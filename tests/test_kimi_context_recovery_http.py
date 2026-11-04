@@ -265,6 +265,26 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual(code, 409, value)
         self.assertEqual(len(fixture.calls), calls)
 
+    def test_room_list_poll_skips_private_tree_audit_and_keeps_the_outcome(self):
+        # Catches: the 3-second room-list poll ran each room's full recovery
+        # audit (hashing every private tree) although it shows only outcomes.
+        fixture = self.fixture('compaction_quota')
+        stopped = fixture.stopped_context_run()
+        self.assertTrue(stopped['current_run']['can_recover_native'], stopped['current_run'])
+        audits, audit = [], fixture.service._audit_native_recovery
+        fixture.service._audit_native_recovery = lambda *args, **kwargs: audits.append(1) or audit(*args, **kwargs)
+        code, listed = fixture.request('GET', '/api/rooms?view=compact')
+        self.assertEqual(code, 200, listed)
+        self.assertEqual(audits, [])
+        room = next(item for item in listed['rooms'] if item['id'] == fixture.room_id)
+        detail = fixture.read()
+        self.assertEqual(len(audits), 1)
+        self.assertEqual((room['outcome_state'], room['objective_status'], room['work_activity']),
+                         (detail['collaboration']['outcome']['state'], detail['objective']['status'], detail['room']['work_activity']))
+        with fixture.service.store._connection() as db:
+            indexes = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertTrue({'events_room_kind', 'events_job'} <= indexes)
+
     def test_other_auth403_is_not_a_context_recovery_authority(self):
         fixture = self.fixture('other_auth403')
         stopped = fixture.stopped_context_run()

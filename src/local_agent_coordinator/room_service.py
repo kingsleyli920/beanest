@@ -1201,7 +1201,7 @@ class RoomService:
                                                       allow_new_text_files=mode == "text_artifacts")
         return self._projects[room_id]
 
-    def _snapshot(self, room_id):
+    def _snapshot(self, room_id, *, list_view=False):
         snapshot = self.store.snapshot(room_id)
         snapshot["member_invitation"] = self._member_invitation(snapshot)
         if snapshot["room"]["mode"] in PROJECT_MODES:
@@ -1267,6 +1267,11 @@ class RoomService:
             for field, text in explanation:
                 outcome[field] = text
                 outcome[field + "_i18n"] = {"parts": [{"key": text, "params": {}}]}
+        if list_view:
+            # The room list reads only the outcome, objective and activity. Run
+            # controls and their private-tree recovery audit are per-room reads.
+            snapshot["room"]["work_activity"] = self._room_work_activity(snapshot, self.store.job_roles(room_id))
+            return snapshot
         if snapshot["current_run"]:
             run = snapshot["current_run"]
             identity_unknown = self.store.continuation_identity_unknown(room_id)
@@ -3355,7 +3360,7 @@ class RoomService:
             room.update(lifecycle_can_change=reason is None, lifecycle_blocked_reason=reason)
             snapshot = None
             if room.get("collaboration"):
-                snapshot = self._snapshot(room["id"])
+                snapshot = self._snapshot(room["id"], list_view=True)
                 room["outcome_state"] = snapshot["collaboration"]["outcome"]["state"]
                 if snapshot.get("objective"):
                     room["objective_status"] = snapshot["objective"]["status"]

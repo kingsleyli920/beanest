@@ -213,6 +213,11 @@ class RoomStore:
                     );
                     CREATE INDEX IF NOT EXISTS project_inspections_context
                         ON project_inspections(room_id,provider,run_id,task_id,phase,seq);
+                    -- Snapshots filter a room's events by kind or job on every UI poll.
+                    CREATE INDEX IF NOT EXISTS events_room_kind
+                        ON events(room_id, json_extract(value_json,'$.kind'));
+                    CREATE INDEX IF NOT EXISTS events_job
+                        ON events(json_extract(value_json,'$.job_id'));
                     CREATE TABLE IF NOT EXISTS native_workspaces (
                         room_id TEXT NOT NULL REFERENCES rooms(id), provider TEXT NOT NULL,
                         state_json TEXT NOT NULL, PRIMARY KEY(room_id,provider)
@@ -369,7 +374,8 @@ class RoomStore:
             return "team_cleanup_unconfirmed"
         team = self._team.team(db, room_id) is not None
         cleanup, claimed, queued, started = {}, set(), set(), set()
-        for row in db.execute("SELECT value_json FROM events WHERE room_id=? ORDER BY seq", (room_id,)):
+        for row in db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind') "
+                              "IN ('job_cleanup','job_claimed','execution_queued','execution_started') ORDER BY seq", (room_id,)):
             event = json.loads(row[0])
             if event["kind"] == "job_cleanup":
                 cleanup[event["job_id"]] = event.get("cleanup_confirmed") is True
@@ -3138,7 +3144,8 @@ class RoomStore:
         if self._team.pending(db, room_id) or room["stop_confirmed"] == 0:
             return "native_recovery_cleanup_unconfirmed"
         claimed, clean = set(), {}
-        for row in db.execute("SELECT value_json FROM events WHERE room_id=? ORDER BY seq", (room_id,)):
+        for row in db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind') "
+                              "IN ('job_claimed','job_cleanup') ORDER BY seq", (room_id,)):
             event = json.loads(row[0])
             if event["kind"] == "job_claimed":
                 claimed.add(event["job_id"])
