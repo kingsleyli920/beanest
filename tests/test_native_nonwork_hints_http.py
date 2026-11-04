@@ -377,8 +377,21 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
                 self.violation, self.hinted_jobs = violation, []
                 self.create()
                 final = self.wait(lambda value: any(job["error"] == code for job in value["jobs"]) and self.quiescent(value))
-                self.assertNotEqual(final["objective"]["status"], "complete")
-                self.assertEqual(final["project"]["revision"], 1)
+                if code == "native_json_files_forbidden":
+                    # Was: the objective must not complete. JSON file bodies in a
+                    # native reply are a correctable reply mistake, so the host
+                    # rejects them, asks once for a corrected reply and continues;
+                    # nothing from the rejected reply may reach canonical files.
+                    self.assertEqual(final["objective"]["status"], "complete")
+                    self.assertIn(code, [event["code"] for event in final["events"]
+                                         if event["kind"] == "format_correction_queued"])
+                    # Only the owned T1 result is published.
+                    self.assertEqual(final["project"]["revision"], 2)
+                    self.assertEqual(self.service._project(self.room_id).files_for_paths(["result.md"])[0]["content"],
+                                     "Ordinary owned result.\n")
+                else:
+                    self.assertNotEqual(final["objective"]["status"], "complete")
+                    self.assertEqual(final["project"]["revision"], 1)
                 for file in self.service._project(self.room_id).files_for_paths(list(DOCS)):
                     self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
 

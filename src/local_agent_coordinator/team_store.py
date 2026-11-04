@@ -1149,6 +1149,17 @@ class TeamStore:
                          "saved result owned by you. Files from the rejected response were NOT saved. "
                          "Inspect the current private project and submit all missing deliverables together; "
                          "if the full scope cannot be safely completed, block with a concrete reason.")
+        text += {
+            "team_task_permission": (" A command referenced a task, phase or role this call does not hold. Use only the "
+                                     "commands allowed for this job phase, for this call's own task or review."),
+            "team_plan_locked": " Only the plan author proposes, and only while planning; omit propose commands now.",
+            "invalid_target": (" request_help.to must name a different available peer; with repair_paths it may be null. "
+                               "If no peer is available, finish with a self-checked result or block with a concrete reason."),
+            "team_files_forbidden": " Only a work call for its own task may submit files, edits or project requests.",
+            "team_capability_unavailable": " The requested capability is unavailable in this room; use text.",
+            "native_json_files_forbidden": (" Native calls write files directly in the private project tree; leave "
+                                            "files and edits empty in the JSON reply."),
+        }.get(error, "")
         diagnostic = (rejection_evidence or {}).get("response_validation") or {}
         for issue in diagnostic.get("commands", []):
             prefix = "commands[" + str(issue["index"]) + "]"
@@ -2068,9 +2079,10 @@ class TeamStore:
             planning_members = self.coordination_members(db, room_id, members)
             if self.store._partner_dispatch_reason(db, team["plan_author"]):
                 return changed
-            if any(not db.execute("SELECT planned FROM team_members WHERE room_id=? AND provider=?",
-                                  (room_id, member)).fetchone()[0] for member in planning_members):
-                return changed
+            waiting = [member for member in planning_members if not db.execute(
+                "SELECT planned FROM team_members WHERE room_id=? AND provider=?", (room_id, member)).fetchone()[0]]
+            if waiting:
+                return self._stop_if_planning_blocked(db, room_id, waiting) or changed
             if not db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?", (room_id,)).fetchone():
                 if objective is not None and json.loads(objective["retired_json"]):
                     return self._coordinate(db, room_id, planning_members)
@@ -2087,7 +2099,8 @@ class TeamStore:
                 if self._replan_parents(db, room_id) and not unready and not unowned:
                     self.stop(db, room_id, "team_plan_stalled")
                     return False
-                return self._coordinate(db, room_id, planning_members if unowned else [row[0] for row in unready])
+                needed = planning_members if unowned else [row[0] for row in unready]
+                return self._stop_if_planning_blocked(db, room_id, needed) or self._coordinate(db, room_id, needed)
         tasks = db.execute("SELECT * FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? ORDER BY rowid", (room_id,)).fetchall()
         for task in sorted(tasks, key=lambda row: row["status"] != "review"):
             if not calls_available(self._remaining(db, room_id)):
@@ -2124,6 +2137,25 @@ class TeamStore:
             return None
         return room["call_limit"] - room["used"] - db.execute(
             "SELECT COUNT(*) FROM jobs WHERE room_id=? AND status='queued'", (room_id,)).fetchone()[0]
+
+    def _stop_if_planning_blocked(self, db, room_id, providers):
+        """Stop when every planner still needed repeated a refused reply.
+
+        A refused correction blocks only that member's plan phase. During
+        planning nothing else can advance, so waiting would leave the room
+        planning forever with no call queued and no way forward.
+        """
+        if not providers or db.execute("SELECT 1 FROM jobs WHERE room_id=? AND status IN ('queued','working')",
+                                       (room_id,)).fetchone():
+            return False
+        if not all(self.response_blocked(db, room_id, provider, "plan") for provider in providers):
+            return False
+        row = db.execute("SELECT json_extract(value_json,'$.code') FROM events WHERE room_id=? "
+            "AND json_extract(value_json,'$.kind')='native_response_blocked' "
+            "AND json_extract(value_json,'$.run_id')=? ORDER BY seq DESC LIMIT 1",
+            (room_id, self.team(db, room_id)["current_run_id"])).fetchone()
+        self.stop(db, room_id, (row and row[0]) or "team_plan_stalled")
+        return True
 
     def _coordinate(self, db, room_id, providers):
         providers = self.coordination_members(db, room_id, providers)

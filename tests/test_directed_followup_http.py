@@ -97,8 +97,9 @@ class DirectedFollowupHTTPTests(unittest.TestCase):
         return value
 
     def bootstrap_stopped(self):
-        # A completed native plan reply fails the real JSON publication gate. Its
-        # private tree is unchanged and its native identity/cleanup are known.
+        # A completed native plan reply fails the real JSON publication gate and
+        # repeats it after the host's correction, so the room stops. Its private
+        # tree is unchanged and its native identity/cleanup are known.
         self.stop_original = True
         self.create()
         stopped = self.wait(lambda value: value["team"]["phase"] == "stopped" and self.quiescent(value))

@@ -8,11 +8,21 @@ NATIVE_RECOVERY_ERRORS = frozenset({
     "native_protocol_invalid", "native_protocol_unknown", "native_process_or_protocol_failure",
     "protocol_turn_incomplete", "invalid_response_json",
 })
+# Mistakes in the reply itself: a command for a task, phase or role this call
+# does not hold, a proposal outside planning, a wrong help target, files from
+# a non-work call, JSON file bodies from a native call, an unavailable
+# capability. Nothing was applied, so the caller corrects its reply instead of
+# the whole objective stopping. State conflicts (reassignment, changed results,
+# scope trespass) stay terminal.
+REPLY_MISTAKES = frozenset({
+    "team_task_permission", "team_plan_locked", "invalid_target", "team_files_forbidden",
+    "team_capability_unavailable", "native_json_files_forbidden",
+})
 FORMAT_ERRORS = frozenset({
     "invalid_agent_response", "invalid_team_commands", "invalid_team_task",
     "invalid_team_dependencies", "invalid_project_files", "invalid_text", "team_task_not_found",
     "team_result_missing", "message_too_large", NATIVE_METADATA_ERROR,
-})
+}) | REPLY_MISTAKES
 
 
 def completed_execution(observation):
