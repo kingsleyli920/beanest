@@ -6309,7 +6309,9 @@ test('paged live progress and actual read-only claim stay truthful when their or
   assert.match(ui.get('partner-activity-claude').textContent, /只读讨论.*本次配置：方案 · 只读 · actual-model · high/s);
   assert.match(ui.get('public-progress-claude').textContent, /本次进展原话/); assert.doesNotMatch(ui.get('public-progress-claude').textContent, /还没收到/);
   const read = descendants(ui.get('public-progress-claude')).find((node) => node.tagName === 'BUTTON' && node.textContent === '读取完整原话');
-  read.fire('click'); await settle(); assert.ok(ui.get('public-progress-claude').textContent.includes(full));
+  read.fire('click');
+  await waitUntil(() => ui.get('public-progress-claude').textContent.includes(full), 'full public progress must pass its asynchronous SHA verification');
+  assert.ok(ui.get('public-progress-claude').textContent.includes(full));
   await ui.click('public-progress-jump-claude'); assert.ok(ui.get('events').textContent.includes(full)); assert.equal(ui.get('events').children.length, 101);
   assert.equal(ui.posts().length, 0);
 });
@@ -6927,7 +6929,8 @@ test('paged user objective decision previews read their exact full original lazi
   } });
   assert.match(ui.get('events').textContent, /用户回复/); assert.equal(ui.requests.filter((request) => request.path.includes('/text?')).length, 0);
   const details = descendants(ui.get('events')).find((node) => node.classList.contains('bound-text'));
-  details.open = true; details.fire('toggle'); await settle();
+  details.open = true; details.fire('toggle');
+  await waitUntil(() => details.textContent.includes(full), 'the full original user reply must pass its asynchronous SHA verification');
   assert.ok(details.textContent.includes(full)); await ui.poll();
   assert.equal(ui.get('events').children.filter((node) => node.dataset.seq === '1').length, 1);
   assert.equal(ui.posts().length, 0);
