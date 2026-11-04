@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="lac-token" content="__LAC_TOKEN__">
+  <title>Local Agent Coordinator · 本地协作</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">◈ <span>Local Agent Coordinator</span></a><span class="local">本机运行 · 文本试用</span></header>
+  <main>
+    <p class="field-note" role="note">开发调试入口 · 非豆窝产品界面。请使用桌面应用或 room_server。<br>Legacy developer interface · For the Beanest product, use the desktop app or room_server.</p>
+    <div class="heading"><div><p class="eyebrow">你的本地 Agent 工作台</p><h1>把任务交出去，把过程看清楚。</h1><p class="muted">派给 Claude 或 Codex，在这里查看回复、追加问题，或交给另一位复核。</p></div><button id="refresh-all" class="secondary">刷新状态</button></div>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="metrics" aria-label="整体情况">
+      <div class="metric"><span id="connection" class="metric-value">连接中…</span><span>本地工作台</span></div>
+      <div class="metric"><strong id="active-count">—</strong><span>正在执行 / 等待输入</span></div>
+      <div class="metric"><strong id="turn-count">—</strong><span>试用派发次数</span></div>
+      <div class="metric"><strong class="unavailable">不可用</strong><span>任务 Token / 费用</span></div>
+    </section>
+    <div class="layout">
+      <aside>
+        <section class="panel new-task">
+          <div class="section-title"><h2>派发新任务</h2><span class="dot"></span></div>
+          <form id="new-task-form">
+            <label for="agent">交给谁</label><select id="agent"><option value="claude">Claude Code</option><option value="codex">Codex</option></select>
+            <label for="prompt">需要它做什么</label><textarea id="prompt" rows="7" maxlength="8000" required placeholder="例如：根据下面的文档整理未完成项，区分已有证据和待验证项。只分析我给的文字，不读取或修改项目。"></textarea>
+            <p class="field-note">当前只处理文字。会创建专用会话，使用现有订阅额度。</p>
+            <button id="start-task" class="primary full" type="submit">创建任务 <span>↗</span></button>
+          </form>
+        </section>
+        <section class="panel task-panel"><div class="section-title"><h2>任务列表</h2><span id="task-count" class="small muted">0</span></div><div id="tasks" class="tasks"><p class="empty">还没有任务。</p></div></section>
+        <p class="privacy">本页只显示本桥创建的任务。订阅剩余额度请在 Superset 的 Usage 中查看；这里的派发次数不是 Token 或金额。</p>
+      </aside>
+      <section class="panel detail" aria-label="任务详情">
+        <div id="empty-detail" class="empty-detail"><span class="empty-symbol">◈</span><h2>从一个小任务开始</h2><p>在左侧写下目标，或选择已有任务。<br>回复和复核关系会留在这里。</p></div>
+        <div id="task-detail" hidden>
+          <div class="detail-header"><div><div class="eyebrow" id="task-agent"></div><h2 id="task-title"></h2></div><span id="task-status" class="badge"></span></div>
+          <div class="task-meta"><span id="task-turns"></span><span id="task-updated"></span><button id="refresh-task" class="text-button">刷新回复</button></div>
+          <div id="parent-link" class="relation" hidden></div>
+          <div id="task-warning" class="notice" hidden></div>
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <details id="tool-details"><summary id="tool-summary">工具活动</summary><div id="tools"></div></details>
+          <div class="actions"><button id="review-task" class="secondary">交给另一位复核</button><button id="cancel-task" class="danger">停止会话</button></div>
+          <form id="reply-form"><label for="reply">追加说明</label><textarea id="reply" rows="3" maxlength="8000" required placeholder="这一轮结束后，可以继续补充规则或提问。"></textarea><div class="reply-bottom"><span id="reply-note" class="field-note"></span><button id="send-reply" class="primary" type="submit">发送给 Agent</button></div></form>
+          <details class="identifiers"><summary>任务与会话信息</summary><p id="task-id"></p><p id="session-id"></p><p id="deadline"></p></details>
+        </div>
+      </section>
+    </div>
+    <footer>文字限制依赖原生权限设置，不是系统级隔离。请先用文档分析试用；正在开发的项目保持原有会话与工作目录。</footer>
+  </main>
+</body>
+</html>

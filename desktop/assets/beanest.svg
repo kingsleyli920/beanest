@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>豆窝 · Beanest</title>
+  <desc>两颗相互依靠的小豆子，代表一起协作的伙伴。</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#fbfcf3"/><stop offset="1" stop-color="#e5edd7"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#bbd49a"/><stop offset="1" stop-color="#8eaf72"/>
+    </linearGradient>
+    <linearGradient id="peach" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#f2c0a8"/><stop offset="1" stop-color="#dc9c84"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="72" width="896" height="896" rx="204" fill="#31432c" opacity=".12"/>
+  <rect x="64" y="56" width="896" height="896" rx="204" fill="url(#tile)"/>
+  <rect x="67" y="59" width="890" height="890" rx="201" fill="none" stroke="#fff" stroke-opacity=".72" stroke-width="6"/>
+  <ellipse cx="516" cy="772" rx="278" ry="43" fill="#647b4d" opacity=".12"/>
+  <!-- Back bean: warm color balances the leaf green without adding tiny detail. -->
+  <g transform="rotate(-16 390 550)">
+    <path d="M371 304C258 304 196 409 204 535c8 139 80 233 178 229 86-3 149-83 149-206 0-120-45-249-160-254Z" fill="url(#peach)"/>
+    <path d="M235 535c20 113 73 183 146 192 68 8 115-34 142-93-22 82-72 127-141 130-99 4-170-90-178-229Z" fill="#b87c68" opacity=".18"/>
+    <ellipse cx="301" cy="521" rx="14" ry="19" fill="#43563b"/>
+    <ellipse cx="405" cy="521" rx="14" ry="19" fill="#43563b"/>
+    <path d="M329 577q28 27 56-2" fill="none" stroke="#43563b" stroke-width="13" stroke-linecap="round"/>
+  </g>
+  <!-- Front bean and leaf share the app's existing sprout identity. -->
+  <g transform="rotate(12 622 543)">
+    <path d="M609 288c-129 0-201 115-196 248 6 145 82 251 200 250 124-1 211-110 204-254-6-140-83-244-208-244Z" fill="#748e59" opacity=".14" transform="translate(4 15)"/>
+    <path d="M609 288c-129 0-201 115-196 248 6 145 82 251 200 250 124-1 211-110 204-254-6-140-83-244-208-244Z" fill="url(#green)"/>
+    <path d="M439 575c39 109 111 169 197 169 70 0 134-37 174-112-27 95-100 153-197 154-118 1-194-105-200-250 0 0 8 17 26 39Z" fill="#6a8e51" opacity=".18"/>
+    <path d="M585 308c-9-60 18-109 78-128 52-16 100-1 117 33-25 26-61 42-105 43-29 1-59-2-90 52Z" fill="#55744b"/>
+    <path d="M585 308c-39-11-61-38-56-72 40-4 74 21 56 72Z" fill="#78965d"/>
+    <ellipse cx="550" cy="520" rx="17" ry="22" fill="#3c5135"/>
+    <ellipse cx="681" cy="520" rx="17" ry="22" fill="#3c5135"/>
+    <path d="M579 591q39 37 78-3" fill="none" stroke="#3c5135" stroke-width="16" stroke-linecap="round"/>
+    <ellipse cx="518" cy="569" rx="23" ry="12" fill="#e8e9b7" opacity=".5"/>
+    <ellipse cx="714" cy="569" rx="23" ry="12" fill="#e8e9b7" opacity=".5"/>
+  </g>
+</svg>

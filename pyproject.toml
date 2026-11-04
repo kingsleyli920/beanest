@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-agent-coordinator"
+version = "0.2.0"
+description = "Beanest: local agent group chats, shared tasks and reviewed file deliveries"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+requires-python = ">=3.11"
+dependencies = ["pathspec==1.1.1"]
+
+[project.urls]
+Homepage = "https://github.com/kingsleyli920/beanest"
+Issues = "https://github.com/kingsleyli920/beanest/issues"
+
+[project.optional-dependencies]
+bridge = ["mcp==2.3.0", "pydantic==2.14.2"]
+
+[project.scripts]
+lac = "local_agent_coordinator.__main__:main"
+lac-mcp = "local_agent_coordinator.mcp_server:main"
+lac-ui = "local_agent_coordinator.ui_server:main"
+lac-rooms = "local_agent_coordinator.room_server:main"
+lac-room-mcp = "local_agent_coordinator.room_mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+local_agent_coordinator = ["ui/*.html", "ui/*.js", "ui/*.css", "room_ui/*.html", "room_ui/*.js", "room_ui/*.css"]

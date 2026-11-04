@@ -1,0 +1,105 @@
+# 豆窝 · Beanest
+
+**让本机的 AI 编程伙伴在同一个工作台里一起做事。**
+
+简体中文 · [English](README.md)
+
+给豆窝一个目标，选择本机已经安装的 Agent，在同一条聊天里看它们分工、并行处理独立文件、互相求助和审核交付。聊天、任务清单、文件版本和执行记录保存在一起，方便随时查看。
+
+这是一个独立的早期项目，面向用户自己的电脑和单用户场景。桌面启动器目前面向 macOS，也可以在本机浏览器使用相同界面。项目与 OpenAI、Anthropic、Moonshot AI 没有官方隶属或背书关系。
+
+![Beanest interface](docs/assets/beanest-zh-CN.jpg)
+
+*使用虚构数据的界面示例，没有调用真实模型。*
+
+## 能做什么
+
+- **接入 Claude Code、Codex 和 Kimi Code**：使用你安装并登录的官方工具，不捆绑账号、不代售会员、不静默改用付费 API key。
+- **共享任务与互审**：伙伴提出方案、认领任务、互相求助并审核成果。没有依赖和文件冲突的任务可以并行，有依赖的任务仍需等待。
+- **保留工作进度**：聊天和成果保存在本机，可暂停、停止或沿已有结果继续。确认伙伴额度用尽时，可交给其他可用伙伴；只剩一位时明确标为自检。
+- **项目与权限**：关联本机文件夹，先只读讨论，或在开发副本中修改。显式选择 Full Access 后，原生 Agent 可以执行本机命令和联网。
+- **直接查看交付**：在聊天里阅读文档、代码、图片和视频；查看 main 与 GitHub 的交付状态，并让伙伴提交、合入和同步代码。
+- **中英文界面**：切换 English 或简体中文，聊天原文、项目名称和文件内容保持原样。
+
+## 快速开始
+
+需要 **Python 3.11+**；桌面启动还需要 **Node.js 22.12+**。至少安装并登录一个已支持的官方 Agent CLI。模型权限、会员额度及使用条款由各供应商管理。
+
+```sh
+git clone https://github.com/kingsleyli920/beanest.git
+cd beanest
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+```
+
+在 macOS 启动桌面版：
+
+```sh
+scripts/start-coordinator.command
+```
+
+首次启动会安装锁定的 Electron 依赖并构建本机应用，需要联网；不会安装 Agent CLI 或购买服务。构建出的应用依赖当前源码目录和 `.venv`，不是可以单独搬走的独立安装包。
+
+只使用本机浏览器时：
+
+```sh
+.venv/bin/python -m local_agent_coordinator.room_server
+```
+
+打开终端打印的 loopback 地址。桌面版与独立 Web 版默认使用不同的运行目录。本项目不提供公网、多用户托管模式，请保持服务只在本机使用。
+
+## 怎么使用
+
+1. 选择伙伴，需要处理已有项目时添加项目文件夹。
+2. 选择“方案”先只读讨论，或选择“动手”实际制作成果；核对任务权限和各伙伴的模型设置。
+3. 发送目标，在同一条聊天查看负责人、进展、需要补充的问题和交付文件。工作过程中也可以补充信息。
+4. 阅读成果及其验证范围。任务完成不代表所有可能的问题都已经测过。
+
+通过语言选择器切换 **English** 或 **简体中文**，偏好保存在本机。切换界面语言不调用模型，也不改变正在执行的任务。
+
+自主任务持续推进原目标，直到完成、需要你提供信息、遇到真实阻塞或被你停止。默认没有固定轮数和调用次数上限，但保留真实额度、进程清理、身份、权限和无进展检查。目前不保证所有供应商版本都兼容，也不保证长时间运行永不出错。
+
+账号额度与当前任务 Token 用量分别展示。额度查不到就显示未知，不冒充为零。多个伙伴配置共用同一 CLI 登录时，不代表多个账号，也不会增加额度池。
+
+## 权限与隐私
+
+豆窝自己的运行数据保存在本机。**本机保存不等于离线推理**：目标与所需上下文会发给你选中的 Agent 和供应商。
+
+开发副本**不是操作系统沙箱**。Full Access 下，原生 Agent 可能读写其他可访问的文件、执行命令和联网，只应对可信工具和任务开启。豆窝不会自动把开发副本合回源项目或发布到 GitHub。
+
+运行数据库、聊天、凭据、连接文件、日志、截图和本机配置不随开源代码发布，也请勿直接上传到公开 issue。详见[安全说明](SECURITY.md)和[第三方说明](THIRD_PARTY_NOTICES.md)。
+
+## 可选：MCP 接入
+
+先安装可选桥接依赖：
+
+```sh
+.venv/bin/python -m pip install -e '.[bridge]'
+```
+
+启动豆窝后，将 MCP 客户端的命令设为源码目录里的 `.venv/bin/python`，参数为：
+
+```text
+-m local_agent_coordinator.room_mcp --connection /absolute/path/to/beanest/runtime/desktop-rooms/connection.json
+```
+
+独立 Web 服务使用 `runtime/rooms/connection.json`。这个文件是本机私有控制凭据，不要提交或分享。MCP 连接已有服务，不会另起一套调度器。
+
+## 参与开发
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+node --test tests/room_ui.test.cjs tests/room_i18n.test.cjs
+npm --prefix desktop ci
+npm --prefix desktop test
+```
+
+这些测试使用临时数据和供应商替身，不能单独证明真实接入兼容性或长时间稳定性。历史文字调试界面属于开发入口，不是豆窝的主应用界面。
+
+[贡献说明](CONTRIBUTING.md) · [项目协作](docs/projects.md) · [适配器扩展](docs/extensions.md) · [房间/API 契约](docs/room-contract.md)
+
+详细工程文档目前主要为中文。中英文 README 均包含安装、日常使用和关键执行边界。
+
+## 许可证
+
+豆窝自有源码采用 [MIT 许可证](LICENSE)。第三方依赖、供应商工具、模型、会员和商标分别遵循各自许可及条款。仓库不捆绑外部 Agent 二进制、Python 环境、Electron 发行包或私有运行数据。

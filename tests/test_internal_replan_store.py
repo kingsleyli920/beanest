@@ -1,0 +1,113 @@
+"""Explicit internal coordination preserves the normal task/permission DAG."""
+import unittest
+from tests import test_team_store as fixtures
+proposal = fixtures.proposal
+
+
+class InternalReplanStoreTests(unittest.TestCase):
+    setUp = fixtures.TeamStoreTests.setUp
+    tearDown = fixtures.TeamStoreTests.tearDown
+    def finish(self, job, commands, **options):
+        fixtures.TeamStoreTests.finish(self, job, commands, **options)
+        self.store.record_job_cleanup(job["id"], confirmed=True)
+        self.store.reconcile_team(job["room_id"])
+    plan = fixtures.TeamStoreTests.plan
+    task = fixtures.TeamStoreTests.task
+    assertCode = fixtures.TeamStoreTests.assertCode
+
+    def room(self, **options):
+        return fixtures.TeamStoreTests.room(self, execution_policy={"mode": "autonomous"}, **options)
+
+    def request(self, room):
+        main = self.store.claim(room, 'claude')
+        self.finish(main, [{'type':'block', 'task_id':'main', 'cause':'coordination_required',
+                            'reason':'A prerequisite has no assigned scope in the current plan.'}])
+
+    def planning(self):
+        room = self.plan(paths=True)
+        revision = self.store.snapshot(room)['team']['revision']
+        peer = self.store.claim(room, 'codex')
+        self.request(room)
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'working')
+        self.assertEqual(self.store.snapshot(room)['team']['revision'], revision)
+        self.finish(peer, [{'type':'complete','task_id':'tests','result':'Concrete independently checked result.'}])
+        review = self.store.claim(room, 'claude')
+        self.assertEqual(review['kind'], 'team_review')
+        self.finish(review, [{'type':'review','task_id':'tests','verdict':'accept','reason':'Exact result checked.'}])
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'planning')
+        return room
+
+    def test_drain_and_replan_preserve_accepted_result_and_reject_dependency_cycle(self):
+        room = self.planning()
+        accepted = self.task(room, 'tests')
+        parent = self.task(room, 'main')
+        author = self.store.claim(room, 'claude')
+        self.assertIn('Explicit internal replanning', author['text'])
+        bad = proposal('fix', dependencies=['main'], paths=['missing.py'])
+        self.assertCode('invalid_team_dependencies', lambda:self.store.prevalidate_team_result(author['id'], [bad]))
+        self.assertEqual(self.task(room, 'main'), parent)
+        self.assertEqual(self.task(room, 'tests'), accepted)
+        self.finish(author, [proposal('fix', paths=['missing.py']), {'type':'claim','task_id':'fix'}, {'type':'plan_ready'}])
+        for _ in range(8):
+            if self.store.snapshot(room)['team']['phase'] == 'working': break
+            for member in ('codex', 'claude'):
+                if self.store.snapshot(room)['team']['phase'] == 'working': break
+                job = self.store.claim(room, member)
+                if job:
+                    self.assertEqual(job['kind'], 'team_coordinate')
+                    self.finish(job, [{'type':'plan_ready'}])
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'working')
+        updated = self.task(room, 'main')
+        self.assertEqual(updated['owner'], parent['owner'])
+        self.assertEqual(updated['write_paths'], parent['write_paths'])
+        self.assertEqual(updated['result_version'], parent['result_version'])
+        self.assertIn('fix', updated['dependencies'])
+        self.assertEqual(self.task(room, 'tests'), accepted)
+        work = self.store.claim(room, 'claude')
+        with self.store._connection() as db:
+            self.assertEqual(self.store._team.job_context(db, work['id'])['task_id'], 'fix')
+
+    def test_ready_without_a_proposal_cannot_resume_parent_or_loop(self):
+        room = self.planning()
+        for _ in range(8):
+            changed = False
+            for member in ('claude','codex'):
+                job = self.store.claim(room, member)
+                if job:
+                    self.assertEqual(job['kind'], 'team_coordinate')
+                    self.finish(job, [{'type':'plan_ready'}]); changed = True
+            if not changed: break
+        self.assertEqual(self.task(room, 'main')['status'], 'blocked')
+        self.assertEqual(self.store.snapshot(room)['team']['stop_reason'], 'team_plan_stalled')
+        count = len(self.store.snapshot(room)['jobs'])
+        self.store.reconcile_team(room)
+        self.assertEqual(len(self.store.snapshot(room)['jobs']), count)
+
+    def test_completed_call_without_confirmed_cleanup_cannot_change_plan_revision(self):
+        room = self.plan(dependency=True)
+        before = self.store.snapshot(room)['team']['revision']
+        job = self.store.claim(room, 'claude')
+        fixtures.TeamStoreTests.finish(self, job, [{'type':'block','task_id':'main',
+            'cause':'coordination_required','reason':'Need concrete prerequisite planning.'}])
+        self.store.record_job_cleanup(job['id'], confirmed=False)
+        self.store.reconcile_team(room)
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'working')
+        self.assertEqual(self.store.snapshot(room)['team']['revision'], before)
+        self.assertIsNone(self.store.claim(room, 'claude'))
+        self.store.record_job_cleanup(job['id'], confirmed=True)
+        self.store.reconcile_team(room)
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'planning')
+        self.assertEqual(self.store.snapshot(room)['team']['revision'], before + 1)
+
+    def test_real_decision_prevents_internal_replanning_from_swallowing_it(self):
+        room = self.plan()
+        peer = self.store.claim(room, 'codex')
+        self.request(room)
+        self.finish(peer, [{'type':'block','task_id':'tests','cause':'permission_required','reason':'User authorization is missing.'}])
+        snap = self.store.snapshot(room)
+        self.assertEqual(snap['team']['phase'], 'working')
+        self.assertEqual(self.task(room, 'tests')['block_cause'], 'permission_required')
+        self.assertFalse(any(e['kind']=='internal_replan_started' for e in snap['events']))
+        binding = {'run_id':snap['current_run']['id'], 'revision':0, 'digest':'fixture'}
+        self.assertTrue(self.store.require_task_decision(room, binding))
+        self.assertEqual(self.store.snapshot(room)['objective']['next_step']['origin'], 'task_block')

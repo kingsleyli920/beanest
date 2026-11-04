@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "Fictional native final presentation and persistence cases; no provider/user records.",
+  "cases": [
+    {"id": "literal_plan", "response_file": "native_plan_response_v1.json", "native_case": "completed", "business_valid": true},
+    {"id": "preamble", "prefix": "已核对虚构材料。\n\n", "suffix": "", "native_case": "completed", "business_valid": true},
+    {"id": "fence", "prefix": "```json\n", "suffix": "\n```", "native_case": "completed", "business_valid": true},
+    {"id": "delayed_disk", "prefix": "", "suffix": "", "native_case": "flush_on_close", "business_valid": true},
+    {"id": "multiple", "prefix": "", "suffix": "\n{}", "native_case": "completed", "business_valid": false},
+    {"id": "illegal_json", "text": "{fictional broken JSON", "native_case": "completed", "business_valid": false},
+    {"id": "empty", "text": "", "native_case": "completed", "business_valid": false},
+    {"id": "array", "text": "[]", "native_case": "completed", "business_valid": false},
+    {"id": "prose", "text": "虚构检查已结束，业务交付仍缺结构。", "native_case": "completed", "business_valid": false}
+  ]
+}

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="lac-token" content="__LAC_TOKEN__">
+  <meta name="theme-color" content="#f7f3e8">
+  <title>豆窝 · Beanest</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/i18n-en-a.js" defer></script>
+  <script src="/i18n-en-b.js" defer></script>
+  <script src="/i18n-en-c.js" defer></script>
+  <script src="/i18n.js" defer></script>
+  <script src="/markdown.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar" aria-label="任务记录" data-i18n-aria-label="任务记录">
+      <a class="brand" href="/" aria-label="豆窝首页" data-i18n-aria-label="豆窝首页"><span class="brand-mark" aria-hidden="true"><span class="bean-body"><span class="bean-eyes"></span><span class="bean-smile"></span></span></span><span class="brand-wordmark"><span data-i18n="豆窝">豆窝</span><small>Beanest</small></span></a>
+      <button id="new-room" class="new-room" type="button"><span aria-hidden="true">＋</span> <span data-i18n="新任务">新任务</span></button>
+      <div class="workspace-links"><button id="open-projects" type="button" class="workspace-link"><span data-i18n="▧ 项目">▧ 项目</span></button><button id="open-partners" type="button" class="workspace-link"><span data-i18n="♧ 工具与状态">♧ 工具与状态</span></button><button id="toggle-history" type="button" class="workspace-link history-toggle" aria-controls="rooms" aria-expanded="false"><span data-i18n="任务记录 · 0">任务记录 · 0</span></button></div>
+      <div class="section-label"><span><span data-i18n="任务记录">任务记录</span></span><span id="room-count">0</span></div>
+      <label class="lifecycle-filter sidebar-filter" for="rooms-filter"><span class="sr-only"><span data-i18n="任务记录视图">任务记录视图</span></span><select id="rooms-filter" aria-label="任务记录视图" data-i18n-aria-label="任务记录视图"><option value="active" data-i18n="当前">当前</option><option value="archived" data-i18n="已归档">已归档</option><option value="removed" data-i18n="已移除">已移除</option></select></label>
+      <div id="room-lifecycle-status" role="status" hidden></div>
+      <details id="legacy-room-review" hidden><summary id="legacy-room-summary"><span data-i18n="整理旧移除记录">整理旧移除记录</span></summary><p class="detail-caption"><span data-i18n="这些是旧版保留的记录。你可以逐条查看、恢复或永久删除；不会自动清理。">这些是旧版保留的记录。你可以逐条查看、恢复或永久删除；不会自动清理。</span></p><div id="legacy-room-list"></div></details>
+      <nav id="rooms" class="room-list" aria-label="选择任务" data-i18n-aria-label="选择任务"></nav>
+      <p id="room-list-empty" class="sidebar-empty"><span data-i18n="还没有任务。">还没有任务。</span><br><span data-i18n="创建后可以在这里继续。">创建后可以在这里继续。</span></p>
+      <label class="language-control" for="interface-language"><span data-i18n="界面语言">界面语言</span><select id="interface-language" aria-label="界面语言" data-i18n-aria-label="界面语言"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
+      <div class="sidebar-footer"><span id="connection-dot" class="connection-dot"></span><span id="connection"><span data-i18n="正在连接本地服务…">正在连接本地服务…</span></span><span class="local-label"><span data-i18n="本机">本机</span></span></div>
+    </aside>
+
+    <section class="conversation" aria-label="协作群聊" data-i18n-aria-label="协作群聊">
+      <header class="conversation-header">
+        <div class="conversation-heading"><p class="eyebrow"><span data-i18n="协作任务">协作任务</span></p><h1 id="room-title"><span data-i18n="新任务">新任务</span></h1><p id="room-subtitle"><span data-i18n="选工具，写下要做的事。">选工具，写下要做的事。</span></p></div>
+        <div class="header-actions"><details id="room-lifecycle-menu" class="lifecycle-menu" hidden><summary><span data-i18n="管理任务">管理任务</span></summary><div id="room-lifecycle-actions" class="lifecycle-menu-body"></div></details><span id="room-status" class="status-badge" hidden></span><button id="toggle-members" class="quiet-button members-toggle" type="button" aria-controls="members-panel" aria-expanded="false"><span data-i18n="任务详情">任务详情</span></button><button id="task-materials-open" class="quiet-button" type="button" aria-controls="task-materials" aria-expanded="false" hidden><span data-i18n="任务资料">任务资料</span></button><button id="refresh" class="icon-button" type="button" aria-label="刷新任务状态" title="只读取状态" data-i18n-aria-label="刷新任务状态" data-i18n-title="只读取状态">↻</button><button id="pause-objective" class="quiet-button" type="button" hidden><span data-i18n="暂停推进">暂停推进</span></button><button id="cancel-room" class="quiet-button danger" type="button" hidden><span data-i18n="停止任务">停止任务</span></button></div>
+      </header>
+      <section id="partner-activity" class="partner-activity" aria-label="伙伴当前状态" hidden data-i18n-aria-label="伙伴当前状态">
+        <div id="partner-activity-cards" class="partner-activity-cards"></div>
+        <p id="partner-activity-note" class="partner-activity-note" hidden></p>
+      </section>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <p id="room-lifecycle-note" class="notice" role="status" hidden></p>
+      <p id="source-plan-note" class="source-plan-note" hidden></p>
+      <div id="pending-request" class="pending-request" role="status" hidden>
+        <strong id="pending-title"></strong><p id="pending-description"></p>
+        <div class="pending-actions"><button id="verify-request" class="quiet-button" type="button"><span data-i18n="核对状态">核对状态</span></button><button id="retry-request" class="quiet-button" type="button"><span data-i18n="用同一请求重试">用同一请求重试</span></button></div>
+      </div>
+      <div id="timeline" class="timeline" tabindex="0" aria-label="任务讨论" data-i18n-aria-label="任务讨论">
+        <div id="empty-room" class="empty-room">
+          <div id="empty-avatars" class="empty-avatars" aria-hidden="true"></div>
+          <h2><span data-i18n="要一起做什么？">要一起做什么？</span></h2>
+          <p><span data-i18n="写下任务，选好的工具会讨论和互审。">写下任务，选好的工具会讨论和互审。</span><br><span data-i18n="需要你决定时，会在这里问你。">需要你决定时，会在这里问你。</span></p>
+        </div>
+        <details id="earlier-discussion" class="earlier-discussion" hidden><summary id="earlier-summary"><span data-i18n="更早的讨论">更早的讨论</span></summary><p id="earlier-note" class="detail-caption"></p><button id="earlier-load" class="quiet-button" type="button" hidden><span data-i18n="重新读取">重新读取</span></button><ol id="earlier-messages" class="events" aria-label="此前任务讨论" data-i18n-aria-label="此前任务讨论"></ol></details>
+        <section id="collaboration-plan" class="collaboration-card" aria-label="任务分工" hidden data-i18n-aria-label="任务分工"></section>
+        <details id="goal-original" class="earlier-discussion" hidden><summary><span data-i18n="完整要求">完整要求</span></summary><pre id="goal-original-text" class="file-content"></pre></details>
+        <p id="history-status" class="detail-caption" role="status" hidden></p>
+        <ol id="events" class="events" role="log" aria-live="polite" aria-relevant="additions"></ol>
+        <section id="collaboration-outcome" class="collaboration-card outcome-card" aria-label="交付与下一步" hidden data-i18n-aria-label="交付与下一步"></section>
+
+        <section id="room-media" class="room-media" aria-label="图片与视频" hidden data-i18n-aria-label="图片与视频"><header id="media-heading" class="media-heading"><h2><span data-i18n="图片与视频">图片与视频</span></h2><button id="media-refresh" class="quiet-button" type="button"><span data-i18n="刷新附件">刷新附件</span></button></header><p id="media-status" class="detail-caption" role="status" hidden></p><div id="media-items" class="media-items"></div><button id="media-more" class="quiet-button" type="button" hidden><span data-i18n="显示更多媒体">显示更多媒体</span></button><details id="media-other" class="media-other" hidden><summary id="media-other-label"><span data-i18n="其他附件">其他附件</span></summary><ul id="media-file-items" class="media-file-items"></ul></details></section>
+      </div>
+      <section id="task-materials" class="task-materials" aria-label="任务资料" hidden data-i18n-aria-label="任务资料">
+        <header class="reader-header"><button id="task-materials-close" class="quiet-button" type="button"><span data-i18n="← 返回聊天">← 返回聊天</span></button><div class="reader-heading"><h2><span data-i18n="任务资料">任务资料</span></h2><p class="detail-caption"><span data-i18n="此前成果、文档与附件；当前交付仍在聊天中。">此前成果、文档与附件；当前交付仍在聊天中。</span></p></div><button id="task-materials-refresh" class="quiet-button" type="button"><span data-i18n="刷新附件">刷新附件</span></button></header>
+        <div id="task-materials-body" class="task-materials-body" tabindex="0">
+          <section id="materials-outcomes" aria-label="此前成果" hidden data-i18n-aria-label="此前成果"></section>
+        <section id="room-documents" class="room-documents" aria-label="文档" hidden data-i18n-aria-label="文档"><h2><span data-i18n="文档">文档</span></h2><p class="detail-caption"><span data-i18n="点击在豆窝内阅读确切版本；审核与来源单独标明。">点击在豆窝内阅读确切版本；审核与来源单独标明。</span></p><div id="document-shortcuts" class="delivery-file-list"></div><details id="document-more" hidden><summary id="document-more-label"><span data-i18n="更多文档">更多文档</span></summary><div id="document-more-items" class="delivery-file-list"></div></details></section>
+          <section class="materials-attachments" aria-label="此前附件" data-i18n-aria-label="此前附件"><h2><span data-i18n="此前附件">此前附件</span></h2><p id="materials-media-status" class="detail-caption" role="status" hidden></p><details id="media-history" class="media-history" hidden><summary id="media-history-label"><span data-i18n="此前附件">此前附件</span></summary><div id="media-history-items" class="media-items"></div><button id="media-history-more" class="quiet-button" type="button" hidden><span data-i18n="显示更多此前媒体">显示更多此前媒体</span></button><ul id="media-history-files" class="media-file-items"></ul></details></section>
+          <p id="task-materials-empty" class="detail-caption" hidden><span data-i18n="还没有保存的任务资料。">还没有保存的任务资料。</span></p>
+        </div>
+      </section>
+      <section id="delivery-reader" class="delivery-reader" aria-label="阅读交付内容" hidden data-i18n-aria-label="阅读交付内容">
+        <header class="reader-header"><button id="reader-back" class="quiet-button" type="button"><span data-i18n="← 返回聊天">← 返回聊天</span></button><div class="reader-heading"><h2 id="reader-title"></h2><p id="reader-meta" class="detail-caption"></p></div><button id="reader-source" class="quiet-button" type="button" aria-pressed="false"><span data-i18n="查看源文">查看源文</span></button></header>
+        <details id="reader-navigation" class="reader-navigation"><summary id="reader-navigation-summary"><span data-i18n="切换成果">切换成果</span></summary><nav id="reader-files" class="reader-files" aria-label="切换交付内容" data-i18n-aria-label="切换交付内容"></nav></details>
+        <div id="reader-update" class="notice" role="status" hidden></div>
+        <article id="reader-body" class="reader-body" tabindex="0" aria-label="交付正文" data-i18n-aria-label="交付正文"></article>
+      </section>
+      <button id="new-events" class="new-events" type="button" hidden><span data-i18n="查看新消息 ↓">查看新消息 ↓</span></button>
+      <p id="action-error" class="notice error action-error" role="alert" hidden></p>
+      <div id="work-indicator" class="work-indicator" hidden><span class="work-dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="work-indicator-text" role="status" aria-live="polite" aria-atomic="true"></span></div>
+      <form id="composer" class="composer">
+        <div class="composer-card">
+          <div id="recipient-control" class="recipient-control" hidden><button id="recipient-button" class="recipient-button" type="button" aria-haspopup="listbox" aria-controls="recipient-menu" aria-expanded="false"><span data-i18n="发给全体">发给全体</span></button><button id="recipient-clear" class="recipient-clear" type="button" aria-label="取消定向，发给全体" hidden data-i18n-aria-label="取消定向，发给全体">×</button><span id="recipient-note" class="detail-caption"></span></div>
+          <div id="recipient-menu" class="recipient-menu" role="listbox" aria-label="选择这条补充的收件人" hidden data-i18n-aria-label="选择这条补充的收件人"></div>
+          <label class="sr-only" for="message"><span data-i18n="目标或补充说明">目标或补充说明</span></label><textarea id="message" aria-controls="recipient-menu" aria-autocomplete="list" rows="3" placeholder="说说这次想做什么" data-i18n-placeholder="说说这次想做什么"></textarea>
+          <div class="composer-bottom">
+            <div class="composer-actions" aria-label="任务常用操作" data-i18n-aria-label="任务常用操作">
+              <div class="work-mode-control"><span id="work-mode-label" class="sr-only"><span data-i18n="工作方式">工作方式</span></span><div class="work-mode-picker" role="group" aria-labelledby="work-mode-label"><button id="work-mode-plan" type="button" aria-pressed="false"><span data-i18n="方案">方案</span></button><button id="work-mode-build" type="button" aria-pressed="true"><span data-i18n="动手">动手</span></button></div></div>
+              <button id="task-options-partners" class="composer-action" type="button" aria-haspopup="dialog" aria-controls="task-options-popover"><span data-i18n="伙伴 · 2">伙伴 · 2</span></button>
+              <button id="task-options-project" class="composer-action" type="button" aria-haspopup="dialog" aria-controls="task-options-popover"><span data-i18n="项目">项目</span></button>
+              <button id="task-options-more" class="composer-action" type="button" aria-haspopup="dialog" aria-controls="task-options-popover" aria-label="更多任务选项" data-i18n-aria-label="更多任务选项">···</button>
+            </div>
+            <button id="runtime-settings" class="composer-action" type="button" aria-haspopup="dialog" aria-controls="runtime-settings-popover" aria-expanded="false"><span id="runtime-settings-summary"><span data-i18n="权限：隔离副本">权限：隔离副本</span></span><span aria-hidden="true">⌄</span></button>
+            <div class="send-controls"><span id="character-count" hidden></span><button id="send" class="send-button" type="submit" disabled><span id="send-label"><span data-i18n="开始任务">开始任务</span></span><span aria-hidden="true">↑</span></button></div>
+          </div>
+          <p id="composer-note" class="composer-status" role="status" hidden></p>
+        </div>
+
+      </form>
+      <p id="terminal-composer-note" class="terminal-composer-note detail-caption" role="status" hidden></p>
+      <section id="composer-usage-bar" class="composer-usage-bar" aria-label="伙伴用量与额度" data-i18n-aria-label="伙伴用量与额度">
+        <span id="runtime-shortcuts-caption" class="runtime-shortcuts-caption" hidden></span>
+        <div id="composer-usage-items" class="composer-usage-items"></div>
+        <p id="composer-usage-empty" class="detail-caption" hidden><span data-i18n="选好伙伴后，在这里看额度和最近结果用量。">选好伙伴后，在这里看额度和最近结果用量。</span></p>
+      </section>
+    </section>
+
+    <aside id="members-panel" class="members-panel" aria-label="代码交付、参与工具和进展" data-i18n-aria-label="代码交付、参与工具和进展">
+      <div class="members-heading"><h2><span data-i18n="本次任务">本次任务</span></h2><button id="close-members" class="quiet-button members-toggle" type="button" aria-label="收起任务详情" data-i18n-aria-label="收起任务详情"><span data-i18n="收起">收起</span></button></div>
+      <section id="code-status-card" class="code-status-card" aria-label="代码交付" hidden data-i18n-aria-label="代码交付">
+        <header class="code-status-heading"><h3><span data-i18n="代码交付">代码交付</span></h3><button id="code-status-refresh" class="quiet-button" type="button"><span data-i18n="刷新">刷新</span></button></header>
+        <div id="code-repository" class="code-repository" hidden>
+          <div class="code-repository-heading"><span id="code-repository-label"></span><button id="code-repository-edit" class="quiet-button" type="button"><span data-i18n="选择仓库">选择仓库</span></button></div>
+          <div id="code-repository-picker" hidden><label for="code-repository-choice"><span data-i18n="实际交付代码的仓库">实际交付代码的仓库</span></label><select id="code-repository-choice"></select><div class="manager-card-actions"><button id="code-repository-cancel" class="quiet-button" type="button"><span data-i18n="取消">取消</span></button><button id="code-repository-save" class="quiet-button" type="button"><span data-i18n="保存">保存</span></button></div></div>
+          <p id="code-repository-error" class="notice error" role="status" hidden></p>
+        </div>
+        <strong id="code-status-summary" class="code-status-summary" role="status"></strong>
+        <div id="code-delivery-states" class="code-working-state" hidden><p id="code-delivery-main"></p><p id="code-delivery-remote"></p></div>
+        <p id="code-delivery-note" class="detail-caption" hidden></p>
+        <p id="code-status-freshness" class="detail-caption"></p>
+        <div id="code-merge-panel" class="code-merge-panel" hidden><label><span data-i18n="交给谁处理">交给谁处理</span><select id="code-merge-target" aria-label="提交同步请求收件人" data-i18n-aria-label="提交同步请求收件人"></select></label><button id="code-merge-send" class="quiet-button" type="button"><span data-i18n="请伙伴提交并同步">请伙伴提交并同步</span></button><p id="code-merge-status" class="detail-caption" role="status" hidden></p></div>
+        <details id="code-status-details"><summary><span data-i18n="查看代码详情">查看代码详情</span></summary>
+          <p id="code-local-summary" class="detail-caption"></p><p id="code-merge-description" class="detail-caption"></p>
+          <label id="code-workspace-control" class="code-workspace-control" hidden><span class="sr-only"><span data-i18n="代码工作区">代码工作区</span></span><select id="code-workspace" aria-label="代码工作区" data-i18n-aria-label="代码工作区"></select></label>
+          <div class="code-working-state"><p id="code-tracked-status" hidden></p><p id="code-untracked-status" class="code-untracked-status" hidden></p><p id="code-untracked-note" class="detail-caption" hidden><span data-i18n="这些文件或目录不在已有提交里；是否纳入 Git，需看具体内容。">这些文件或目录不在已有提交里；是否纳入 Git，需看具体内容。</span></p></div>
+          <p id="code-status-branch" class="detail-caption"></p>
+          <div id="code-last-commit" class="code-last-commit" hidden><span class="detail-caption"><span data-i18n="此目录最近提交">此目录最近提交</span></span><p id="code-commit-subject"></p><span id="code-commit-hash" class="detail-caption"></span></div>
+          <p id="code-upstream" class="detail-caption" hidden></p><p id="code-mainline" class="detail-caption" hidden></p>
+          <p id="code-directory" class="detail-caption"></p><p id="code-commit-full" class="detail-caption" hidden></p><p id="code-status-counts" class="detail-caption"></p><ul id="code-file-list"></ul><p id="code-files-more" class="detail-caption" hidden></p>
+        </details>
+      </section>
+      <div id="member-cards"></div>
+      <section class="budget-card" aria-label="任务处理记录" data-i18n-aria-label="任务处理记录"><div><span id="budget-label"><span data-i18n="本轮调用">本轮调用</span></span><strong id="budget-used">—</strong></div><p id="objective-budget" class="detail-caption" hidden></p><p id="conversation-budget" class="detail-caption" hidden></p><p class="detail-caption"><span data-i18n="记录实际处理次数，不代表 Token 或费用。">记录实际处理次数，不代表 Token 或费用。</span></p></section>
+      <details id="run-history" class="jobs-details" hidden><summary><span data-i18n="迭代记录">迭代记录</span> <span id="run-count">0</span></summary><ol id="runs" class="job-list"></ol></details>
+      <details class="jobs-details"><summary><span data-i18n="任务记录">任务记录</span> <span id="job-count">0</span></summary><ol id="jobs" class="job-list"></ol><p id="jobs-empty" class="detail-caption"><span data-i18n="尚无任务">尚无任务</span></p></details>
+      <details id="project-details" class="project-details" hidden><summary><span data-i18n="文件与改稿">文件与改稿</span></summary><p id="project-status" class="detail-caption"></p><button id="download-artifacts" class="quiet-button" type="button" disabled><span data-i18n="下载成果">下载成果</span></button><p id="export-note" class="detail-caption" role="status" hidden></p><div id="project-files"></div></details>
+      <details id="executions-details" class="project-details" hidden><summary><span data-i18n="隔离执行记录">隔离执行记录</span></summary><p class="detail-caption"><span data-i18n="记录固定文件版本、进程退出与清理状态。程序输出需核对，不等于目标已验收。">记录固定文件版本、进程退出与清理状态。程序输出需核对，不等于目标已验收。</span></p><div id="execution-records"></div></details>
+      <details id="native-executions-details" class="project-details" hidden><summary><span data-i18n="本机工具执行记录">本机工具执行记录</span></summary><p class="detail-caption"><span data-i18n="记录实际工具调用及进程结果；退出码 0 不代表测试或游戏已通过验收。">记录实际工具调用及进程结果；退出码 0 不代表测试或游戏已通过验收。</span></p><div id="native-execution-records"></div></details>
+      <p class="member-footnote"><span data-i18n="空闲只表示暂时没有在处理的任务，不表示目标已经验收。">空闲只表示暂时没有在处理的任务，不表示目标已经验收。</span></p>
+    </aside>
+  </main>
+    <section id="workspace-manager" class="workspace-manager" role="dialog" aria-modal="true" aria-labelledby="manager-title" hidden>
+      <div class="manager-sheet">
+        <header class="manager-heading"><div><p class="eyebrow"><span data-i18n="豆窝工作台">豆窝工作台</span></p><h2 id="manager-title"><span data-i18n="项目">项目</span></h2></div><button id="close-manager" class="quiet-button" type="button"><span data-i18n="返回聊天">返回聊天</span></button></header>
+        <nav class="manager-tabs" aria-label="工作台管理" data-i18n-aria-label="工作台管理"><button id="manager-projects-tab" class="target" type="button"><span data-i18n="项目">项目</span></button><button id="manager-partners-tab" class="target" type="button"><span data-i18n="工具与状态">工具与状态</span></button></nav>
+        <div id="manager-notice" class="notice" role="status" hidden></div>
+        <section id="projects-view" class="manager-view">
+          <p class="manager-intro"><span data-i18n="选择项目文件夹，再选择文本协作或本机开发。本机开发使用工具对应的原生权限模式。">选择项目文件夹，再选择文本协作或本机开发。本机开发使用工具对应的原生权限模式。</span></p>
+          <label class="lifecycle-filter" for="projects-filter"><span data-i18n="显示">显示</span><select id="projects-filter" aria-label="项目视图" data-i18n-aria-label="项目视图"><option value="active" data-i18n="当前">当前</option><option value="archived" data-i18n="已归档">已归档</option><option value="removed" data-i18n="已移除">已移除</option></select></label>
+          <div id="projects-list" class="manager-grid"></div>
+          <details id="project-add-details" class="manager-add"><summary><span data-i18n="＋ 添加本机项目">＋ 添加本机项目</span></summary>
+            <form id="project-form" class="manager-form">
+              <div class="project-file-picker"><button id="choose-project-folder" class="quiet-button" type="button" hidden><span data-i18n="选择项目文件夹">选择项目文件夹</span></button><p id="project-picker-help" class="detail-caption"></p><p id="project-picker-note" class="detail-caption" role="status" hidden></p></div>
+              <details id="project-manual" class="project-manual"><summary><span data-i18n="手动填写项目">手动填写项目</span></summary><label><span data-i18n="项目名称">项目名称</span><input id="project-name" maxlength="80" placeholder="例如：我的小项目" required data-i18n-placeholder="例如：我的小项目"></label><label><span data-i18n="本机项目目录">本机项目目录</span><input id="project-path" placeholder="填写项目的完整目录路径" required data-i18n-placeholder="填写项目的完整目录路径"></label></details>
+              <details id="project-files-advanced" class="project-manual"><summary><span data-i18n="只处理指定文件（高级）">只处理指定文件（高级）</span></summary><label><input id="project-explicit-files" type="checkbox"><span data-i18n="限制为指定文本文件">限制为指定文本文件</span></label><button id="choose-project-files" class="quiet-button" type="button" hidden><span data-i18n="选择指定文件">选择指定文件</span></button><label><span data-i18n="允许处理的文件">允许处理的文件</span><textarea id="project-files-input" rows="4" placeholder="每行一个相对路径，例如：README.md" data-i18n-placeholder="每行一个相对路径，例如：README.md"></textarea></label><p class="detail-caption"><span data-i18n="此方式限 1–12 个文本文件，每个 16 KiB，总计 48 KiB。">此方式限 1–12 个文本文件，每个 16 KiB，总计 48 KiB。</span></p></details>
+              <p class="detail-caption"><span data-i18n="添加时只登记项目位置。开始任务后建立隔离副本，伙伴按需读取的内容会发送给所选模型服务供应商，不把整个项目全文放进聊天。请勿选择含凭据或私密记录的目录。本机开发可按任务要求和所选原生权限处理项目文件。">添加时只登记项目位置。开始任务后建立隔离副本，伙伴按需读取的内容会发送给所选模型服务供应商，不把整个项目全文放进聊天。请勿选择含凭据或私密记录的目录。本机开发可按任务要求和所选原生权限处理项目文件。</span></p><button id="save-project" class="send-button" type="submit"><span data-i18n="添加项目">添加项目</span></button>
+            </form>
+          </details>
+        </section>
+        <section id="partners-view" class="manager-view" hidden>
+          <div id="partner-discovery" class="partner-discovery" hidden><p id="partner-discovery-text"></p><p class="detail-caption"><span data-i18n="找到工具不代表已确认登录；任务仍由你发送后才开始。">找到工具不代表已确认登录；任务仍由你发送后才开始。</span></p><button id="rediscover-partners" class="quiet-button" type="button" hidden><span data-i18n="重新检测">重新检测</span></button><p id="discovery-feedback" class="detail-caption" role="status" hidden></p></div>
+          <div id="native-tool-setup" class="native-tool-setup" hidden></div>
+          <p id="partners-intro" class="manager-intro"><span data-i18n="查看工具是否已安装、当前在做什么，以及本次用量。只显示豆窝里的任务，不读取其它应用的聊天。">查看工具是否已安装、当前在做什么，以及本次用量。只显示豆窝里的任务，不读取其它应用的聊天。</span></p>
+          <label class="lifecycle-filter" for="partners-filter"><span data-i18n="显示">显示</span><select id="partners-filter" aria-label="伙伴视图" data-i18n-aria-label="伙伴视图"><option value="active" data-i18n="当前">当前</option><option value="archived" data-i18n="已归档">已归档</option><option value="removed" data-i18n="已移除">已移除</option></select></label>
+          <div id="partners-list" class="manager-grid"></div>
+          <details id="advanced-sessions" class="manager-add"><summary id="advanced-sessions-label"><span data-i18n="更多会话（高级）">更多会话（高级）</span></summary><p class="detail-caption"><span data-i18n="同一工具可以开多个独立会话，使用同一登录，不是新工具或新账号。一般直接使用上面的 Claude Code 和 Codex 即可。">同一工具可以开多个独立会话，使用同一登录，不是新工具或新账号。一般直接使用上面的 Claude Code 和 Codex 即可。</span></p><div id="additional-partners-list" class="manager-grid"></div></details><details id="partner-add-details" class="manager-add"><summary><span data-i18n="＋ 添加工具或独立会话">＋ 添加工具或独立会话</span></summary>
+            <form id="partner-form" class="manager-form">
+              <div class="form-columns"><div class="form-field"><label for="partner-adapter"><span data-i18n="选择工具">选择工具</span></label><select id="partner-adapter" required></select></div><div class="form-field"><label for="partner-name"><span data-i18n="会话名称">会话名称</span></label><input id="partner-name" maxlength="80" placeholder="留空也可以，我们来起名" data-i18n-placeholder="留空也可以，我们来起名"></div></div>
+              <details id="partner-connection" class="partner-connection" hidden><summary><span data-i18n="本机连接设置（可稍后配置）">本机连接设置（可稍后配置）</span></summary><p id="connection-help" class="detail-caption"><span data-i18n="模板可以先保存。只有实现豆窝 JSON 协议的本机连接器通过检查后才能参加任务；普通同名 CLI 不会自动接通。">模板可以先保存。只有实现豆窝 JSON 协议的本机连接器通过检查后才能参加任务；普通同名 CLI 不会自动接通。</span></p><div class="form-field"><label for="connection-executable"><span data-i18n="连接器完整路径">连接器完整路径</span></label><input id="connection-executable" placeholder="例如：/Users/you/bin/beanest-connector" data-i18n-placeholder="例如：/Users/you/bin/beanest-connector"></div><div class="form-field"><label for="connection-args"><span data-i18n="启动参数（每行一个，按原文传入）">启动参数（每行一个，按原文传入）</span></label><textarea id="connection-args" rows="2" placeholder="不要填写 shell 命令或 API key" data-i18n-placeholder="不要填写 shell 命令或 API key"></textarea></div><div class="form-field"><label for="connection-billing"><span data-i18n="你已确认的调用方式">你已确认的调用方式</span></label><select id="connection-billing"><option value="" data-i18n="请选择">请选择</option><option value="existing_subscription" data-i18n="使用已有订阅">使用已有订阅</option><option value="local" data-i18n="只在本机运行">只在本机运行</option></select></div><p class="detail-caption"><span data-i18n="只记录你的选择，连接检查不证明厂商账务；不会新增 API key 或改变计费方式。">只记录你的选择，连接检查不证明厂商账务；不会新增 API key 或改变计费方式。</span></p></details>
+              <fieldset class="bean-style-fieldset"><legend><span data-i18n="挑一只小豆子">挑一只小豆子</span></legend><p class="detail-caption"><span data-i18n="挑个喜欢的样子。可用方向键选择。">挑个喜欢的样子。可用方向键选择。</span></p><div id="bean-style-picker" class="bean-style-picker" role="radiogroup" aria-label="选择伙伴的豆子形象" data-i18n-aria-label="选择伙伴的豆子形象"></div><p id="bean-style-selection" class="bean-style-selection" role="status"></p></fieldset>
+              <details class="partner-advanced"><summary><span data-i18n="高级设置（一般不用改）">高级设置（一般不用改）</span></summary><div class="form-columns"><div class="form-field"><label for="partner-id"><span data-i18n="内部标识">内部标识</span></label><input id="partner-id" maxlength="32" placeholder="自动生成" data-i18n-placeholder="自动生成"></div><div class="form-field"><label for="partner-avatar"><span data-i18n="身份角标">身份角标</span></label><input id="partner-avatar" maxlength="2" placeholder="按工具自动设置" data-i18n-placeholder="按工具自动设置"></div></div></details>
+              <p id="partner-save-help" class="detail-caption"><span data-i18n="新会话使用所选工具现有的登录。创建后不会开始任务，也不会自动参加其它任务。">新会话使用所选工具现有的登录。创建后不会开始任务，也不会自动参加其它任务。</span></p>
+              <div id="partner-save-pending" class="partner-save-pending" role="status" hidden><p><span data-i18n="这次添加还没确认。已保留原信息，先核对，避免重复添加。">这次添加还没确认。已保留原信息，先核对，避免重复添加。</span></p><button id="verify-partner-save" class="quiet-button" type="button"><span data-i18n="核对保存结果">核对保存结果</span></button></div>
+              <button id="save-partner" class="send-button" type="submit"><span data-i18n="创建会话">创建会话</span></button>
+              <button id="cancel-connection" class="quiet-button" type="button" hidden><span data-i18n="取消配置">取消配置</span></button>
+            </form>
+          </details>
+        </section>
+      </div>
+    </section>
+
+    <section id="lifecycle-confirm" class="lifecycle-confirm" role="dialog" aria-modal="true" aria-labelledby="lifecycle-confirm-title" hidden>
+      <div class="lifecycle-confirm-sheet"><h2 id="lifecycle-confirm-title"><span data-i18n="移除登记？">移除登记？</span></h2><p id="lifecycle-confirm-description"></p><p id="lifecycle-confirm-note" class="detail-caption"><span data-i18n="之后可以在“已移除”中恢复。此操作不会启动模型。">之后可以在“已移除”中恢复。此操作不会启动模型。</span></p><div class="manager-card-actions"><button id="lifecycle-confirm-cancel" class="quiet-button" type="button"><span data-i18n="先保留">先保留</span></button><button id="lifecycle-confirm-submit" class="quiet-button danger" type="button"><span data-i18n="移除登记">移除登记</span></button></div></div>
+    </section>
+
+  <section id="appearance-dialog" class="lifecycle-confirm appearance-dialog" role="dialog" aria-modal="true" aria-labelledby="appearance-title" hidden>
+    <div class="lifecycle-confirm-sheet appearance-sheet"><h2 id="appearance-title"><span data-i18n="换皮肤">换皮肤</span></h2><p class="detail-caption"><span data-i18n="给伙伴换个样子，当前任务里的头像也会一起更新。">给伙伴换个样子，当前任务里的头像也会一起更新。</span></p><div id="appearance-preview" class="appearance-preview"></div><div id="appearance-picker" class="bean-style-picker" role="radiogroup" aria-label="伙伴皮肤" data-i18n-aria-label="伙伴皮肤"></div><p id="appearance-selection" class="bean-style-selection" role="status"></p><p id="appearance-error" class="notice error" role="alert" hidden></p><div class="manager-card-actions"><button id="appearance-cancel" class="quiet-button" type="button"><span data-i18n="取消">取消</span></button><button id="appearance-save" class="quiet-button appearance-save" type="button"><span data-i18n="保存皮肤">保存皮肤</span></button></div></div>
+  </section>
+  <section id="availability-recheck-dialog" class="lifecycle-confirm" role="dialog" aria-modal="true" aria-labelledby="availability-recheck-title" hidden>
+    <div class="lifecycle-confirm-sheet availability-recheck-sheet"><h2 id="availability-recheck-title"></h2><p id="availability-recheck-description"></p><p class="detail-caption"><span data-i18n="下次真实任务仍可能遇到限额；工具再次报告限额时会重新阻止使用。这个操作不会启动模型，不会更换登录，也不会启用你停用的伙伴。">下次真实任务仍可能遇到限额；工具再次报告限额时会重新阻止使用。这个操作不会启动模型，不会更换登录，也不会启用你停用的伙伴。</span></p><p id="availability-recheck-error" class="notice error" role="status" hidden></p><div class="manager-card-actions"><button id="availability-recheck-cancel" class="quiet-button" type="button"><span data-i18n="先不调整">先不调整</span></button><button id="availability-recheck-submit" class="quiet-button" type="button"><span data-i18n="重新允许使用">重新允许使用</span></button></div></div>
+  </section>
+  <section id="task-options-popover" class="runtime-settings-popover task-options-popover" role="dialog" aria-modal="true" aria-labelledby="task-options-title" hidden>
+    <div class="runtime-settings-sheet task-options-sheet">
+      <header class="runtime-settings-heading"><h2 id="task-options-title"><span data-i18n="任务选项">任务选项</span></h2><button id="task-options-close" class="quiet-button" type="button"><span data-i18n="完成">完成</span></button></header>
+      <div id="composer-context" class="composer-context" aria-label="任务选项" tabindex="0" data-i18n-aria-label="任务选项">
+          <section id="new-room-setup" class="new-room-setup" aria-label="安排本次协作" data-i18n-aria-label="安排本次协作">
+            <fieldset class="participant-fieldset"><legend><span data-i18n="参与工具">参与工具</span> <span id="participant-count"></span></legend><div id="participant-picker" class="participant-picker"></div><details id="extra-session-choice" class="extra-session-choice" hidden><summary id="extra-session-choice-label"><span data-i18n="更多会话（高级）">更多会话（高级）</span></summary><p class="detail-caption"><span data-i18n="同一工具的独立会话，使用同一登录。只会邀请你勾选的会话。">同一工具的独立会话，使用同一登录。只会邀请你勾选的会话。</span></p><div id="extra-session-picker" class="participant-picker"></div></details></fieldset>
+            <div id="discovery-hint" class="discovery-hint" role="status" hidden><span id="discovery-hint-text"></span><button id="discovery-manage" class="inline-button" type="button" hidden><span data-i18n="查看工具">查看工具</span></button></div>
+            <details id="project-choice" class="project-choice"><summary id="project-choice-label"><span data-i18n="关联项目（可选）">关联项目（可选）</span></summary><div class="project-selection"><label class="sr-only" for="project-picker"><span data-i18n="关联项目">关联项目</span></label><select id="project-picker"><option value="" data-i18n="不关联项目 · 自由协作">不关联项目 · 自由协作</option></select><button id="composer-projects" class="quiet-button" type="button"><span data-i18n="添加项目">添加项目</span></button></div><label id="project-workflow-control" class="policy-field" hidden><span data-i18n="处理方式">处理方式</span><select id="project-workflow"><option value="project_folder" data-i18n="只改文件（不运行）">只改文件（不运行）</option><option value="native_project" data-i18n="开发并运行（本机工具）">开发并运行（本机工具）</option></select><span class="detail-caption"><span data-i18n="在输入框下方的“权限”选择可做的操作；这里不会自动提高权限。">在输入框下方的“权限”选择可做的操作；这里不会自动提高权限。</span></span></label></details>
+          </section>
+          <p id="work-mode-note" class="detail-caption"></p>
+          <div id="frozen-participants" class="frozen-participants" hidden></div>
+          <section id="room-member-invitation" class="room-member-invitation" hidden aria-label="邀请伙伴加入当前聊天" data-i18n-aria-label="邀请伙伴加入当前聊天"><p id="member-invitation-hint" class="detail-caption"></p><div id="member-invitation-options" class="member-invitation-options"></div><p id="member-invitation-status" class="detail-caption" role="status" hidden></p><button id="member-invitation-check" class="quiet-button" type="button" hidden><span data-i18n="核对邀请状态">核对邀请状态</span></button><button id="member-invitation-manage" class="quiet-button" type="button"><span data-i18n="工具与状态">工具与状态</span></button></section>
+          <p id="frozen-project" class="detail-caption" tabindex="-1" hidden></p>
+          <details id="more-settings" class="more-settings"><summary><span data-i18n="更多设置">更多设置</span></summary><p id="team-setup-note" class="detail-caption"><span data-i18n="先由谁整理分工？伙伴会认领任务、按需要求助并交叉检查。">先由谁整理分工？伙伴会认领任务、按需要求助并交叉检查。</span></p><div id="target-picker" class="target-picker" role="group" aria-label="先让谁接手" data-i18n-aria-label="先让谁接手"><span class="target-label"><span data-i18n="正在读取伙伴…">正在读取伙伴…</span></span></div><details id="advanced-execution" class="advanced-execution"><summary><span data-i18n="成果类型与测试">成果类型与测试</span></summary><label id="task-mode-control" class="task-mode-control" hidden><span data-i18n="成果类型">成果类型</span> <select id="task-mode"><option value="text" data-i18n="文字协作">文字协作</option><option id="text-artifacts-mode" value="text_artifacts" disabled hidden data-i18n="文档、网页与矢量图（不运行）">文档、网页与矢量图（不运行）</option><option value="python_artifacts" data-i18n="新建 Python 文件（暂不运行）">新建 Python 文件（暂不运行）</option><option id="sandbox-mode" value="python_sandbox" disabled hidden data-i18n="新建 Python 项目并隔离测试">新建 Python 项目并隔离测试</option></select></label></details></details>
+          </div>
+        <details class="scope-note"><summary id="scope-summary"><span data-i18n="聊天协作 · 使用现有订阅">聊天协作 · 使用现有订阅</span></summary><p id="scope-description"><span data-i18n="先围绕你输入的内容讨论，不会自行改动你的项目或运行代码。没有新任务时不会调用模型；结果未确认的请求不会自动重发。">先围绕你输入的内容讨论，不会自行改动你的项目或运行代码。没有新任务时不会调用模型；结果未确认的请求不会自动重发。</span></p></details>
+    </div>
+  </section>
+  <section id="runtime-settings-popover" class="runtime-settings-popover" role="dialog" aria-modal="true" aria-labelledby="runtime-settings-title" hidden>
+    <div class="runtime-settings-sheet">
+      <header class="runtime-settings-heading"><h2 id="runtime-settings-title"><span data-i18n="权限与模型">权限与模型</span></h2><button id="runtime-settings-close" class="quiet-button" type="button"><span data-i18n="完成">完成</span></button></header>
+      <div class="runtime-settings-scroll"><p id="runtime-settings-note" class="detail-caption"></p><div id="runtime-settings-body"></div><p id="runtime-settings-message" class="detail-caption" role="status" hidden></p></div>
+      <p class="runtime-settings-footer detail-caption"><span data-i18n="选择会自动保留，发送任务时才生效。关闭这里不会启动任务。">选择会自动保留，发送任务时才生效。关闭这里不会启动任务。</span></p>
+    </div>
+  </section>
+  <section id="composer-usage-popover" class="composer-usage-popover" role="dialog" aria-modal="false" aria-labelledby="composer-usage-title" tabindex="-1" hidden>
+    <header class="composer-usage-heading"><h2 id="composer-usage-title"></h2><button id="composer-usage-close" class="quiet-button" type="button" aria-label="收起用量详情" data-i18n-aria-label="收起用量详情"><span data-i18n="收起">收起</span></button></header>
+    <div id="composer-usage-account"></div>
+    <details id="composer-usage-tokens" class="composer-usage-tokens"><summary><span data-i18n="最近结果 Token">最近结果 Token</span></summary><dl id="composer-usage-token-fields" class="usage-fields"></dl><p class="detail-caption"><span data-i18n="这是最近一次结果的快照，不是本轮累计、上下文占用或订阅额度；处理中不表示即时消耗。">这是最近一次结果的快照，不是本轮累计、上下文占用或订阅额度；处理中不表示即时消耗。</span></p></details>
+  </section>
+  <section id="entry-context-menu" class="entry-context-menu" role="menu" aria-labelledby="entry-context-title" tabindex="-1" hidden>
+    <p id="entry-context-title" class="entry-context-title"></p>
+    <div id="entry-context-actions"></div>
+  </section>
+</body>
+</html>

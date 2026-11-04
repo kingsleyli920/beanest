@@ -1,0 +1,24 @@
+{
+  "message": "已读取虚构需求，提交一项文本任务并认领。",
+  "state": "done",
+  "commands": [
+    {
+      "type": "propose", "id": "T1", "task_id": null,
+      "title": "虚构文本交付", "description": "整理一条虚构检查结论。",
+      "acceptance": "文本清楚并由另一伙伴核对。", "capability": "text",
+      "dependencies": [], "write_paths": []
+    },
+    {
+      "type": "claim", "id": null, "task_id": "T1",
+      "title": null, "description": null, "acceptance": null,
+      "capability": null, "dependencies": null, "write_paths": null
+    },
+    {
+      "type": "plan_ready", "id": null, "task_id": null,
+      "title": null, "description": null, "acceptance": null,
+      "capability": null, "dependencies": null, "write_paths": null
+    }
+  ],
+  "base_revision": 1,
+  "files": [], "edits": [], "unchanged_paths": [], "resolved_conflicts": []
+}

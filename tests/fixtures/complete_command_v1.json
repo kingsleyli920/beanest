@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Hand-authored fictional full flat work replies; no real provider output.",
+  "capability": {
+    "message": "虚构文件已完成。", "state": "done", "base_revision": 1,
+    "commands": [{"type": "complete", "task_id": "T1", "result": "已核对虚构文件。", "capability": "text", "text": null, "to": null, "repair_paths": null, "reason": null, "cause": null}],
+    "files": [], "edits": [], "unchanged_paths": [], "resolved_conflicts": []
+  },
+  "to": {
+    "message": "虚构文件已完成。", "state": "done", "base_revision": 1,
+    "commands": [{"type": "complete", "task_id": "T1", "result": "已核对虚构文件。", "capability": null, "text": null, "to": "claude", "repair_paths": null, "reason": null, "cause": null}],
+    "files": [], "edits": [], "unchanged_paths": [], "resolved_conflicts": []
+  },
+  "full": {
+    "message": "虚构文件已完成。", "state": "done", "base_revision": 1,
+    "commands": [{"type": "complete", "task_id": "T1", "result": "已核对虚构文件。", "capability": null, "text": null, "to": null, "repair_paths": null, "reason": null, "cause": null}],
+    "files": [], "edits": [], "unchanged_paths": [], "resolved_conflicts": []
+  },
+  "concise": {
+    "message": "虚构文件已完成。", "state": "done", "base_revision": 1,
+    "commands": [{"type": "complete", "task_id": "T1", "result": "已核对虚构文件。"}],
+    "files": [], "edits": [], "unchanged_paths": [], "resolved_conflicts": []
+  }
+}

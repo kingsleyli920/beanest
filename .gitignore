@@ -1,0 +1,31 @@
+# 本地凭据与运行数据
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/local-config/
+/runtime/
+/logs/
+/artifacts/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# 常见构建与工具缓存
+.DS_Store
+node_modules/
+dist/
+build/
+target/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Local maintenance notes are not part of the public source release.
+/docs/status.md
+/AGENTS.md
+/CLAUDE.md
+/START-HERE.md
