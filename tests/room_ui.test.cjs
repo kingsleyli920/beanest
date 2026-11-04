@@ -194,10 +194,24 @@ function deferred() {
   return { promise, resolve };
 }
 
+const pendingCryptoDigests = new Set();
+function trackedDigest(...args) {
+  // Return the real operation's result/rejection, while tracking only its
+  // native computation. Deliberately held fetches are not part of settlement.
+  const operation = Promise.resolve(webcrypto.subtle.digest(...args));
+  const tracked = operation.finally(() => pendingCryptoDigests.delete(tracked));
+  pendingCryptoDigests.add(tracked);
+  return tracked;
+}
 async function settle() {
-  // Settle ordinary promise continuations. Native WebCrypto needs an explicit
-  // completion condition, because its worker can finish after these turns.
-  for (let turn = 0; turn < 5; turn += 1) await new Promise(setImmediate);
+  const deadline = Date.now() + 2000;
+  for (let turn = 0; turn < 5; turn += 1) {
+    await new Promise(setImmediate);
+    if (pendingCryptoDigests.size) {
+      await waitUntil(() => pendingCryptoDigests.size === 0,
+        'browser SHA computation did not settle within the harness deadline', Math.max(0, deadline - Date.now()));
+    }
+  }
 }
 
 async function waitUntil(predicate, message, timeoutMs = 2000) {
@@ -274,7 +288,7 @@ async function browser({ language = 'zh-CN', languageStorage = new Map(), agents
     document, window: { location, history, addEventListener(type, callback) { if (!windowEvents.has(type)) windowEvents.set(type, []); windowEvents.get(type).push(callback); }, getSelection: () => ({ toString: () => selection }), ...(desktopBridge ? { beanestDesktop: desktopBridge } : {}) }, console, TextEncoder, AbortController, Blob, atob,
     Date: class extends Date { static now() { return now(); } },
     URL: { createObjectURL: (blob) => { const key = `blob:fictional-${document.blobs.size}`; document.blobs.set(key, blob); return key; }, revokeObjectURL: (url) => document.blobs.delete(url) },
-    crypto: { subtle: webcrypto.subtle, randomUUID: () => `00000000-0000-4000-8000-${String(++nextId).padStart(12, '0')}` },
+    crypto: { subtle: { digest: trackedDigest }, randomUUID: () => `00000000-0000-4000-8000-${String(++nextId).padStart(12, '0')}` },
     indexedDB: fakeIndexedDB(storage, idbFailure),
     sessionStorage: {
       getItem: (key) => storage.get(key) ?? null,
@@ -9402,4 +9416,34 @@ test('host review-only interruption uses bound platform explanation without call
     delete saved.collaboration.outcome.reason_i18n; await ui.poll();
     assert.equal(ui.posts().length,0); assert.equal(ui.get('recover-native').disabled,true);
   }
+});
+
+test('browser settlement waits for real SHA work but leaves held network reads and intervening drafts controllable', async () => {
+  for (const outcome of ['valid', 'bad-sha', 'new-draft']) {
+    const source = objectiveSnapshot({status:'complete',decision:'complete'}); source.room.status='completed';
+    const full = '精确的完整目标'.repeat(1000);
+    const ref = {kind:'run_goal',room_id:roomId,run_id:source.current_run.id,sha256:createHash('sha256').update(full).digest('hex')};
+    Object.assign(source.current_run,{goal_preview:full.slice(0,20),goal_text_ref:ref,goal_truncated:true,can_fork:true,revision:0});
+    delete source.current_run.goal;
+    const saved = pagedFixture(source,[]); const network=deferred();
+    const ui = await browser({rooms:[source.room],saved,pagingSupport:true,executionPolicySupport:true,route(request){
+      if(request.path.endsWith('/state'))return saved;
+      if(request.path.includes('/text?'))return network.promise;
+      return eventPageRoute(request,[]);
+    }});
+    await ui.click('fork-room');
+    assert.equal(ui.requests.filter(request=>request.path.includes('/text?')).length,1);
+    assert.equal(ui.get('message').value,'','settlement must return while the network response is deliberately held');
+    if(outcome==='new-draft')ui.type('网络等待期间的新草稿');
+    network.resolve({...ref,text:outcome==='bad-sha'?'不匹配的正文':full,truncated:false});
+    await settle();
+    assert.equal(pendingCryptoDigests.size,0);
+    if(outcome==='valid')assert.equal(ui.get('message').value,full);
+    else if(outcome==='bad-sha'){
+      assert.equal(ui.get('message').value,'');assert.match(ui.get('notice').textContent,/原文内容与记录版本不一致/);
+    }else assert.equal(ui.get('message').value,'网络等待期间的新草稿');
+    assert.equal(ui.posts().length,0);
+  }
+  await assert.rejects(trackedDigest('not-a-real-hash',new Uint8Array()),{name:'NotSupportedError'});
+  await settle();assert.equal(pendingCryptoDigests.size,0,'rejected native computations must be released without swallowing the rejection');
 });

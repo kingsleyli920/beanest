@@ -45,7 +45,7 @@ _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLO
 _EXCLUDED_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "vendor", ".venv", "venv", "env",
     "__pycache__", ".cache", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".next", ".nuxt", "build", "dist", "target", "runtime", ".tox", ".idea",
+    ".next", ".nuxt", "build", "dist", "target", "runtime", ".tox", ".idea", ".godot",
 })
 
 
@@ -69,11 +69,11 @@ def validate_folder_path(value):
     return _path(value)
 
 
-def _excluded(path):
+def _excluded(path, *, captured=False):
     parts = path.split("/")
     for part in parts:
         name = part.casefold()
-        if name in _EXCLUDED_DIRS:
+        if name in _EXCLUDED_DIRS and not (captured and name == ".godot"):
             return "excluded_directory"
         if (name == ".env" or name.startswith(".env.") or name in _SENSITIVE_NAMES
                 or name.split(".")[0] in _SENSITIVE_NAMES
@@ -192,7 +192,9 @@ class FolderWorkspace(ProjectWorkspace):
                 _path(item["path"])
             except ProjectWorkspaceError:
                 raise ProjectWorkspaceError("project_storage_corrupt") from None
-            if (_excluded(item["path"]) or item["path"].casefold() in seen
+            # Older snapshots could capture .godot before it became a standard
+            # cache exclusion. Keep those verified inputs readable, not writable.
+            if (_excluded(item["path"], captured=True) or item["path"].casefold() in seen
                     or not isinstance(item["sha256"], str) or not _HASH.fullmatch(item["sha256"])
                     or type(item["bytes"]) is not int or item["bytes"] < 0
                     or type(item["text"]) is not bool or type(item["changed"]) is not bool
@@ -818,12 +820,15 @@ class FolderWorkspace(ProjectWorkspace):
                 or (request["query"] is not None and not isinstance(request["query"], str))):
             raise ProjectWorkspaceError("invalid_project_request")
         path = _path(request["path"], root=request["kind"] != "read")
-        if _excluded(path):
+        excluded = _excluded(path)
+        if excluded and _excluded(path, captured=True):
             raise ProjectWorkspaceError("project_sensitive_content")
         with self._locked() as (room, revisions, _):
             index = self._index(revisions, self._manifest(room), revision)
             selected = [item for item in index["files"] if not path or item["path"] == path
                         or item["path"].startswith(path + "/")]
+            if excluded and not selected:
+                raise ProjectWorkspaceError("project_sensitive_content")
             if request["kind"] == "list":
                 page, used = [], 0
                 for item in selected[request["offset"]:request["offset"] + request["limit"]]:
