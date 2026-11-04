@@ -2170,6 +2170,8 @@ class RoomService:
         metadata_correction, partial_works = None, []
         called = {entry["provider"] for entry in snapshot["native_executions"]}
         checked = []
+        board = (requirements.get("context_limit") or {}).get("decision_board") or {}
+        board_retained = []
         for member in snapshot["members"]:
             state = self.store.native_workspace(snapshot["room"]["id"], member["id"])
             retained = retained_by_provider.get(member["id"])
@@ -2180,7 +2182,7 @@ class RoomService:
             try:
                 archive = state.get("partial_archive")
                 allowed = (retained["write_paths"] if retained and member["id"] == retained["provider"]
-                           else archive["paths"] if archive else [])
+                           else archive["paths"] if archive else board.get("paths", {}).get(member["id"], []))
                 changes = native_workspace.collect_changes(state["project"], state, allowed, resolved_conflicts=[])
             except (native_workspace.NativeWorkspaceError, OSError, ValueError):
                 raise RoomError("native_recovery_unpublished_changes") from None
@@ -2195,6 +2197,11 @@ class RoomService:
                 if member["id"] in fenced_retained:
                     fenced_observations.append({"candidate": retained,
                         "observation": self._audit_native_metadata_candidate(snapshot, retained, state, changes)})
+            elif retained is None and member["id"] not in fenced_retained and member["id"] in board.get("paths", {}):
+                # The owner's own resumed task paths; it publishes them through that task.
+                if changes["files"]:
+                    board_retained.append({"provider": member["id"], "files": [
+                        {"path": file["path"], "sha256": file["sha256"]} for file in changes["files"]]})
             elif allowed or member["id"] in fenced_retained:
                 observation = self._audit_native_metadata_candidate(snapshot, retained, state, changes)
                 if retained.get("recovery_ancestry"):
@@ -2233,6 +2240,10 @@ class RoomService:
             checked.append({"quota_checkpoint": attestation})
         if requirements.get("context_limit"):
             attestation = self._audit_native_context_limit_recovery(snapshot, requirements["context_limit"])
+            if board_retained and attestation["recovery_kind"] != "native_compaction_quota":
+                raise RoomError("native_recovery_unpublished_changes")
+            if board:
+                attestation["retained_board_work"] = board_retained
             checked.append({"context_limit": attestation})
         if fenced:
             attestation = self._audit_native_fenced_recovery(snapshot, fenced)
@@ -2309,7 +2320,7 @@ class RoomService:
             self._wake(room_id)
 
     def _audit_native_context_limit_recovery(self, snapshot, candidate, *, quota=False):
-        from .kimi_acp import context_limit_recovery_proof, quota_failure_recovery_proof
+        from .kimi_acp import compaction_quota_recovery_proof, context_limit_recovery_proof, quota_failure_recovery_proof
         state = self.store.native_workspace(snapshot["room"]["id"], candidate["provider"])
         current = self._project(snapshot["room"]["id"]).snapshot()
         binding = candidate.get("binding") or {}
@@ -2339,15 +2350,21 @@ class RoomService:
                 and {member["id"] for member in context.get("members", [])} == set(self.store.member_ids(snapshot["room"]["id"]))
                 and self._native_receipt_schema_matches(adapters._strict_json(schema_text), context, candidate["provider"],
                     candidate["phase"], can_propose=candidate["provider"] == candidate["plan_author"]))
+        kind = "native_quota_failure" if quota else "native_context_limit"
         try:
             prove = quota_failure_recovery_proof if quota else context_limit_recovery_proof
-            receipt = prove(Path(state["project"]), candidate["session_id"],
-                claimed_at=candidate["claimed_at"], finished_at=candidate["finished_at"], model=candidate["model"], validate_prompt=matches)
+            arguments = dict(claimed_at=candidate["claimed_at"], finished_at=candidate["finished_at"],
+                             model=candidate["model"], validate_prompt=matches)
+            receipt = prove(Path(state["project"]), candidate["session_id"], **arguments)
+            if receipt is None and not quota:
+                # The same exact compaction may instead prove a typed quota refusal.
+                receipt = compaction_quota_recovery_proof(Path(state["project"]), candidate["session_id"], **arguments)
+                kind = "native_compaction_quota"
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
             receipt = None
         if receipt is None:
             raise RoomError("native_recovery_diagnostic_unconfirmed")
-        return {"recovery_kind": "native_quota_failure" if quota else "native_context_limit", "candidate": candidate,
+        return {"recovery_kind": kind, "candidate": candidate,
             "current_binding": {"run_id": snapshot["current_run"]["id"], "revision": snapshot["current_run"]["revision"],
                                 "digest": snapshot["current_run"]["digest"]},
             "receipt": receipt, "old_commands_accepted": False}

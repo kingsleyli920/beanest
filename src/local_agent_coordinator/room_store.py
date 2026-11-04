@@ -3019,7 +3019,7 @@ class RoomStore:
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         if (room["mode"] != "native_project" or room["stop_requested"] or team is None
                 or team["phase"] not in {"unknown", "stopped", "interrupted"}
-                or team["stop_reason"] not in {"native_auth_unconfirmed", "native_provider_error"}):
+                or team["stop_reason"] not in {"native_auth_unconfirmed", "native_provider_error", "native_turn_unconfirmed"}):
             return None
         tasks = db.execute("SELECT status FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])).fetchall()
         if any(task[0] not in {"accepted", "self_checked"} for task in tasks):
@@ -3062,8 +3062,42 @@ class RoomStore:
                     "plan_author": team["plan_author"], "permission": native.get("permission"),
                     "claim_seq": claim_seq, "finish_seq": finish_seq,
                     "claimed_at": claim["created_at"], "finished_at": end["created_at"],
-                    "binding": native.get("binding"), "peer_job_ids": [peer["id"] for peer in jobs]}
+                    "binding": native.get("binding"), "peer_job_ids": [peer["id"] for peer in jobs],
+                    "decision_board": None if tasks else self._native_decision_board(db, room_id, team["current_run_id"])}
         return None
+
+    def _native_decision_board(self, db, room_id, run_id):
+        """The board a user's objective decision replanned from, never an arbitrary old run.
+
+        Only unfinished tasks blocked by the retired invalid_target rejection
+        resume; their owners' private paths may hold that rejected work.
+        """
+        objective = self._team.objectives.current(db, room_id)
+        events = [json.loads(row[0]) | {"seq": row[1]} for row in db.execute(
+            "SELECT value_json,seq FROM events WHERE room_id=? AND json_extract(value_json,'$.run_id')=? "
+            "AND json_extract(value_json,'$.kind') IN ('run_started','objective_decision') ORDER BY seq", (room_id, run_id))]
+        begun = [event for event in events if event["kind"] == "run_started"]
+        decisions = [event for event in events if event["kind"] == "objective_decision"]
+        if (objective is None or len(begun) != 1 or len(decisions) != 1 or begun[0].get("sender") != "user"
+                or decisions[0].get("sender") != "user" or decisions[0].get("objective_id") != objective["id"]
+                or decisions[0].get("previous_run_id") != begun[0].get("previous_run_id")
+                or not begun[0]["seq"] < decisions[0]["seq"]):
+            return None
+        board = db.execute("SELECT * FROM team_runs WHERE room_id=? AND id=? AND objective_id=?",
+                           (room_id, begun[0]["previous_run_id"], objective["id"])).fetchone()
+        current = db.execute("SELECT number FROM team_runs WHERE room_id=? AND id=?", (room_id, run_id)).fetchone()
+        if board is None or current is None or board["number"] >= current[0]:
+            return None
+        tasks = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid", (room_id, board["id"])).fetchall()
+        resumed = [task for task in tasks if task["status"] == "blocked" and task["blocked_reason"] == "invalid_target"
+                   and task["block_cause"] is None and task["owner"] is not None]
+        if not resumed:
+            return None
+        paths = {}
+        for task in resumed:
+            paths.setdefault(task["owner"], set()).update(json.loads(task["write_paths_json"]))
+        return {"run_id": board["id"], "task_errors": {task["id"]: "invalid_target" for task in resumed},
+                "paths": {owner: sorted(values) for owner, values in paths.items()}}
 
     def _native_recovery_requirements(self, db, room_id):
         """One candidate projection for admission and the service's full audit."""
@@ -3244,6 +3278,7 @@ class RoomStore:
                 self._settle(db, room_id)
                 return True
             context_limit = self._native_context_limit_candidate(db, room_id)
+            compaction_quota = False
             legacy = self._legacy_native_recovery_candidate(db, room_id)
             review = self._native_review_recovery_candidate(db, room_id)
             fenced = self._native_fenced_recovery_candidate(db, room_id)
@@ -3361,14 +3396,19 @@ class RoomStore:
                 self._event(db, room_id, "native_review_recovery_attestation", sender=recovery_source, **legacy_attestation)
             elif context_limit:
                 receipt = (legacy_attestation or {}).get("receipt", {})
+                compaction_quota = (legacy_attestation or {}).get("recovery_kind") == "native_compaction_quota"
                 if (not isinstance(legacy_attestation, dict)
-                        or legacy_attestation.get("recovery_kind") != "native_context_limit"
+                        or legacy_attestation.get("recovery_kind") not in {"native_context_limit", "native_compaction_quota"}
                         or legacy_attestation.get("candidate") != context_limit
                         or legacy_attestation.get("current_binding") != binding
                         or legacy_attestation.get("old_commands_accepted") is not False
-                        or receipt.get("diagnostic") != {"phase": "compaction", "reason": "provider_context_limit", "http_status": 403}
+                        or receipt.get("diagnostic") != ({"phase": "compaction", "reason": "provider_quota_exhausted", "http_status": 429}
+                            if compaction_quota else {"phase": "compaction", "reason": "provider_context_limit", "http_status": 403})
                         or any(not re.fullmatch(r"[0-9a-f]{64}", receipt.get(key, "")) for key in ("sha256", "prompt_sha256"))):
                     raise RoomError("native_recovery_diagnostic_unconfirmed")
+                if compaction_quota:
+                    # An exhausted peer is retired below, never resumed in a fresh session.
+                    quota_blocked = set(quota_blocked) | {context_limit["provider"]}
                 self._event(db, room_id, "native_context_limit_handoff", sender=recovery_source, **legacy_attestation,
                             old_calls_replayed=False)
             elif team["stop_reason"] not in NATIVE_RECOVERY_ERRORS:
@@ -3434,6 +3474,11 @@ class RoomStore:
             if len(board_runs) > 1:
                 raise RoomError("native_recovery_binding_changed")
             board_run = next(iter(board_runs), binding["run_id"])
+            decision_board = context_limit.get("decision_board") if compaction_quota else None
+            if decision_board:
+                if partial_works or board_run != binding["run_id"]:
+                    raise RoomError("native_recovery_binding_changed")
+                board_run = decision_board["run_id"]
             hint_sources = {(item["candidate"]["run_id"], item["candidate"]["source_error"]) for item in partial_works
                             if item["candidate"].get("requires_revision_hint_audit") or item["candidate"].get("requires_retained_scope_audit")}
             task_errors = {}
@@ -3445,6 +3490,8 @@ class RoomStore:
                 task_errors.update({task_id: "native_turn_unconfirmed" for task_id in fenced["recoverable_task_ids"]})
             if help_repair:
                 task_errors[help_candidate["task_id"]] = "native_changes_not_imported"
+            if decision_board:
+                task_errors.update(decision_board["task_errors"])
             for source_run, error in hint_sources:
                 task_errors.update(self._revision_hint_recovery_tasks(db, room_id, source_run, error=error))
             self._team.carry_unfinished(db, room_id, board_run, new_id, recovery_errors=errors,
@@ -3453,9 +3500,13 @@ class RoomStore:
                 objective = self._team.objectives.current(db, room_id)
                 continuation = json.loads(objective["continuation_json"] or "{}")
                 continuation["native_context_handoff"] = {"source_run_id": binding["run_id"],
-                    "source_job_id": context_limit["job_id"], "reason": "provider_context_limit",
+                    "source_job_id": context_limit["job_id"],
+                    "reason": "provider_quota_exhausted" if compaction_quota else "provider_context_limit",
                     "sessions": "fresh", "old_sessions_preserved": True, "old_calls_replayed": False}
                 db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(continuation), objective["id"]))
+                if compaction_quota:
+                    self._team.retire_quota(db, room_id, context_limit["provider"], "subscription_limit_reached",
+                                            ownership_files, binding["revision"], defer_reconcile=True)
             if fenced:
                 for retained in legacy_attestation["retained_peers"]:
                     source = retained["candidate"]
