@@ -7700,6 +7700,14 @@ if (typeof window.beanestDesktop?.onOpened === 'function') {
   if (typeof unsubscribe === 'function') window.addEventListener('pagehide', unsubscribe);
 }
 
+function renderLanguageControl() {
+  const targetIsEnglish = window.BeanestI18n.getLocale() !== 'en';
+  const button = $('interface-language');
+  button.textContent = targetIsEnglish ? 'English' : '简体中文';
+  button.setAttribute('aria-label', button.textContent);
+  button.setAttribute('lang', targetIsEnglish ? 'en' : 'zh-CN');
+}
+
 // Language changes re-render interface state only. They never apply a server
 // snapshot, save an editor draft, or dispatch a task/request.
 function renderInterfaceLanguage() {
@@ -7731,11 +7739,13 @@ function renderInterfaceLanguage() {
   for (const [id, open] of openDetails) if ($(id)) $(id).open = open;
   for (const [id, top] of positions) $(id).scrollTop = top;
   state.unseen = unseen;
-  $('interface-language').value = window.BeanestI18n.getLocale();
+  renderLanguageControl();
   if (focus?.id && $(focus.id)) $(focus.id).focus({ preventScroll: true });
 }
-$('interface-language').value = window.BeanestI18n.getLocale();
-$('interface-language').addEventListener('change', () => window.BeanestI18n.setLocale($('interface-language').value));
+renderLanguageControl();
+$('interface-language').addEventListener('click', () => {
+  window.BeanestI18n.setLocale(window.BeanestI18n.getLocale() === 'en' ? 'zh-CN' : 'en');
+});
 window.BeanestI18n.subscribe(renderInterfaceLanguage);
 if (typeof window.beanestDesktop?.setLocale === 'function'
     && window.beanestDesktop.currentLocale !== window.BeanestI18n.getLocale()) {

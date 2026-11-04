@@ -1171,7 +1171,7 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 .task-materials-body .room-documents { margin-top: 0; }
 
 .language-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0; font-size: 12px; color: var(--muted); }
-.language-control select { max-width: 132px; min-width: 0; padding: 6px 8px; border-radius: 10px; }
+.language-control button { max-width: 132px; min-width: 0; padding: 6px 8px; border-radius: 10px; }
 html[lang="en"] .header-actions, html[lang="en"] .composer-actions { flex-wrap: wrap; }
 html[lang="en"] .quiet-button { white-space: normal; }
 html[lang="en"] .brand-wordmark small { display: none; }

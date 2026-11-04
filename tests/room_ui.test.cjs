@@ -9195,9 +9195,12 @@ test('interface language switches and persists without translating authored cont
   const ui = await browser({ rooms: [saved.room], saved, languageStorage, executionPolicySupport: true, naturalContinuationSupport: true });
   ui.type('这是原样保存的草稿 @Codex'); ui.get('message').fire('keydown', { key: 'Enter' });
   const draft = ui.get('message').value;
+  assert.equal(ui.get('interface-language').tagName, 'BUTTON');
+  assert.equal(ui.get('interface-language').textContent, 'English');
+  assert.equal(ui.get('interface-language').getAttribute('lang'), 'en');
   const calls = ui.requests.length; const posts = ui.posts().length;
-  ui.get('interface-language').value = 'en'; ui.get('interface-language').fire('change'); await settle();
-  assert.equal(ui.get('interface-language').value, 'en'); assert.equal(languageStorage.get('beanest:locale'), 'en');
+  await ui.click('interface-language');
+  assert.equal(ui.get('interface-language').textContent, '简体中文'); assert.equal(languageStorage.get('beanest:locale'), 'en');
   assert.equal(ui.document.documentElement.lang, 'en'); assert.equal(ui.document.title, 'Beanest');
   assert.match(ui.get('new-room').textContent, /New task/i);
   assert.doesNotMatch(ui.get('send-label').textContent, /[一-龥]/);
@@ -9208,19 +9211,28 @@ test('interface language switches and persists without translating authored cont
   assert.equal(ui.requests.length, calls); assert.equal(ui.posts().length, posts);
   await ui.poll(); assert.doesNotMatch(ui.get('send-label').textContent, /[一-龥]/); assert.equal(ui.get('message').value, draft);
   const reloaded = await browser({ rooms: [saved.room], saved, languageStorage, language: 'zh-CN', executionPolicySupport: true, naturalContinuationSupport: true });
-  assert.equal(reloaded.get('interface-language').value, 'en');
-  reloaded.get('interface-language').value = 'zh-CN'; reloaded.get('interface-language').fire('change'); await settle();
+  assert.equal(reloaded.get('interface-language').textContent, '简体中文');
+  await reloaded.click('interface-language');
   assert.equal(reloaded.get('send-label').textContent, '发送'); assert.equal(reloaded.document.documentElement.lang, 'zh-CN');
+  assert.equal(reloaded.get('interface-language').textContent,'English');
+  assert.equal(reloaded.get('interface-language').getAttribute('lang'),'en');
+  assert.equal(languageStorage.get('beanest:locale'),'zh-CN');
 });
 
 test('English is a browser default only without an explicit preference and desktop preferences synchronize without task calls', async () => {
   const calls = [];
   const first = await browser({ language: 'en-US', desktopBridge: { currentLocale: 'zh-CN', setLocale: async locale => { calls.push(locale); return { ok: true, locale }; } } });
-  assert.equal(first.get('interface-language').value, 'zh-CN'); assert.deepEqual(calls, []);
+  assert.equal(first.get('interface-language').textContent, 'English'); assert.deepEqual(calls, []);
   const storage = new Map([['beanest:locale', 'en']]);
   const second = await browser({ language: 'zh-CN', languageStorage: storage, desktopBridge: { currentLocale: 'zh-CN', setLocale: async locale => { calls.push(locale); return { ok: true, locale }; } } });
-  assert.equal(second.get('interface-language').value, 'en'); assert.deepEqual(calls, ['en']); assert.equal(second.posts().length, 0);
-  const web = await browser({ language: 'en-CA' }); assert.equal(web.get('interface-language').value, 'en');
+  assert.equal(second.get('interface-language').textContent, '简体中文'); assert.deepEqual(calls, ['en']); assert.equal(second.posts().length, 0);
+  const requests = second.requests.length;
+  await second.click('interface-language');
+  assert.equal(second.get('interface-language').textContent, 'English');
+  assert.equal(second.document.documentElement.lang, 'zh-CN');
+  assert.deepEqual(calls, ['en','zh-CN']); assert.equal(storage.get('beanest:locale'),'zh-CN');
+  assert.equal(second.requests.length,requests); assert.equal(second.posts().length,0);
+  const web = await browser({ language: 'en-CA' }); assert.equal(web.get('interface-language').textContent, '简体中文');
 });
 
 test('language changes preserve materials reader content and scroll, runtime selections and open task options', async () => {
@@ -9233,7 +9245,7 @@ test('language changes preserve materials reader content and scroll, runtime sel
   const file = [...descendants(ui.get('document-shortcuts')), ...descendants(ui.get('document-more-items'))].find(node=>node.dataset.documentPath==='first.md');
   file.fire('click'); await settle(); const body = ui.get('reader-body').textContent; ui.get('reader-body').scrollTop = 73;
   const calls = ui.requests.length;
-  ui.get('interface-language').value = 'en'; ui.get('interface-language').fire('change'); await settle();
+  await ui.click('interface-language');
   assert.equal(ui.get('delivery-reader').hidden,false); assert.equal(ui.get('reader-body').textContent,body);
   assert.equal(ui.get('reader-body').scrollTop,73); assert.equal(ui.get('message').value,'阅读时的原样草稿');
   assert.match(ui.get('reader-back').textContent,/materials/i); assert.equal(ui.requests.length,calls);
@@ -9243,7 +9255,7 @@ test('language changes preserve materials reader content and scroll, runtime sel
   const numeric = ui.document.createElement('input'); numeric.id = 'test-nontext-selection'; numeric.type = 'number'; numeric.value = '42';
   numeric.selectionStart = 0; numeric.selectionEnd = 0; numeric.setSelectionRange = () => { throw Error('number inputs cannot select text'); };
   ui.get('composer').append(numeric);
-  ui.get('interface-language').value = 'zh-CN'; ui.get('interface-language').fire('change'); await settle();
+  await ui.click('interface-language');
   assert.equal(ui.get('runtime-settings-popover').hidden,false); assert.equal(ui.get('runtime-permission').value,permission);
   assert.equal(numeric.value,'42');
   assert.equal(ui.get('message').value,'阅读时的原样草稿'); assert.equal(ui.posts().length,0);
@@ -9251,16 +9263,16 @@ test('language changes preserve materials reader content and scroll, runtime sel
 
 test('language selection refreshes empty-home partner cards and connection copy in both directions without requests', async () => {
   const ui = await browser({ language: 'en-US' }); const calls = ui.requests.length;
-  assert.equal(ui.get('interface-language').value,'en'); assert.match(ui.get('status-claude').textContent,/Not started/i);
+  assert.equal(ui.get('interface-language').textContent, '简体中文'); assert.match(ui.get('status-claude').textContent,/Not started/i);
   ui.type('欢迎页独立草稿');
-  ui.get('interface-language').value='zh-CN'; ui.get('interface-language').fire('change'); await settle();
+  await ui.click('interface-language');
   assert.equal(ui.get('status-claude').textContent,'未启动'); assert.equal(ui.get('connection').textContent,'本地服务已连接');
-  assert.equal(ui.get('interface-language').getAttribute('aria-label'),'界面语言');
+  assert.equal(ui.get('interface-language').getAttribute('aria-label'),'English');
   assert.doesNotMatch(ui.get('member-claude').textContent,/Not started|Last confirmed|Current task|Task session/);
   assert.equal(ui.get('message').value,'欢迎页独立草稿'); assert.equal(ui.requests.length,calls);
-  ui.get('interface-language').value='en'; ui.get('interface-language').fire('change'); await settle();
+  await ui.click('interface-language');
   assert.match(ui.get('status-claude').textContent,/Not started/i); assert.match(ui.get('connection').textContent,/connected/i);
-  assert.equal(ui.get('interface-language').getAttribute('aria-label'),'Interface language');
+  assert.equal(ui.get('interface-language').getAttribute('aria-label'),'简体中文');
   assert.equal(ui.get('message').value,'欢迎页独立草稿'); assert.equal(ui.requests.length,calls);
 });
 
@@ -9382,10 +9394,10 @@ test('progress record labels switch both directions while preserving expansion c
   const records = ui.get('activity-records'); records.open = true; records.scrollTop = 37; ui.get('activity-events').scrollTop = 22;
   const count = ui.get('activity-count').textContent; const events = ui.get('activity-events').textContent;
   const calls = ui.requests.length;
-  ui.get('interface-language').value='en'; ui.get('interface-language').fire('change'); await settle();
+  await ui.click('interface-language');
   assert.equal(ui.get('activity-records-label').textContent,'Progress records ');
   assert.equal(ui.get('activity-count').textContent,count); assert.equal(records.open,true); assert.equal(records.scrollTop,37);
-  ui.get('interface-language').value='zh-CN'; ui.get('interface-language').fire('change'); await settle();
+  await ui.click('interface-language');
   assert.equal(ui.get('activity-records-label').textContent,'进展记录 ');
   assert.equal(ui.get('activity-events').textContent,events); assert.equal(records.open,true); assert.equal(records.scrollTop,37);
   assert.equal(ui.get('activity-events').scrollTop,22);

@@ -55,7 +55,7 @@ Open the loopback URL printed in the terminal. The desktop and browser modes use
 3. Send your goal. Watch task ownership, progress, requests for information, and reviewed files in the same chat. You can add information while work continues.
 4. Read the delivery and its stated verification limits. Completion of a task is not a guarantee that every possible issue has been tested.
 
-Use the language selector to choose **English** or **简体中文**. The preference is saved locally. Changing interface language does not send a model request or change a running task.
+The sidebar language button shows the language you can switch to: **English** in the Chinese interface, and **简体中文** in the English interface. Click it to switch. The preference is saved locally. Changing interface language does not send a model request or change a running task.
 
 Autonomous work continues toward the stated goal until it completes, needs your input, encounters a genuine blocker, or you stop it. It has no default fixed round or call-count limit, but real quota, process cleanup, identity, permissions, and lack-of-progress checks still apply. Long-running stability and every provider/version combination are not guaranteed.
 
