@@ -7506,6 +7506,7 @@ test('active work labels old code observations and its terminal transition refre
   await ui.poll(); assert.equal(reads, 1); assert.equal(ui.get('code-local-summary').classList.contains('is-clean'), false);
   saved.room.work_activity.state = 'idle'; saved.current_run.status = 'complete'; saved.objective.status = 'complete'; await ui.poll(); assert.equal(reads, 2);
   await ui.poll(); assert.equal(reads, 2); assert.equal(ui.get('code-local-summary').textContent, '工作区干净');
+  assert.equal(ui.requests.filter((request) => request.path.includes('/code-status')).every((request) => request.path.includes('refresh_remote=1')), true);
 });
 test('unbound and non Git workspaces never report zero changes and old hosts receive no code status requests', async () => {
   for (const [state, reason, expected] of [['unbound', 'no_project_workspace', '未关联本机项目'], ['not_git', 'not_git_repository', '此目录未使用 Git'], ['unavailable', 'git_filter_required', '仓库使用自定义文件转换，暂未读取状态']]) {
@@ -8302,18 +8303,73 @@ test('task code delivery is compact and separates confirmed commits from files s
   assert.doesNotMatch(ui.get('code-delivery-note').textContent, /点击刷新核对 GitHub/);
 });
 
-test('only an explicit code refresh requests a live remote check while workspace changes stay local', async () => {
+test('initial code display checks remote once while polling and workspace detail reads stay local', async () => {
   const saved = completedSuggestionFixture(); const data = taskCodeDeliveryFixture('unknown');
   const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true,
     route(request) { if (request.path.includes('/code-status')) return { ...data, workspace_id: new URL(`http://fixture${request.path}`).searchParams.get('workspace') || data.workspace_id }; } });
   assert.equal(ui.requests.filter((request) => request.path.includes('/code-status')).length, 1);
-  assert.equal(ui.requests.some((request) => request.path.includes('refresh_remote=1')), false);
+  assert.match(ui.requests.filter((request) => request.path.includes('/code-status'))[0].path, /refresh_remote=1/);
+  await ui.poll(); await ui.poll();
+  assert.equal(ui.requests.filter((request) => request.path.includes('/code-status')).length, 1);
   await ui.click('code-status-refresh');
   assert.match(ui.requests.filter((request) => request.path.includes('/code-status')).at(-1).path, /refresh_remote=1/);
   ui.get('code-workspace').value = 'native:codex'; ui.get('code-workspace').fire('change'); await settle();
   const last = ui.requests.filter((request) => request.path.includes('/code-status')).at(-1);
   assert.match(last.path, /workspace=native%3Acodex/); assert.doesNotMatch(last.path, /refresh_remote/);
   assert.equal(ui.posts().length, 0);
+});
+
+test('remote freshness uses the real check time and local-only reads preserve that timestamp', async () => {
+  const saved = completedSuggestionFixture(); const data = taskCodeDeliveryFixture();
+  data.observed_at = 1700086400; data.delivery_summary.remote.checked_at = 1700000000;
+  const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true,
+    route(request) { if (request.path.includes('/code-status')) return { ...data, workspace_id: new URL(`http://fixture${request.path}`).searchParams.get('workspace') || data.workspace_id }; } });
+  const initial = ui.get('code-status-freshness').textContent;
+  assert.match(initial, /GitHub 检查于 /);
+  const remoteTime = initial.split('GitHub 检查于 ')[1]; assert.ok(remoteTime);
+  data.observed_at += 86400; data.delivery_summary.remote.cached = true;
+  ui.get('code-workspace').value = 'native:codex'; ui.get('code-workspace').fire('change'); await settle();
+  assert.notEqual(ui.get('code-status-freshness').textContent, initial);
+  assert.equal(ui.get('code-status-freshness').textContent.split('GitHub 检查于 ')[1], remoteTime);
+  assert.equal(ui.get('code-delivery-remote').textContent, 'GitHub：当前主分支已同步');
+  delete data.delivery_summary.remote.checked_at; await ui.click('code-status-refresh');
+  assert.doesNotMatch(ui.get('code-status-freshness').textContent, /GitHub 检查于 /);
+  assert.equal(ui.posts().length, 0);
+});
+
+test('a local read with an invalidated bound remote performs one guarded check without retrying other failures', async () => {
+  for (const result of ['confirmed', 'not_checked', 'git_timeout', 'binding_changed', 'network_error']) {
+    const saved = withNaturalContinuation(completedSuggestionFixture()); const { data, bind } = deliveryRepositoryFixture(); bind('delivery:app');
+    let mode = 'initial'; let reads = 0;
+    const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true, route(request) {
+      if (!request.path.includes('/code-status')) return;
+      reads++; const url = new URL(`http://fixture${request.path}`); const reply = structuredClone(data);
+      if (mode !== 'initial' && result === 'network_error' && url.searchParams.has('refresh_remote')) throw new Error('fictional remote read failure');
+      reply.workspace_id = url.searchParams.get('workspace') || data.workspace_id;
+      if (mode !== 'initial') {
+        const remoteReason = url.searchParams.has('refresh_remote') ? result : (result === 'git_timeout' ? 'git_timeout' : 'not_checked');
+        reply.delivery_summary.remote = { state: remoteReason === 'confirmed' ? 'confirmed' : 'unknown', reason: remoteReason === 'confirmed' ? null : remoteReason };
+        if (remoteReason === 'binding_changed') reply.delivery_repository.workspace_id = 'delivery:control';
+      }
+      return reply;
+    } });
+    mode = 'local'; ui.type('保留远端核查期间的草稿'); await ui.choose('codex');
+    ui.get('code-workspace').value = 'delivery:control'; ui.get('code-workspace').fire('change'); await settle();
+    assert.equal(reads, result === 'git_timeout' ? 2 : 3);
+    const last = ui.requests.filter((request) => request.path.includes('/code-status')).at(-1);
+    assert.match(last.path, /workspace=delivery%3Acontrol/);
+    if (result === 'git_timeout') assert.doesNotMatch(last.path, /refresh_remote/);
+    else assert.match(last.path, /refresh_remote=1/);
+    if (result === 'binding_changed') assert.match(ui.get('code-local-summary').textContent, /交付仓库已变化/);
+    if (result === 'network_error') {
+      assert.match(ui.get('code-local-summary').textContent, /本次代码查询未完成/);
+      assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), false);
+    }
+    if (result === 'confirmed') assert.equal(ui.get('code-delivery-remote').textContent, 'GitHub：当前主分支已同步');
+    await ui.poll(); await ui.poll(); assert.equal(reads, result === 'git_timeout' ? 2 : 3);
+    assert.equal(ui.get('message').value, '保留远端核查期间的草稿'); assert.match(ui.get('recipient-button').textContent, /Codex/);
+    assert.equal(ui.posts().length, 0);
+  }
 });
 
 test('submission and sync sends one ordinary directed request even after a merge and preserves composer drafts', async () => {
@@ -8841,6 +8897,7 @@ test('delivery repository selection is compact, explicit, persists across reload
   await ui.click('code-repository-edit'); ui.get('code-repository-choice').value = 'delivery:app'; ui.get('code-repository-choice').fire('change');
   await ui.click('code-repository-save');
   assert.equal(ui.posts().length, 1); assert.equal(ui.get('code-repository-label').textContent, '交付仓库：应用仓库');
+  assert.match(ui.requests.filter((request) => request.path.includes('/code-status')).at(-1).path, /refresh_remote=1/);
   assert.equal(ui.get('code-repository-picker').hidden, true); assert.equal(ui.get('code-delivery-states').hidden, false);
   assert.equal(ui.get('code-status-summary').textContent, '已提交代码已合入并同步 GitHub'); assert.match(ui.get('code-published-note').textContent, /23\/26/);
   assert.equal(ui.get('message').value, '保留原草稿'); assert.match(ui.get('recipient-button').textContent, /Codex/);

@@ -39,11 +39,12 @@ class DeliverySummaryHTTPTests(http_fixture.CodeStatusHTTPTests):
     def test_explicit_remote_refresh_and_main_push_are_independent(self):
         self.clean_main()
         self.assertEqual(git_status.read_github_main(self.source, "main", self.local_commit)["state"], "unknown")
-        with local_github_transport(self.bare_upstream), patch.object(git_status, "read_github_main", wraps=git_status.read_github_main) as remote:
+        with local_github_transport(self.bare_upstream), patch.object(git_status, "_run", wraps=git_status._run) as commands:
             value = self.summary()
             self.assertEqual(value["main"]["state"], "confirmed")
             self.assertEqual(value["remote"]["reason"], "not_checked")
-            remote.assert_not_called()
+            self.assertFalse(any("ls-remote" in call.args[2] for call in commands.call_args_list),
+                             "A local read may inspect identity/configuration, never contact the remote")
             value = self.summary(True)
             self.assertEqual(value["remote"]["state"], "pending")
             self.git(self.source, "push", "origin", "main")

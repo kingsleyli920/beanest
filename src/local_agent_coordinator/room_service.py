@@ -422,6 +422,7 @@ class RoomService:
         self._runner_instance = runner
         self._executions: dict[str, asyncio.Task] = {}
         self._run_controls: dict[str, asyncio.Lock] = {}
+        self._github_main_checks = git_status.GithubCheckCache()
         self._runtime_catalogs: dict[str, dict] = {}
         self._runtime_catalog_locks: dict[str, asyncio.Lock] = {}
         self._execution_lock = asyncio.Lock()
@@ -487,7 +488,7 @@ class RoomService:
         summary = await asyncio.to_thread(code_delivery.summarize, workspaces, statuses=statuses,
             native_states=native_states, canonical=canonical, canonical_changes=canonical_changes,
             retained_states=retained_states, refresh_remote=refresh_remote, now=self.clock, deadline=deadline,
-            delivery_repository=delivery_repository)
+            delivery_repository=delivery_repository, remote_cache=self._github_main_checks)
         return {**result, "workspace_id": selected["id"], "workspaces": workspaces, "delivery_summary": summary,
                 "delivery_repository": delivery_repository}
 

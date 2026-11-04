@@ -635,5 +635,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "工作快照对照：记录中的内容与主分支一致。": "Work snapshot comparison: recorded content matches the main branch.",
   "工作快照对照：{p0}。": "Work snapshot comparison: {p0}.",
   "尚未匹配到相同内容": "No matching content found yet",
-  "这是累计工作快照的内容对照，不代表待提交、待合并或必须发布的文件清单。": "This compares the cumulative work snapshot. It is not a list of files awaiting commit or merge, or files that must be published."
+  "这是累计工作快照的内容对照，不代表待提交、待合并或必须发布的文件清单。": "This compares the cumulative work snapshot. It is not a list of files awaiting commit or merge, or files that must be published.",
+  "GitHub 检查于 {p0}": "GitHub checked at {p0}"
 });

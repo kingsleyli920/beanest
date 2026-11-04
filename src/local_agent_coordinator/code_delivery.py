@@ -81,7 +81,7 @@ def _published_status(canonical, changes, source, candidates, expected, deadline
     return {"state": "unknown", "reason": "published_work_mapping_unknown", "files": {**unknown_counts, "total": len(changes)}}
 
 
-def summarize(workspaces, *, statuses, native_states, canonical, canonical_changes=None, retained_states=(), refresh_remote=False, now, deadline=None, delivery_repository=None):
+def summarize(workspaces, *, statuses, native_states, canonical, canonical_changes=None, retained_states=(), refresh_remote=False, now, deadline=None, delivery_repository=None, remote_cache=None):
     main, remote, private, repositories, roots = [], [], [], {}, []
     # Service calls always supply the host's binding. Keep the pure helper's
     # registered-project default for callers without room persistence.
@@ -209,8 +209,10 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
         checked.add(common)
         key = (common, refs["mainline_name"], refs["main_head"])
         if key not in remote_checks:
-            remote_checks[key] = (git_status.read_github_main(identity[1], refs["mainline_name"], refs["main_head"], now=now, deadline=deadline)
-                if refresh_remote else {"state": "unknown", "reason": "not_checked", "checked_at": None})
+            remote_checks[key] = (git_status.read_github_main(identity[1], refs["mainline_name"], refs["main_head"],
+                now=now, deadline=deadline, cache=remote_cache, refresh=refresh_remote)
+                if refresh_remote or remote_cache is not None else
+                {"state": "unknown", "reason": "not_checked", "checked_at": None, "cached": False})
         remote.append({**remote_checks[key], "workspace_id": refs["workspace_id"]})
     if delivery_repository["state"] != "bound":
         reason = delivery_repository.get("reason") or "delivery_repository_unbound"
@@ -220,7 +222,9 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
     main_status["checks"] = main
     remote_status = _aggregate(remote, "no_linked_repository")
     remote_status["checks"] = remote
-    remote_status["checked_at"] = now() if refresh_remote and remote else None
+    checked_times = [entry["checked_at"] for entry in remote if entry.get("checked_at") is not None]
+    remote_status["checked_at"] = min(checked_times) if len(checked_times) == len(remote) and checked_times else None
+    remote_status["cached"] = any(entry.get("cached") is True for entry in remote)
     private_status = _aggregate(private, "private_work_unconfirmed") if private else {"state": "confirmed", "reason": None}
     workspace_status = _aggregate(workspace_checks, "workspace_unavailable") if workspace_checks else {"state": "confirmed", "reason": None}
     overall = _aggregate([main_status, remote_status, published, private_status, workspace_status], "delivery_unconfirmed")

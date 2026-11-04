@@ -402,7 +402,7 @@ $('code-repository-save').addEventListener('click', async () => {
     if (!codeRepository({ repository: response.delivery_repository }) || response.delivery_repository.state !== 'bound' || response.delivery_repository.workspace_id !== workspaceId) throw new Error('unconfirmed_repository');
     entry.repository = response.delivery_repository; entry.data = null; entry.workspaceId = null; entry.workspaceExplicit = false; entry.loaded = false;
     entry.repositoryEditing = false;
-    if (state.selected === room) await refreshCodeStatus(true);
+    if (state.selected === room) await refreshCodeStatus(true, true);
   } catch (_error) {
     // A lost save response is checked by a read, never by replaying the mutation.
     try {
@@ -611,7 +611,9 @@ function renderCodeStatus() {
   const observed = data?.observed_at;
   const freshness = Number.isFinite(observed) ? t("检查于 {p0}{p1}", { p0: timeLabel(observed, true), p1: !state.connected ? t(" · 本地连接已断开") : active ? t(" · 任务进行中，刷新查看最新改动") : '' }) : '';
   const queryStatus = available ? entry.loading ? t("正在重新核对，以上为上次结果") : entry.error : '';
-  $('code-status-freshness').textContent = [freshness, queryStatus].filter(Boolean).join(' · ');
+  const remoteCheckedAt = available && deliveryKnown ? delivery.remote?.checked_at : null;
+  const remoteFreshness = Number.isFinite(remoteCheckedAt) ? t("GitHub 检查于 {p0}", { p0: timeLabel(remoteCheckedAt, true) }) : '';
+  $('code-status-freshness').textContent = [freshness, remoteFreshness, queryStatus].filter(Boolean).join(' · ');
   const commit = available ? data.last_commit : null;
   $('code-last-commit').hidden = !commit;
   $('code-commit-subject').textContent = commit?.subject || ''; $('code-commit-hash').textContent = commit?.short_hash || '';
@@ -707,6 +709,7 @@ async function refreshCodeStatus(force = false, refreshRemote = false) {
   const finished = entry.runId === run?.id && entry.runActive && !active;
   entry.runId = run?.id || null; entry.runActive = active;
   if (!force && !finished && (entry.loaded || entry.loading)) { renderCodeStatus(); return; }
+  refreshRemote = refreshRemote || !entry.loaded || finished;
   const request = ++entry.request; const workspaceId = entry.workspaceExplicit ? entry.workspaceId : null;
   entry.loading = true; entry.error = ''; renderCodeStatus();
   try {
@@ -714,8 +717,20 @@ async function refreshCodeStatus(force = false, refreshRemote = false) {
     if (workspaceId) params.push(`workspace=${encodeURIComponent(workspaceId)}`);
     if (refreshRemote) params.push('refresh_remote=1');
     const query = params.length ? `?${params.join('&')}` : '';
-    const data = await api(`/api/rooms/${roomId}/code-status${query}`);
+    let data = await api(`/api/rooms/${roomId}/code-status${query}`);
     if (entry.request !== request) return;
+    // An expired or invalidated remote observation needs one live check, not
+    // recurring network work on every room poll or every unknown/error result.
+    if (!refreshRemote && data?.delivery_repository?.state === 'bound'
+        && data.delivery_summary?.scope === 'task_linked_workspaces' && data.delivery_summary.remote?.reason === 'not_checked') {
+      const repositoryId = data.delivery_repository.workspace_id;
+      const followup = await api(`/api/rooms/${roomId}/code-status${query}${query ? '&' : '?'}refresh_remote=1`);
+      if (entry.request !== request) return;
+      if (followup?.delivery_repository?.state !== 'bound' || followup.delivery_repository.workspace_id !== repositoryId) {
+        throw new RequestError(t("交付仓库已变化，请重新选择"));
+      }
+      data = followup;
+    }
     if (!Array.isArray(data?.workspaces) || !['ready', 'not_git', 'unavailable', 'unbound'].includes(data.state)
         || workspaceId && data.workspace_id !== workspaceId) throw new RequestError(t("项目代码状态暂时无法确认。"));
     entry.data = data; entry.workspaceId = data.workspace_id; entry.repository = data.delivery_repository || null;

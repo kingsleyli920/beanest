@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import hashlib
+import math
+import threading
 from pathlib import Path
 import re
 import selectors
@@ -20,6 +22,50 @@ MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 READ_SECONDS = 5
 CODE_STATUS_SECONDS = 15
 MAX_DETAIL_FILES = 20
+GITHUB_CHECK_SECONDS = 300
+
+
+class GithubCheckCache:
+    """Recent observations owned by one service, never by the Git repository."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._observations = {}
+        self._generation = 0
+
+    def read(self, key, now):
+        with self._lock:
+            entry = self._observations.get(key)
+            result = entry[1] if entry else None
+            if entry and result is None:
+                return None  # A local poll must not invalidate an in-flight check.
+            checked = result.get("checked_at") if result else None
+            if (type(checked) not in {int, float} or not math.isfinite(checked)
+                    or not math.isfinite(now) or not 0 <= now - checked <= GITHUB_CHECK_SECONDS):
+                self._observations.pop(key, None)
+                return None
+            return {**result, "cached": True}
+
+    def begin(self, key):
+        with self._lock:
+            self._generation += 1
+            self._observations.pop(key, None)
+            self._observations[key] = (self._generation, None)
+            # Bound service memory; eviction only requires another real check.
+            if len(self._observations) > 128:
+                self._observations.pop(next(iter(self._observations)))
+            return self._generation
+
+    def finish(self, key, generation, result):
+        with self._lock:
+            entry = self._observations.get(key)
+            if entry and entry[0] == generation:
+                self._observations[key] = (generation, dict(result))
+
+    def invalidate(self, identity):
+        with self._lock:
+            for key in list(self._observations):
+                if key[0] == identity:
+                    del self._observations[key]
 
 
 def _read_deadline(deadline):
@@ -412,13 +458,30 @@ def _github_url(command, directory, deadline):
     return url
 
 
-def read_github_main(path, mainline_name, main_head, *, now=time.time, deadline=None):
-    result = {"state": "unknown", "reason": "github_remote_unavailable", "checked_at": now()}
+def read_github_main(path, mainline_name, main_head, *, now=time.time, deadline=None,
+                     cache=None, refresh=True):
+    """Check the remote or reuse a recent observation of this exact Git target.
+
+    Cached timestamps remain the original check time, including failed checks.
+    Each lookup revalidates the repository identity and configured GitHub URL.
+    """
+    result = {"state": "unknown", "reason": "github_remote_unavailable", "checked_at": None, "cached": False}
     command, deadline = shutil.which("git"), _read_deadline(deadline)
     if command is None:
         return result
+    identity, key, generation = None, None, None
     try:
+        if cache is not None:
+            repository = repository_identity(path, deadline=deadline)
+            identity = tuple(repository[name] for name in ("root", "common", "device", "inode"))
         url = _github_url(command, path, deadline)
+        key = (identity, url, mainline_name, main_head)
+        if not refresh:
+            observed = cache.read(key, now()) if cache is not None else None
+            return observed or {**result, "reason": "not_checked"}
+        if cache is not None:
+            generation = cache.begin(key)
+        result["checked_at"] = now()
         raw = _run(command, path, ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
             "-c", "protocol.ssh.allow=always", "-c", "core.sshCommand=ssh -oBatchMode=yes",
             "-c", "http.followRedirects=false", "ls-remote", "--refs", "--exit-code", url,
@@ -432,18 +495,25 @@ def read_github_main(path, mainline_name, main_head, *, now=time.time, deadline=
             raise _GitError("git_invalid_output")
         remote_head = _text(fields[0])
         if remote_head == main_head:
-            return {**result, "state": "confirmed", "reason": None}
-        # A newer remote is also sufficient when its object is already local.
-        counts = _text(_run(command, path, ["rev-list", "--left-right", "--count",
-            main_head + "..." + remote_head], deadline)).strip().split()
-        if len(counts) != 2 or not all(value.isdecimal() for value in counts):
-            raise _GitError("remote_ancestry_unknown")
-        local_only, remote_only = map(int, counts)
-        if local_only == 0:
-            return {**result, "state": "confirmed", "reason": None}
-        return {**result, "state": "pending", "reason": "local_mainline_not_on_remote"}
+            result.update(state="confirmed", reason=None)
+        else:
+            # A newer remote is sufficient only when its ancestry is local.
+            counts = _text(_run(command, path, ["rev-list", "--left-right", "--count",
+                main_head + "..." + remote_head], deadline)).strip().split()
+            if len(counts) != 2 or not all(value.isdecimal() for value in counts):
+                raise _GitError("remote_ancestry_unknown")
+            local_only, remote_only = map(int, counts)
+            result.update(state="confirmed" if local_only == 0 else "pending",
+                          reason=None if local_only == 0 else "local_mainline_not_on_remote")
     except _GitError as error:
-        return {**result, "reason": error.code}
+        result["reason"] = error.code
+        if cache is not None and identity is not None and generation is None:
+            cache.invalidate(identity)
+    if cache is not None and generation is not None:
+        # A later failure replaces an older success; an older late response
+        # cannot overwrite a more recent check (or its invalidation).
+        cache.finish(key, generation, result)
+    return result
 
 
 def committed_file(path, main_head, project_path, name, *, deadline=None):
