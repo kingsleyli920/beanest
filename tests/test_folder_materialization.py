@@ -54,6 +54,22 @@ class FolderMaterializationTests(unittest.TestCase):
         self.assertEqual((existing/'keep').read_text(),'keep')
         self.assertEqual((self.source/'a.txt').read_text(),'original')
 
+    def test_revision_index_tampered_after_a_validated_read_is_still_corrupt(self):
+        # Catches: reusing an already validated index for UI polls while the
+        # revision file on disk was changed underneath it.
+        (self.source/'a.txt').write_text('original')
+        self.seed()
+        self.workspace.snapshot()
+        self.workspace.snapshot()
+        # Directory order differs by filesystem; tamper every revision naming the file.
+        tampered=0
+        for index in (self.root/self.room_id/'revisions').iterdir():
+            if index.suffix=='.json' and b'a.txt' in index.read_bytes():
+                index.write_bytes(index.read_bytes().replace(b'a.txt',b'b.txt'))
+                tampered+=1
+        self.assertGreater(tampered,0)
+        self.assertCode('project_storage_corrupt',self.workspace.snapshot)
+
     def test_corrupt_blob_and_cancellation_remove_only_the_new_export(self):
         (self.source/'a.txt').write_text('original')
         self.seed()

@@ -42,7 +42,9 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     return
                 await asyncio.gather(*tasks)
             self.fail("fake scheduler did not settle")
-        await asyncio.wait_for(wait(), 5)
+        # A hang guard, not a speed assertion: 32 calls and 8 stages take
+        # about 2.5 s locally and exceeded 5 s on slower CI runners.
+        await asyncio.wait_for(wait(), 30)
         self.assertIsNone(self.service._background_error)
         self.assertFalse(self.fake.assertion_failures)
 
