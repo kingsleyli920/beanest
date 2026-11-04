@@ -30,7 +30,7 @@ _COMMAND_FIELDS = {
     "checkpoint_review": {"type", "verdict", "reason", "proposal_digest"},
 }
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
-from .native_outcome import FORMAT_ERRORS
+from .native_outcome import FORMAT_ERRORS, REPLY_MISTAKES
 
 
 
@@ -333,6 +333,9 @@ class TeamStore:
         resumable = {"budget_exhausted", "objective_calls_exhausted", "objective_deadline_exceeded",
                      "objective_stage_limit", "deadline_exceeded", "cancelled", "service_shutdown",
                      "invoke_interrupted", "explicit_new_attempt", "invalid_team_commands"}
+        # A reply mistake applied nothing; the carried task is redone, not a
+        # question for the user.
+        resumable.update(REPLY_MISTAKES)
         resumable.update(recovery_errors)
         text_failure = self._host_text_failure_source(db, room_id, source_run_id)
         if text_failure:

@@ -111,6 +111,27 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
             await self.service.objective_action(created['room']['id'], 'restart-objective', 'stale-restart',
                 **binding, execution_policy={'mode':'autonomous'})
 
+    async def test_restart_reopens_tasks_blocked_by_a_reply_mistake_instead_of_asking(self):
+        # Catches: a task blocked by a correctable reply mistake such as
+        # team_task_permission was carried still blocked, so continuing the
+        # objective immediately turned into objective_decision_required.
+        created = await self.create({'mode':'autonomous','max_calls':3,'max_seconds':7200})
+        await self.settle()
+        before = await self.service.read_room(created['room']['id'])
+        task_id = before['team']['tasks'][0]['id']
+        with self.service.store._connection(write=True) as db:
+            db.execute("UPDATE shared_tasks SET status='blocked',blocked_reason='team_task_permission' "
+                       "WHERE room_id=? AND run_id=? AND id=?", (created['room']['id'], before['current_run']['id'], task_id))
+        binding = {key:before['current_run'][key] for key in ('id','revision','digest')}
+        binding['run_id'] = binding.pop('id')
+        await self.service.objective_action(created['room']['id'], 'restart-objective', 'restart',
+            **binding, execution_policy={'mode':'autonomous'})
+        await self.settle()
+        result = await self.service.read_room(created['room']['id'])
+        self.assertEqual(result['objective']['status'], 'complete', result['objective'].get('stop_reason'))
+        self.assertEqual(result['team']['tasks'][0]['id'], task_id)
+        self.assertNotEqual(result['team']['tasks'][0]['status'], 'blocked')
+
     async def test_new_reads_reset_the_repeat_episode_but_old_ranges_cannot_ping_pong_forever(self):
         created = await self.create({'mode':'autonomous','max_calls':3})
         await self.settle()
