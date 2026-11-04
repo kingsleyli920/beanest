@@ -1483,7 +1483,9 @@ class TeamStore:
                         if command.get("repair_paths") and (room["mode"] != "native_project" or read_only(
                                 room["work_mode"], json.loads(room["runtime_settings_json"] or "null"))):
                             raise RoomError("permission_read_only" if room["mode"] == "native_project" else "team_capability_unavailable")
-                        if not isinstance(command["to"], str) or command["to"] not in members or command["to"] == job["provider"]:
+                        # Repairs route to canonical owners, so a lone peer may leave to null.
+                        if not (command["to"] is None and command.get("repair_paths")) and (
+                                not isinstance(command["to"], str) or command["to"] not in members or command["to"] == job["provider"]):
                             raise RoomError("invalid_target")
                         if not isinstance(command["capability"], str) or command["capability"] not in {"text", "python", "image"}:
                             raise RoomError("invalid_team_commands")

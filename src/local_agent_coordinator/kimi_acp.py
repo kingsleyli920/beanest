@@ -335,6 +335,9 @@ def failed_turn_diagnostic(path, initial):
         error = ends[0].get("error")
         if not isinstance(error, dict):
             return None
+        if error.get("code") == "compaction.failed" and isinstance(error.get("cause"), dict):
+            # Compaction wraps the typed provider refusal; classify that cause.
+            error = error["cause"]
         details = error.get("details")
         status = details.get("statusCode") if isinstance(details, dict) else None
         result = {"phase": "compaction" if compacting else "prompt", "reason": "provider_error"}

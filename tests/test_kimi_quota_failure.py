@@ -33,6 +33,29 @@ class KimiQuotaFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(row.get('method')=='session/prompt' for row in self.trace()),1)
         self.assertNotIn(fixture.PRIVATE,json.dumps(result))
 
+    async def test_quota_failure_wrapped_by_automatic_compaction_is_exhausted_quota(self):
+        # Catches: Kimi 2.x reports a 5-hour limit hit during auto compaction as
+        # compaction.failed with the typed refusal in cause; it was classified as a
+        # generic provider_error, so one exhausted peer stopped the whole objective.
+        self.scenario('wire_failed')
+        code=self.executable.read_text()
+        old='terminal["error"] = {"message": "FICTIONAL_PROVIDER_ERROR_NEVER_EXPOSE"}'
+        cause={'code':'provider.api_error','name':'APIProviderQuotaExhaustedError','retryable':False,
+               'message':fixture.PRIVATE,'details':{'statusCode':429,'requestId':None,'traceId':fixture.PRIVATE}}
+        wrapper={'code':'compaction.failed','name':'Error2','retryable':False,'message':fixture.PRIVATE,'cause':cause}
+        compaction=('append_wire({"type": "full_compaction.begin", "source": "auto"}); '
+                    'append_wire({"type": "llm.request", "kind": "compaction", "modelAlias": "kimi-code/fictional-0"}); '
+                    'append_wire({"type": "full_compaction.cancel"}); ')
+        self.assertIn(old,code)
+        self.executable.write_text(code.replace(old,compaction+'terminal["error"] = '+repr(wrapper)))
+        result=await self.invoke(permission='full_access')
+        self.assertEqual((result['status'],result['failure_code']),('failed','subscription_limit_reached'))
+        diagnostic=result['native_execution']['failure_diagnostic']
+        self.assertEqual((diagnostic['phase'],diagnostic['reason'],diagnostic['http_status']),
+                         ('compaction','provider_quota_exhausted',429))
+        self.assertEqual(sum(row.get('method')=='session/prompt' for row in self.trace()),1)
+        self.assertNotIn(fixture.PRIVATE,json.dumps(result))
+
     async def test_other_429_wrong_status_or_retryable_failure_is_not_exhausted_quota(self):
         for name,status,retryable in [('APIProviderRateLimitError',429,True),('APIStatusError',429,False),
                                      ('APIProviderQuotaExhaustedError',403,False),
