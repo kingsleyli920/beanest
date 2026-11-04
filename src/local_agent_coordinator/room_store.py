@@ -3062,8 +3062,42 @@ class RoomStore:
                     "plan_author": team["plan_author"], "permission": native.get("permission"),
                     "claim_seq": claim_seq, "finish_seq": finish_seq,
                     "claimed_at": claim["created_at"], "finished_at": end["created_at"],
-                    "binding": native.get("binding"), "peer_job_ids": [peer["id"] for peer in jobs]}
+                    "binding": native.get("binding"), "peer_job_ids": [peer["id"] for peer in jobs],
+                    "decision_board": None if tasks else self._native_decision_board(db, room_id, team["current_run_id"])}
         return None
+
+    def _native_decision_board(self, db, room_id, run_id):
+        """The board a user's objective decision replanned from, never an arbitrary old run.
+
+        Only unfinished tasks blocked by the retired invalid_target rejection
+        resume; their owners' private paths may hold that rejected work.
+        """
+        objective = self._team.objectives.current(db, room_id)
+        events = [json.loads(row[0]) | {"seq": row[1]} for row in db.execute(
+            "SELECT value_json,seq FROM events WHERE room_id=? AND json_extract(value_json,'$.run_id')=? "
+            "AND json_extract(value_json,'$.kind') IN ('run_started','objective_decision') ORDER BY seq", (room_id, run_id))]
+        begun = [event for event in events if event["kind"] == "run_started"]
+        decisions = [event for event in events if event["kind"] == "objective_decision"]
+        if (objective is None or len(begun) != 1 or len(decisions) != 1 or begun[0].get("sender") != "user"
+                or decisions[0].get("sender") != "user" or decisions[0].get("objective_id") != objective["id"]
+                or decisions[0].get("previous_run_id") != begun[0].get("previous_run_id")
+                or not begun[0]["seq"] < decisions[0]["seq"]):
+            return None
+        board = db.execute("SELECT * FROM team_runs WHERE room_id=? AND id=? AND objective_id=?",
+                           (room_id, begun[0]["previous_run_id"], objective["id"])).fetchone()
+        current = db.execute("SELECT number FROM team_runs WHERE room_id=? AND id=?", (room_id, run_id)).fetchone()
+        if board is None or current is None or board["number"] >= current[0]:
+            return None
+        tasks = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid", (room_id, board["id"])).fetchall()
+        resumed = [task for task in tasks if task["status"] == "blocked" and task["blocked_reason"] == "invalid_target"
+                   and task["block_cause"] is None and task["owner"] is not None]
+        if not resumed:
+            return None
+        paths = {}
+        for task in resumed:
+            paths.setdefault(task["owner"], set()).update(json.loads(task["write_paths_json"]))
+        return {"run_id": board["id"], "task_errors": {task["id"]: "invalid_target" for task in resumed},
+                "paths": {owner: sorted(values) for owner, values in paths.items()}}
 
     def _native_recovery_requirements(self, db, room_id):
         """One candidate projection for admission and the service's full audit."""
@@ -3440,6 +3474,11 @@ class RoomStore:
             if len(board_runs) > 1:
                 raise RoomError("native_recovery_binding_changed")
             board_run = next(iter(board_runs), binding["run_id"])
+            decision_board = context_limit.get("decision_board") if compaction_quota else None
+            if decision_board:
+                if partial_works or board_run != binding["run_id"]:
+                    raise RoomError("native_recovery_binding_changed")
+                board_run = decision_board["run_id"]
             hint_sources = {(item["candidate"]["run_id"], item["candidate"]["source_error"]) for item in partial_works
                             if item["candidate"].get("requires_revision_hint_audit") or item["candidate"].get("requires_retained_scope_audit")}
             task_errors = {}
@@ -3451,6 +3490,8 @@ class RoomStore:
                 task_errors.update({task_id: "native_turn_unconfirmed" for task_id in fenced["recoverable_task_ids"]})
             if help_repair:
                 task_errors[help_candidate["task_id"]] = "native_changes_not_imported"
+            if decision_board:
+                task_errors.update(decision_board["task_errors"])
             for source_run, error in hint_sources:
                 task_errors.update(self._revision_hint_recovery_tasks(db, room_id, source_run, error=error))
             self._team.carry_unfinished(db, room_id, board_run, new_id, recovery_errors=errors,

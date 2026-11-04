@@ -211,6 +211,60 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         self.assertTrue(all(task['status'] in {'accepted', 'self_checked'} for task in final['team']['tasks']))
         self.assertTrue({'T3', 'T4'} <= {task['id'] for task in final['team']['tasks']})
 
+    def test_compaction_quota_recovery_resumes_invalid_target_board_with_owner_private_work(self):
+        # Catches: the stuck room's lone peer kept unpublished work for a task
+        # blocked by the retired invalid_target rejection; recovery refused it
+        # as unpublished changes or replanned from an empty board and lost it.
+        fixture = self.fixture('compaction_quota')
+        stopped = fixture.stopped_context_run()
+        board_run = fixture.original['current_run']['id']
+        with fixture.service.store._connection(write=True) as db:
+            db.execute("UPDATE shared_tasks SET owner='claude',status='blocked',blocked_reason='invalid_target',block_cause=NULL "
+                       "WHERE run_id=? AND id='T3'", (board_run,))
+        retained = b'Fictional lone-peer report that was never published.\n'
+        state = fixture.service.store.native_workspace(fixture.room_id, 'claude')
+        (Path(state['project']) / 'final.md').write_bytes(retained)
+        snapshot = fixture.read()
+        self.assertTrue(snapshot['current_run']['can_recover_native'], snapshot['current_run'])
+        seen, original_reply = [], fixture.reply
+        def reply(agent, context, cwd):
+            if context['job']['job_phase'] == 'work' and (context.get('task') or {}).get('id') == 'T3':
+                seen.append((agent, (Path(cwd) / 'final.md').read_bytes()))
+                return native_reply(context, [{'type': 'complete', 'task_id': 'T3', 'result': 'Published the retained report.'}])
+            return original_reply(agent, context, cwd)
+        fixture.reply = reply
+        prior_calls = len(fixture.calls)
+        code, value = fixture.continue_http(snapshot)
+        self.assertEqual(code, 200, value)
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertEqual(final['objective']['retired_partners'].get('kimi', {}).get('reason'), 'subscription_limit_reached')
+        self.assertEqual(seen, [('claude', retained)])
+        self.assertFalse(any(call['agent'] == 'kimi' for call in fixture.calls[prior_calls:]))
+        self.assertEqual({task['id']: task['status'] for task in final['team']['tasks']},
+                         {'T1': 'accepted', 'T2': 'accepted', 'T3': 'self_checked'})
+        published = fixture.service._project(fixture.room_id).files_for_paths(['final.md'])
+        self.assertEqual([(file['owner'], file['content']) for file in published], [('claude', retained.decode())])
+
+    def test_resumed_board_never_retains_private_work_outside_the_owner_task_paths(self):
+        # Catches: retaining a resumed owner's private work must not become a
+        # way to carry arbitrary unpublished files into the next run.
+        fixture = self.fixture('compaction_quota')
+        fixture.stopped_context_run()
+        with fixture.service.store._connection(write=True) as db:
+            db.execute("UPDATE shared_tasks SET owner='claude',status='blocked',blocked_reason='invalid_target',block_cause=NULL "
+                       "WHERE run_id=? AND id='T3'", (fixture.original['current_run']['id'],))
+        state = fixture.service.store.native_workspace(fixture.room_id, 'claude')
+        (Path(state['project']) / 'final.md').write_text('Fictional retained report.\n')
+        (Path(state['project']) / 'unowned-notes.md').write_text('Fictional file outside every resumed task.\n')
+        snapshot = fixture.read()
+        self.assertFalse(snapshot['current_run']['can_recover_native'])
+        self.assertEqual(snapshot['current_run']['native_recovery_reason'], 'native_recovery_unpublished_changes')
+        calls = len(fixture.calls)
+        code, value = fixture.continue_http(snapshot)
+        self.assertEqual(code, 409, value)
+        self.assertEqual(len(fixture.calls), calls)
+
     def test_other_auth403_is_not_a_context_recovery_authority(self):
         fixture = self.fixture('other_auth403')
         stopped = fixture.stopped_context_run()

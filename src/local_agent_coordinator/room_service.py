@@ -2170,6 +2170,8 @@ class RoomService:
         metadata_correction, partial_works = None, []
         called = {entry["provider"] for entry in snapshot["native_executions"]}
         checked = []
+        board = (requirements.get("context_limit") or {}).get("decision_board") or {}
+        board_retained = []
         for member in snapshot["members"]:
             state = self.store.native_workspace(snapshot["room"]["id"], member["id"])
             retained = retained_by_provider.get(member["id"])
@@ -2180,7 +2182,7 @@ class RoomService:
             try:
                 archive = state.get("partial_archive")
                 allowed = (retained["write_paths"] if retained and member["id"] == retained["provider"]
-                           else archive["paths"] if archive else [])
+                           else archive["paths"] if archive else board.get("paths", {}).get(member["id"], []))
                 changes = native_workspace.collect_changes(state["project"], state, allowed, resolved_conflicts=[])
             except (native_workspace.NativeWorkspaceError, OSError, ValueError):
                 raise RoomError("native_recovery_unpublished_changes") from None
@@ -2195,6 +2197,11 @@ class RoomService:
                 if member["id"] in fenced_retained:
                     fenced_observations.append({"candidate": retained,
                         "observation": self._audit_native_metadata_candidate(snapshot, retained, state, changes)})
+            elif retained is None and member["id"] not in fenced_retained and member["id"] in board.get("paths", {}):
+                # The owner's own resumed task paths; it publishes them through that task.
+                if changes["files"]:
+                    board_retained.append({"provider": member["id"], "files": [
+                        {"path": file["path"], "sha256": file["sha256"]} for file in changes["files"]]})
             elif allowed or member["id"] in fenced_retained:
                 observation = self._audit_native_metadata_candidate(snapshot, retained, state, changes)
                 if retained.get("recovery_ancestry"):
@@ -2233,6 +2240,10 @@ class RoomService:
             checked.append({"quota_checkpoint": attestation})
         if requirements.get("context_limit"):
             attestation = self._audit_native_context_limit_recovery(snapshot, requirements["context_limit"])
+            if board_retained and attestation["recovery_kind"] != "native_compaction_quota":
+                raise RoomError("native_recovery_unpublished_changes")
+            if board:
+                attestation["retained_board_work"] = board_retained
             checked.append({"context_limit": attestation})
         if fenced:
             attestation = self._audit_native_fenced_recovery(snapshot, fenced)
