@@ -1334,7 +1334,8 @@ class RoomService:
             nonwork = self.store.native_nonwork_recovery_candidate(room_id) if snapshot["room"]["mode"] == "native_project" else None
             permission_restore = self.store.native_nonwork_permission_candidate(room_id) if snapshot["room"]["mode"] == "native_project" else None
             run["native_recovery_kind"] = ("native_quota_checkpoint" if recovery_requirements.get("quota_checkpoint") else "native_context_limit" if recovery_requirements.get("context_limit") else "host_nonwork_permission" if permission_restore else "nonwork_metadata" if nonwork
-                                           else "partial_work" if partial or help_repair else None)
+                                           else "partial_work" if partial or help_repair
+                                           else "unconfirmed_restart" if recovery_requirements.get("unconfirmed_restart") else None)
             quota_works = [item for item in recovery_partial_works or [] if item.get("quota_failure_receipt")]
             run["native_quota_failure"] = ({"source_job_id": quota_works[0]["candidate"]["job_id"],
                 "provider": quota_works[0]["candidate"]["provider"], "reason": "provider_quota_exhausted", "http_status": 429}
@@ -2178,7 +2179,8 @@ class RoomService:
         metadata_correction, partial_works = None, []
         called = {entry["provider"] for entry in snapshot["native_executions"]}
         checked = []
-        board = (requirements.get("context_limit") or {}).get("decision_board") or {}
+        board = ((requirements.get("context_limit") or {}).get("decision_board")
+                 or requirements.get("unconfirmed_restart") or {})
         board_retained = []
         for member in snapshot["members"]:
             state = self.store.native_workspace(snapshot["room"]["id"], member["id"])
@@ -2257,6 +2259,15 @@ class RoomService:
             attestation = self._audit_native_fenced_recovery(snapshot, fenced)
             attestation["retained_peers"] = sorted(fenced_observations, key=lambda item: item["candidate"]["job_id"])
             checked.append({"fenced_recovery": attestation})
+        if requirements.get("unconfirmed_restart"):
+            # The loop above refused every unpublished change outside the
+            # owners' own unfinished task paths; those stay for the owner.
+            attestation = {"recovery_kind": "native_unconfirmed_restart", "candidate": requirements["unconfirmed_restart"],
+                           "retained_owner_work": board_retained,
+                           "current_binding": {"run_id": snapshot["current_run"]["id"], "revision": snapshot["current_run"]["revision"],
+                                               "digest": snapshot["current_run"]["digest"]},
+                           "old_commands_accepted": False}
+            checked.append({"unconfirmed_restart": attestation})
         return (hashlib.sha256(json.dumps([checked, metadata_correction, partial_works], sort_keys=True).encode()).hexdigest(),
                 attestation, metadata_correction, partial_works)
 
