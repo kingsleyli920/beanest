@@ -87,7 +87,7 @@ async function main() {
   const stage = path.join(build, 'source');
   const config = require('./package.json');
   await fs.mkdir(stage, { recursive: true, mode: 0o700 });
-  for (const name of ['main.js', 'lifecycle.js', 'menu.js', 'locale.js', 'project-picker.js', 'power-guard.js', 'chat-location.js', 'external-pages.js', 'preload.js']) {
+  for (const name of ['main.js', 'lifecycle.js', 'menu.js', 'locale.js', 'project-picker.js', 'power-guard.js', 'chat-location.js', 'external-pages.js', 'preload.js', 'shell-path.js']) {
     await fs.copyFile(path.join(__dirname, name), path.join(stage, name));
   }
   await fs.writeFile(path.join(stage, 'package.json'), JSON.stringify({

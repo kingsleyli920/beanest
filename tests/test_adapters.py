@@ -448,6 +448,19 @@ class ProtocolTests(unittest.TestCase):
             child = adapters._environment()
         self.assertFalse(any(k in child for k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_PROFILE')))
 
+    def test_network_proxy_and_ca_reach_the_child_but_provider_routing_does_not(self):
+        # Catches: users behind an HTTPS proxy or corporate CA could not reach
+        # the provider from Beanest although their own terminal could.
+        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://127.0.0.1:7890', 'no_proxy': 'localhost',
+                                    'NODE_EXTRA_CA_CERTS': '/etc/corp-ca.pem', 'SSL_CERT_FILE': '/etc/corp-ca.pem',
+                                    'ANTHROPIC_BASE_URL': 'https://router.invalid', 'OPENAI_BASE_URL': 'https://router.invalid'}):
+            child = adapters._environment()
+        self.assertEqual({key: child.get(key) for key in ('HTTPS_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE')},
+                         {'HTTPS_PROXY': 'http://127.0.0.1:7890', 'no_proxy': 'localhost',
+                          'NODE_EXTRA_CA_CERTS': '/etc/corp-ca.pem', 'SSL_CERT_FILE': '/etc/corp-ca.pem'})
+        self.assertNotIn('ANTHROPIC_BASE_URL', child)
+        self.assertNotIn('OPENAI_BASE_URL', child)
+
     def test_no_implicit_resume(self):
         with self.assertRaises(ValueError):
             adapters._command('codex', '--last')
