@@ -9459,3 +9459,22 @@ test('browser settlement waits for real SHA work but leaves held network reads a
   await assert.rejects(trackedDigest('not-a-real-hash',new Uint8Array()),{name:'NotSupportedError'});
   await settle();assert.equal(pendingCryptoDigests.size,0,'rejected native computations must be released without swallowing the rejection');
 });
+
+test('current stage delivery starts collapsed and preserves deliberate expansion and collapse through reading and polling', async () => {
+  const saved = withNaturalContinuation(objectiveDeliveryFixture());
+  saved.objective.status='awaiting_continue'; saved.team.phase='ready_for_user';
+  const ui = await browser({rooms:[saved.room],saved,executionPolicySupport:true,naturalContinuationSupport:true});
+  let files=ui.document.querySelector('.delivery-content');
+  assert.equal(files.tagName,'DETAILS'); assert.equal(files.firstChild.tagName,'SUMMARY');
+  assert.equal(files.dataset.outcomeDetail,'current'); assert.equal(files.open,false);
+  ui.type('保留未发送草稿');
+  files.open=true; saved.collaboration.outcome.validation.summary='刷新检查范围'; await ui.poll();
+  files=ui.document.querySelector('.delivery-content'); assert.equal(files.open,true);
+  const read=descendants(files).find(node=>node.tagName==='BUTTON' && node.dataset.documentPath);
+  assert.ok(read); read.fire('click'); await settle(); assert.equal(ui.get('delivery-reader').hidden,false);
+  await ui.click('reader-back'); assert.equal(ui.document.querySelector('.delivery-content').open,true);
+  ui.document.querySelector('.delivery-content').open=false;
+  saved.collaboration.outcome.validation.summary='再次刷新检查范围'; await ui.poll();
+  assert.equal(ui.document.querySelector('.delivery-content').open,false);
+  assert.equal(ui.get('message').value,'保留未发送草稿'); assert.equal(ui.posts().length,0);
+});

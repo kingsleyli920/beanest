@@ -5072,10 +5072,10 @@ function renderCollaboration(snapshot) {
   for (const [entries, group] of [[currentDocuments, 'current'], [inheritedDocuments, 'baseline'], [savedDocuments, 'saved']]) {
     if (!entries.length) continue;
     const historical = group !== 'current';
-    const folded = historical || foldedResult;
-    const delivery = element(folded ? 'details' : 'section', '', historical ? `delivery-content ${group === 'baseline' ? 'baseline-file-history' : 'saved-file-history'}` : 'delivery-content');
-    if (folded) { const key = technicalInterruption ? `technical-${group}` : group; delivery.dataset.outcomeDetail = key; delivery.open = preservedDetails.get(key) || false; }
-    delivery.append(element(folded ? 'summary' : 'h3', group === 'baseline' ? t("沿用的交付（上一轮）") : group === 'saved' ? t("已保存文件（未列入本轮交付）")
+    const delivery = element('details', '', historical ? `delivery-content ${group === 'baseline' ? 'baseline-file-history' : 'saved-file-history'}` : 'delivery-content');
+    const key = technicalInterruption ? `technical-${group}` : group;
+    delivery.dataset.outcomeDetail = key; delivery.open = preservedDetails.get(key) || false;
+    delivery.append(element('summary', group === 'baseline' ? t("沿用的交付（上一轮）") : group === 'saved' ? t("已保存文件（未列入本轮交付）")
       : t("{p0} · {p1} 份", { p0: objective ? t("本目标成果与答复") : snapshot.current_run?.work_mode === 'plan' ? t("方案与答复") : t("交付内容"), p1: entries.length })),
     element('p', group === 'baseline' ? t("保留上一轮的确切版本，单独阅读；不计为这个目标新完成的修改。") : group === 'saved'
       ? t("这些文件仍可阅读，不代表{p0}完成了修改或交付。", { p0: objective ? t("本目标") : t("本轮") }) : objective ? t("汇总这个目标各阶段的已核对成果。点击直接阅读，无需下载。") : t("点击直接阅读，无需下载。"), 'detail-caption'));
