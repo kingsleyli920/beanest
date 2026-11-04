@@ -4942,7 +4942,7 @@ class RoomStore:
                 if is_team and not error and not uncertain:
                     help_request = next((command for command in team_commands if command["type"] == "request_help"), None)
                     if help_request:
-                        recipient = help_request["to"]
+                        recipient = help_request["to"] or "all"
                     elif team_context["job_phase"] in {"help", "review"}:
                         recipient = self._team.task(db, room_id, team_context["task_id"])["owner"]
                 self._event(db, room_id, "message", sender=provider, recipient=recipient,

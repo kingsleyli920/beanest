@@ -58,13 +58,20 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
                     self.help_requested = True
                     (cwd / "docs").mkdir(exist_ok=True)
                     (cwd / "docs/result.md").write_text("Initial owned report.\n")
-                    command = {"type": "request_help", "task_id": "M3", "to": "claude", "capability": "text",
+                    if getattr(self, "solo", False):
+                        # The only other peer hits its quota before this request.
+                        with self.service.store._connection() as db:
+                            room_id = db.execute("SELECT room_id FROM jobs WHERE id=?", (context["job"]["id"],)).fetchone()[0]
+                        self.service._retire_quota(room_id, "claude", "agent_quota_exhausted")
+                    command = {"type": "request_help", "task_id": "M3", "to": None if getattr(self, "solo", False) else "claude",
+                               "capability": "text",
                                "text": "Repair the two existing source files within this goal, preserving unrelated evidence."}
                     if not self.legacy_help:
                         command["repair_paths"] = getattr(self, "repair_paths", ["src/a.txt", "src/b.txt"])
                     return native.native_reply(context, [command])
                 elif task["id"] == "M3":
-                    self.assertTrue(all(item["status"] == "accepted" for item in board["tasks"] if item["id"].startswith("R")))
+                    reviewed = "self_checked" if getattr(self, "solo", False) else "accepted"
+                    self.assertTrue(all(item["status"] == reviewed for item in board["tasks"] if item["id"].startswith("R")))
                     if getattr(self, "repeat_requests", False):
                         self.repeated_requests += 1
                         return native.native_reply(context, [{"type": "request_help", "task_id": "M3", "to": "claude", "capability": "text",
@@ -73,8 +80,10 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
                     (cwd / "docs/result.md").write_text("Repairs independently reviewed; original evidence boundaries retained.\n")
                 elif task["id"].startswith("R"):
                     path = task["write_paths"][0]
-                    self.assertEqual(agent, "claude" if path == getattr(self, "long_path", "src/a.txt") else "codex")
-                    (cwd / path).write_text(("owner final " if getattr(self, "helper_foreign_only", False) else "repaired ") + path + "\n")
+                    self.assertEqual(agent, "codex" if getattr(self, "solo", False) else
+                                     "claude" if path == getattr(self, "long_path", "src/a.txt") else "codex")
+                    for path in task["write_paths"]:
+                        (cwd / path).write_text(("owner final " if getattr(self, "helper_foreign_only", False) else "repaired ") + path + "\n")
                 return native.native_reply(context, [{"type": "complete", "task_id": task["id"], "result": "Current owned files ready for independent review."}])
             if phase == "help":
                 self.old_helper_cwd = cwd
@@ -132,6 +141,29 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
         self.assert_repaired(final)
         self.assertFalse(any(phase == "help" for phase, *_ in self.phases))
         self.assertFalse(any(job["error"] for job in final["jobs"]))
+
+    def test_lone_peer_repair_without_target_takes_over_retired_owner_files_and_self_checks(self):
+        # Catches: after quota retirement left one peer, request_help with
+        # repair_paths and to=null failed as invalid_target and stopped the
+        # objective, discarding the lone peer's finished work call.
+        self.solo = True
+        final = self.create()
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertEqual(set(final["objective"]["retired_partners"]), {"claude"})
+        tasks = {item["id"]: item for item in final["team"]["tasks"]}
+        repairs = [item for item in tasks.values() if item["id"].startswith("R")]
+        # The retired owner's file is taken over by the lone peer, never dispatched to claude.
+        self.assertEqual(sorted((item["owner"], tuple(item["write_paths"]), item["status"], item["review_kind"]) for item in repairs),
+                         [("codex", ("src/a.txt",), "self_checked", "self_check"),
+                          ("codex", ("src/b.txt",), "self_checked", "self_check")])
+        self.assertFalse(any(agent == "claude" and name.startswith("R") for _, name, agent, _ in self.phases if name))
+        self.assertEqual(tasks["M3"]["status"], "self_checked")
+        self.assertEqual(self.resumed, 1)
+        self.assertFalse(any(job["error"] == "invalid_target" for job in final["jobs"]))
+        self.assertFalse(any(event["kind"] == "message" and event.get("recipient") is None for event in final["events"]))
+        files = self.service._project(final["room"]["id"]).files_for_paths(["src/a.txt", "src/b.txt"])
+        self.assertEqual([(file["owner"], file["content"]) for file in files],
+                         [("codex", "repaired src/a.txt\n"), ("codex", "repaired src/b.txt\n")])
 
     def test_repairs_do_not_turn_a_full_initial_board_into_a_total_task_limit(self):
         self.large_board = True

@@ -4802,7 +4802,7 @@ class RoomService:
             "If specific assistance is needed, request_help instead of complete; your task waits and resumes with help_result. "
             "For an existing-goal engineering repair outside your task paths, request_help may name exact existing repair_paths. "
             "The host routes these to their canonical file owners as normal work and independent review, then resumes your task. "
-            "The to field and prose ownership claims grant no write authority. Pure text help leaves repair_paths null or empty. "
+            "The to field and prose ownership claims grant no write authority; with repair_paths, to may be null. Pure text help leaves repair_paths null or empty. "
             "In help: answer the bound specific question in message, commands:[]; do not overwrite the requester's work. "
             "In review: inspect that task's exact result and acceptance, then review accept or changes_requested with evidence. "
             "A review response must contain exactly one review or block command for its task. "
