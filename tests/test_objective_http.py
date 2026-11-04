@@ -22,15 +22,24 @@ class ObjectiveHTTPTests(unittest.TestCase):
             return result
         self.provider.handler = handler
 
-    def wait(self, room_id, predicate):
-        deadline = time.monotonic() + 4
+    def wait(self, room_id, predicate, *, timeout=4):
+        deadline = time.monotonic() + timeout
+        snapshot = None
         while time.monotonic() < deadline:
             code, snapshot = self.request("GET", "/api/rooms/" + room_id)
             self.assertEqual(code, 200)
             if predicate(snapshot):
                 return snapshot
             time.sleep(0.005)
-        self.fail("Objective fixture did not reach expected state")
+        objective = (snapshot or {}).get("objective") or {}
+        last_call = self.provider.calls[-1]["context"] if self.provider.calls else {}
+        diagnostic = {"timeout": timeout, "stage": objective.get("stage"),
+            "status": objective.get("status"), "stop_reason": objective.get("stop_reason"),
+            "team_phase": ((snapshot or {}).get("team") or {}).get("phase"),
+            "calls": len(self.provider.calls), "last_phase": last_call.get("job", {}).get("job_phase"),
+            "background_error": repr(self.service._background_error),
+            "provider_assertion_failures": self.provider.assertion_failures}
+        self.fail("Objective fixture did not reach expected state: " + repr(diagnostic))
 
     def create_objective(self):
         code, created = self.request("POST", "/api/rooms", {"goal": "Deliver the bounded checked item.", "target": "claude",

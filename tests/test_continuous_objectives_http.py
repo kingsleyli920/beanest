@@ -1,4 +1,5 @@
 """Actual loopback HTTP boundary; only provider inference is replaced by a fake."""
+import asyncio
 import unittest
 import test_objective_http as fixtures
 import test_autonomous_objectives as objective_fixtures
@@ -10,12 +11,18 @@ class ContinuousObjectiveHTTPTests(unittest.TestCase):
     request = fixtures.ObjectiveHTTPTests.request
     wait = fixtures.ObjectiveHTTPTests.wait
 
-    def configure(self, rounds=1):
+    def configure(self, rounds=1, *, checkpoint_latency=0):
         self.rounds = rounds
-        self.provider.handler = lambda agent, context: objective_fixtures.ObjectiveIntegrationTests.handler(self,agent,context)
+        async def handler(agent, context):
+            if checkpoint_latency and context['job']['job_phase'] == 'checkpoint':
+                await asyncio.sleep(checkpoint_latency)
+            return objective_fixtures.ObjectiveIntegrationTests.handler(self, agent, context)
+        self.provider.handler = handler
 
     def test_both_null_limits_are_advertised_and_progress_beyond_legacy_stages(self):
-        self.configure(rounds=9)
+        # Nine checkpoints alone exceed the shared single-stage four-second
+        # wait. Keep real asynchronous provider latency in this HTTP regression.
+        self.configure(rounds=9, checkpoint_latency=0.5)
         code,status = self.request('GET','/api/status')
         self.assertEqual(code,200)
         self.assertTrue(status['capabilities']['continuous_objective'])
@@ -23,7 +30,8 @@ class ContinuousObjectiveHTTPTests(unittest.TestCase):
             'request_id':'continuous-http','mode':'python_artifacts','work_mode':'build',
             'execution_policy':{'mode':'autonomous','max_seconds':None,'max_calls':None}})
         self.assertEqual(code,200)
-        result = self.wait(created['room']['id'],lambda item:item['objective']['status']=='complete')
+        result = self.wait(created['room']['id'],lambda item:item['objective']['status']=='complete',
+                           timeout=2 * self.rounds)
         self.assertEqual(result['objective']['stage'],9)
         self.assertGreater(result['objective']['budget']['used'],32)
         self.assertIsNone(result['budget']['deadline'])
