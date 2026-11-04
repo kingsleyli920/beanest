@@ -9375,3 +9375,28 @@ test('progress record labels switch both directions while preserving expansion c
   assert.equal(ui.get('activity-events').children.length,Number(count));
   assert.equal(ui.requests.length,calls); assert.equal(ui.posts().length,0);
 });
+
+test('host review-only interruption uses bound platform explanation without calling it a format failure or changing recovery gates', async () => {
+  const reason = '审核被旧的负责人校验误拒，原任务和已提交结果仍保留。';
+  const next = '继续后只补审核，不会重复执行已完成的工作。';
+  for (const language of ['zh-CN','en']) {
+    const saved = nativeRecoverySnapshot(); saved.objective.interruption_kind='host_result_validation';
+    Object.assign(saved.collaboration.outcome,{reason,next_action:next,
+      reason_i18n:{parts:[{key:reason,params:{}}]},next_action_i18n:{parts:[{key:next,params:{}}]}});
+    const ui = await browser({language,rooms:[saved.room],saved,executionPolicySupport:true,nativeProjectSupport:true});
+    const expected = language==='en' ? /old ownership check incorrectly rejected.*retry the review only/s : /审核被旧的负责人校验误拒.*继续后只补审核/s;
+    const notice = descendants(ui.get('collaboration-outcome')).find(node=>node.classList.contains('outcome-reason'));
+    assert.match(notice.textContent,expected);
+    assert.doesNotMatch(notice.textContent,/格式校验|format validation/i);
+    assert.match(ui.get('task-claude').textContent,expected);
+    ui.type('保留我的补充 @Codex');
+    const recipient = ui.get('recipient-button').textContent;
+    assert.equal(ui.get('recover-native').disabled,true); await ui.click('recover-native'); assert.equal(ui.posts().length,0);
+    saved.collaboration.outcome.reason_i18n.parts[0].key='stale metadata'; await ui.poll();
+    const fallback = descendants(ui.get('collaboration-outcome')).find(node=>node.classList.contains('outcome-reason'));
+    assert.match(fallback.textContent,language==='en' ? /format validation/i : /格式校验/);
+    assert.equal(ui.get('message').value,'保留我的补充 @Codex'); assert.equal(ui.get('recipient-button').textContent,recipient);
+    delete saved.collaboration.outcome.reason_i18n; await ui.poll();
+    assert.equal(ui.posts().length,0); assert.equal(ui.get('recover-native').disabled,true);
+  }
+});

@@ -4555,6 +4555,12 @@ function actualWorkMode(snapshot = state.snapshot) {
 }
 function hostResultInterruption(objective) { return objective?.status === 'interrupted' && objective.interruption_kind === 'host_result_validation'; }
 const hostResultInterruptionText = "结果提交未通过格式校验，已有记录保留。继续后由伙伴重新提交并核对。";
+function hostResultInterruptionMessage(snapshot) {
+  const outcome = snapshot?.collaboration?.outcome;
+  const reason = boundPlatformDisplayText(outcome?.reason, outcome?.reason_i18n);
+  const action = boundPlatformDisplayText(outcome?.next_action, outcome?.next_action_i18n);
+  return reason && action ? [reason, action].join(interfaceWordSpace()) : t(hostResultInterruptionText);
+}
 function objectiveLabel(objective) { if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return t("方案讨论"); if (objective.status === 'complete' && isReadOnlyDiscussion()) return t("讨论已结束"); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
 function currentObjective(snapshot = state.snapshot) {
   const objective = snapshot?.objective;
@@ -4869,15 +4875,18 @@ function quotaFailureDescription(failure, snapshot) {
   return t("{p0} 的订阅额度已用完。{p1}已有成果和改动保留。{p2}", { p0: displayName(failure.provider), p1: reset, p2: next });
 }
 // Translate only source-bound platform descriptors; opaque model/user parts stay literal.
-function platformDisplayText(value, descriptor) {
-  if (typeof value !== 'string' || !Array.isArray(descriptor?.parts)) return value;
-  if (!descriptor.parts.every((part) => part && (typeof part.key === 'string' || typeof part.text === 'string'))) return value;
+function boundPlatformDisplayText(value, descriptor) {
+  if (typeof value !== 'string' || !Array.isArray(descriptor?.parts)) return null;
+  if (!descriptor.parts.every((part) => part && (typeof part.key === 'string' || typeof part.text === 'string'))) return null;
   const source = descriptor.parts.map((part) => typeof part.key === 'string'
     ? part.key.replace(/\{(p\d+)\}/g, (token, name) => Object.hasOwn(part.params || {}, name) ? String(part.params[name]) : token)
     : part.text).join('');
   // A later projection may replace a field while retaining older metadata.
-  if (source !== value) return value;
+  if (source !== value) return null;
   return descriptor.parts.map((part) => typeof part.key === 'string' ? t(part.key, part.params || {}) : part.text).join('');
+}
+function platformDisplayText(value, descriptor) {
+  return boundPlatformDisplayText(value, descriptor) ?? value;
 }
 function localizedCollaboration(projection) {
   const outcome = projection.outcome;
@@ -5010,7 +5019,7 @@ function renderCollaboration(snapshot) {
   result.append(element('h2', discussionIdle ? t("方案讨论") : objective ? objective.status === 'complete' ? t("本轮已交付") : objectiveLabel(objective)
     : accepted && ['accepted', 'ready_for_user'].includes(outcomeState) ? t("本轮已接受") : singlePartner && outcomeState === 'round_finished' ? t("本轮已回复") : outcomeLabels[outcomeState]));
   if (collaboration.mode === 'legacy') result.append(element('p', singlePartner ? t("单伙伴任务") : t("历史记录 · 旧版协作流程"), 'collaboration-context'));
-  if (technicalInterruption) result.append(element('p', t(hostResultInterruptionText), 'outcome-reason'));
+  if (technicalInterruption) result.append(element('p', hostResultInterruptionMessage(snapshot), 'outcome-reason'));
   if (typeof reason === 'string' && reason) (foldedResult ? report : result).append(element('p', reason, 'outcome-reason'));
   if (objective && !discussionIdle && !completed) renderObjectiveNextStep(result, snapshot, objective, report, null, technicalInterruption);
   const suggestion = completed ? completionSuggestion(snapshot) : null;
@@ -5604,7 +5613,7 @@ function memberActivity(snapshot, member) {
   }
   else if (!job && objective && ['stopped', 'interrupted', 'needs_user'].includes(objective.status)) {
     status = objective.status === 'needs_user' ? 'needs_user' : objective.status;
-    label = objectiveLabel(objective); task = hostResultInterruption(objective) ? t(hostResultInterruptionText) : objective.stop_reason ? executionMessage(objective.stop_reason)
+    label = objectiveLabel(objective); task = hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot) : objective.stop_reason ? executionMessage(objective.stop_reason)
       : objective.next_step?.question || t("当前进度已保留，请查看下一步与任务记录。");
   } else if (!job && objective?.status === 'complete') { label = isReadOnlyDiscussion(snapshot) ? t("讨论已结束") : Number.isFinite(snapshot.current_run?.accepted_at) ? t("目标已确认完成") : t("目标已交付"); task = isReadOnlyDiscussion(snapshot) ? t("回复与建议已保留；已有改动未发布。可继续讨论，或切到动手后接着做。") : t("查看本目标成果；仅自检的部分会单独注明。"); }
   else if (!job && retired?.cleanup_confirmed === true) {

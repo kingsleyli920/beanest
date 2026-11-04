@@ -17,7 +17,7 @@ import test_code_status_http as fixtures
 
 
 class CodeStatusLatencyHTTPTests(unittest.TestCase):
-    def fixture(self):
+    def fixture(self, *, delay_project=False):
         fixture = fixtures.CodeStatusHTTPTests(methodName='runTest')
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
@@ -30,6 +30,7 @@ class CodeStatusLatencyHTTPTests(unittest.TestCase):
         fixture.delay = fixture.root / 'git-delay.json'
         fixture.delay.write_text('6')
         fixture.trace = fixture.root / 'git-processes.jsonl'
+        delayed_roots = [str(fixture.slow)] + ([str(fixture.source)] if delay_project else [])
         wrapper = fixture.root / 'owned-git'
         wrapper.write_text(f'#!{sys.executable}\n' + textwrap.dedent(f'''
             import json, os, sys, time
@@ -37,7 +38,7 @@ class CodeStatusLatencyHTTPTests(unittest.TestCase):
             root = Path(__file__).parent
             with (root / 'git-processes.jsonl').open('a') as stream:
                 stream.write(json.dumps({{'pid': os.getpid()}}) + '\\n')
-            if Path.cwd() == Path({str(fixture.slow)!r}) and 'status' in sys.argv:
+            if str(Path.cwd()) in {delayed_roots!r} and 'status' in sys.argv:
                 (root / 'slow-status-started').touch()
                 time.sleep(float((root / 'git-delay.json').read_text()))
             os.execv({fixture.git_binary!r}, [{fixture.git_binary!r}, *sys.argv[1:]])
@@ -115,14 +116,17 @@ class CodeStatusLatencyHTTPTests(unittest.TestCase):
         self.assert_settled(fixture)
 
     def test_overall_budget_returns_typed_unknown_before_frontend_timeout(self):
-        fixture = self.fixture()
+        # Default delivery excludes the reference repo, so delay the requested
+        # project's real status rather than relying on unrelated Git startup cost.
+        fixture = self.fixture(delay_project=True)
         with patch.object(git_status, 'CODE_STATUS_SECONDS', .4):
             started = time.monotonic()
             value = self.request(fixture, f'/api/rooms/{fixture.room_id}/code-status?refresh_remote=1')
         self.assertLess(time.monotonic() - started, 2)
         summary = value['delivery_summary']
         self.assertNotEqual(summary['state'], 'confirmed')
-        self.assertTrue(any(check['reason'] == 'git_timeout' for check in summary['workspace']['checks']))
+        self.assertTrue(any(check['workspace_id'] == 'project' and check['reason'] == 'git_timeout'
+                            for check in summary['workspace']['checks']))
         self.assert_settled(fixture)
 
 

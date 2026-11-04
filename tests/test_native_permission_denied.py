@@ -39,7 +39,10 @@ class PermissionDeniedTests(unittest.IsolatedAsyncioTestCase):
         rows = [json.loads(line)['data'] for line in receipt.splitlines()]
         denial = next(row for row in rows if isinstance(row, dict) and row.get('subtype') == 'permission_denied')
         self.assertEqual(set(denial), {'type', 'subtype', 'tool_name', 'tool_use_id', 'session_id', 'uuid'})
-        argv = native.native_command('claude', permission='read_only')
+        # Command construction is part of the fixture too: CI needs no installed CLI.
+        with self.make_stub([], agent='claude'):
+            argv = native.native_command('claude', permission='read_only')
+        self.assertEqual(argv[0], str(self.stub))
         self.assertIn('dontAsk', argv)
         self.assertEqual(argv[argv.index('--tools') + 1], 'Read,Glob,Grep')
 

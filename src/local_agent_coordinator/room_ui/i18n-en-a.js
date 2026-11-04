@@ -760,3 +760,8 @@ Object.assign(window.BeanestI18nEnglish, {
   "登记目录 · {p0}": "Registered folder · {p0}",
   "{p0}工作副本": "{p0}'s working copy"
 });
+
+Object.assign(window.BeanestI18nEnglish, {
+  "审核被旧的负责人校验误拒，原任务和已提交结果仍保留。": "The old ownership check incorrectly rejected this review. The original task and submitted result are preserved.",
+  "继续后只补审核，不会重复执行已完成的工作。": "Continue to retry the review only. Completed work will not be repeated."
+});

@@ -29,3 +29,17 @@ __pycache__/
 /AGENTS.md
 /CLAUDE.md
 /START-HERE.md
+
+# Existing private research notes stay local when using git add .
+/docs/architecture.md
+/docs/changes-and-contribution.md
+/docs/integration-research.md
+/docs/local-ui.md
+/docs/mcp-bridge.md
+/docs/native-cross-review.md
+/docs/open-source-readiness.md
+/docs/paradev-fit.md
+/docs/product.md
+/docs/prototype-verification.md
+/docs/upstream-auto-collaboration-proposal.md
+/docs/upstream-trial.md

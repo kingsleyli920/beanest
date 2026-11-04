@@ -4185,6 +4185,11 @@ class RoomStore:
                             or scope_retry.get("workspaces") != self._native_workspace_fingerprints(db, room_id)):
                         raise RoomError("native_recovery_binding_changed")
                     scope_errors = {item["task_id"]: "team_scope_conflict" for item in candidates}
+                if baseline and baseline.get("review_retry"):
+                    expected_files = self._run_result_files(db, room_id, binding["run_id"],
+                        include_provenance=True, include_retry_review=True)
+                    if baseline.get("files") != expected_files:
+                        raise RoomError("objective_binding_changed")
                 previous = self._team.objectives.current(db, room_id)
                 goal = previous["original_goal"] if previous else room["goal"]
                 target_run = self._team.start_next(db, room_id, goal, team["plan_author"], **binding,
@@ -4327,9 +4332,14 @@ class RoomStore:
         with self._connection() as db:
             objective = self._team.objectives.current(db, room_id)
             checkpoint = json.loads(objective["checkpoint_json"] or "{}") if objective else {}
-            if objective is None or objective["status"] != "needs_user" or checkpoint.get("origin") != "task_block":
+            if objective is None:
                 return None
-            return self._team._host_text_failure_source(db, room_id, self._team.team(db, room_id)["current_run_id"])
+            legacy_question = objective["status"] == "needs_user" and checkpoint.get("origin") == "task_block"
+            stopped_review = objective["status"] == "stopped" and objective["stop_reason"] == "team_assignment_changed"
+            if not legacy_question and not stopped_review:
+                return None
+            failure = self._team._host_text_failure_source(db, room_id, self._team.team(db, room_id)["current_run_id"])
+            return failure if legacy_question or failure and failure.get("review_only") else None
 
     def stop_objective_limit(self, room_id):
         with self._connection(write=True) as db:
@@ -4418,19 +4428,34 @@ class RoomStore:
                                                 "review_kind": task["review_kind"]}
             return sorted(files.values(), key=lambda file: file["path"])
 
-    def run_result_files(self, room_id, run_id, *, include_provenance=False):
-        """Latest accepted result for each path, preserving superseded history."""
+    def run_result_files(self, room_id, run_id, *, include_provenance=False, include_retry_review=False):
+        """Latest accepted files, optionally including one proven unstarted review."""
         with self._connection() as db:
-            self._room(db, room_id)
-            if not db.execute("SELECT 1 FROM team_runs WHERE room_id=? AND id=?", (room_id, run_id)).fetchone():
-                raise RoomError("team_run_conflict")
-            files = {}
-            for task in db.execute("SELECT id,review_kind,result_files_json FROM shared_tasks WHERE room_id=? AND run_id=? "
-                                   "AND status IN ('accepted','self_checked') ORDER BY rowid", (room_id, run_id)):
-                for file in json.loads(task["result_files_json"] or "[]"):
-                    files[file["path"]] = {**file, "run_id": run_id, "task_id": task["id"],
-                                           "review_kind": task["review_kind"]}
-            return list(files.values()) if include_provenance else {path: file["sha256"] for path, file in files.items()}
+            return self._run_result_files(db, room_id, run_id, include_provenance=include_provenance,
+                                          include_retry_review=include_retry_review)
+
+    def _run_result_files(self, db, room_id, run_id, *, include_provenance=False, include_retry_review=False):
+        self._room(db, room_id)
+        if not db.execute("SELECT 1 FROM team_runs WHERE room_id=? AND id=?", (room_id, run_id)).fetchone():
+            raise RoomError("team_run_conflict")
+        files = {}
+        for task in db.execute("SELECT id,review_kind,result_files_json FROM shared_tasks WHERE room_id=? AND run_id=? "
+                               "AND status IN ('accepted','self_checked') ORDER BY rowid", (room_id, run_id)):
+            for file in json.loads(task["result_files_json"] or "[]"):
+                files[file["path"]] = {**file, "run_id": run_id, "task_id": task["id"],
+                                       "review_kind": task["review_kind"]}
+        if include_retry_review:
+            failure = self._team._host_text_failure_source(db, room_id, run_id)
+            if not failure or not failure.get("review_only"):
+                raise RoomError("objective_binding_changed")
+            task = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?",
+                              (room_id, run_id, failure["task_id"])).fetchone()
+            # These bytes are published, but their task still requires review.
+            # A historical accepted SHA of the same path is no longer current.
+            for file in json.loads(task["result_files_json"]):
+                files[file["path"]] = {**file, "run_id": run_id, "task_id": task["id"],
+                                       "review_kind": "pending_review"}
+        return list(files.values()) if include_provenance else {path: file["sha256"] for path, file in files.items()}
 
     def autonomous_work_active(self):
         with self._connection() as db:
@@ -4490,6 +4515,17 @@ class RoomStore:
                       for task_id, paths in scopes.items()}
             db.execute("UPDATE team_jobs SET claim_grants_json=? WHERE job_id=?", (json.dumps(grants), job_id))
 
+    @staticmethod
+    def _task_ownership_grants(task):
+        """Validate the owner's transfer proof without assigning it to a reader."""
+        grants = json.loads(task["ownership_grant_json"]) if task["ownership_grant_json"] else {}
+        paths = set(json.loads(task["write_paths_json"]))
+        if (not isinstance(grants, dict) or any(not isinstance(grant, dict) or path not in paths
+                or grant.get("new_owner") != task["owner"]
+                or grant.get("assignment_epoch") != task["assignment_epoch"] for path, grant in grants.items())):
+            raise RoomError("team_assignment_changed")
+        return grants
+
     def ownership_grant(self, job_id):
         with self._connection() as db:
             job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -4498,10 +4534,14 @@ class RoomStore:
             if context is None or context["task_id"] is None:
                 return {}
             task = self._team.task(db, job["room_id"], context["task_id"])
-            grants = json.loads(task["ownership_grant_json"]) if task["ownership_grant_json"] else {}
-            paths = set(json.loads(task["write_paths_json"]))
-            if any(path not in paths or grant["new_owner"] != job["provider"]
-                   or grant["assignment_epoch"] != task["assignment_epoch"] for path, grant in grants.items()):
+            grants = self._task_ownership_grants(task)
+            if context["job_phase"] == "review":
+                if task["reviewer"] != job["provider"] or task["result_version"] != context["result_version"]:
+                    raise RoomError("team_assignment_changed")
+                return {}  # Reviewing a result never inherits its owner's write grant.
+            if context["job_phase"] != "work":
+                return {}
+            if task["owner"] != job["provider"]:
                 raise RoomError("team_assignment_changed")
             return grants
 

@@ -1253,14 +1253,17 @@ class RoomService:
         text_failure = self.store.host_text_failure(room_id)
         if text_failure and not text_failure.get("local_response"):
             # Keep the original host checkpoint and failed jobs in history. A
-            # format rejection is recoverable execution state, not a question.
+            # host validation rejection is recoverable state, not a question.
             snapshot["objective"].update(status="interrupted", stop_reason=text_failure["code"],
                                          interruption_kind="host_result_validation")
             snapshot["room"]["status"] = "interrupted"
             outcome = snapshot["collaboration"]["outcome"]
             outcome["state"] = "interrupted"
-            for field, text in (("reason", "结果提交被宿主格式校验拒绝，原任务和结果仍保留。"),
-                                ("next_action", "继续后由伙伴重新提交并核对，无需补充业务决定。")):
+            explanation = (("reason", "审核被旧的负责人校验误拒，原任务和已提交结果仍保留。"),
+                           ("next_action", "继续后只补审核，不会重复执行已完成的工作。")) if text_failure.get("review_only") else (
+                           ("reason", "结果提交被宿主格式校验拒绝，原任务和结果仍保留。"),
+                           ("next_action", "继续后由伙伴重新提交并核对，无需补充业务决定。"))
+            for field, text in explanation:
                 outcome[field] = text
                 outcome[field + "_i18n"] = {"parts": [{"key": text, "params": {}}]}
         if snapshot["current_run"]:
@@ -1616,10 +1619,15 @@ class RoomService:
             if action in {"objective", "restart-objective", "directed-objective"}:
                 project = snapshot.get("project") or {}
                 actual = {file["path"]: file for file in project.get("files", [])}
-                files = self.store.run_result_files(room_id, run_id, include_provenance=True)
+                review_retry = (action == "restart-objective"
+                    and (self.store.host_text_failure(room_id) or {}).get("review_only") is True)
+                files = self.store.run_result_files(room_id, run_id, include_provenance=True,
+                                                    include_retry_review=review_retry)
                 if any(actual.get(file["path"], {}).get("sha256") != file["sha256"] for file in files):
                     raise RoomError("objective_binding_changed")
                 baseline = {"run_id": run_id, "revision": revision, "digest": digest, "files": files, "verified": True}
+                if review_retry:
+                    baseline["review_retry"] = True
             elif action == "followup-objective":
                 delivery = snapshot["objective"]["delivery"]
                 if not delivery["verified"]:

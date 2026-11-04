@@ -337,6 +337,8 @@ class TeamStore:
         text_failure = self._host_text_failure_source(db, room_id, source_run_id)
         if text_failure:
             resumable.update({"invalid_text", "message_too_large"})
+            if text_failure.get("review_only"):
+                resumable.add(text_failure["code"])
         tasks = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid",
                            (source_room_id or room_id, source_run_id)).fetchall()
         for task in tasks:
@@ -362,6 +364,13 @@ class TeamStore:
         db.execute("UPDATE team_members SET planned=?,plan_ready_revision=? WHERE room_id=?",
                    (1 if tasks else 0, 0 if tasks else -1, room_id))
         objective = self.objectives.current(db, room_id)
+        if text_failure and text_failure.get("review_only"):
+            previous = db.execute("SELECT o.retired_json FROM objectives o JOIN team_runs r ON r.objective_id=o.id "
+                                  "WHERE r.id=? AND r.room_id=?", (source_run_id, room_id)).fetchone()
+            if previous:
+                # Retrying an unstarted host review does not restore an exhausted
+                # source; normal fresh-availability recovery remains authoritative.
+                db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (previous[0], objective["id"]))
         continuation = {"source_run_id": source_run_id, "preserved_task_ids": [task["id"] for task in tasks],
                         "scope": "unfinished_work_only", "old_calls_replayed": False}
         db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(continuation), objective["id"]))
@@ -396,6 +405,39 @@ class TeamStore:
             and binding.get("digest") == task["result_digest"]
             and sorted(binding.get("files") or [], key=lambda file: file["path"])
                 == sorted(files, key=lambda file: file["path"]))
+
+    def _obsolete_transfer_grant_review_rejection(self, db, room_id, failure, task):
+        """The former writer-grant check rejected an unstarted peer review."""
+        if (self.store._room(db, room_id)["mode"] != "native_project"
+                or failure["phase"] != "review" or task["reviewer"] != failure["provider"]
+                or task["owner"] == failure["provider"] or task["result_version"] <= 0
+                or task["result_version"] != failure["result_version"]
+                or task["assignment_epoch"] != failure["assignment_epoch"]
+                or not self.store._stage_cleanup_confirmed(db, room_id)):
+            return False
+        try:
+            grants = self.store._task_ownership_grants(task)
+            files = json.loads(task["result_files_json"] or "[]")
+        except (RoomError, ValueError, TypeError):
+            return False
+        paths = set(json.loads(task["write_paths_json"]))
+        if (not grants or not isinstance(files, list) or not files
+                or type(task["result_revision"]) is not int or not isinstance(task["result_digest"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", task["result_digest"])
+                or any(not isinstance(file, dict) or file.get("path") not in paths
+                       or not isinstance(file.get("sha256"), str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", file["sha256"]) for file in files)):
+            return False
+        row = db.execute("SELECT metadata_json FROM native_executions WHERE job_id=?", (failure["id"],)).fetchone()
+        try:
+            native = json.loads(row[0]) if row else {}
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(native, dict):
+            return False
+        return (native.get("status") == "not_started" and native.get("never_started") is True
+            and native.get("cleanup_confirmed") is True and native.get("side_effects_possible") is False
+            and all(type(native.get(key)) is int and native[key] == 0 for key in ("tool_calls", "tool_results")))
 
     def _native_response_failure_source(self, db, room_id, run_id):
         """Recognize typed completed-call rejections, never a model's block text."""
@@ -459,7 +501,7 @@ class TeamStore:
                                (room_id, run_id)).fetchall()
             blocked = [task for task in tasks if not task_finished(task)]
             if not blocked or any(task["status"] != "blocked" or task["blocked_reason"] not in
-                                  {"invalid_text", "message_too_large", "native_review_unobserved"}
+                                  {"invalid_text", "message_too_large", "native_review_unobserved", "team_assignment_changed"}
                                   or task["block_cause"] is not None for task in blocked):
                 return None
             for task in blocked:
@@ -472,7 +514,7 @@ class TeamStore:
                     return None
             failures = db.execute("SELECT j.id,j.provider,j.error,t.task_id,t.phase,t.result_version,t.assignment_epoch "
                                   "FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.run_id=? "
-                                  "AND j.status='failed' AND j.error IN ('invalid_text','message_too_large','native_review_unobserved') "
+                                  "AND j.status='failed' AND j.error IN ('invalid_text','message_too_large','native_review_unobserved','team_assignment_changed') "
                                   "ORDER BY j.rowid DESC", (room_id, run_id)).fetchall()
             by_id = {task["id"]: task for task in blocked}
             # A second independently rejected review is not a collateral stop.
@@ -484,6 +526,21 @@ class TeamStore:
                    and not self._obsolete_native_review_rejection(db, room_id, failure, by_id[failure["task_id"]])
                    for failure in failures):
                 return None
+            if any(task["blocked_reason"] == "team_assignment_changed" and not any(
+                    failure["error"] == task["blocked_reason"] and failure["task_id"] == task["id"]
+                    and self._obsolete_transfer_grant_review_rejection(db, room_id, failure, task)
+                    for failure in failures)
+                    and not (task["result_version"] == 0 and not db.execute(
+                        "SELECT 1 FROM team_jobs WHERE room_id=? AND run_id=? AND task_id=? "
+                        "AND assignment_epoch=? LIMIT 1", (room_id, run_id, task["id"], task["assignment_epoch"])).fetchone())
+                    for task in blocked):
+                return None
+            if any(failure["error"] == "team_assignment_changed" and failure["task_id"] in by_id
+                   and failure["result_version"] == by_id[failure["task_id"]]["result_version"]
+                   and failure["assignment_epoch"] == by_id[failure["task_id"]]["assignment_epoch"]
+                   and not self._obsolete_transfer_grant_review_rejection(db, room_id, failure, by_id[failure["task_id"]])
+                   for failure in failures):
+                return None
             for failure in failures:
                 task = by_id.get(failure["task_id"])
                 actor = "owner" if failure["phase"] == "work" else "reviewer" if failure["phase"] == "review" else None
@@ -491,7 +548,8 @@ class TeamStore:
                         and task["blocked_reason"] == failure["error"]
                         and task["result_version"] == failure["result_version"]
                         and task["assignment_epoch"] == failure["assignment_epoch"]):
-                    return {"run_id": run_id, "job_id": failure["id"], "task_id": task["id"], "code": failure["error"]}
+                    return {"run_id": run_id, "job_id": failure["id"], "task_id": task["id"], "code": failure["error"],
+                            **({"review_only": True} if failure["error"] == "team_assignment_changed" else {})}
             objective = db.execute("SELECT continuation_json FROM objectives WHERE room_id=? AND id=?",
                                    (room_id, run["objective_id"])).fetchone()
             continuation = json.loads(objective[0] or "{}") if objective else {}
