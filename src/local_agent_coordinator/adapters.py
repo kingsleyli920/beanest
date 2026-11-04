@@ -31,9 +31,20 @@ CODE_MODE_DISABLED_NOTICE = (
     'Code mode will fail closed; enable `features.code_mode_host` and '
     'install `codex-code-mode-host`.'
 )
+# Whole official notices only, built from observed Claude Code wording:
+# session/weekly/N-hour windows, dated resets, any zone, spend limits and
+# usage credits. Appended prose, an unobserved window name or "temporarily
+# limiting requests (not your usage limit)" never match.
+_CLAUDE_RESET = (r"resets (?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?:[1-9]|[12][0-9]|3[01]) at )?"
+                 r"(?:[1-9]|1[0-2])(?::[0-5][0-9])?(?:am|pm)(?: \([A-Za-z_]+(?:/[A-Za-z0-9_+-]+){0,2}\))?")
+_CLAUDE_WINDOW = r"(?:session|weekly|[1-9][0-9]?-hour)"
 _CLAUDE_SUBSCRIPTION_LIMIT = re.compile(
-    r"You've hit your (?:weekly|5-hour) limit · resets (?:[1-9]|1[0-2])(?::[0-5][0-9])?(?:am|pm) "
-    r"\([A-Za-z_]+(?:/[A-Za-z0-9_+-]+){1,2}\)\Z"
+    r"You've hit your " + _CLAUDE_WINDOW + r" limit · " + _CLAUDE_RESET
+    + r"|You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your "
+    + _CLAUDE_WINDOW + r" limit " + _CLAUDE_RESET
+    + r"|You're out of usage credits\. (?:Switch to another model, or manage usage credits at "
+      r"claude\.ai/settings/usage(?:\?from=[a-z_]{1,40})?, to continue\."
+      r"|Run /usage-credits to keep using [A-Za-z0-9 .-]{1,40} or /model to switch models\.)"
 )
 _CODEX_DISABLED_FEATURES = ('shell_tool', 'apps', 'plugins', 'multi_agent', 'multi_agent_v2',
     'browser_use', 'browser_use_external', 'in_app_browser', 'computer_use', 'image_generation',
@@ -358,7 +369,7 @@ def _claude_native_error_code(event: dict, session_id: str | None = None) -> str
     # this fallback to the entire official notice, never arbitrary result text.
     if (event.get('type') == 'result' and event.get('subtype') == 'success'
             and event.get('is_error') is True and isinstance(event.get('result'), str)
-            and len(event['result']) <= 256 and _CLAUDE_SUBSCRIPTION_LIMIT.fullmatch(event['result'])):
+            and len(event['result']) <= 512 and _CLAUDE_SUBSCRIPTION_LIMIT.fullmatch(event['result'])):
         return 'subscription_limit_reached'
     # Native provider metadata, unlike model prose or tool output, identifies
     # the subscription window without depending on translated reset wording.
@@ -375,7 +386,7 @@ def _claude_native_error_code(event: dict, session_id: str | None = None) -> str
             and isinstance(content, list) and len(content) == 1
             and isinstance(content[0], dict) and content[0].get('type') == 'text'):
         text = content[0].get('text')
-        if isinstance(text, str) and len(text) <= 256 and _CLAUDE_SUBSCRIPTION_LIMIT.fullmatch(text):
+        if isinstance(text, str) and len(text) <= 512 and _CLAUDE_SUBSCRIPTION_LIMIT.fullmatch(text):
             return 'subscription_limit_reached'
     return 'unknown_provider_error'
 
@@ -538,7 +549,13 @@ def parse_events(agent: str, lines: list[bytes], *, structured: bool = False,
                 result['events'].append({'type': 'session.started'})
             elif kind == 'assistant':
                 native_error = event.get('isApiErrorMessage') is True
-                if native_error:
+                sidechain = (event.get('parent_tool_use_id') is not None or event.get('parentToolUseID') is not None
+                             or event.get('isSidechain') not in (None, False))
+                if native_error and sidechain:
+                    # A subagent's API refusal is reported to its parent as a
+                    # tool result; the main turn's own terminal decides.
+                    result['events'].append({'type': 'warning', 'code': 'sidechain_provider_error'})
+                elif native_error:
                     result['events'].append({'type': 'provider_error',
                         'code': _claude_native_error_code(event, result['session_id'])})
                 message = event.get('message', {})
