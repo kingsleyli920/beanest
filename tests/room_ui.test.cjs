@@ -8402,7 +8402,7 @@ test('task code clarity explains missing task provenance while GitHub and untrac
   assert.equal(ui.get('code-delivery-remote').textContent, 'GitHub：当前主分支已同步');
   assert.match(ui.get('code-status-summary').textContent, /任务成果尚未核齐/);
   assert.match(ui.get('code-delivery-note').textContent, /不能据此判断全部交付完成/);
-  assert.match(ui.get('code-delivery-note').textContent, /另有 20 项未纳入 Git/);
+  assert.match(ui.get('code-untracked-status').textContent, /20/);
   assert.doesNotMatch(ui.get('code-status-summary').textContent, /全部.*完成|交付状态待核实/);
   assert.equal(ui.get('code-status-details').open, false); assert.equal(ui.posts().length, 0);
 });
@@ -8416,7 +8416,7 @@ test('task code clarity keeps a known mainline blocker visible when GitHub is un
   assert.equal(ui.get('code-status-summary').textContent, '还有任务成果未合入主分支');
   assert.match(ui.get('code-delivery-main').textContent, /伙伴工作区还有成果未提交/);
   assert.match(ui.get('code-delivery-remote').textContent, /尚未检查远端.*刷新/);
-  assert.match(ui.get('code-delivery-note').textContent, /20 项未纳入 Git/);
+  assert.match(ui.get('code-untracked-status').textContent, /20/);
   data.delivery_summary.main = { state: 'confirmed', reason: null };
   data.delivery_summary.remote = { state: 'unknown', reason: 'git_timeout' };
   await ui.click('code-status-refresh');
@@ -8444,7 +8444,7 @@ test('task code clarity separates confirmed committed code from unreadable priva
   assert.match(ui.get('code-delivery-private').textContent, /Codex/);
   assert.doesNotMatch(ui.get('code-delivery-private').textContent, /native:|\/private/);
   assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), false);
-  assert.match(ui.get('code-delivery-note').textContent, /20 项未纳入 Git/);
+  assert.match(ui.get('code-untracked-status').textContent, /20/);
   assert.equal(ui.posts().length, 0);
 });
 
@@ -8478,18 +8478,55 @@ test('task code clarity shows partial delivery file mapping without undoing conf
     files: { total: 26, matched: 23, missing: 3, different: 0 } };
   const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true,
     route(request) { if (request.path.includes('/code-status')) return data; } });
-  assert.equal(ui.get('code-status-summary').textContent, '已提交代码已同步，另有交付文件待核对');
+  assert.equal(ui.get('code-status-summary').textContent, '已提交代码已合入并同步 GitHub');
   assert.equal(ui.get('code-delivery-main').textContent, '主分支：已提交代码已合入');
   assert.equal(ui.get('code-delivery-remote').textContent, 'GitHub：当前主分支已同步');
-  assert.match(ui.get('code-delivery-note').textContent, /23\/26 项与主分支一致，另 3 项尚需核对对应位置/);
-  assert.match(ui.get('code-delivery-note').textContent, /20 项未纳入 Git/);
+  assert.match(ui.get('code-published-note').textContent, /23\/26 项与主分支一致.*主分支未找到相同路径：3 项/);
+  assert.ok(html.indexOf('<details id="code-status-details"') < html.indexOf('id="code-published-note"'));
+  assert.doesNotMatch(ui.get('code-delivery-note').textContent, /23\/26|未找到相同路径/);
+  assert.match(ui.get('code-untracked-status').textContent, /20/);
   assert.equal(ui.get('code-delivery-private').textContent, '伙伴工作区：无额外未交付改动');
-  assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), false);
+  assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), true);
   assert.equal(ui.get('code-status-details').open, false); assert.equal(ui.posts().length, 0);
   data.delivery_summary.published = { state: 'unknown', reason: 'published_work_unavailable', files: { total: null, matched: null, missing: null, different: null, mode_unknown: null } };
   await ui.click('code-status-refresh');
-  assert.match(ui.get('code-delivery-note').textContent, /暂时无法读取/);
-  assert.doesNotMatch(ui.get('code-delivery-note').textContent, /0\/0/);
+  assert.match(ui.get('code-published-note').textContent, /暂时无法读取/);
+  assert.doesNotMatch(ui.get('code-published-note').textContent, /0\/0/);
+});
+
+test('Git delivery headline and color exclude cumulative snapshot mismatches but preserve real tracked changes', async () => {
+  const saved = withNaturalContinuation(completedSuggestionFixture()); const data = taskCodeDeliveryFixture();
+  const delivery = data.delivery_summary;
+  delivery.private = { state: 'confirmed', reason: null };
+  delivery.workspace = { state: 'confirmed', reason: null, tracked: 0, untracked: 21 };
+  delivery.published = { state: 'pending', reason: 'published_work_not_on_mainline',
+    files: { total: 49, matched: 30, missing: 17, different: 2 } };
+  delivery.state = 'pending';
+  const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true,
+    route(request) { if (request.path.includes('/code-status')) return data; } });
+  ui.type('保持草稿'); await ui.choose('codex');
+  for (const state of ['pending', 'unknown']) {
+    delivery.state = state; delivery.published.state = state; await ui.click('code-status-refresh');
+    assert.equal(ui.get('code-status-summary').textContent, '已提交代码已合入并同步 GitHub');
+    assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), true);
+    assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), false);
+    assert.match(ui.get('code-published-note').textContent, /30\/49.*未找到相同路径：17 项.*内容或文件属性不同：2 项/);
+    assert.match(ui.get('code-published-note').textContent, /不代表待提交、待合并或必须发布/);
+    assert.equal(ui.get('code-status-details').open, false);
+    assert.equal(ui.get('code-merge-send').disabled, false);
+  }
+  delivery.workspace = { state: 'pending', reason: 'uncommitted_tracked_changes', tracked: 2, untracked: 21 };
+  data.uncommitted.tracked = 2; await ui.click('code-status-refresh');
+  assert.equal(ui.get('code-status-summary').textContent, '还有工作区成果待提交');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), true);
+  assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), false);
+  assert.match(ui.get('code-delivery-workspace').textContent, /已跟踪的改动未提交/);
+  assert.equal(ui.get('code-merge-send').disabled, false);
+  delivery.main.state = 'pending'; await ui.click('code-status-refresh');
+  assert.equal(ui.get('code-status-summary').textContent, '还有任务成果未合入主分支');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-clean'), false);
+  assert.equal(ui.get('message').value, '保持草稿'); assert.match(ui.get('recipient-button').textContent, /Codex/);
+  assert.equal(ui.posts().length, 0);
 });
 
 test('completion clarity preserves every report paragraph and marks stage plans as historical readable sources', async () => {
@@ -8805,7 +8842,7 @@ test('delivery repository selection is compact, explicit, persists across reload
   await ui.click('code-repository-save');
   assert.equal(ui.posts().length, 1); assert.equal(ui.get('code-repository-label').textContent, '交付仓库：应用仓库');
   assert.equal(ui.get('code-repository-picker').hidden, true); assert.equal(ui.get('code-delivery-states').hidden, false);
-  assert.match(ui.get('code-status-summary').textContent, /已提交代码已同步，另有交付文件待核对/); assert.match(ui.get('code-delivery-note').textContent, /23\/26/);
+  assert.equal(ui.get('code-status-summary').textContent, '已提交代码已合入并同步 GitHub'); assert.match(ui.get('code-published-note').textContent, /23\/26/);
   assert.equal(ui.get('message').value, '保留原草稿'); assert.match(ui.get('recipient-button').textContent, /Codex/);
   const reloaded = await browser(options); assert.equal(reloaded.get('code-repository-label').textContent, '交付仓库：应用仓库');
   assert.equal(reloaded.posts().length, 0); assert.equal(ui.posts().some((request) => request.path.endsWith('/messages')), false);
@@ -8814,7 +8851,7 @@ test('delivery repository selection is compact, explicit, persists across reload
   data.delivery_summary.private.state = 'confirmed'; data.delivery_summary.workspace.state = 'pending'; await ui.click('code-status-refresh');
   assert.equal(ui.get('code-status-summary').textContent, '还有工作区成果待提交', 'tracked pending changes take priority too');
   data.delivery_summary.workspace.state = 'confirmed'; data.delivery_summary.main.state = 'unknown'; await ui.click('code-status-refresh');
-  assert.equal(ui.get('code-status-summary').textContent, '还有交付文件待合入主分支', 'a not-yet-confirmed main branch keeps the pending branch');
+  assert.equal(ui.get('code-status-summary').textContent, 'GitHub 当前主分支已同步，任务成果尚未核齐', 'an unknown main branch is not turned into a pending merge by snapshot differences');
 });
 
 test('a lost delivery repository save is read back once without repeating POST and unconfirmed choices remain editable', async () => {

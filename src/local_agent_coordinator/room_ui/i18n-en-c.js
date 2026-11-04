@@ -627,5 +627,13 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "收起用量详情": "Collapse usage details",
   "最近结果 Token": "Latest result tokens",
   "这是最近一次结果的快照，不是本轮累计、上下文占用或订阅额度；处理中不表示即时消耗。": "A snapshot of the latest result, not this round's total, context usage, or subscription quota. During processing it does not indicate live consumption.",
-  "界面语言": "Interface language"
+  "界面语言": "Interface language",
+  "工作快照对照：{p0}/{p1} 项与主分支一致。": "Work snapshot comparison: {p0}/{p1} items match the main branch.",
+  "主分支未找到相同路径：{p0} 项。": "Same path not found on the main branch: {p0} items.",
+  "与主分支内容或文件属性不同：{p0} 项。": "Content or file attributes differ from the main branch: {p0} items.",
+  "另有 {p0} 项尚未完成内容对照。": "Content comparison is incomplete for {p0} more items.",
+  "工作快照对照：记录中的内容与主分支一致。": "Work snapshot comparison: recorded content matches the main branch.",
+  "工作快照对照：{p0}。": "Work snapshot comparison: {p0}.",
+  "尚未匹配到相同内容": "No matching content found yet",
+  "这是累计工作快照的内容对照，不代表待提交、待合并或必须发布的文件清单。": "This compares the cumulative work snapshot. It is not a list of files awaiting commit or merge, or files that must be published."
 });

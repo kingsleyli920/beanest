@@ -426,14 +426,16 @@ function codeRunActive(snapshot = state.snapshot) {
   if (snapshot?.room?.work_activity?.state === 'working' || snapshot?.live?.jobs?.some((job) => job.status === 'working')) return true;
   return !!snapshot?.current_run && !['complete', 'completed', 'ready_for_user', 'needs_user', 'stopped', 'interrupted', 'cancelled', 'unknown'].includes(snapshot.current_run.status);
 }
-function taskDeliveryMessage(delivery) {
+function taskGitDeliveryState(delivery) {
+  const states = [delivery.main?.state, delivery.remote?.state,
+    ...[delivery.private?.state, delivery.workspace?.state].filter(Boolean)];
+  return states.includes('pending') ? 'pending' : states.every(state => state === 'confirmed') ? 'confirmed' : 'unknown';
+}
+function taskDeliveryMessage(delivery, gitState) {
   const main = delivery.main?.state, remote = delivery.remote?.state, privateState = delivery.private?.state;
   if (main === 'pending') return t("还有任务成果未合入主分支");
   if (privateState === 'pending' || delivery.workspace?.state === 'pending') return t("还有工作区成果待提交");
-  if (delivery.published?.state === 'pending') return main === 'confirmed' && remote === 'confirmed'
-    ? t("已提交代码已同步，另有交付文件待核对") : t("还有交付文件待合入主分支");
-  if (delivery.published?.state === 'unknown') return main === 'confirmed' && remote === 'confirmed'
-    ? t("已提交代码已同步，另有交付文件待核对") : t("交付文件与主分支的对应关系尚未核齐");
+  if (gitState === 'confirmed') return t("已提交代码已合入并同步 GitHub");
   if (main === 'confirmed') {
     if (remote === 'confirmed') return privateState === 'unknown' || delivery.workspace?.state === 'unknown' ? t("已提交代码已同步，工作区成果尚未核齐") : t("已提交代码已合入并同步 GitHub");
     return remote === 'pending' ? t("主分支已合入，GitHub 还有内容待同步") : t("主分支已合入，GitHub 尚未核对");
@@ -480,17 +482,25 @@ function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
   return messages.map((message, index) => index ? message.slice(message.indexOf('：') + 1) : message).join('；');
 }
 function taskPublishedMessage(published) {
-  const files = published.files;
+  const files = published.files; const parts = [];
   if (Number.isSafeInteger(files?.total) && files.total > 0 && Number.isSafeInteger(files.matched)
       && files.matched >= 0 && files.matched <= files.total) {
-    const remaining = files.total - files.matched;
-    return t("交付文件：{p0}/{p1} 项与主分支一致{p2}。", { p0: files.matched, p1: files.total, p2: remaining ? t("，另 {p0} 项尚需核对对应位置", { p0: remaining }) : '' });
+    parts.push(t("工作快照对照：{p0}/{p1} 项与主分支一致。", { p0: files.matched, p1: files.total }));
+    if (Number.isSafeInteger(files.missing) && files.missing > 0) parts.push(t("主分支未找到相同路径：{p0} 项。", { p0: files.missing }));
+    if (Number.isSafeInteger(files.different) && files.different > 0) parts.push(t("与主分支内容或文件属性不同：{p0} 项。", { p0: files.different }));
+    if (Number.isSafeInteger(files.missing) && Number.isSafeInteger(files.different)) {
+      const unknown = files.total - files.matched - files.missing - files.different;
+      if (unknown > 0) parts.push(t("另有 {p0} 项尚未完成内容对照。", { p0: unknown }));
+    }
+  } else if (published.state === 'confirmed') parts.push(t("工作快照对照：记录中的内容与主分支一致。"));
+  else {
+    const reasons = { published_work_baseline_unknown: t("缺少本任务起点记录，暂不能核齐成果"),
+      published_work_unavailable: t("暂时无法读取，尚未完成核对"), published_work_mainline_unconfirmed: t("暂时无法比对交付文件与主分支") };
+    parts.push(t("工作快照对照：{p0}。", { p0: reasons[published.reason] || (published.state === 'pending'
+      ? t("尚未匹配到相同内容") : t("尚未确认与主分支的对应位置")) }));
   }
-  if (published.state === 'confirmed') return t("交付文件：已记录的成果与主分支核对一致。");
-  const reasons = { published_work_baseline_unknown: t("缺少本任务起点记录，暂不能核齐成果"),
-    published_work_unavailable: t("暂时无法读取，尚未完成核对"), published_work_mainline_unconfirmed: t("暂时无法比对交付文件与主分支") };
-  return t("交付文件：{p0}。", { p0: reasons[published.reason] || (published.state === 'pending'
-    ? t("还有成果未合入主分支") : t("尚未确认与主分支的对应位置")) });
+  parts.push(t("这是累计工作快照的内容对照，不代表待提交、待合并或必须发布的文件清单。"));
+  return parts.join(interfaceWordSpace());
 }
 function codeStateMessage(data) {
   if (data?.state === 'ready') {
@@ -536,6 +546,7 @@ function renderCodeStatus() {
   summary.textContent = entry.loading ? t("正在读取代码状态…") : entry.error || `${stale && available && data.state === 'ready' ? t("上次检查：") : ''}${codeStateMessage(available ? data : null)}`;
   const delivery = available ? data?.delivery_summary : null;
   const deliveryKnown = delivery?.scope === 'task_linked_workspaces';
+  const gitState = deliveryKnown ? taskGitDeliveryState(delivery) : null;
   const headline = $('code-status-summary');
   headline.textContent = available && data.state === 'ready' ? t("{p0}尚未取得本任务的交付核对记录", { p0: stale ? t("上次检查：") : '' }) : summary.textContent;
   headline.className = 'code-status-summary';
@@ -558,7 +569,7 @@ function renderCodeStatus() {
   $('code-delivery-note').textContent = t("可刷新重新读取，或请伙伴核对并提交同步。");
   if (deliveryKnown) {
     const prefix = stale ? t("上次检查：") : '';
-    headline.textContent = prefix + taskDeliveryMessage(delivery);
+    headline.textContent = prefix + taskDeliveryMessage(delivery, gitState);
     $('code-delivery-main').textContent = prefix + taskDeliveryScopeStatus(delivery, 'main', data.workspaces);
     $('code-delivery-remote').textContent = prefix + taskDeliveryScopeStatus(delivery, 'remote', data.workspaces);
     if (!workspaceStatus.hidden) workspaceStatus.textContent = prefix + taskDeliveryScopeStatus(delivery, 'workspace', data.workspaces);
@@ -569,10 +580,10 @@ function renderCodeStatus() {
     $('code-delivery-note').textContent = delivery.main?.state !== 'confirmed' && delivery.remote?.state === 'confirmed'
       ? t("GitHub 已同步的是当前主分支；上面的任务成果问题仍需核对，不能据此判断全部交付完成。")
       : t("主分支核对已提交代码，工作区核对尚未交付的成果；GitHub 核对当前主分支。");
-    if (delivery.published) $('code-delivery-note').textContent = taskPublishedMessage(delivery.published);
-    if (Number.isSafeInteger(delivery.workspace?.untracked) && delivery.workspace.untracked > 0)
-      $('code-delivery-note').textContent += t(" 另有 {p0} 项未纳入 Git，需伙伴核对是否提交。", { p0: delivery.workspace.untracked });
   }
+  $('code-published-note').hidden = !deliveryKnown || !delivery.published;
+  $('code-published-note').textContent = deliveryKnown && delivery.published
+    ? (stale ? t("上次检查：") : '') + taskPublishedMessage(delivery.published) : '';
   const repository = codeRepository(entry);
   if (repository && repository.state !== 'bound') {
     headline.textContent = codeRepositoryNotice(repository);
@@ -586,7 +597,7 @@ function renderCodeStatus() {
   const merged = ['merged', 'same_branch'].includes(data?.mainline?.relation) && data?.mainline?.state === 'ready';
   const pendingTracked = trackedKnown ? counts.tracked > 0 : counts?.total > 0;
   summary.className = `code-status-summary${available && !stale && data.state === 'ready' && !pendingTracked && (counts?.total === 0 || merged) ? ' is-clean' : available && (pendingTracked || data?.mainline?.relation === 'unmerged') ? ' is-dirty' : ''}`;
-  if (deliveryKnown) headline.className = `code-status-summary${(!repository || repository.state === 'bound') && !stale && delivery.state === 'confirmed' && delivery.private?.state !== 'unknown' && delivery.private?.state !== 'pending' && delivery.published?.state !== 'unknown' && delivery.published?.state !== 'pending' && delivery.workspace?.state !== 'unknown' && delivery.workspace?.state !== 'pending' ? ' is-clean' : delivery.state === 'pending' ? ' is-dirty' : ''}`;
+  if (deliveryKnown) headline.className = `code-status-summary${(!repository || repository.state === 'bound') && !stale && gitState === 'confirmed' ? ' is-clean' : gitState === 'pending' ? ' is-dirty' : ''}`;
   $('code-tracked-status').hidden = !trackedKnown;
   $('code-tracked-status').textContent = trackedKnown ? t("已跟踪文件：{p0}", { p0: counts.tracked ? t("{p0} 个有改动，尚未提交", { p0: counts.tracked }) : t("无待提交改动") }) : '';
   const untracked = counts?.untracked;
