@@ -51,6 +51,8 @@ _EXCLUDED_DIRS = frozenset({
 
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# (index sha256, revision) pairs whose decoded bytes passed every check.
+_VALIDATED_INDEXES = set()
 
 
 def _path(value, *, root=False):
@@ -179,6 +181,10 @@ class FolderWorkspace(ProjectWorkspace):
         if _hash(raw) != commit["sha256"]:
             raise ProjectWorkspaceError("project_storage_corrupt")
         value = self._decode_json(raw)
+        # Bytes are re-read and hashed every time; only the per-file checks of
+        # identical, already validated bytes are skipped on each UI poll.
+        if (commit["sha256"], revision) in _VALIDATED_INDEXES:
+            return value
         if (not isinstance(value, dict)
                 or set(value) != {"format", "revision", "files", "source", "excluded"}
                 or value["format"] != FORMAT or value["revision"] != revision
@@ -216,6 +222,9 @@ class FolderWorkspace(ProjectWorkspace):
                 or not isinstance(source.get("source_hash"), str) or not _HASH.fullmatch(source["source_hash"])
                 or not isinstance(source.get("name"), str) or not isinstance(source.get("path"), str)):
             raise ProjectWorkspaceError("project_storage_corrupt")
+        if len(_VALIDATED_INDEXES) >= 4096:
+            _VALIDATED_INDEXES.clear()
+        _VALIDATED_INDEXES.add((commit["sha256"], revision))
         return value
 
     def _publish_index(self, room, revisions, manifest, files, proposal_id, fingerprint, source, excluded):

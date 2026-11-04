@@ -222,6 +222,9 @@ class RoomStore:
                         ON events(room_id, json_extract(value_json,'$.kind'));
                     CREATE INDEX IF NOT EXISTS events_job
                         ON events(json_extract(value_json,'$.job_id'));
+                    -- Partner monitors read each partner's latest activity and usage.
+                    CREATE INDEX IF NOT EXISTS events_sender_kind
+                        ON events(json_extract(value_json,'$.sender'), json_extract(value_json,'$.kind'), seq);
                     CREATE TABLE IF NOT EXISTS native_workspaces (
                         room_id TEXT NOT NULL REFERENCES rooms(id), provider TEXT NOT NULL,
                         state_json TEXT NOT NULL, PRIMARY KEY(room_id,provider)
