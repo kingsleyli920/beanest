@@ -25,9 +25,12 @@ class NativeWorkspaceError(ValueError):
         super().__init__(code)
 
 
+_CONTROL = re.compile(r"[\x00-\x1f]")
+
+
 def _path(value):
     if (not isinstance(value, str) or not value or "\\" in value
-            or value.startswith("/") or any(ord(c) < 32 for c in value)
+            or value.startswith("/") or _CONTROL.search(value)
             or any(part in {"", ".", ".."} or part.casefold() == ".git" for part in value.split("/"))):
         raise NativeWorkspaceError("invalid_native_path")
     return value
@@ -64,14 +67,43 @@ def _directory(path):
     return path
 
 
-def _file(root, name):
-    path = root / _path(name)
-    for parent in path.relative_to(root).parents:
-        if (root / parent).is_symlink():
+def _file(root, name, checked=None):
+    name = _path(name)
+    base = str(root)
+    # The root and every parent directory are refused as symlinks. One tree
+    # walk may share its checked directories, never another call's results.
+    parents = [""] + ["/".join(name.split("/")[:index]) for index in range(1, name.count("/") + 1)]
+    for parent in parents:
+        if checked is not None and parent in checked:
+            continue
+        if os.path.islink(os.path.join(base, parent) if parent else base):
             raise NativeWorkspaceError("native_symlink_refused")
-    if path.is_symlink():
+        if checked is not None:
+            checked.add(parent)
+    if os.path.islink(os.path.join(base, name)):
         raise NativeWorkspaceError("native_symlink_refused")
-    return path
+    return root / name
+
+
+# Recovery audits re-read whole private trees on every UI poll. Reuse a digest
+# only while the file's identity, size, mtime and ctime are all unchanged.
+_DIGESTS = {}
+
+
+def _file_digest(path):
+    before = os.stat(path)
+    key = (str(path), before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    sha = _DIGESTS.get(key)
+    if sha is not None:
+        return sha
+    with path.open("rb") as stream:
+        sha = hashlib.file_digest(stream, "sha256").hexdigest()
+        after = os.fstat(stream.fileno())
+    if (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) == key[2:]:
+        if len(_DIGESTS) >= 200_000:
+            _DIGESTS.clear()
+        _DIGESTS[key] = sha
+    return sha
 
 
 def _cancelled(callback):
@@ -340,8 +372,9 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
         raise NativeWorkspaceError("invalid_native_resolution")
     candidates, blocked, generated = [], [], []
     untracked = {_path(name) for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if name}
+    checked = set()
     for name in sorted(set(entries) | allowed | untracked):
-        path = _file(root, name)
+        path = _file(root, name, checked)
         before = entries.get(name)
         if not path.exists():
             if before:
@@ -349,8 +382,7 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
             continue
         if not path.is_file():
             raise NativeWorkspaceError("invalid_native_file")
-        with path.open("rb") as stream:
-            sha = hashlib.file_digest(stream, "sha256").hexdigest()
+        sha = _file_digest(path)
         if (before is None and name not in allowed and _excluded(name) == "excluded_directory"
                 and not any(_excluded(part) == "sensitive_path" for part in name.split("/"))):
             # These untracked build/cache outputs were never captured as

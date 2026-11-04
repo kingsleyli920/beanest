@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -138,6 +139,47 @@ class NativeWorkspaceTests(unittest.TestCase):
         (project / "own.py").symlink_to(source[0] / "own.py")
         with self.assertRaisesRegex(NativeWorkspaceError, "native_symlink_refused"):
             collect_changes(project, receipt, ["own.py"])
+
+    def test_parent_directory_symlink_is_refused_for_every_nested_path(self):
+        # Catches: sharing checked parent directories across one tree walk must
+        # still refuse a symlinked directory before reading any file beneath it.
+        source = self.export("source", {"pkg/a.py": "a\n", "pkg/deep/b.py": "b\n", "top.py": "t\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        outside = self.root / "outside-pkg"
+        shutil.copytree(project / "pkg", outside)
+        shutil.rmtree(project / "pkg")
+        (project / "pkg").symlink_to(outside, target_is_directory=True)
+        # Hide the links from the untracked listing so only the parent check sees them.
+        exclude = project / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text("/pkg\n/pkg/deep\n")
+        with self.assertRaisesRegex(NativeWorkspaceError, "native_symlink_refused"):
+            collect_changes(project, receipt, [])
+        (project / "pkg").unlink()
+        shutil.copytree(outside, project / "pkg")
+        (project / "pkg" / "deep").rename(project / "pkg" / "real-deep")
+        (project / "pkg" / "deep").symlink_to(project / "pkg" / "real-deep", target_is_directory=True)
+        with self.assertRaisesRegex(NativeWorkspaceError, "native_symlink_refused"):
+            collect_changes(project, receipt, [])
+
+    def test_reused_digest_never_hides_same_size_content_with_restored_mtime(self):
+        # Catches: a stat-keyed digest cache that misses an edit whose size and
+        # mtime were restored (ctime still changes), reporting it as unchanged.
+        source = self.export("source", {"own.py": "old\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        self.assertEqual(collect_changes(project, receipt, ["own.py"])["files"], [])
+        target = project / "own.py"
+        before = target.stat()
+        target.write_text("new\n")
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(target.stat().st_mtime_ns, before.st_mtime_ns)
+        changed = collect_changes(project, receipt, ["own.py"])["files"]
+        self.assertEqual([(item["path"], item["content"]) for item in changed], [("own.py", "new\n")])
+        target.write_text("old\n")
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(collect_changes(project, receipt, ["own.py"])["files"], [])
 
     def test_changed_export_is_rejected_and_only_created_tree_is_cleaned(self):
         source = self.export("source", {"own.py": "old\n"})

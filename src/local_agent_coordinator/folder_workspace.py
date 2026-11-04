@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import time
@@ -49,12 +50,15 @@ _EXCLUDED_DIRS = frozenset({
 })
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _path(value, *, root=False):
     if value == "" and root:
         return value
     if (not isinstance(value, str) or not value or len(value) > 1024
             or "\\" in value or value.startswith("/")
-            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            or _CONTROL.search(value)
             or any(part in {"", ".", ".."} for part in value.split("/"))):
         raise ProjectWorkspaceError("invalid_project_files")
     try:
