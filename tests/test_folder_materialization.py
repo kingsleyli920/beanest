@@ -61,8 +61,13 @@ class FolderMaterializationTests(unittest.TestCase):
         self.seed()
         self.workspace.snapshot()
         self.workspace.snapshot()
-        index=next(path for path in (self.root/self.room_id/'revisions').iterdir() if path.suffix=='.json')
-        index.write_bytes(index.read_bytes().replace(b'a.txt',b'b.txt'))
+        # Directory order differs by filesystem; tamper every revision naming the file.
+        tampered=0
+        for index in (self.root/self.room_id/'revisions').iterdir():
+            if index.suffix=='.json' and b'a.txt' in index.read_bytes():
+                index.write_bytes(index.read_bytes().replace(b'a.txt',b'b.txt'))
+                tampered+=1
+        self.assertGreater(tampered,0)
         self.assertCode('project_storage_corrupt',self.workspace.snapshot)
 
     def test_corrupt_blob_and_cancellation_remove_only_the_new_export(self):
