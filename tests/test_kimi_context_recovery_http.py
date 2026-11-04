@@ -285,6 +285,29 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
             indexes = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
         self.assertTrue({'events_room_kind', 'events_job'} <= indexes)
 
+    def test_partner_retired_from_the_objective_cannot_veto_recovery_with_an_unreadable_login(self):
+        # Catches: a peer already retired for quota whose login could not be
+        # re-read (stale CLI, missing email) refused Continue for every peer.
+        from unittest.mock import patch
+        fixture = self.fixture('compaction_quota')
+        stopped = fixture.stopped_context_run()
+        with fixture.service.store._connection(write=True) as db:
+            db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (json.dumps({'kimi': {
+                'reason': 'subscription_limit_reached', 'at': 1.0, 'cleanup_confirmed': True}}), stopped['objective']['id']))
+        original = fixture.partners.get
+        def get(provider):
+            value = original(provider)
+            if provider == 'kimi':
+                value = {**value, 'availability': {**value['availability'], 'state': 'blocked',
+                         'selectable': False, 'reason': 'account_identity_unknown'}}
+            return value
+        fixture.t3_calls.append({'job_id': None})  # the lone peer resumes a later T3 attempt
+        with patch.object(fixture.partners, 'get', side_effect=get):
+            code, value = fixture.continue_http(fixture.read())
+            self.assertEqual(code, 200, value)
+            final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+
     def test_other_auth403_is_not_a_context_recovery_authority(self):
         fixture = self.fixture('other_auth403')
         stopped = fixture.stopped_context_run()

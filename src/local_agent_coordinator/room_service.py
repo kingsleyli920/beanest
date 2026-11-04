@@ -1843,9 +1843,12 @@ class RoomService:
             quota_failure = current.get("native_quota_failure")
             # An exact exhausted source is being retired, not checked as a
             # possible recipient. Its login cache cannot veto healthy receivers.
+            # Partners already retired from this objective receive no work; an
+            # unreadable login for one of them cannot veto the remaining peers.
+            retired = (snapshot.get("objective") or {}).get("retired_partners") or {}
             availability_members = ([_message_target] if directed_followup else
                 [member["id"] for member in snapshot["members"]
-                 if not quota_failure or member["id"] != quota_failure["provider"]])
+                 if (not quota_failure or member["id"] != quota_failure["provider"]) and member["id"] not in retired])
             quota_blocked = await self._guard_objective_availability(
                 availability_members, snapshot["objective"]["execution_policy"])
             if quota_failure:
@@ -3828,8 +3831,9 @@ class RoomService:
             if intent is not None:
                 self._expected_run(snapshot, **binding)
                 recipients = checked_target(target, tuple(member["id"] for member in snapshot["members"]))
+                retired = (snapshot.get("objective") or {}).get("retired_partners") or {}
                 availability_members = (recipients if self._natural_continuation(snapshot, target=target)["action"] in {"message", "directed-objective"}
-                                        else [member["id"] for member in snapshot["members"]])
+                                        else [member["id"] for member in snapshot["members"] if member["id"] not in retired])
                 quota_blocked = await self._guard_objective_availability(availability_members,
                     (snapshot.get("objective") or {}).get("execution_policy"))
                 snapshot = self._snapshot(canonical)
