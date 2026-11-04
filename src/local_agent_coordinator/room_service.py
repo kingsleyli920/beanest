@@ -5763,6 +5763,18 @@ class RoomService:
                 self.store.finish_stop(room_id, confirmed=False, final_status="unknown")
 
     def _validate_team_result(self, job, parsed):
+        if job["team"]["job_phase"] == "work":
+            # A work reply may settle only its own task. An extra terminal for
+            # another task (e.g. finishing the parent it unblocked) is a
+            # correctable response shape, not a permission breach that
+            # should stop the whole objective.
+            stray = [index for index, command in enumerate(parsed["commands"])
+                     if command["type"] in {"complete", "request_help", "block"}
+                     and command.get("task_id") != job["team"]["task_id"]]
+            if stray:
+                raise ResponseValidationError("invalid_team_commands", {"commands": [{
+                    "index": index, "operation": parsed["commands"][index]["type"],
+                    "constraint": "one_terminal_for_own_task"} for index in stray]})
         if not self.store.prevalidate_team_result(job["id"], parsed["commands"]):
             return False
         snapshot = self.store.snapshot(job["room_id"])

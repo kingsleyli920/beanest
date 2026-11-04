@@ -1168,6 +1168,10 @@ class TeamStore:
                          "keep any file changes within the current task's authorized scope. If code repair is necessary, "
                          "report the missing ownership explicitly; any later write task still needs ordinary plan/claim authorization, "
                          "and a text reply alone is not proof that the code was repaired.")
+            if issue.get("constraint") == "one_terminal_for_own_task":
+                text += (" " + prefix + " settles a task other than this work call's own task. Submit exactly one "
+                         "complete, request_help or block for the current task only; other tasks, including a parent "
+                         "this work unblocks, resume through their own calls.")
         if diagnostic.get("command_shapes"):
             text += (" Command field shapes rejected by transactional validation (types only, not values): "
                      + json.dumps(diagnostic["command_shapes"], sort_keys=True) + ". "
