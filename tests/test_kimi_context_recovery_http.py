@@ -26,6 +26,18 @@ CONTEXT_FAILURE = textwrap.dedent('''
             "message": message, "details": {"statusCode": 403}}})
         send({"id": row["id"], "error": {"code": -32000, "message": "PRIVATE_FAKE_ERROR"}})
         continue
+    if case == "compaction_quota" and method == "session/prompt":
+        # Kimi wraps a 5-hour limit hit by auto compaction and still ends the turn.
+        append_wire({"type": "turn.prompt", "origin": {"kind": "user"}, "input": params["prompt"]})
+        append_wire({"type": "full_compaction.begin", "source": "auto"})
+        append_wire({"type": "llm.request", "kind": "compaction", "model": "fictional-0", "modelAlias": "kimi-code/fictional-0", "droppedCount": 0})
+        append_wire({"type": "full_compaction.cancel"})
+        append_wire({"type": "turn.ended", "turnId": 23, "reason": "failed", "error": {
+            "code": "compaction.failed", "name": "Error2", "retryable": False, "message": "Fictional private provider error.",
+            "cause": {"code": "provider.api_error", "name": "APIProviderQuotaExhaustedError", "retryable": False,
+                      "message": "Fictional private provider error.", "details": {"statusCode": 429}}}})
+        send({"id": row["id"], "result": {"stopReason": "end_turn"}})
+        continue
 ''')
 
 
@@ -70,6 +82,11 @@ class ContextRecoveryFixture(InternalReplanFixture):
                     # Minimal retired classification simulation, not a production snapshot.
                     result['failure_code'] = 'native_auth_unconfirmed'
                     result['native_execution'].pop('failure_diagnostic', None)
+                if self.failure == 'compaction_quota':
+                    # Rooms stuck before wrapped quota refusals were classified.
+                    result['failure_code'] = 'native_turn_unconfirmed'
+                    result['native_execution']['failure_diagnostic'] = {
+                        'phase': 'compaction', 'reason': 'provider_error', 'prompt_sent': True}
                 return result
             finally:
                 self.native_case = previous
@@ -78,7 +95,7 @@ class ContextRecoveryFixture(InternalReplanFixture):
     def reply(self, agent, context, cwd):
         if self.recovered and context['job']['job_phase'] in {'plan', 'coordinate'}:
             commands = []
-            if agent == 'kimi' and not context['team']['tasks']:
+            if agent == context['team']['plan_author'] and not context['team']['tasks']:
                 commands = [proposal('T4', paths=['README.md']),
                             proposal('T3', paths=['final.md'], dependencies=['T4']),
                             {'type': 'claim', 'task_id': 'T4'}, {'type': 'claim', 'task_id': 'T3'}]
@@ -163,6 +180,36 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual(fixture.work_tasks.count('T1'), 1)
         self.assertEqual(fixture.work_tasks.count('T2'), 1)
         self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
+
+    def test_compaction_quota_stuck_room_continues_by_retiring_kimi_without_replaying_it(self):
+        # Catches: a room stopped as native_turn_unconfirmed by a wrapped Kimi
+        # compaction quota refusal had no recovery path, so every continue,
+        # retry and directed message was refused for good.
+        fixture = self.fixture('compaction_quota')
+        stopped = fixture.stopped_context_run()
+        self.assertEqual(next(job['error'] for job in stopped['jobs'] if job['id'] == fixture.failed_plan['job_id']),
+                         'native_turn_unconfirmed')
+        self.assertEqual((stopped['team']['phase'], stopped['team']['stop_reason']), ('unknown', 'native_turn_unconfirmed'))
+        self.assertTrue(stopped['current_run']['can_recover_native'], stopped['current_run'])
+        old_jobs = {job['id']: (job['status'], job['error']) for job in stopped['jobs']}
+        old_wire = fixture.failed_wire.read_bytes()
+        prior_calls = len(fixture.calls)
+        # The script blocks only a first T3 attempt and counts Kimi's; the
+        # lone peer's resumed T3 is a later attempt of the same task.
+        fixture.t3_calls.append({'job_id': None})
+        code, value = fixture.continue_http(stopped)
+        self.assertEqual(code, 200, value)
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertEqual(final['objective']['retired_partners'].get('kimi', {}).get('reason'), 'subscription_limit_reached')
+        self.assertEqual(final['objective']['continuation']['native_context_handoff']['reason'], 'provider_quota_exhausted')
+        later = fixture.calls[prior_calls:]
+        self.assertTrue(later)
+        self.assertFalse(any(call['agent'] == 'kimi' for call in later))
+        self.assertEqual({job['id']: (job['status'], job['error']) for job in final['jobs'] if job['id'] in old_jobs}, old_jobs)
+        self.assertEqual(fixture.failed_wire.read_bytes(), old_wire)
+        self.assertTrue(all(task['status'] in {'accepted', 'self_checked'} for task in final['team']['tasks']))
+        self.assertTrue({'T3', 'T4'} <= {task['id'] for task in final['team']['tasks']})
 
     def test_other_auth403_is_not_a_context_recovery_authority(self):
         fixture = self.fixture('other_auth403')

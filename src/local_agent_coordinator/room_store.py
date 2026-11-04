@@ -3019,7 +3019,7 @@ class RoomStore:
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         if (room["mode"] != "native_project" or room["stop_requested"] or team is None
                 or team["phase"] not in {"unknown", "stopped", "interrupted"}
-                or team["stop_reason"] not in {"native_auth_unconfirmed", "native_provider_error"}):
+                or team["stop_reason"] not in {"native_auth_unconfirmed", "native_provider_error", "native_turn_unconfirmed"}):
             return None
         tasks = db.execute("SELECT status FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])).fetchall()
         if any(task[0] not in {"accepted", "self_checked"} for task in tasks):
@@ -3244,6 +3244,7 @@ class RoomStore:
                 self._settle(db, room_id)
                 return True
             context_limit = self._native_context_limit_candidate(db, room_id)
+            compaction_quota = False
             legacy = self._legacy_native_recovery_candidate(db, room_id)
             review = self._native_review_recovery_candidate(db, room_id)
             fenced = self._native_fenced_recovery_candidate(db, room_id)
@@ -3361,14 +3362,19 @@ class RoomStore:
                 self._event(db, room_id, "native_review_recovery_attestation", sender=recovery_source, **legacy_attestation)
             elif context_limit:
                 receipt = (legacy_attestation or {}).get("receipt", {})
+                compaction_quota = (legacy_attestation or {}).get("recovery_kind") == "native_compaction_quota"
                 if (not isinstance(legacy_attestation, dict)
-                        or legacy_attestation.get("recovery_kind") != "native_context_limit"
+                        or legacy_attestation.get("recovery_kind") not in {"native_context_limit", "native_compaction_quota"}
                         or legacy_attestation.get("candidate") != context_limit
                         or legacy_attestation.get("current_binding") != binding
                         or legacy_attestation.get("old_commands_accepted") is not False
-                        or receipt.get("diagnostic") != {"phase": "compaction", "reason": "provider_context_limit", "http_status": 403}
+                        or receipt.get("diagnostic") != ({"phase": "compaction", "reason": "provider_quota_exhausted", "http_status": 429}
+                            if compaction_quota else {"phase": "compaction", "reason": "provider_context_limit", "http_status": 403})
                         or any(not re.fullmatch(r"[0-9a-f]{64}", receipt.get(key, "")) for key in ("sha256", "prompt_sha256"))):
                     raise RoomError("native_recovery_diagnostic_unconfirmed")
+                if compaction_quota:
+                    # An exhausted peer is retired below, never resumed in a fresh session.
+                    quota_blocked = set(quota_blocked) | {context_limit["provider"]}
                 self._event(db, room_id, "native_context_limit_handoff", sender=recovery_source, **legacy_attestation,
                             old_calls_replayed=False)
             elif team["stop_reason"] not in NATIVE_RECOVERY_ERRORS:
@@ -3453,9 +3459,13 @@ class RoomStore:
                 objective = self._team.objectives.current(db, room_id)
                 continuation = json.loads(objective["continuation_json"] or "{}")
                 continuation["native_context_handoff"] = {"source_run_id": binding["run_id"],
-                    "source_job_id": context_limit["job_id"], "reason": "provider_context_limit",
+                    "source_job_id": context_limit["job_id"],
+                    "reason": "provider_quota_exhausted" if compaction_quota else "provider_context_limit",
                     "sessions": "fresh", "old_sessions_preserved": True, "old_calls_replayed": False}
                 db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(continuation), objective["id"]))
+                if compaction_quota:
+                    self._team.retire_quota(db, room_id, context_limit["provider"], "subscription_limit_reached",
+                                            ownership_files, binding["revision"], defer_reconcile=True)
             if fenced:
                 for retained in legacy_attestation["retained_peers"]:
                     source = retained["candidate"]

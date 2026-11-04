@@ -2309,7 +2309,7 @@ class RoomService:
             self._wake(room_id)
 
     def _audit_native_context_limit_recovery(self, snapshot, candidate, *, quota=False):
-        from .kimi_acp import context_limit_recovery_proof, quota_failure_recovery_proof
+        from .kimi_acp import compaction_quota_recovery_proof, context_limit_recovery_proof, quota_failure_recovery_proof
         state = self.store.native_workspace(snapshot["room"]["id"], candidate["provider"])
         current = self._project(snapshot["room"]["id"]).snapshot()
         binding = candidate.get("binding") or {}
@@ -2339,15 +2339,21 @@ class RoomService:
                 and {member["id"] for member in context.get("members", [])} == set(self.store.member_ids(snapshot["room"]["id"]))
                 and self._native_receipt_schema_matches(adapters._strict_json(schema_text), context, candidate["provider"],
                     candidate["phase"], can_propose=candidate["provider"] == candidate["plan_author"]))
+        kind = "native_quota_failure" if quota else "native_context_limit"
         try:
             prove = quota_failure_recovery_proof if quota else context_limit_recovery_proof
-            receipt = prove(Path(state["project"]), candidate["session_id"],
-                claimed_at=candidate["claimed_at"], finished_at=candidate["finished_at"], model=candidate["model"], validate_prompt=matches)
+            arguments = dict(claimed_at=candidate["claimed_at"], finished_at=candidate["finished_at"],
+                             model=candidate["model"], validate_prompt=matches)
+            receipt = prove(Path(state["project"]), candidate["session_id"], **arguments)
+            if receipt is None and not quota:
+                # The same exact compaction may instead prove a typed quota refusal.
+                receipt = compaction_quota_recovery_proof(Path(state["project"]), candidate["session_id"], **arguments)
+                kind = "native_compaction_quota"
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
             receipt = None
         if receipt is None:
             raise RoomError("native_recovery_diagnostic_unconfirmed")
-        return {"recovery_kind": "native_quota_failure" if quota else "native_context_limit", "candidate": candidate,
+        return {"recovery_kind": kind, "candidate": candidate,
             "current_binding": {"run_id": snapshot["current_run"]["id"], "revision": snapshot["current_run"]["revision"],
                                 "digest": snapshot["current_run"]["digest"]},
             "receipt": receipt, "old_commands_accepted": False}

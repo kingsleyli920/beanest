@@ -368,6 +368,11 @@ def quota_failure_recovery_proof(cwd, session_id, **kwargs):
     return _failed_turn_recovery_proof(cwd, session_id, quota=True, **kwargs)
 
 
+def compaction_quota_recovery_proof(cwd, session_id, **kwargs):
+    """Prove a typed quota refusal raised by this prompt's automatic compaction."""
+    return _failed_turn_recovery_proof(cwd, session_id, quota=True, compaction=True, **kwargs)
+
+
 def _quota_cleanup_footer(row, tasks, ended_at):
     """Recognize an owned process kill receipt, never a new native action.
 
@@ -406,7 +411,7 @@ def _quota_cleanup_footer(row, tasks, ended_at):
     return True
 
 
-def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, model, validate_prompt, quota):
+def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, model, validate_prompt, quota, compaction=False):
     """Bind a failed turn to this owned prompt and the current wire tail.
 
     Quota proof may include matched background-process cleanup metadata. It
@@ -491,12 +496,13 @@ def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, mod
                 elif kind == "turn.ended":
                     failed, turn = row.get("reason") == "failed", row.get("turnId")
                     ended_at = timestamp
-        if (prompts != 1 or (not quota and not started) or not failed or type(turn) is not int or started_turns not in ([], [turn]) or not isinstance(request, dict)
-                or request.get("kind") not in ({"loop"} if quota else {"compaction", "full_compaction"})
+        compacting = compaction or not quota
+        if (prompts != 1 or (compacting and not started) or not failed or type(turn) is not int or started_turns not in ([], [turn]) or not isinstance(request, dict)
+                or request.get("kind") not in ({"compaction", "full_compaction"} if compacting else {"loop"})
                 or request.get("modelAlias") != model):
             return None
         diagnostic = failed_turn_diagnostic(path, ((info.st_dev, info.st_ino), offset))
-        expected = ({"phase": "prompt", "reason": "provider_quota_exhausted", "http_status": 429} if quota else
+        expected = ({"phase": "compaction" if compaction else "prompt", "reason": "provider_quota_exhausted", "http_status": 429} if quota else
                     {"phase": "compaction", "reason": "provider_context_limit", "http_status": 403})
         if diagnostic != expected:
             return None
