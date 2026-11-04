@@ -786,6 +786,28 @@ test('an explicit project selects one first author and displays isolated changes
   assert.equal(descendants(ui.get('project-files')).some((node) => node.tagName === 'SVG'), false);
 });
 
+test('partner card names the CLI in use and why another installation was skipped', async () => {
+  // Catches: a stale CLI first on PATH surfaced only as "请刷新账号状态",
+  // leaving users to compare installations by hand.
+  const agents = catalog.slice(0, 2);
+  const partners = agents.map((agent) => ({ ...agent, adapter: agent.id, enabled: true, health: { state: 'ready', version: '0.163.0', checked_at: 5 },
+    monitor: { status: 'idle' }, installation: agent.id === 'codex'
+      ? { state: 'found', executable: '/Applications/Fictional.app/codex',
+          skipped: [{ path: '/fictional/nvm/bin/codex', version: '0.144.4', reason: 'config_unreadable' },
+                    { path: '/fictional/other/codex', version: null, reason: 'not_a_known_reason' }] }
+      : { state: 'found' } }));
+  const ui = await browser({ agents, partners, route(request) {
+    if (request.path === '/api/status') return { agents, task_modes: ['text'] };
+    if (request.path === '/api/partners') return { partners, supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }] };
+  } });
+  await ui.click('open-partners');
+  const text = ui.get('partners-list').textContent;
+  assert.match(text, /已跳过 \/fictional\/nvm\/bin\/codex（0\.144\.4）：读不了本机配置文件/);
+  assert.match(text, /使用中的 CLI\/Applications\/Fictional\.app\/codex/);
+  assert.doesNotMatch(text, /\/fictional\/other\/codex/, 'an unknown reason is never rendered as a guess');
+  assert.equal((text.match(/已跳过/g) || []).length, 1);
+});
+
 test('partner registration and explicit checks do not create goals or select the new partner', async () => {
   let agents = catalog.slice(0, 2);
   let partners = agents.map((agent) => ({ ...agent, adapter: agent.id, enabled: true, health: { state: 'unknown' }, monitor: { status: 'idle' } }));

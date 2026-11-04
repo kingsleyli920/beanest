@@ -3825,6 +3825,17 @@ function renderGlobalPartners() {
     card.append(heading, element('p', { found: t("本机已找到"), missing: t("本机未找到"), unknown: t("本机未检测") }[installation], 'installation-state'),
       element('p', t("连接检查：{p0}", { p0: healthLabels[health.state] || healthLabels.unknown }), `health-state ${health.state === 'ready' ? 'ready' : 'unknown'}`));
     if (availability.value) card.append(element('p', availabilityText(availability), `availability-note${availability.blocked ? ' blocked' : ''}`));
+    const skippedReasons = {
+      config_unreadable: t("读不了本机配置文件，通常是较旧的 CLI 遇到新版配置；升级或移除这个安装即可。"),
+      cli_outdated: t("版本太旧，不支持豆窝需要的参数；升级或移除这个安装即可。"),
+      cli_unusable: t("这个安装无法正常运行，例如缺少它依赖的 Node。"),
+      login_unconfirmed: t("没有确认已登录的订阅账号。"), login_check_failed: t("登录检查没有完成。"),
+    };
+    for (const item of Array.isArray(partner.installation?.skipped) ? partner.installation.skipped : []) {
+      if (typeof item?.path !== 'string' || !Object.hasOwn(skippedReasons, item.reason)) continue;
+      card.append(element('p', t("已跳过 {p0}（{p1}）：{p2}", { p0: item.path,
+        p1: typeof item.version === 'string' ? item.version : t("版本未知"), p2: skippedReasons[item.reason] }), 'availability-note blocked'));
+    }
     const recheck = availabilityRecheckControl(partner.id); if (recheck) card.append(recheck);
     const healthReasons = {
       cli_missing: t("本机未找到对应 CLI。"), cli_check_failed: t("CLI 检查未成功，接入状态尚未确认。"),
@@ -3842,6 +3853,7 @@ function renderGlobalPartners() {
     const facts = element('dl', '', 'monitor-facts');
     const fact = (label, value) => facts.append(element('dt', label), element('dd', value));
     fact(t("CLI 版本"), typeof health.version === 'string' ? health.version : t("不可用"));
+    if (typeof partner.installation?.executable === 'string') fact(t("使用中的 CLI"), partner.installation.executable);
     fact(t("认证方式"), typeof health.auth?.method === 'string' ? health.auth.method : t("未确认"));
     fact(t("最近检查"), Number.isFinite(health.checked_at) ? timeLabel(health.checked_at, true) : t("尚未检查"));
     const monitor = partner.monitor || {};

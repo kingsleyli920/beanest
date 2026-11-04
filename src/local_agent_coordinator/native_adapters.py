@@ -720,9 +720,11 @@ def native_command(agent, session_id=None, *, permission='read_only',
 
 def _processes():
     """Read process identities so cleanup never targets a reused PID by name."""
+    # lstart is localized: zh/ja dates such as "三 10月/14" split into fewer
+    # fields, silently dropping processes from cleanup. Parse the C locale.
     completed = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,lstart=,stat='],
                                capture_output=True, timeout=2, check=False,
-                               env=adapters._environment())
+                               env={**adapters._environment(), 'LC_ALL': 'C'})
     if completed.returncode:
         raise RuntimeError('native_process_inspection_failed')
     result = {}

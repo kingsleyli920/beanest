@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import weakref
 
 from .message_capacity import MAX_PROMPT_BYTES
 
@@ -58,25 +59,130 @@ def _find_cli(command: str, fallbacks: tuple[Path, ...]) -> str | None:
     return None
 
 
+def _install_locations(agent):
+    return {'codex': (CODEX_APP,),
+            'claude': (Path.home() / '.local/bin/claude', *CLAUDE_SYSTEM_PATHS),
+            'kimi': (Path.home() / '.kimi-code/bin/kimi',)}[agent]
+
+
+def cli_installations(agent) -> list[str]:
+    """Every distinct executable installation, PATH first; nothing is executed."""
+    on_path = shutil.which(agent)
+    found, seen = [], set()
+    for path in ((Path(on_path),) if on_path else ()) + _install_locations(agent):
+        try:
+            if path.is_file() and os.access(path, os.X_OK) and os.path.realpath(path) not in seen:
+                seen.add(os.path.realpath(path))
+                found.append(str(path.absolute()))
+        except OSError:
+            # An inaccessible stale installation must not hide a later usable one.
+            continue
+    return found
+
+
+# One verified installation per tool is shared by checks, telemetry and
+# inference, so a quota read never describes a different CLI from the one
+# that runs. A stale copy earlier on PATH (an old nvm global, a second
+# Homebrew install) is skipped and reported instead of silently used.
+_SELECTIONS = {agent: {'path': None, 'skipped': [], 'checked': False} for agent in ('codex', 'claude', 'kimi')}
+_SELECTION_LOCKS = weakref.WeakKeyDictionary()
+
+
+def _selected_cli(agent, missing):
+    installed = cli_installations(agent)
+    if _SELECTIONS[agent]['path'] in installed:
+        return _SELECTIONS[agent]['path']
+    if installed:
+        return installed[0]
+    raise RuntimeError(missing)
+
+
 def find_codex() -> str:
-    path = _find_cli('codex', (CODEX_APP,))
-    if path is not None:
-        return path
-    raise RuntimeError('Codex CLI is unavailable')
+    return _selected_cli('codex', 'Codex CLI is unavailable')
 
 
 def find_claude() -> str:
-    path = _find_cli('claude', (Path.home() / '.local/bin/claude', *CLAUDE_SYSTEM_PATHS))
-    if path is not None:
-        return path
-    raise RuntimeError('Claude Code CLI is unavailable')
+    return _selected_cli('claude', 'Claude Code CLI is unavailable')
 
 
 def find_kimi() -> str:
-    path = _find_cli('kimi', (Path.home() / '.kimi-code/bin/kimi',))
-    if path is not None:
-        return path
-    raise RuntimeError('Kimi Code CLI is unavailable')
+    return _selected_cli('kimi', 'Kimi Code CLI is unavailable')
+
+
+def cli_selection(agent) -> dict:
+    """The last verified choice and why other installations were skipped."""
+    selection = _SELECTIONS[agent]
+    return {'path': selection['path'], 'checked': selection['checked'],
+            'skipped': [dict(item) for item in selection['skipped']]}
+
+
+async def _probe_installation(agent, path, cwd, timeout):
+    """Return (authentication or None, skip reason or None) for one installation."""
+    command = {'codex': [path, 'login', 'status'],
+               'claude': [path, '--safe-mode', '--restricted', 'auth', 'status', '--json'],
+               'kimi': [path, '--version']}[agent]
+    lines, code = await _run(command, '', cwd, timeout, include_stderr=True)
+    text = b'\n'.join(lines)[:65536].decode('utf-8', errors='replace')
+    if agent == 'kimi':
+        # Kimi login is one shared managed configuration; a copy only has to run.
+        usable = code == 0 and re.search(r'[0-9]+\.[0-9]+', text) is not None
+        return ({'available': True} if usable else None), (None if usable else 'cli_unusable')
+    authentication = _authentication(agent, code, text)
+    if authentication['subscription_confirmed']:
+        return authentication, None
+    if 'Error loading configuration' in text:
+        return None, 'config_unreadable'
+    if re.search(r"unknown option|unexpected argument|unrecognized (?:option|argument)", text, re.IGNORECASE):
+        return None, 'cli_outdated'
+    try:
+        json.loads(text) if agent == 'claude' else None
+    except ValueError:
+        return None, 'cli_unusable'
+    return None, 'login_unconfirmed'
+
+
+def _selection_applies(agent):
+    """Arbitrate only between discovered copies; a substituted executable stays authoritative."""
+    installed = cli_installations(agent)
+    try:
+        current = globals()['find_' + agent]()
+    except RuntimeError:
+        return False
+    return len(installed) > 1 and current in installed
+
+
+async def select_cli(agent, cwd, *, timeout=10) -> dict:
+    """Use the first installation that runs and confirms the existing login."""
+    if not _selection_applies(agent):
+        return {'confirmed': None, 'authentication': None, **cli_selection(agent)}
+    lock = _SELECTION_LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(agent, asyncio.Lock())
+    async with lock:
+        installed = cli_installations(agent)
+        ordered = sorted(installed, key=lambda path: path != _SELECTIONS[agent]['path'])
+        skipped, chosen, authentication = [], None, None
+        for path in ordered:
+            try:
+                authentication, reason = await _probe_installation(agent, path, cwd, timeout)
+            except (OSError, RuntimeError, asyncio.TimeoutError):
+                authentication, reason = None, 'login_check_failed'
+            if reason is None:
+                chosen = path
+                break
+            skipped.append({'path': path, 'reason': reason, 'version': None})
+        for item in skipped:
+            try:
+                lines, code = await _run([item['path'], '--version'], '', cwd, timeout, include_stderr=True)
+                match = re.search(r'[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.]+)?', b'\n'.join(lines)[:4096].decode('utf-8', 'replace'))
+                item['version'] = match.group(0) if code == 0 and match else None
+            except (OSError, RuntimeError, asyncio.TimeoutError):
+                pass
+        _SELECTIONS[agent].update(path=chosen, checked=True, skipped=skipped)
+        return {'confirmed': chosen is not None, 'authentication': authentication if chosen else None, **cli_selection(agent)}
+
+
+async def _ensure_cli(agent, cwd, timeout=10):
+    if not _SELECTIONS[agent]['checked'] and _selection_applies(agent):
+        await select_cli(agent, cwd, timeout=timeout)
 
 
 def _environment() -> dict[str, str]:
@@ -584,6 +690,11 @@ async def _subscription_status(agent: str, cwd: Path) -> dict:
     # A cancelled to_thread(doctor) left its synchronous status child running.
     cleanup, attempted = {}, False
     try:
+        if _selection_applies(agent):
+            attempted = True
+            selection = await select_cli(agent, cwd, timeout=15)
+            return {**(selection['authentication'] or {'available': True, 'authMethod': 'unconfirmed',
+                                                       'subscription_confirmed': False}), 'cleanup_confirmed': True}
         command = ([find_codex(), 'login', 'status'] if agent == 'codex' else
                    [find_claude(), '--safe-mode', '--restricted', 'auth', 'status'])
         attempted = True
@@ -1022,6 +1133,7 @@ async def _claude_account_status(cwd, timeout):
 
 async def kimi_status(cwd, *, timeout=10):
     from .kimi_acp import status
+    await _ensure_cli('kimi', cwd, timeout=timeout)
     return await status(cwd, timeout=timeout)
 
 
@@ -1033,8 +1145,10 @@ async def account_status(agent, cwd, *, timeout=10):
         raise AccountTelemetryError('account_check_failed')
     if agent == 'kimi':
         from .kimi_usage import account_status as kimi_account_status
+        await _ensure_cli('kimi', cwd, timeout=timeout)
         return await kimi_account_status(cwd, timeout=timeout)
     if agent == 'codex':
+        await _ensure_cli('codex', cwd, timeout=timeout)
         command = [find_codex(), 'app-server', '--listen', 'stdio://',
                    '-c', 'mcp_servers={}', '-c', 'model_provider="openai"',
                    '-c', 'forced_login_method="chatgpt"', '-c', 'analytics.enabled=false']
@@ -1043,6 +1157,7 @@ async def account_status(agent, cwd, *, timeout=10):
         return await _codex_account_rpc(command, cwd, timeout=timeout)
     if agent != 'claude':
         raise AccountTelemetryError('account_adapter_unsupported')
+    await _ensure_cli('claude', cwd, timeout=timeout)
     return await asyncio.wait_for(_claude_account_status(cwd, timeout), timeout=timeout)
 
 
@@ -1056,6 +1171,7 @@ async def runtime_options(agent, cwd, *, timeout=10):
         return {'models': configuration['models'], 'catalog_source': 'kimi_managed_config',
                 'effort_scope': 'per_model', 'reason': 'provider_model_entitlement_not_exposed'}
     if agent == 'codex':
+        await _ensure_cli('codex', cwd, timeout=timeout)
         command = [find_codex(), 'app-server', '--listen', 'stdio://',
                    '-c', 'mcp_servers={}', '-c', 'model_provider="openai"',
                    '-c', 'forced_login_method="chatgpt"', '-c', 'analytics.enabled=false']
@@ -1068,6 +1184,7 @@ async def runtime_options(agent, cwd, *, timeout=10):
                 'effort_scope': 'per_model', 'reason': None}
     if agent != 'claude':
         raise AccountTelemetryError('runtime_settings_unsupported')
+    await _ensure_cli('claude', cwd, timeout=timeout)
     try:
         models = await _claude_control_rpc(_claude_control_command(), cwd, query='models', timeout=timeout)
     except AccountTelemetryError as error:

@@ -219,7 +219,13 @@ class PartnerManager:
                 return {"state": "unknown"}
         observed = next((tool["installed"] for tool in self._discovery["tools"]
                          if tool["adapter"] == adapter), None)
-        return {"state": "found" if observed is True else "missing" if observed is False else "unknown"}
+        result = {"state": "found" if observed is True else "missing" if observed is False else "unknown"}
+        selection = adapters.cli_selection(adapter) if adapter in {"codex", "claude", "kimi"} else None
+        if selection and selection["checked"] and (selection["skipped"] or selection["path"]):
+            # Several installations may coexist; name the one in use and why
+            # others were skipped instead of a generic login prompt.
+            result.update(executable=selection["path"], skipped=selection["skipped"])
+        return result
 
     def _ensure_root(self):
         for path in (self.root, *self.root.parents):
@@ -764,6 +770,7 @@ class PartnerManager:
                     return self._save_check(partner_id, health)
                 if adapter == "kimi":
                     adapters.find_kimi()
+                    await adapters.select_cli("kimi", self.root)
                     observation = await adapters.kimi_status(self.root)
                     health.update(state="ready" if observation["ready"] else "unavailable", cli_available=True,
                                   version=observation["version"], reason=None if observation["ready"] else "auth_unconfirmed",
@@ -771,6 +778,7 @@ class PartnerManager:
                                         "subscription_confirmed": observation["ready"]})
                     self._setup_observations[adapter] = "ready" if observation["ready"] else "login_required"
                     return self._save_check(partner_id, health)
+                await adapters.select_cli(adapter, self.root)
                 executable = native_adapter(adapter).resolve()
                 health["cli_available"] = True
                 version_command = ([executable, "--version"] if adapter == "codex" else
