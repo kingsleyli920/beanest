@@ -185,12 +185,20 @@ async def _ensure_cli(agent, cwd, timeout=10):
         await select_cli(agent, cwd, timeout=timeout)
 
 
+# The user's own network path to the provider: an outbound proxy or a
+# corporate CA. These neither select an account nor reroute the provider API.
+_NETWORK_ENVIRONMENT = frozenset({
+    'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy', 'no_proxy',
+    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+})
+
+
 def _environment() -> dict[str, str]:
     # Keep OS essentials, not arbitrary agent/provider overrides. In particular,
-    # ANTHROPIC_API_KEY, OPENAI_API_KEY, OAuth-token overrides, provider routing,
-    # proxy base URLs and cloud credentials never reach the child.
+    # ANTHROPIC_API_KEY, OPENAI_API_KEY, OAuth-token overrides, provider routing
+    # such as *_BASE_URL and cloud credentials never reach the child.
     allowed = {'HOME', 'PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL',
-               'USER', 'LOGNAME', 'SHELL', 'SYSTEMROOT'}
+               'USER', 'LOGNAME', 'SHELL', 'SYSTEMROOT'} | _NETWORK_ENVIRONMENT
     return {k: v for k, v in os.environ.items() if k in allowed}
 
 

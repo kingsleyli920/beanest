@@ -11,6 +11,7 @@ const { createPowerGuard, readOwnedActivity } = require('./power-guard');
 const { createChatLocation } = require('./chat-location');
 const { installExternalPages } = require('./external-pages');
 const { strings, loadLocale, saveLocale, installLocale } = require('./locale');
+const { loginShellPath, mergedPath } = require('./shell-path');
 
 let serverProcess;
 let quitting = false;
@@ -74,7 +75,9 @@ function pythonCommand(root) {
 function startRoomServer() {
   const root = projectRoot();
   const runtime = runtimeDirectory();
-  const env = { ...process.env, PYTHONPATH: path.join(root, 'src') };
+  const loginPath = loginShellPath();
+  const env = { ...process.env, PYTHONPATH: path.join(root, 'src'),
+    ...(loginPath ? { PATH: mergedPath(loginPath, process.env.PATH) } : {}) };
   serverProcess = spawn(pythonCommand(root), [
     '-m', 'local_agent_coordinator.room_server', '--runtime', runtime, '--port', '0',
   ], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
