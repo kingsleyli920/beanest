@@ -167,7 +167,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "整理旧移除记录（{p0}）": "Clean up old removed records ({p0})",
   "启用": "Enable",
   "停用": "Disable",
-  "处理": "Process",
   "已有工作的改动已保留，接手情况见原聊天。": "Changes from existing work are preserved. See the original chat for the handoff status.",
   "已有聊天和成果保留。": "Existing chats and results are preserved.",
   "伙伴配置移除结果尚未确认。": "Partner configuration removal has not been confirmed.",

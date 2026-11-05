@@ -808,6 +808,27 @@ test('partner card names the CLI in use and why another installation was skipped
   assert.equal((text.match(/已跳过/g) || []).length, 1);
 });
 
+test('a new partner starts with the look of its tool until the user picks one', async () => {
+  // Catches Kimi Code defaulting to Codex's green sprout, so two partners looked alike in the task list.
+  const agents = catalog.slice(0, 2);
+  const partners = agents.map((agent) => ({ ...agent, adapter: agent.id, enabled: true, health: { state: 'unknown' }, monitor: { status: 'idle' } }));
+  const ui = await browser({ agents, partners, route(request) {
+    if (request.path === '/api/status') return { agents, task_modes: ['text'] };
+    if (request.path === '/api/partners' && request.method === 'GET') return { partners,
+      supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }, { id: 'kimi', name: 'Kimi Code' }] };
+  } });
+  await ui.click('open-partners');
+  const checked = () => ui.get('bean-style-picker').children.find((node) => node.getAttribute('aria-checked') === 'true')?.dataset.beanChoice;
+  for (const [adapter, style] of [['kimi', 'sky'], ['codex', 'sprout'], ['claude', 'peach']]) {
+    ui.get('partner-adapter').value = adapter; ui.get('partner-adapter').fire('change'); await settle();
+    assert.equal(checked(), style, adapter);
+  }
+  ui.get('bean-style-picker').children.find((node) => node.dataset.beanChoice === 'cocoa').fire('click');
+  ui.get('partner-adapter').value = 'kimi'; ui.get('partner-adapter').fire('change'); await settle();
+  assert.equal(checked(), 'cocoa', 'a look the user picked survives a tool change');
+  assert.equal(ui.posts().length, 0);
+});
+
 test('partner registration and explicit checks do not create goals or select the new partner', async () => {
   let agents = catalog.slice(0, 2);
   let partners = agents.map((agent) => ({ ...agent, adapter: agent.id, enabled: true, health: { state: 'unknown' }, monitor: { status: 'idle' } }));
@@ -838,7 +859,8 @@ test('partner registration and explicit checks do not create goals or select the
   assert.equal(ui.get('bean-style-picker').children.find((node) => node.dataset.beanChoice === 'cocoa'), cocoa, 'polling keeps the style control node');
   ui.get('partner-form').fire('submit'); await settle();
   assert.deepEqual(ui.posts()[0].body, { id: 'review_peer', name: '额外的审核搭子', avatar: 'R', adapter: 'claude', bean_style: 'cocoa' });
-  assert.equal(ui.get('bean-style-picker').firstChild.getAttribute('aria-checked'), 'true', 'successful registration restores the default for the next partner');
+  // The next partner starts from the chosen tool's own look (Claude Code: peach).
+  assert.equal(ui.get('bean-style-picker').children.find((node) => node.dataset.beanChoice === 'peach').getAttribute('aria-checked'), 'true', 'successful registration restores the tool default for the next partner');
   assert.equal(ui.get('partner-id').value, '', 'successful registration clears the previous identity before another addition');
   assert.equal(ui.get('partner-name').value, '');
   assert.equal(ui.get('partner-avatar').value, '');
@@ -9674,7 +9696,7 @@ test('English working status separates system fragments from raw task names and 
   const room = saved.room;
   const ui = await browser({language:'en',rooms:[room],saved});
   // English quotes a task name with “ ” instead of leaking 「」 (hard-coded punctuation audit).
-  assert.match(ui.get('partner-activity-claude').textContent,/In progress: Develop “用户原文标题”/);
+  assert.match(ui.get('partner-activity-claude').textContent,/Building “用户原文标题”/);
   assert.doesNotMatch(ui.get('partner-activity-claude').textContent,/[「」、：；（）]/);
   const labels = descendants(ui.get('rooms')).map(node=>node.getAttribute('aria-label')).filter(Boolean);
   assert.ok(labels.some(label=>label.includes(', Working')), JSON.stringify(labels));

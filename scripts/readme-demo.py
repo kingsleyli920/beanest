@@ -33,7 +33,7 @@ COPY = {
         ("export-endpoint", "Add a CSV export endpoint for transactions" if EN else "新增交易记录的 CSV 导出接口", "codex", "app/export.py"),
         ("csv-escaping", "Escape commas, quotes and line breaks in CSV fields" if EN else "处理 CSV 字段里的逗号、引号和换行", "claude", "app/csv_format.py"),
         ("export-button", "Add an Export CSV button to the transactions page" if EN else "在交易页加上“导出 CSV”按钮", "kimi", "app/templates/transactions.html"),
-        ("export-tests", "Test the export with sample transactions" if EN else "用示例交易数据测试导出", "codex", "tests/test_export.py"),
+        ("export-tests", "Write export tests" if EN else "补上导出测试", "codex", "tests/test_export.py"),
         ("readme-guide", "Document CSV export in the README" if EN else "在 README 里写清 CSV 导出用法", "claude", "README.md"),
     ],
     "plan": "I'll take the parts I own and review the others." if EN else "我认领自己负责的部分，其余的帮忙互审。",

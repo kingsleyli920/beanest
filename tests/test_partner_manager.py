@@ -23,6 +23,14 @@ class PartnerManagerTests(unittest.TestCase):
         self.base = default_registry(unused)
         self.manager = PartnerManager(self.root, self.base, clock=lambda: 42)
 
+    def test_each_builtin_tool_starts_with_its_own_look(self):
+        # Kimi Code used to fall back to Codex's green sprout, so two partners looked alike.
+        kimi = self.manager.add(id='kimi', name='Kimi Code', adapter='kimi')
+        styles = {profile['id']: profile['bean_style'] for profile in self.manager.profiles()}
+        self.assertEqual((styles['claude'], styles['codex'], kimi['bean_style']), ('peach', 'sprout', 'sky'))
+        chosen = self.manager.add(id='kimi_cocoa', name='Kimi Code 2', adapter='kimi', bean_style='cocoa')
+        self.assertEqual(chosen['bean_style'], 'cocoa', 'an explicit choice still wins')
+
     def test_defaults_are_inspection_only_and_alias_keeps_real_adapter(self):
         initial = self.manager.profiles()
         self.assertEqual([item['id'] for item in initial], ['claude', 'codex'])

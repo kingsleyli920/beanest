@@ -56,7 +56,8 @@ test('English sentences built from parts keep their spaces and never splice a ve
   assert.equal(api.t('伙伴已停用。{p0}', { p0: api.t('已有聊天和成果保留。') }).startsWith('Partner disabled. '), true);
   assert.equal(api.t('{p0} 开始处理审核任务', { p0: 'Claude' }), 'Claude started a review');
   assert.equal(api.t('{p0} 向 {p1} 发起求助', { p0: 'Claude', p1: 'Codex' }), 'Claude asked Codex for help');
-  assert.equal(api.t('正在{p0}', { p0: 'Read file' }), 'In progress: Read file');
+  assert.equal(api.t('正在读取文件'), 'Reading a file', 'a running tool action is one sentence, not "In progress: Read file"');
+  assert.equal(api.t('处理中 · 最近完成：执行命令'), 'Working · just ran a command');
   assert.equal(api.t('本轮已交付') === api.t('阶段已交付'), false, 'a round and a stage read differently');
 });
 test('every literal the interface translates has English copy, from the page and from the service', () => {

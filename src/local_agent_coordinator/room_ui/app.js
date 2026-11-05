@@ -12,7 +12,6 @@ const interfaceSemicolon = () => englishInterface() ? '; ' : '；';
 const interfaceParen = (text) => englishInterface() ? ` (${text})` : `（${text}）`;
 const interfaceQuote = (text) => englishInterface() ? `“${text}”` : `「${text}」`;
 const interfaceStop = () => englishInterface() ? '. ' : '。';
-const interfaceLead = () => englishInterface() ? ': ' : '';
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="lac-token"]').content;
 let providers = [];
@@ -293,7 +292,7 @@ const state = {
   discovery: null, discoveryOpened: false, discoveryInFlight: false, discoveryLastOpened: null,
   nativeLogins: new Map(), nativeLoginBusy: new Set(), nativeLoginErrors: new Map(), nativeLoginTimer: null, nativeSetupFingerprint: null,
   connectionTemplates: [], connectionProtocol: null, configuringPartnerId: null,
-  beanStyleOptions: beanStyles, selectedBeanStyle: 'sprout',
+  beanStyleOptions: beanStyles, selectedBeanStyle: 'sprout', beanStyleChosen: false,
   pendingPartner: null, pendingPartnerScopeChanged: false,
   partnerSaveUncertain: false, partnerVerifying: false, projectChoosing: false,
   contextMenu: null, usagePopover: null, usageButtons: new Map(), partnerControls: new Map(), activityNodes: new Map(), taskOptions: null, handoffHistory: null,
@@ -1833,6 +1832,9 @@ $('reader-source').addEventListener('click', () => {
   state.reader.source = !state.reader.source; renderReader();
 });
 
+// Mirrors agent_registry.default_bean_style: each built-in tool starts with its own look.
+const defaultBeanStyles = { claude: 'peach', codex: 'sprout', kimi: 'sky' };
+function defaultBeanStyle(adapter) { return defaultBeanStyles[adapter] || 'sprout'; }
 function beanStyle(id, descriptor) {
   // Appearance is a live preference; the room still owns its frozen identity.
   const preferred = state.partners.find((partner) => partner.id === id);
@@ -1840,7 +1842,7 @@ function beanStyle(id, descriptor) {
   const agent = descriptor || state.snapshot?.members.find((member) => member.id === id)
     || state.catalog.find((member) => member.id === id) || state.partners.find((member) => member.id === id);
   if (beanStyleIds.has(agent?.bean_style)) return agent.bean_style;
-  return (agent?.adapter || agent?.provider || id) === 'claude' ? 'peach' : 'sprout';
+  return defaultBeanStyle(agent?.adapter || agent?.provider || id);
 }
 
 function avatar(id, descriptor) {
@@ -4206,7 +4208,7 @@ function renderBeanStylePicker() {
   const picker = $('bean-style-picker');
   const existing = new Map([...picker.children].map((node) => [node.dataset.beanChoice, node]));
   const typedInitial = $('partner-avatar').value.trim();
-  const previewInitial = typedInitial && [...typedInitial].length <= 2 ? typedInitial : ($('partner-adapter').value === 'codex' ? 'X' : 'C');
+  const previewInitial = typedInitial && [...typedInitial].length <= 2 ? typedInitial : (({ codex: 'X', kimi: 'K' })[$('partner-adapter').value] || 'C');
   const blocked = state.managementBusy || state.busy || !!state.pending || !!state.pendingPartner || !!state.configuringPartnerId;
   const nodes = state.beanStyleOptions.map((style) => {
     let button = existing.get(style.id);
@@ -4218,7 +4220,7 @@ function renderBeanStylePicker() {
         element('span', '', 'bean-style-name'), element('span', '', 'bean-style-description'));
       button.addEventListener('click', () => {
         if (state.managementBusy || state.busy || state.pending) return;
-        state.selectedBeanStyle = style.id; renderBeanStylePicker();
+        state.selectedBeanStyle = style.id; state.beanStyleChosen = true; renderBeanStylePicker();
       });
       button.addEventListener('keydown', (event) => {
         if (state.managementBusy || state.busy || state.pending) return;
@@ -4230,7 +4232,7 @@ function renderBeanStylePicker() {
         else if (event.key === 'End') next = state.beanStyleOptions.length - 1;
         else return;
         event.preventDefault();
-        state.selectedBeanStyle = state.beanStyleOptions[next].id; renderBeanStylePicker();
+        state.selectedBeanStyle = state.beanStyleOptions[next].id; state.beanStyleChosen = true; renderBeanStylePicker();
         [...picker.children].find((node) => node.dataset.beanChoice === state.selectedBeanStyle)?.focus({ preventScroll: true });
       });
     }
@@ -4690,7 +4692,7 @@ function beginConnection(partner) {
   state.configuringPartnerId = partner.id;
   $('partner-id').value = partner.id; $('partner-name').value = partner.name;
   $('partner-avatar').value = partner.avatar; $('partner-adapter').value = partner.adapter;
-  state.selectedBeanStyle = beanStyle(partner.id, partner);
+  state.selectedBeanStyle = beanStyle(partner.id, partner); state.beanStyleChosen = true;
   fillConnection(partner.connection);
   $('partner-add-details').open = true; $('partner-connection').open = true;
   renderManagementControls(); $('connection-executable').focus();
@@ -4708,7 +4710,9 @@ function rememberPendingPartner() {
 function clearPartnerForm() {
   for (const id of ['partner-id', 'partner-name', 'partner-avatar']) $(id).value = '';
   fillConnection(null); state.configuringPartnerId = null;
-  state.selectedBeanStyle = 'sprout'; state.pendingPartner = null; state.partnerSaveUncertain = false;
+  // The look follows the chosen tool until the user picks one themselves.
+  state.selectedBeanStyle = defaultBeanStyle($('partner-adapter').value); state.beanStyleChosen = false;
+  state.pendingPartner = null; state.partnerSaveUncertain = false;
   state.pendingPartnerScopeChanged = false;
   rememberPendingPartner(); renderManagementControls();
 }
@@ -4724,7 +4728,7 @@ function restorePendingPartner() {
     state.pendingPartner = body; state.partnerSaveUncertain = true;
     state.pendingPartnerScopeChanged = saved.scope !== state.authScope;
     $('partner-id').value = body.id; $('partner-name').value = body.name; $('partner-avatar').value = body.avatar;
-    $('partner-adapter').value = body.adapter; state.selectedBeanStyle = body.bean_style;
+    $('partner-adapter').value = body.adapter; state.selectedBeanStyle = body.bean_style; state.beanStyleChosen = true;
     state.configuringPartnerId = saved.configuring === body.id ? body.id : null;
     fillConnection(body.connection);
   } catch (_error) {
@@ -6108,6 +6112,21 @@ function nativeActionName(event) {
     Read: t("读取文件"), Edit: t("修改文件"), Write: t("修改文件"), file_change: t("修改文件"),
     WebFetch: t("联网查询"), WebSearch: t("联网查询"), web_search: t("联网查询") })[event?.tool_kind] || t("使用工具");
 }
+// Whole sentences per tool action: "In progress: Read file" read as a label in English.
+const nativeActionSentences = {
+  read_file: ["正在读取文件", "处理中 · 最近完成：读取文件"], edit_file: ["正在修改文件", "处理中 · 最近完成：修改文件"],
+  write_file: ["正在写入文件", "处理中 · 最近完成：写入文件"], search_files: ["正在查找文件", "处理中 · 最近完成：查找文件"],
+  run_command: ["正在执行命令", "处理中 · 最近完成：执行命令"], search_web: ["正在搜索网页", "处理中 · 最近完成：搜索网页"],
+  fetch_web: ["正在读取网页", "处理中 · 最近完成：读取网页"], update_plan: ["正在更新计划", "处理中 · 最近完成：更新计划"],
+  delegate: ["正在分配任务", "处理中 · 最近完成：分配任务"], generate_image: ["正在生成图片", "处理中 · 最近完成：生成图片"],
+  lookup_web: ["正在联网查询", "处理中 · 最近完成：联网查询"], use_tool: ["正在使用本机工具", "处理中 · 最近完成：使用工具"],
+};
+function nativeActionKind(event) {
+  if (Object.hasOwn(nativeActionSentences, event?.operation)) return event.operation;
+  return ({ Bash: 'run_command', PowerShell: 'run_command', command_execution: 'run_command', Read: 'read_file', Edit: 'edit_file',
+    Write: 'edit_file', file_change: 'edit_file', WebFetch: 'lookup_web', WebSearch: 'lookup_web', web_search: 'lookup_web' })[event?.tool_kind] || 'use_tool';
+}
+function nativeActionSentence(event, running) { return t(nativeActionSentences[nativeActionKind(event)][running ? 0 : 1]); }
 function activityAge(timestamp) {
   if (!Number.isFinite(timestamp)) return '';
   const seconds = Math.floor(Date.now() / 1000 - timestamp);
@@ -6296,9 +6315,7 @@ function memberActivity(snapshot, member) {
     if (objective?.status === 'checkpoint') { label = job.status === 'queued' ? t("等待判断下一步") : t("正在判断下一步"); task = t("核对已有成果与原目标，决定继续、完成或向你提问。"); }
     const native = job.status === 'working' && (job.latest_native_activity || [...runEvents].reverse().find((event) => event.kind === 'native_tool_activity' && event.job_id === job.id && event.sender === id));
     if (native && ['started', 'running', 'completed', 'failed'].includes(native.state)) {
-      const action = nativeActionName(native);
-      label = ['running', 'started'].includes(native.state) ? action === t("使用工具") ? t("正在使用本机工具") : t("正在{p0}", { p0: action })
-        : native.state === 'failed' ? t("工具返回异常") : t("处理中 · 最近完成：{p0}", { p0: action });
+      label = native.state === 'failed' ? t("工具返回异常") : nativeActionSentence(native, ['running', 'started'].includes(native.state));
 
     }
     const inspection = runEvents.find((event) => event.kind === 'native_partial_inspection_queued' && event.job_id === job.id);
@@ -6329,15 +6346,18 @@ function memberActivity(snapshot, member) {
     legacyTask: !snapshot.team && typeof member.current_task === 'string' ? member.current_task : null };
 }
 function compactActivityLabel(info) {
-  if (info.label.startsWith(t("处理中 · 最近完成："))) return t("正在处理");
-  return ({ '正在使用本机工具': t("正在处理"), '正在读取文件': t("正在读文件"), '正在修改文件': t("正在改文件"),
+  if (Object.values(nativeActionSentences).some(([, done]) => info.label === t(done))) return t("正在处理");
+  // Labels arrive translated, so match them against the translated source copy.
+  const compact = { '正在使用本机工具': t("正在处理"), '正在读取文件': t("正在读文件"), '正在修改文件': t("正在改文件"),
     '正在写入文件': t("正在改文件"), '正在查找文件': t("正在查找"), '正在执行命令': t("正在执行"),
     '正在搜索网页': t("正在搜索"), '正在读取网页': t("正在查询"), '正在联网查询': t("正在查询"),
     '正在更新计划': t("整理计划"), '正在分配任务': t("正在分工"), '正在生成图片': t("正在出图"),
     '正在核对上次进度': t("正在核对"), '等待核对上次进度': t("等待核对"), '正在判断下一步': t("安排下一步"),
     '等待判断下一步': t("等待安排"), '正在暂停，等待当前处理结束': t("正在暂停"),
     '只读核对接手进度': t("只读核对"), '等待读取接手记录': t("等待核对"),
-    '目标推进已停止': t("已停止"), '目标已确认完成': t("已完成") })[info.label] || info.label;
+    '目标推进已停止': t("已停止"), '目标已确认完成': t("已完成") };
+  const source = Object.keys(compact).find((key) => t(key) === info.label);
+  return source ? compact[source] : info.label;
 }
 function renderPartnerActivity(snapshot) {
   const members = snapshot?.members || state.catalog.filter((agent) => state.participantIds.includes(agent.id));
@@ -6393,8 +6413,8 @@ function teamMemberTask(snapshot, member) {
   const job = jobs.find((entry) => entry.status === 'working') || jobs.find((entry) => entry.status === 'queued');
   if (job) {
     const waiting = job.status === 'queued';
-    const prefix = (waiting ? t("等待开始") : t("正在")) + interfaceLead();
-    if (['team_plan', 'team_coordinate', 'team_user'].includes(job.kind)) return prefix + teamStageLabels[job.kind];
+    // Whole sentences: "In progress: Review “x”" read as a label in English; the Chinese is unchanged.
+    if (['team_plan', 'team_coordinate', 'team_user'].includes(job.kind)) return t(waiting ? "等待开始{p0}" : "正在{p0}", { p0: teamStageLabels[job.kind] });
     const bindings = {
       team_work: ['owner', waiting ? 'assigned' : 'working'],
       team_review: ['reviewer', 'review'],
@@ -6408,13 +6428,17 @@ function teamMemberTask(snapshot, member) {
       const task = candidates.length === 1 ? candidates[0] : null;
       const title = task && typeof task.title === 'string' ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务（具体任务待核对）");
       const mode = jobClaim(snapshot, job)?.work_mode || snapshot.room.work_mode || snapshot.current_run?.work_mode;
-      let action = mode === 'plan' ? t("整理方案") : t("处理");
-      if (job.kind === 'team_review') action = t("审核");
-      else if (job.kind === 'team_help') action = t("协助处理");
-      else if (mode !== 'plan' && (task?.capability === 'python' || task?.write_paths?.length)) action = t("开发");
-      return `${prefix}${action}${interfaceWordSpace()}${title}`;
+      let action = mode === 'plan' ? 'plan' : 'work';
+      if (job.kind === 'team_review') action = 'review';
+      else if (job.kind === 'team_help') action = 'help';
+      else if (mode !== 'plan' && (task?.capability === 'python' || task?.write_paths?.length)) action = 'build';
+      const sentences = {
+        plan: ["正在整理方案{p0}", "等待开始整理方案{p0}"], work: ["正在处理{p0}", "等待开始处理{p0}"],
+        review: ["正在审核{p0}", "等待开始审核{p0}"], help: ["正在协助处理{p0}", "等待开始协助处理{p0}"], build: ["正在开发{p0}", "等待开始开发{p0}"],
+      };
+      return t(sentences[action][waiting ? 1 : 0], { p0: title });
     }
-    return t("{p0}处理团队任务，具体分工待核对", { p0: prefix });
+    return waiting ? t("等待开始处理团队任务，具体分工待核对") : t("正在处理团队任务，具体分工待核对");
   }
   const owned = tasks.filter((task) => task.owner === member.id);
   const waitingForHelp = owned.find((task) => task.status === 'waiting_peer');
@@ -6457,7 +6481,7 @@ function renderMemberPublicProgress(snapshot, member) {
   holder.hidden = !snapshot;
   if (!snapshot) return;
   if (!publicMessage) {
-    const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceLead() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
+    const text = tool ? `${['started', 'running'].includes(tool.state) ? nativeActionSentence(tool, true) : `${tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)}`} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
     // The idle line repeats the member's task line, so the card hides it.
     // Without a progress message the line only repeats the status above it (idle, or the latest tool action).
@@ -8326,7 +8350,10 @@ $('partner-form').addEventListener('submit', (event) => {
   });
 });
 $('partner-avatar').addEventListener('input', renderBeanStylePicker);
-$('partner-adapter').addEventListener('change', renderManagementControls);
+$('partner-adapter').addEventListener('change', () => {
+  if (!state.beanStyleChosen && !state.configuringPartnerId) state.selectedBeanStyle = defaultBeanStyle($('partner-adapter').value);
+  renderManagementControls();
+});
 $('cancel-connection').addEventListener('click', clearPartnerForm);
 $('verify-partner-save').addEventListener('click', () => void verifyPendingPartner());
 $('project-explicit-files').addEventListener('change', renderManagementControls);
