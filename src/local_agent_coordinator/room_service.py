@@ -5385,6 +5385,8 @@ class RoomService:
             "Only the temporary plan author proposes the initial list; it is not a permanent supervisor. "
             "Each deliverable gets host-scheduled review; do not invent duplicate review-only tasks. "
             "In work, implement your owned task.write_paths, run appropriate real checks and return one complete, request_help or block. "
+            "This call ends when you reply, and processes you started are stopped then; wait for checks to finish within "
+            "the call instead of replying with a progress update. "
             + _BLOCK_PROTOCOL +
             "In help, answer the bound question; in review, inspect the exact exported result and run meaningful checks if permitted, "
             "then return one review accept/changes_requested or block. Do not change another owner's files. "

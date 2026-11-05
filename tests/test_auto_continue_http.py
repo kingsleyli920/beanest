@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from local_agent_coordinator import room_service
 from test_native_outcome_http import CORPUS, DependencyFixture, OutcomeFixture
+from test_native_room_service import native_reply
 
 
 class LimitedDependencyFixture(DependencyFixture):
@@ -20,6 +21,26 @@ class LimitedDependencyFixture(DependencyFixture):
             if not self.repeated:
                 self.occurrences = 1  # Past the first call, an unrepeated case is not selected.
         return await super().invoke(agent, prompt, cwd, session_id=session_id, **options)
+
+
+class ProgressOnlyFixture(LimitedDependencyFixture):
+    """The T1 owner replies "still running" with no command a fixed number of times."""
+    def __init__(self, case, *, progress_times):
+        super().__init__(case, bad_times=0)
+        self.progress_times = progress_times
+        self.progress_replies = 0
+        self.work_prompts = []
+
+    def reply(self, agent, context, cwd):
+        if context['job']['job_phase'] == 'work' and context['task']['id'] == 'T1':
+            self.work_prompts.append(context)
+            if self.progress_replies < self.progress_times:
+                self.progress_replies += 1
+                reply = native_reply(context, [])
+                reply['message'] = 'The full test run is still going in the background; I will report when it finishes.'
+                reply['state'] = 'working'
+                return reply
+        return super().reply(agent, context, cwd)
 
 
 class AutoContinueHTTPTests(unittest.TestCase):
@@ -93,6 +114,35 @@ class AutoContinueHTTPTests(unittest.TestCase):
         self.assertEqual(sum(event['kind'] == 'task_blocks_resumed' for event in later['events']), 1)
         self.assertEqual(len(fixture.calls), calls)
 
+
+    def test_a_progress_only_work_reply_goes_back_to_its_owner_and_finishes(self):
+        # Catches: a turn ending with "tests still running" blocking the task as
+        # team_result_missing and showing the user a decision card.
+        case = next(c for c in CORPUS['cases'] if c['id'] == 'illegal_json')
+        fixture = self.keep(ProgressOnlyFixture(case, progress_times=1))
+        fixture.create()
+        final = fixture.settled()
+        kinds = [event['kind'] for event in final['events']]
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertEqual(kinds.count('unfinished_work_resumed'), 1)
+        self.assertNotIn('objective_decision_required', kinds)
+        self.assertNotIn('objective_auto_continued', kinds)
+        self.assertEqual(len(fixture.work_prompts), 2)
+        self.assertIn('Processes started in that call were stopped', fixture.work_prompts[1]['task']['help_result'])
+
+    def test_a_reply_that_never_finishes_is_resumed_a_bounded_number_of_times(self):
+        # Catches: resuming a progress-only owner forever when nothing changes.
+        case = next(c for c in CORPUS['cases'] if c['id'] == 'illegal_json')
+        fixture = self.keep(ProgressOnlyFixture(case, progress_times=99))
+        fixture.create()
+        self.settled_after_auto(fixture, 1)
+        import time
+        time.sleep(5)  # Two more watchdog passes.
+        later = fixture.read()
+        self.assertNotEqual(later['objective']['status'], 'complete')
+        self.assertEqual(sum(event['kind'] == 'unfinished_work_resumed' for event in later['events']), 2)
+        self.assertEqual(fixture.progress_replies, 4)
+        self.assertFalse(any(job['status'] in {'queued', 'working'} for job in later['jobs']))
 
     def test_cleanup_recorded_too_early_at_shutdown_is_confirmed_from_the_calls_own_receipt(self):
         # Catches: quitting the app mid-call recorded cleanup as unconfirmed
