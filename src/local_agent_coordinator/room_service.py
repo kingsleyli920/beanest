@@ -20,6 +20,7 @@ from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached
+from .stop_policy import continues_automatically
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError
 from .project_catalog import ProjectCatalog, ProjectCatalogError
@@ -98,6 +99,9 @@ def _direct_updates(events):
 # A room whose partners all ran out of quota rechecks this often; a check
 # refreshes account usage but never calls a model while still exhausted.
 _QUOTA_WAIT_RECHECK_SECONDS = 300
+# A recoverable stop is continued after this pause, so cleanup receipts and
+# the dedicated quota recoveries settle first.
+_AUTO_CONTINUE_DELAY_SECONDS = 15
 _DIRECTED_CONTEXT_INSTRUCTION = (
     "This is a shared group conversation, not a private channel. Messages retain recipient: all/both addresses the group, "
     "a member ID addresses that peer, and a missing legacy recipient is unspecified. Respond to your actual job and "
@@ -437,6 +441,7 @@ class RoomService:
         self._quota_handoff_tasks = {}
         self._quota_waits = {}
         self._quota_stop_audits = {}
+        self._auto_continues = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
         self._lifecycle_retry_after: dict[str, float] = {}
@@ -4398,22 +4403,73 @@ class RoomService:
         self._quota_handoff_tasks[room_id] = task
         task.add_done_callback(self._worker_done)
 
-    def _settle_clean_quota_stop(self, room_id):
-        """A review or planning call that ran out of quota stopped the room as
-        unconfirmed side effects. With its private tree unchanged it was an
-        ordinary refusal, so record it as one and continue the same board."""
-        candidate = self.store.clean_quota_stop_candidate(room_id)
+    def _settle_clean_stop(self, room_id):
+        """A call whose failure stopped the room as unconfirmed, with no
+        dedicated recovery, left its private tree unchanged: record it as an
+        ordinary failed call so the same board can continue. A quota refusal
+        also retires that partner."""
+        candidate = self.store.clean_stop_candidate(room_id)
         if candidate is None or self._closed:
             return
         job = {"id": candidate["job_id"], "room_id": room_id, "provider": candidate["provider"],
                "team": {"job_phase": candidate["phase"], "task_id": candidate["task_id"]}}
         if candidate["job_id"] not in self._quota_stop_audits:
-            self._quota_stop_audits[candidate["job_id"]] = self._quota_left_tree_unchanged(job)
-        if not self._quota_stop_audits[candidate["job_id"]] or not self.store.settle_clean_quota_stop(room_id, candidate["job_id"]):
+            self._quota_stop_audits[candidate["job_id"]] = self._tree_unchanged(job, candidate["own_paths"])
+        if not self._quota_stop_audits[candidate["job_id"]]:
             return
-        self._retire_quota(room_id, candidate["provider"], "subscription_limit_reached")
-        task = asyncio.create_task(self._resume_after_quota_wait(room_id, candidate["run_id"]))
+        settled = self.store.settle_clean_stop(room_id, candidate["job_id"])
+        if settled is None or settled["reason"] != "subscription_limit_reached":
+            return  # The generic automatic continue picks up an ordinary stop.
+        self._retire_quota(room_id, settled["provider"], "subscription_limit_reached")
+        task = asyncio.create_task(self._resume_after_quota_wait(room_id, settled["run_id"]))
         task.add_done_callback(self._worker_done)
+
+    def _schedule_auto_continue(self, room_id, snapshot):
+        """Press 继续 for the user on a stop that 继续 would fix (stop_policy)."""
+        objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
+        if (self._closed or snapshot["room"]["lifecycle_state"] != "active"
+                or (objective.get("execution_policy") or {}).get("mode") != "autonomous"
+                or any(item["status"] in {"queued", "working"} for item in snapshot["jobs"] + snapshot["executions"])):
+            self._auto_continues.pop(room_id, None)
+            return
+        if objective.get("status") == "needs_user" and (objective.get("next_step") or {}).get("origin") == "task_block":
+            code = "task_block"
+        elif (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted"}
+              and continues_automatically(team.get("stop_reason"))):
+            code = team["stop_reason"]
+        else:
+            self._auto_continues.pop(room_id, None)
+            return
+        key = (snapshot["current_run"]["id"], code)
+        state = self._auto_continues.get(room_id)
+        if state is None or state["key"] != key:
+            self._auto_continues[room_id] = {"key": key, "at": self.clock(), "task": None}
+            return
+        if state["task"] is not None or self.clock() - state["at"] < _AUTO_CONTINUE_DELAY_SECONDS:
+            return  # One attempt per stopped state; a repeat waits for new progress.
+        state["task"] = asyncio.create_task(self._auto_continue(room_id, key[0], code))
+        state["task"].add_done_callback(self._worker_done)
+
+    async def _auto_continue(self, room_id, run_id, code):
+        fingerprint, repeated = self.store.auto_continue_state(room_id)
+        if repeated:
+            return  # The same stop came back without progress: it is the user's now.
+        if code == "task_block":
+            if self.store.resume_recoverable_block(room_id):
+                self.store.note_auto_continued(room_id, fingerprint, code, run_id)
+                self._wake(room_id)
+            return
+        snapshot = self._snapshot(room_id)
+        continuation = self._natural_continuation(snapshot)
+        if (snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]
+                or continuation["action"] not in {"restart-objective", "recover-native"}):
+            return
+        try:
+            await self._send_natural_action(snapshot, continuation["action"], None, "auto-continue-" + str(uuid4()),
+                                            continuation["binding"], None)
+        except RoomError:
+            return
+        self.store.note_auto_continued(room_id, fingerprint, code, run_id)
 
     def _schedule_quota_wait(self, room_id, snapshot):
         """Every partner out of quota is a wait, not the end of the objective."""
@@ -5346,13 +5402,18 @@ class RoomService:
     def _quota_left_tree_unchanged(self, job):
         """A review or planning call never publishes files, so an unchanged
         private tree shows its quota stop left nothing behind to keep."""
-        team = job.get("team") or {}
-        if (team.get("job_phase") not in {"plan", "coordinate", "review", "help"}
-                or job.get("native_partial_inspection") or job.get("partner_handoff_inspection")):
+        if (job.get("team") or {}).get("job_phase") not in {"plan", "coordinate", "review", "help"}:
+            return False
+        return self._tree_unchanged(job)
+
+    def _tree_unchanged(self, job, own_paths=()):
+        """No change in the provider's private tree beyond retained work and
+        the failed task's own write paths."""
+        if job.get("native_partial_inspection") or job.get("partner_handoff_inspection"):
             return False
         try:
             state = self.store.native_workspace(job["room_id"], job["provider"])
-            return state is not None and not self._audited_native_changes(job, state, [], [])["blocked"]
+            return state is not None and not self._audited_native_changes(job, state, list(own_paths), [])["blocked"]
         except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError):
             return False
 
@@ -6324,7 +6385,8 @@ class RoomService:
             snapshot = self.store.snapshot(room["id"])
             self._schedule_quota_handoff(room["id"])
             self._schedule_quota_wait(room["id"], snapshot)
-            self._settle_clean_quota_stop(room["id"])
+            self._settle_clean_stop(room["id"])
+            self._schedule_auto_continue(room["id"], self.store.snapshot(room["id"]))
             objective = snapshot.get("objective")
             deadline = objective["deadline"] if objective else snapshot["budget"]["deadline"]
             if room["status"] == "running" and deadline_reached(deadline, self.clock()):

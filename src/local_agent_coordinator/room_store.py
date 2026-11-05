@@ -19,6 +19,7 @@ from .runtime_settings import normalized_settings, RuntimeSettingsError, read_on
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
+from .stop_policy import continues_automatically
 from .native_outcome import NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, FORMAT_ERRORS, completed_execution
 NATIVE_PARTIAL_RECOVERY_ERRORS = NATIVE_RECOVERY_ERRORS | {"cli_nonzero_exit", "native_side_effects_unconfirmed"}
 # Outcomes that are themselves unknown; abandoning their calls could hide a
@@ -1076,18 +1077,24 @@ class RoomStore:
             self._invalidate_outbox(db, room_id, preserve_invitations=True)
             self._event(db, room_id, "room_stop_requested", sender="system")
 
-    def clean_quota_stop_candidate(self, room_id):
+    def clean_stop_candidate(self, room_id):
         with self._connection() as db:
-            return self._clean_quota_stop_candidate(db, room_id)
+            return self._clean_stop_candidate(db, room_id)
 
-    def _clean_quota_stop_candidate(self, db, room_id):
-        """The one non-work call whose quota refusal after tool calls stopped the room."""
+    def _clean_stop_candidate(self, db, room_id):
+        """The one call whose unconfirmed failure stopped the room, when no
+        dedicated recovery applies; the service still audits its private tree."""
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         objective = self._team.objectives.current(db, room_id)
         if (room["mode"] != "native_project" or room["lifecycle_state"] != "active" or team is None
-                or team["phase"] != "unknown" or team["stop_reason"] != "native_side_effects_unconfirmed"
-                or objective is None or not json.loads(objective["policy_json"]).get("quota_failover")
+                or team["phase"] != "unknown" or objective is None
                 or json.loads(objective["policy_json"]).get("mode") != "autonomous" or self._team.pending(db, room_id)):
+            return None
+        quota = team["stop_reason"] == "native_side_effects_unconfirmed"
+        if quota and not json.loads(objective["policy_json"]).get("quota_failover"):
+            return None
+        if not quota and (not continues_automatically(team["stop_reason"])
+                          or self._native_recovery_requirements(db, room_id)["eligible"]):
             return None
         jobs = db.execute("SELECT j.id,j.provider,j.status,j.error,t.phase,t.task_id,t.run_id,n.metadata_json FROM jobs j "
                           "JOIN team_jobs t ON t.job_id=j.id LEFT JOIN native_executions n ON n.job_id=j.id "
@@ -1097,32 +1104,71 @@ class RoomStore:
             return None
         job = jobs[0]
         native = json.loads(job["metadata_json"] or "{}")
-        if (job["error"] != "native_side_effects_unconfirmed" or job["phase"] not in {"plan", "coordinate", "review", "help"}
+        phases = {"plan", "coordinate", "review", "help"} | (set() if quota else {"work"})
+        if (job["error"] != team["stop_reason"] or job["phase"] not in phases
                 or native.get("cleanup_confirmed") is not True or native.get("status") != "failed"):
             return None
-        return {"job_id": job["id"], "provider": job["provider"], "phase": job["phase"],
-                "task_id": job["task_id"], "run_id": job["run_id"]}
+        task = db.execute("SELECT owner,write_paths_json FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?",
+                          (room_id, job["run_id"], job["task_id"])).fetchone() if job["task_id"] else None
+        # A crashed work call may leave its own unfinished edits; the owner redoes the task on that tree.
+        own_paths = (json.loads(task["write_paths_json"]) if job["phase"] == "work" and task is not None
+                     and task["owner"] == job["provider"] else [])
+        return {"job_id": job["id"], "provider": job["provider"], "phase": job["phase"], "task_id": job["task_id"],
+                "run_id": job["run_id"], "error": job["error"], "own_paths": own_paths,
+                "reason": "subscription_limit_reached" if quota else job["error"]}
 
-    def settle_clean_quota_stop(self, room_id, job_id):
-        """Record an audited unchanged-tree quota stop as the refusal it was."""
+    def settle_clean_stop(self, room_id, job_id):
+        """Record an audited unchanged-tree failure as an ordinary failed call."""
         with self._connection(write=True) as db:
-            candidate = self._clean_quota_stop_candidate(db, room_id)
+            candidate = self._clean_stop_candidate(db, room_id)
             if candidate is None or candidate["job_id"] != job_id:
-                return False
-            reason = "subscription_limit_reached"
+                return None
+            reason, quota = candidate["reason"], candidate["reason"] != candidate["error"]
             db.execute("UPDATE jobs SET status='failed',error=? WHERE id=?", (reason, job_id))
-            db.execute("UPDATE members SET status='needs_user',current_task=NULL WHERE room_id=? AND provider=?",
-                       (room_id, candidate["provider"]))
-            db.execute("UPDATE shared_tasks SET status='blocked',blocked_reason=? WHERE room_id=? AND run_id=? "
-                       "AND status='unknown' AND blocked_reason='native_side_effects_unconfirmed'",
-                       (reason, room_id, candidate["run_id"]))
+            db.execute("UPDATE members SET status=?,current_task=NULL WHERE room_id=? AND provider=?",
+                       ("needs_user" if quota else "idle", room_id, candidate["provider"]))
+            # The call left nothing behind, so its task is as it was before the call.
+            db.execute("UPDATE shared_tasks SET status=CASE WHEN result_version>0 AND review_reason IS NULL THEN 'review' "
+                       "WHEN owner IS NOT NULL THEN 'assigned' ELSE 'open' END,blocked_reason=NULL "
+                       "WHERE room_id=? AND run_id=? AND status='unknown' AND blocked_reason=?",
+                       (room_id, candidate["run_id"], candidate["error"]))
             db.execute("UPDATE teams SET phase='stopped',stop_reason=? WHERE room_id=?", (reason, room_id))
             db.execute("UPDATE team_runs SET status='stopped' WHERE id=? AND accepted_at IS NULL", (candidate["run_id"],))
             db.execute("UPDATE objectives SET stop_reason=? WHERE id=?", (reason, self._team.objectives.current(db, room_id)["id"]))
             db.execute("UPDATE rooms SET blocked_reason='needs_user' WHERE id=?", (room_id,))
-            self._event(db, room_id, "native_quota_stop_settled", sender="system", job_id=job_id,
-                        provider=candidate["provider"], run_id=candidate["run_id"], code=reason)
-            return True
+            self._event(db, room_id, "native_quota_stop_settled" if quota else "native_failed_call_settled",
+                        sender="system", job_id=job_id, provider=candidate["provider"], run_id=candidate["run_id"], code=reason)
+            return candidate
+
+    def resume_recoverable_block(self, room_id):
+        with self._connection(write=True) as db:
+            resumed = self._team.resume_recoverable_block(db, room_id, sender="system", host_blocks=True)
+            if resumed:
+                self._settle(db, room_id)
+            return resumed
+
+    def auto_continue_state(self, room_id):
+        """The board's progress fingerprint, and whether the host already
+        continued this exact state since the user last spoke."""
+        with self._connection() as db:
+            team = self._team.team(db, room_id)
+            objective = self._team.objectives.current(db, room_id)
+            tasks = db.execute("SELECT id,status,owner,result_digest,result_version,blocked_reason,block_cause "
+                               "FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY id",
+                               (room_id, team["current_run_id"])).fetchall()
+            board = [team["stop_reason"] or (objective["stop_reason"] if objective else None),
+                     [list(task) for task in tasks]]
+            fingerprint = hashlib.sha256(json.dumps(board, sort_keys=True).encode()).hexdigest()
+            repeated = db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
+                                  "AND json_extract(value_json,'$.kind')='objective_auto_continued' "
+                                  "AND json_extract(value_json,'$.fingerprint')=? LIMIT 1",
+                                  (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()
+            return fingerprint, repeated is not None
+
+    def note_auto_continued(self, room_id, fingerprint, code, source_run_id):
+        with self._connection(write=True) as db:
+            self._event(db, room_id, "objective_auto_continued", sender="system", fingerprint=fingerprint,
+                        code=code, source_run_id=source_run_id, run_id=self._team.team(db, room_id)["current_run_id"])
 
     def note_quota_wait_resumed(self, room_id, source_run_id):
         with self._connection(write=True) as db:
@@ -4464,7 +4510,7 @@ class RoomStore:
                     raise RoomError("objective_answer_unavailable")
                 decision = {"text": checked_message(answer), "at": self.clock(), "run_id": binding["run_id"]}
                 resumed_format = (self._team.resume_host_text_failure(db, room_id, recipients=recipients)
-                                  or self._team.resume_coordination_block(db, room_id))
+                                  or self._team.resume_recoverable_block(db, room_id))
                 if not resumed_format and room["mode"] == "native_project" and db.execute(
                         "SELECT 1 FROM events e JOIN shared_tasks t ON t.room_id=e.room_id "
                         "AND t.run_id=json_extract(e.value_json,'$.run_id') AND t.id=json_extract(e.value_json,'$.task_id') "
@@ -5517,8 +5563,10 @@ class RoomStore:
                            "AND status IN ('queued','working')", (room_id,))
                 self._event(db, room_id, "warning", sender="system", code="service_restarted_no_retry")
             # A crash between the last cleanup and checkpoint scheduling may
-            # leave no queued job. It still must not silently resume an opted-in
-            # autonomous objective after a restart.
+            # leave no queued job. Startup records the stop rather than
+            # resuming mid-flight; the host's automatic continue (stop_policy)
+            # then resumes it the way the user's 继续 would, once cleanup and
+            # session identity allow that.
             for row in db.execute("SELECT DISTINCT t.room_id FROM teams t JOIN team_runs r ON r.id=t.current_run_id "
                                   "JOIN objectives o ON o.id=r.objective_id WHERE o.status IN ('running','checkpoint')").fetchall():
                 self._team.stop(db, row[0], "service_restarted", status="interrupted")
