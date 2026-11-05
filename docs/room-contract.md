@@ -96,7 +96,7 @@ Web用户入口均返回当前snapshot，使用稳定request_id记录参数指�
 
 `snapshot.objective`提供`id,original_goal,mode,execution_policy,status,deadline,budget,stage,next_step,can_answer,retired_partners,baseline,delivery`。下一步包含确切源绑定、范围、问题及can_start；can_start_objective和can_start_suggested_goal由服务结合清理、版本和生命周期计算，界面不能仅凭旧can_continue推断。
 
-额度接手只接受已知额度原因，且仅在原已选的兼容成员之间进行；同一登录的多个别名共用额度，换别名不能绕过限额。原调用必须确认清理，接手增加assignment_epoch，内部grant冻结确切写路径、原owner和SHA；模型及HTTP/MCP不能提交或扩大grant。旧epoch晚回、错SHA、额外路径整批拒绝。原历史owner保留，新写入才更新当前owner。已完成任务不重做，待修改任务不派回已退役成员；剩下一位时任务为self_checked，不能称为独立审核通过。全员额度用完时保留进度，每 5 分钟复查一次，有伙伴额度恢复就沿同一任务板自动继续；身份或清理状态未知时停下并保留现场。
+额度接手只接受已知额度原因，且仅在原已选的兼容成员之间进行；同一登录的多个别名共用额度，换别名不能绕过限额。原调用必须确认清理，接手增加assignment_epoch，内部grant冻结确切写路径、原owner和SHA；模型及HTTP/MCP不能提交或扩大grant。旧epoch晚回、错SHA、额外路径整批拒绝。原历史owner保留，新写入才更新当前owner。已完成任务不重做，待修改任务不派回已退役成员；剩下一位时任务为self_checked，不能称为独立审核通过。自主目标开启额度接手时，全员额度用完会保留进度，每个房间最多每 5 分钟复查一次；拿到额度恢复的证据（伙伴状态明确为 available，或用量窗口还有剩余）才沿同一任务板自动继续，完全没有用量数据时最多每小时试一次；身份或清理状态未知时停下并保留现场。
 
 `objective.delivery`只汇总同目标各阶段已通过独立审核或自检的result_files，按路径保留最新确切SHA，并核对当前私有版本，提供缺失/变化清单。来源run、revision和digest保留；旧库存不当作新交付。明确接续旧目标的成果单列在baseline，不能算作本目标新写入。
 
@@ -183,7 +183,7 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 ### 停止策略
 
-自主目标停下时，宿主按 `stop_policy.py` 决定是否等用户。只有两类停止码等用户：一是用户自己的停止、用户设的上限、目标本身提出的问题或无进展（`USER_STOPS`）；二是结果未知、需要保留现场的情况，例如清理、提交、会话身份或副作用无法确认（`KEEP_SCENE`）。全员额度用完（`all_partners_quota_exhausted`）走自己的等待路径，每 5 分钟复查。其余停止码，包括以后新增的，都在约 15 秒后由宿主代用户点一次“继续”（`restart-objective` 或 `recover-native`）。宿主按“停止原因 + 任务板状态”算指纹，用户上次发言之后，同一指纹只自动继续一次；同样的停下再次出现且没有新进展，就留给用户。宿主自己因调用失败加上的任务阻塞（不是模型提出的问题）会原地重开。下文各处写的“停止”“等待用户”，在自主目标下都先按本策略处理。同房间的受限 Python 隔离执行另有资源与失败回收约束，不能据此声称原生开发总目标有次数限制。
+自主目标停下时，宿主按 `stop_policy.py` 决定是否等用户。只有两类停止码等用户：一是用户自己的停止、用户设的上限、目标本身提出的问题或无进展（`USER_STOPS`）；二是结果未知、需要保留现场的情况，例如清理、提交、会话身份或副作用无法确认（`KEEP_SCENE`）。全员额度用完（`all_partners_quota_exhausted`）走自己的等待路径：最多每 5 分钟复查，有额度恢复的证据才继续，没有任何用量数据时最多每小时试一次。其余停止码，包括以后新增的，都在约 15 秒后由宿主代用户点一次“继续”（`restart-objective` 或 `recover-native`）。宿主按“停止原因 + 任务板状态”算指纹，用户上次发言之后，同一指纹只自动继续一次；同样的停下再次出现且没有新进展，就留给用户。宿主自己因调用失败加上的任务阻塞（不是模型提出的问题）会原地重开。下文各处写的“停止”“等待用户”，在自主目标下都先按本策略处理。同房间的受限 Python 隔离执行另有资源与失败回收约束，不能据此声称原生开发总目标有次数限制。
 
 处于stopped/unknown/interrupted/cancelled终止阶段时，普通继续返回 `team_retry_required`，补充消息不解冻。用户可显式提交 `/runs` 且 `retry:true` 建立新尝试：先停止已跟踪工作并核清理，未确认返回 `team_cleanup_unconfirmed`；成功后使用新的原生 session，旧身份、失败、交付及调用预算保留，不能复用旧 session 伪装新尝试。执行缺 result 时，仅持久记录能证明已 queued 且从未 started 的预约可视为未启动；已启动、重启中断或来源不明且无 cleanup receipt 的记录都阻止新尝试。能力标记是展示提示，写入口仍重新核对全部门槛。
 
