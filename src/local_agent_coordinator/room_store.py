@@ -5563,8 +5563,10 @@ class RoomStore:
                            "AND status IN ('queued','working')", (room_id,))
                 self._event(db, room_id, "warning", sender="system", code="service_restarted_no_retry")
             # A crash between the last cleanup and checkpoint scheduling may
-            # leave no queued job. It still must not silently resume an opted-in
-            # autonomous objective after a restart.
+            # leave no queued job. Startup records the stop rather than
+            # resuming mid-flight; the host's automatic continue (stop_policy)
+            # then resumes it the way the user's 继续 would, once cleanup and
+            # session identity allow that.
             for row in db.execute("SELECT DISTINCT t.room_id FROM teams t JOIN team_runs r ON r.id=t.current_run_id "
                                   "JOIN objectives o ON o.id=r.objective_id WHERE o.status IN ('running','checkpoint')").fetchall():
                 self._team.stop(db, row[0], "service_restarted", status="interrupted")
