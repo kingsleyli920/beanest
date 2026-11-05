@@ -23,11 +23,12 @@
 
 ## 快速开始
 
-需要 **Python 3.12+**；桌面启动还需要 **Node.js 22.12+**。至少安装并登录一个已支持的官方 Agent CLI。模型权限、会员额度及使用条款由各供应商管理。
+需要 **Python 3.12+**；桌面启动还需要 **Node.js 22.12+**。至少安装并登录一个已支持的官方 Agent CLI。模型权限、会员额度及使用条款由各供应商管理。macOS 自带的 `python3` 是 3.9，用不了；请先装新版本，例如 `brew install python`，再用它创建 `.venv`。
 
 ```sh
 git clone https://github.com/kingsleyli920/beanest.git
 cd beanest
+python3 --version   # 需要 3.12 或更新
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
@@ -46,7 +47,7 @@ scripts/start-coordinator.command
 .venv/bin/python -m local_agent_coordinator.room_server
 ```
 
-打开终端打印的 loopback 地址。桌面版与独立 Web 版默认使用不同的运行目录。本项目不提供公网、多用户托管模式，请保持服务只在本机使用。
+打开终端打印的 loopback 地址。8769 端口被占用时，加 `--port` 换一个空闲端口。桌面版与独立 Web 版默认使用不同的运行目录。本项目不提供公网、多用户托管模式，请保持服务只在本机使用。
 
 ## 怎么使用
 

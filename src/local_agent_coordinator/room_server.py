@@ -7,6 +7,7 @@ direct subscription CLI service and never starts a Paradev host.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -772,13 +773,15 @@ def main():
                               workspace=runtime / "workspaces")
         server = create_room_server(service, port=args.port)
         connection = publish_connection(server, runtime)
-    except (OSError, ValueError, RoomError, ProjectCatalogError):
+    except (OSError, ValueError, RoomError, ProjectCatalogError) as error:
         # A failed bind must release this service's runtime ownership too.
         if server is not None:
             server.server_close()
         elif service is not None:
             import asyncio
             asyncio.run(service.shutdown())
+        if isinstance(error, OSError) and error.errno == errno.EADDRINUSE:
+            parser.exit(1, f"Port {args.port} is already in use. Stop the other program or pass --port with a free port.\n")
         parser.exit(1, "Local rooms could not start. Check the runtime directory or port.\n")
 
     # Desktop startup reads only this first line; no auth token is printed.
