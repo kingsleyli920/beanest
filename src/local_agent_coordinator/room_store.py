@@ -1076,6 +1076,54 @@ class RoomStore:
             self._invalidate_outbox(db, room_id, preserve_invitations=True)
             self._event(db, room_id, "room_stop_requested", sender="system")
 
+    def clean_quota_stop_candidate(self, room_id):
+        with self._connection() as db:
+            return self._clean_quota_stop_candidate(db, room_id)
+
+    def _clean_quota_stop_candidate(self, db, room_id):
+        """The one non-work call whose quota refusal after tool calls stopped the room."""
+        room, team = self._room(db, room_id), self._team.team(db, room_id)
+        objective = self._team.objectives.current(db, room_id)
+        if (room["mode"] != "native_project" or room["lifecycle_state"] != "active" or team is None
+                or team["phase"] != "unknown" or team["stop_reason"] != "native_side_effects_unconfirmed"
+                or objective is None or not json.loads(objective["policy_json"]).get("quota_failover")
+                or json.loads(objective["policy_json"]).get("mode") != "autonomous" or self._team.pending(db, room_id)):
+            return None
+        jobs = db.execute("SELECT j.id,j.provider,j.status,j.error,t.phase,t.task_id,t.run_id,n.metadata_json FROM jobs j "
+                          "JOIN team_jobs t ON t.job_id=j.id LEFT JOIN native_executions n ON n.job_id=j.id "
+                          "WHERE j.room_id=? AND t.run_id=? AND j.status='unknown'",
+                          (room_id, team["current_run_id"])).fetchall()
+        if len(jobs) != 1:
+            return None
+        job = jobs[0]
+        native = json.loads(job["metadata_json"] or "{}")
+        if (job["error"] != "native_side_effects_unconfirmed" or job["phase"] not in {"plan", "coordinate", "review", "help"}
+                or native.get("cleanup_confirmed") is not True or native.get("status") != "failed"):
+            return None
+        return {"job_id": job["id"], "provider": job["provider"], "phase": job["phase"],
+                "task_id": job["task_id"], "run_id": job["run_id"]}
+
+    def settle_clean_quota_stop(self, room_id, job_id):
+        """Record an audited unchanged-tree quota stop as the refusal it was."""
+        with self._connection(write=True) as db:
+            candidate = self._clean_quota_stop_candidate(db, room_id)
+            if candidate is None or candidate["job_id"] != job_id:
+                return False
+            reason = "subscription_limit_reached"
+            db.execute("UPDATE jobs SET status='failed',error=? WHERE id=?", (reason, job_id))
+            db.execute("UPDATE members SET status='needs_user',current_task=NULL WHERE room_id=? AND provider=?",
+                       (room_id, candidate["provider"]))
+            db.execute("UPDATE shared_tasks SET status='blocked',blocked_reason=? WHERE room_id=? AND run_id=? "
+                       "AND status='unknown' AND blocked_reason='native_side_effects_unconfirmed'",
+                       (reason, room_id, candidate["run_id"]))
+            db.execute("UPDATE teams SET phase='stopped',stop_reason=? WHERE room_id=?", (reason, room_id))
+            db.execute("UPDATE team_runs SET status='stopped' WHERE id=? AND accepted_at IS NULL", (candidate["run_id"],))
+            db.execute("UPDATE objectives SET stop_reason=? WHERE id=?", (reason, self._team.objectives.current(db, room_id)["id"]))
+            db.execute("UPDATE rooms SET blocked_reason='needs_user' WHERE id=?", (room_id,))
+            self._event(db, room_id, "native_quota_stop_settled", sender="system", job_id=job_id,
+                        provider=candidate["provider"], run_id=candidate["run_id"], code=reason)
+            return True
+
     def note_quota_wait_resumed(self, room_id, source_run_id):
         with self._connection(write=True) as db:
             self._event(db, room_id, "quota_wait_resumed", sender="system", source_run_id=source_run_id,
