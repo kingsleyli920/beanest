@@ -31,6 +31,7 @@ _COMMAND_FIELDS = {
 }
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 from .native_outcome import FORMAT_ERRORS, REPLY_MISTAKES
+from .stop_policy import host_block_recoverable
 
 
 
@@ -614,11 +615,12 @@ class TeamStore:
         self.reconcile(db, room_id)
         return True
 
-    def resume_coordination_block(self, db, room_id):
-        """Answering a question that only asked for another task replans the same board.
+    def resume_recoverable_block(self, db, room_id, *, sender="user", host_blocks=False):
+        """A question raised only by recoverable blocks continues the same board.
 
-        An older carry kept the source run's planning revision, so the new run
-        asked the user instead of replanning. Accepted work stays as it is.
+        A coordination request replans; a task the host blocked on a call's
+        failure is reopened. A question the model itself asked still waits.
+        Accepted work stays as it is.
         """
         team, objective = self.team(db, room_id), self.objectives.current(db, room_id)
         checkpoint = json.loads(objective["checkpoint_json"] or "{}") if objective else {}
@@ -626,16 +628,27 @@ class TeamStore:
                 or json.loads(objective["policy_json"])["mode"] != "autonomous"
                 or team["phase"] != "working" or self.pending(db, room_id) or self.store._room(db, room_id)["stop_requested"]):
             return False
-        blocked = db.execute("SELECT id,block_cause FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked'",
+        blocked = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked'",
                              (room_id, team["current_run_id"])).fetchall()
-        if not blocked or any(task["block_cause"] != "coordination_required" for task in blocked):
+        # A user's own answer may carry new guidance, so only the host's automatic
+        # continue reopens host blocks in place; an answer replans them.
+        if not blocked or not all(task["block_cause"] == "coordination_required"
+                                  or host_blocks and host_block_recoverable(task) for task in blocked):
             return False
-        db.execute("UPDATE shared_tasks SET internal_replan_revision=-1 WHERE room_id=? AND run_id=? AND status='blocked'",
+        db.execute("UPDATE shared_tasks SET internal_replan_revision=-1 WHERE room_id=? AND run_id=? AND status='blocked' "
+                   "AND block_cause='coordination_required'", (room_id, team["current_run_id"]))
+        db.execute("UPDATE shared_tasks SET status=CASE WHEN result_version>0 AND review_reason IS NULL THEN 'review' "
+                   "WHEN owner IS NOT NULL THEN 'assigned' ELSE 'open' END,blocked_reason=NULL,reviewer=NULL,"
+                   # A new attempt, as on carry: the rejected attempt's response block no longer applies.
+                   "assignment_epoch=assignment_epoch+1,ownership_grant_json=NULL "
+                   "WHERE room_id=? AND run_id=? AND status='blocked' AND block_cause IS NULL",
                    (room_id, team["current_run_id"]))
+        db.execute("UPDATE members SET status='idle' WHERE room_id=? AND status='needs_user' AND provider NOT IN "
+                   "(SELECT value FROM json_each(?))", (room_id, json.dumps(list(json.loads(objective["retired_json"])))))
         db.execute("UPDATE objectives SET status='running',stop_reason=NULL,checkpoint_json=NULL WHERE id=?", (objective["id"],))
         db.execute("UPDATE team_runs SET status='working' WHERE id=?", (team["current_run_id"],))
         db.execute("UPDATE rooms SET blocked_reason=NULL,status='running' WHERE id=?", (room_id,))
-        self.store._event(db, room_id, "coordination_block_resumed", sender="user", run_id=team["current_run_id"],
+        self.store._event(db, room_id, "task_blocks_resumed", sender=sender, run_id=team["current_run_id"],
                           task_ids=[task["id"] for task in blocked], previous_checkpoint=checkpoint)
         self.reconcile(db, room_id)
         return True

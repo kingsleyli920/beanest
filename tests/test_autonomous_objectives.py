@@ -354,6 +354,36 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call["agent"] == "claude" for call in self.fake.calls[calls:]))
         self.assertTrue(any(event["kind"] == "quota_wait_resumed" for event in final["events"]))
 
+    async def tick(self, room):
+        # One watchdog pass of the desktop service, then let what it started finish.
+        await self.service.expire_tasks()
+        for state in list(self.service._auto_continues.values()):
+            if state["task"] is not None:
+                await state["task"]
+        await self.settle()
+        return await self.service.read_room(room)
+
+    async def failing_once(self, failures):
+        original = self.handler
+        def handler(agent, context):
+            if context["job"]["job_phase"] == "work" and failures:
+                return {"adapter_failure": failures.pop(0)}
+            return original(agent, context)
+        created = await self.create()
+        self.fake.handler = handler
+        await self.settle()
+        return created["room"]["id"]
+
+    async def test_a_stop_the_user_asked_for_is_never_continued_automatically(self):
+        room = await self.failing_once(["cli_nonzero_exit"])
+        stopped = await self.service.read_room(room)
+        await self.service.cancel_room(room)
+        for _ in range(3):
+            self.now += 20
+            value = await self.tick(room)
+        self.assertEqual(value["current_run"]["id"], stopped["current_run"]["id"])
+        self.assertFalse(any(event["kind"] == "objective_auto_continued" for event in value["events"]))
+
     async def test_preclaim_quota_reassigns_planning_without_charging_retired_member(self):
         async def guard(members):
             if "claude" in members:
