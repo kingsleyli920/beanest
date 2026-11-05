@@ -320,6 +320,41 @@ const selfCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 
   'team_capability_unavailable', 'native_json_files_forbidden', 'team_write_path_conflict', 'invalid_agent_response',
   'invalid_team_commands', 'invalid_team_task', 'invalid_team_dependencies', 'invalid_project_files', 'invalid_text',
   'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required', 'team_scope_conflict']);
+// Mirrors stop_policy.py: only these stops wait for the user (USER_STOPS),
+// keep the scene for inspection (KEEP_SCENE) or have their own quota wait.
+// The host continues every other stop of an autonomous objective once per
+// board state; a stop that comes back without progress is the user's.
+const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt', 'budget_exhausted', 'deadline_exceeded',
+  'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit', 'objective_no_progress',
+  'objective_decision_required', 'objective_scope_confirmation', 'objective_checkpoint_disagreed']);
+const keepSceneCodes = new Set(['project_commit_unconfirmed', 'native_cleanup_unconfirmed', 'team_cleanup_unconfirmed',
+  'native_recovery_cleanup_unconfirmed', 'session_identity_changed', 'session_identity_unknown',
+  'native_recovery_unpublished_changes', 'native_side_effects_unconfirmed', 'execution_unknown']);
+function stopContinuesAutomatically(code) {
+  return typeof code === 'string' && !userStopCodes.has(code) && !keepSceneCodes.has(code) && code !== 'all_partners_quota_exhausted';
+}
+function objectivePolicy(snapshot) {
+  const objective = currentObjective(snapshot);
+  return objective?.execution_policy || snapshot.current_run?.execution_policy || (objective ? { mode: objective.mode } : null);
+}
+function autonomousObjective(snapshot) {
+  return activeEntry(snapshot.room) && objectivePolicy(snapshot)?.mode === 'autonomous';
+}
+function autoContinuedAlready(snapshot, code) {
+  const events = Array.isArray(snapshot.events) ? snapshot.events : [];
+  const lastUser = events.reduce((seq, event) => event.kind === 'message' && event.sender === 'user' && event.seq > seq ? event.seq : seq, 0);
+  return events.some((event) => event.kind === 'objective_auto_continued' && event.seq > lastUser
+    && event.code === code && event.run_id === snapshot.current_run?.id);
+}
+// A blocked board the host reopens by itself: coordination requests and
+// tasks the host blocked on a call's failure (team_store.resume_recoverable_block).
+function taskBlockContinuesAutomatically(snapshot, blocked) {
+  return autonomousObjective(snapshot) && blocked.length > 0 && !autoContinuedAlready(snapshot, 'task_block')
+    && blocked.every((task) => task.block_cause === 'coordination_required' || task.block_cause == null && stopContinuesAutomatically(task.blocked_reason));
+}
+function quotaWaitContinues(snapshot) {
+  return autonomousObjective(snapshot) && objectivePolicy(snapshot)?.quota_failover === true;
+}
 function blockedTaskReason(task) {
   if (task?.block_cause === 'permission_required') return t("需要权限确认：这一步要用到当前权限以外的操作。同意就按原计划做，不同意伙伴会换一种做法。");
   if (task?.block_cause === 'user_decision') {
@@ -327,7 +362,7 @@ function blockedTaskReason(task) {
     return raw && !blockCodePattern.test(raw) ? raw.length > 240 ? `${raw.slice(0, 240)}…` : raw : t("伙伴需要你定一个方向，具体问题见“讨论”。");
   }
   if (task?.block_cause === 'external_dependency') return t("在等外部条件，满足后点“继续”接着做。");
-  return t("这项需要重新安排，点“继续”后会自动处理，不用你选。");
+  return t("这项需要重新安排，豆窝会接着处理，不用你选。");
 }
 function stopReasonMessage(code) {
   return selfCorrectedCodes.has(code) ? t("有任务需要重新安排，点“继续推进”后会自动处理。") : executionMessage(code);
@@ -402,8 +437,11 @@ function nowSummary(snapshot) {
     const next = boundObjectiveNextStep(snapshot);
     const blocked = next?.origin === 'task_block' ? tasks.filter(taskNeedsUser) : [];
     const canAnswer = objective?.can_answer === true;
-    if (next?.origin === 'task_block' && !blocked.length) return { tone: 'stop', label: label(t("已暂停")), canAnswer,
-      title: t("有几项需要重新安排"), text: t("点“继续推进”或在下面补充要求，豆窝会自动重新安排，不用逐项处理。") };
+    if (next?.origin === 'task_block' && !blocked.length) return taskBlockContinuesAutomatically(snapshot, tasks.filter((task) => task.status === 'blocked'))
+      ? { tone: 'go', autoContinue: true, label: label(t("马上自动继续")), canAnswer,
+        title: t("有几项要重新安排，豆窝会自动接着做"), text: t("几秒后自动继续，不用你操作。想补充要求可以直接在下面说。") }
+      : { tone: 'stop', label: label(t("已暂停")), canAnswer,
+        title: t("有几项需要重新安排"), text: t("点“继续推进”或在下面补充要求，豆窝会自动重新安排，不用逐项处理。") };
     const question = !blocked.length && typeof next?.question === 'string' ? next.question.trim() : '';
     const permission = blocked.length && blocked.every((task) => task.block_cause === 'permission_required');
     return { tone: 'ask', label: label(t("等你决定")), blocked, canAnswer,
@@ -429,6 +467,23 @@ function nowSummary(snapshot) {
       text: parts.join(' ') || t("有新要求可以直接在下面说。") };
     return { tone: 'done', label: label(accepted ? t("已接受") : t("已交付")), title: accepted ? t("这一轮你已经接受") : t("伙伴说做完了，等你验收"),
       text: parts.join(' ') || t("看看成果，不满意直接在下面说哪里不对。") };
+  }
+  const stopReason = typeof objective?.stop_reason === 'string' ? objective.stop_reason : '';
+  const doneNote = done ? t("已完成的 {p0} 项成果都在。", { p0: done }) : t("已有成果和记录都在。");
+  if (['stopped', 'interrupted'].includes(status) && !hostResultInterruption(objective)) {
+    const stoppedLabel = label(t("已停止"), room.updated_at);
+    if (stopReason === 'all_partners_quota_exhausted' && quotaWaitContinues(snapshot)) return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
+      title: t("伙伴额度都用完了，恢复后自动继续"), text: [executionMessage(stopReason), done ? doneNote : ''].filter(Boolean).join(' ') };
+    const continueReady = ['restart-objective', 'recover-native'].some((id) => liveControl(id) && !document.getElementById(id).disabled);
+    if (stopContinuesAutomatically(stopReason) && autonomousObjective(snapshot) && continueReady) {
+      const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
+      return autoContinuedAlready(snapshot, stopReason)
+        ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过一次，又停在同一处"),
+          text: [t("没有新进展，所以不再自动继续。点“继续推进”再试，或在下面补充要求。"), doneNote].join(' ') }
+        : { tone: 'go', autoContinue: true, label: label(t("马上自动继续"), room.updated_at),
+          title: restartedStop ? t("豆窝服务重启过，马上自动接着做") : t("推进停了一下，马上自动接着做"),
+          text: [t("几秒后自动继续，不用你操作。"), doneNote].join(' ') };
+    }
   }
   if (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown') return { tone: 'bad', label: label(t("结果待确认")),
     title: t("上一步的结果还没确认"), text: t("执行结果还没核对清楚，豆窝不会自动重跑。可以先看看讨论里的记录。") };
@@ -466,13 +521,14 @@ function renderNowCard() {
   if (primary) {
     const labels = { 'accept-run': t("验收这一轮") };
     const original = document.getElementById(primary);
-    actions.push(nowAction(primary, labels[primary] || (original.textContent === t("继续") ? t("继续推进") : ''), 'btn pri'));
+    // An automatic continue needs no click; the button only lets the user go now.
+    actions.push(nowAction(primary, labels[primary] || (original.textContent === t("继续") ? t("继续推进") : ''), summary.autoContinue ? 'btn' : 'btn pri'));
   }
   if (summary.tone === 'ask' && summary.canAnswer) actions.push({ id: 'message', label: t("写回复"), className: actions.length ? 'btn' : 'btn pri', focus: true });
   if (pause) actions.push(nowAction('pause-objective', '', actions.length ? 'btn' : 'btn pri'));
-  const blockedPrimary = actions.find((action) => action.className.includes('pri') && action.disabled);
+  const blockedPrimary = !summary.autoContinue && actions.find((action) => action.className.includes('pri') && action.disabled);
   if (blockedPrimary) actions.push({ id: 'refresh', label: t("重新读取状态"), className: 'btn', disabled: $('refresh').disabled });
-  if (stop && summary.tone === 'go') actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
+  if (stop && summary.tone === 'go' && !summary.autoContinue) actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
   else if (stop) delete stop.dataset.mirrored;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), summary.tone, summary.label, summary.title, summary.text, summary.question,
     (summary.blocked || []).map((task) => [task.id, task.title, task.blocked_reason, task.block_cause]), summary.canAnswer, $('message').disabled, actions]);
@@ -6852,7 +6908,7 @@ function renderControls() {
     button.disabled = blocked || inactive || !state.connected || !modeEditable;
     button.setAttribute('aria-pressed', String((modeEditable ? state.workMode : currentWorkMode) === value));
   }
-  $('work-mode-note').textContent = teamStopped ? t("本轮已停止，已有内容保留，不会自动继续。") : room && !modeEditable
+  $('work-mode-note').textContent = teamStopped ? t("本轮已停止，已有内容保留。") : room && !modeEditable
     ? currentWorkMode === 'plan' ? t("正在先聊方案，这轮不会修改文件。") : currentWorkMode === 'build' ? t("正在按目标推进，完成后给你看成果。") : t("这份旧记录没有区分方案与动手模式。")
     : state.workMode === 'plan' ? t("先讨论和查资料，不修改文件。聊清楚后，可以点“按方案开始”。")
       : t("直接分工并制作成果，遇到需要你决定的事再问你。");

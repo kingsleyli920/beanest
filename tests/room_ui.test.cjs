@@ -9147,17 +9147,24 @@ test('reply-mistake blocks read as automatic replanning, while only a permission
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
   const now = ui.get('now-card');
   assert.equal(now.hidden, false);
-  assert.match(ui.get('now-title').textContent, /有几项需要重新安排/);
-  assert.doesNotMatch(now.textContent, /team_task_permission|按原分工重试|先跳过/);
+  // The host reopens these blocks itself (stop_policy), so nothing waits on a click.
+  assert.match(ui.get('now-label').textContent, /马上自动继续/);
+  assert.doesNotMatch(now.textContent, /等你决定|team_task_permission|按原分工重试|先跳过|停止任务/);
+  assert.equal(descendants(now).some((node) => node.tagName === 'BUTTON' && node.classList.contains('pri')), false, 'no primary click is needed');
   const outcomeLines = descendants(ui.get('collaboration-outcome')).filter((node) => node.classList.contains('detail-caption')).map((node) => node.textContent).join('\n');
   assert.doesNotMatch(outcomeLines, /实跑遗漏入口：/, 'replanned tasks are not listed as decisions');
   assert.match(outcomeLines, /2 项需要重新安排，点“继续推进”后会自动处理/);
   const pane = ui.get('progress-pane');
   assert.equal(ui.get('conversation').dataset.tab, 'progress');
   assert.match(pane.textContent, /2 项待重新安排/);
-  assert.match(pane.textContent, /点“继续”后会自动处理，不用你选/);
+  assert.match(pane.textContent, /豆窝会接着处理，不用你选/);
   assert.equal(descendants(pane).filter((node) => node.tagName === 'BUTTON').length, 0, 'no per-task choice for automatic replanning');
   assert.ok(descendants(pane).some((node) => node.classList.contains('tech-details') && node.textContent.includes('team_task_permission')));
+  // Once the host already continued this board since the user last spoke, the repeat is the user's.
+  saved.events.push({ seq: 40, kind: 'objective_auto_continued', sender: 'system', code: 'task_block', run_id: saved.current_run.id, created_at: 1040 });
+  await ui.poll();
+  assert.match(ui.get('now-title').textContent, /有几项需要重新安排/);
+  assert.doesNotMatch(ui.get('now-card').textContent, /马上自动继续|等你决定/);
 
   const permission = currentTaskBlockFixture();
   const second = await browser({ rooms: [permission.room], saved: permission, executionPolicySupport: true, naturalContinuationSupport: true });
@@ -9171,6 +9178,47 @@ test('reply-mistake blocks read as automatic replanning, while only a permission
   await second.click('tab-discussion');
   assert.equal(second.get('conversation').dataset.tab, 'discussion');
   assert.equal(second.get('timeline').hidden, timelineHidden, 'views switch by layout only and leave reader state alone');
+});
+test('stops the host continues by itself never read as a decision, and only user stops leave the click to the user', async () => {
+  // Catches automatic stops (stop_policy) shown as waiting on the user, and user or keep-scene stops falsely promised to resume.
+  const cases = [
+    ['all_partners_quota_exhausted', /等额度恢复/, /伙伴额度都用完了，恢复后自动继续/, /有伙伴额度恢复后会自动继续/],
+    ['service_restarted', /马上自动继续/, /豆窝服务重启过，马上自动接着做/, /几秒后自动继续，不用你操作/],
+    ['cli_nonzero_exit', /马上自动继续/, /推进停了一下，马上自动接着做/, /几秒后自动继续/],
+    ['objective_calls_exhausted', /已停止/, /推进已停止/, /不会自动重跑/],
+    ['session_identity_unknown', /已停止/, /推进已停止/, /不会自动重跑/],
+  ];
+  for (const [reason, label, title, text] of cases) {
+    const saved = restartSnapshot(); saved.objective.stop_reason = reason;
+    saved.objective.execution_policy = { ...saved.current_run.execution_policy };
+    const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+    const now = ui.get('now-card');
+    assert.match(ui.get('now-label').textContent, label, reason);
+    assert.match(ui.get('now-title').textContent, title, reason);
+    assert.match(ui.get('now-text').textContent, text, reason);
+    assert.doesNotMatch(now.textContent, /等你决定|同意，按原计划做|写回复/, reason);
+    const automatic = !['objective_calls_exhausted', 'session_identity_unknown'].includes(reason);
+    const primary = descendants(now).find((node) => node.tagName === 'BUTTON' && node.dataset.mirror === 'restart-objective');
+    assert.ok(primary, `${reason} still lets the user continue now`);
+    assert.equal(primary.classList.contains('pri'), !automatic, `${reason}: a click is only the main action when nothing resumes by itself`);
+    assert.equal(ui.posts().length, 0);
+  }
+  // A step-by-step objective and a run without quota failover are never promised an automatic resume.
+  const manual = restartSnapshot(); manual.objective.stop_reason = 'service_restarted';
+  manual.objective.execution_policy = { ...manual.current_run.execution_policy, mode: 'step' };
+  const manualUi = await browser({ rooms: [manual.room], saved: manual, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.doesNotMatch(manualUi.get('now-card').textContent, /自动继续|自动接着做/);
+  const noFailover = restartSnapshot(); noFailover.objective.stop_reason = 'all_partners_quota_exhausted';
+  noFailover.objective.execution_policy = { ...noFailover.current_run.execution_policy, quota_failover: false };
+  const noFailoverUi = await browser({ rooms: [noFailover.room], saved: noFailover, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.doesNotMatch(noFailoverUi.get('now-title').textContent, /恢复后自动继续/);
+  // The same automatic stop coming back after one automatic continue waits for the user.
+  const repeated = restartSnapshot(); repeated.objective.stop_reason = 'service_restarted';
+  repeated.objective.execution_policy = { ...repeated.current_run.execution_policy };
+  repeated.events.push({ seq: 90, kind: 'objective_auto_continued', sender: 'system', code: 'service_restarted', run_id: repeated.current_run.id, created_at: 1090 });
+  const repeatedUi = await browser({ rooms: [repeated.room], saved: repeated, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.match(repeatedUi.get('now-title').textContent, /自动继续过一次，又停在同一处/);
+  assert.ok(descendants(repeatedUi.get('now-card')).find((node) => node.dataset.mirror === 'restart-objective').classList.contains('pri'));
 });
 test('current task question refuses stale bindings and never infers a permission category from free text or ordinary checkpoints', async () => {
   for (const variant of ['binding', 'origin', 'checkpoint', 'cause', 'coordination']) {
