@@ -301,8 +301,392 @@ const state = {
   deliveryLimit: 256, deliveryScope: '',
   drafts: new Map(), roomNodes: new Map(), eventNodes: new Map(), progressNodes: new Map(),
   renderedRoom: null, jobsFingerprint: '', collaborationFingerprint: '', unseen: 0,
+  roomTabs: new Map(), deliveryPending: 0,
 };
 $('task-mode').value = 'text';
+
+// The "now" card, the four room views and the progress board. They read the
+// same snapshot as the conversation; actions forward to the existing controls
+// so every request still goes through one code path.
+const blockReasonLabels = localizedLabels({
+  team_task_permission: '伙伴想改一项不归它负责的任务，被豆窝拦下了。',
+  team_plan_locked: '分工已经定下，伙伴想改分工，被豆窝拦下了。',
+  team_scope_conflict: '两位伙伴要改的范围重叠，要先定由谁来改。',
+  invalid_target: '伙伴的回复指向了不存在的任务或伙伴，这次回复没有生效。',
+  team_files_forbidden: '伙伴在不允许改文件的步骤里交了文件，豆窝没有采用。',
+  team_capability_unavailable: '伙伴用了当前接入不支持的操作。',
+  native_json_files_forbidden: '伙伴把文件内容直接写进了回复，豆窝没有采用。',
+  native_changes_not_imported: '伙伴工作区里的改动还没并回共享项目。',
+  native_review_unobserved: '没看到审核的伙伴真正检查过这项改动。',
+  native_turn_unconfirmed: '伙伴这一轮是否做完没能确认。',
+  native_protocol_unknown: '伙伴的回复格式认不出来，这次结果没有采用。',
+  native_protocol_invalid: '伙伴的回复格式不对，这次结果没有采用。',
+  invalid_response_json: '伙伴的回复格式不对，这次结果没有采用。',
+  invalid_text: '伙伴的回复格式不对，这次结果没有采用。',
+  invalid_team_commands: '伙伴发出的协作指令格式不对，这次没有生效。',
+  native_unchanged_reason_required: '伙伴说没有改文件，但没说明原因。',
+  native_side_effects_unconfirmed: '伙伴可能已经在本机做了改动，结果没能确认。',
+  team_assignment_changed: '分工已经变了，这项需要重新安排。',
+  project_file_unavailable: '要用到的文件暂时读不到。',
+});
+const blockCodePattern = /^[a-z][a-z0-9_]{2,80}$/;
+function blockedTaskReason(task) {
+  if (task?.block_cause === 'permission_required') return t("需要权限确认：伙伴要做的事超出了当前权限，等你同意。");
+  const raw = typeof task?.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
+  if (!raw) return t("需要你补充决定。");
+  if (blockCodePattern.test(raw)) {
+    return Object.hasOwn(blockReasonLabels, raw) ? blockReasonLabels[raw] : Object.hasOwn(executionLabels, raw)
+      ? executionLabels[raw] : t("伙伴卡住了，这个原因还没有对应的说明，原始代码在技术细节里。");
+  }
+  return raw.length > 240 ? `${raw.slice(0, 240)}…` : raw;
+}
+function blockedTaskTechnical(task) {
+  const raw = typeof task?.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
+  return [blockCodePattern.test(raw) ? raw : '', typeof task?.block_cause === 'string' ? task.block_cause : ''].filter(Boolean).join(' · ');
+}
+function techDetails(raw, summary = t("技术细节")) {
+  const details = element('details', '', 'tech-details');
+  details.append(element('summary', summary), element('code', raw));
+  return details;
+}
+// Quick choices only fill the composer; the user still reviews and sends.
+function fillAnswerDraft(text) {
+  const message = $('message');
+  if (message.disabled) return;
+  const draft = message.value;
+  if (draft.includes(text)) { message.focus(); return; }
+  const combined = draft.trim() ? `${draft}\n${text}` : text;
+  if (!checkUserText(combined)) return;
+  message.value = combined; saveDraft(); renderControls(); message.focus();
+}
+function quickAnswers(task) {
+  const title = taskDisplayTitle(task.title || task.id);
+  if (task.block_cause === 'permission_required') return [
+    [t("同意并继续"), t("同意「{p0}」需要的权限，继续。", { p0: title })],
+    [t("不同意"), t("不同意「{p0}」需要的权限，请换一种不需要这个权限的做法。", { p0: title })]];
+  return [
+    [t("按原分工重试"), t("「{p0}」按原分工重试：请负责人在自己的任务范围内重新提交。", { p0: title })],
+    [t("先跳过这项"), t("「{p0}」先跳过，继续其它任务，最后告诉我还差什么。", { p0: title })]];
+}
+function blockedTaskBody(task, canAnswer, className) {
+  const body = element('div', '', className);
+  body.append(element('p', blockedTaskReason(task)));
+  if (canAnswer) {
+    const row = element('div', '', 'quick-row');
+    for (const [label, text] of quickAnswers(task)) {
+      const button = element('button', label, 'btn sm'); button.type = 'button'; button.title = text;
+      button.addEventListener('click', () => fillAnswerDraft(text));
+      row.append(button);
+    }
+    body.append(row);
+  }
+  const raw = blockedTaskTechnical(task);
+  if (raw) body.append(techDetails(raw));
+  return body;
+}
+
+const nowPrimaryIds = ['accept-run', 'continue-current', 'continue-objective', 'recover-native', 'native-handoff', 'restart-objective',
+  'start-objective', 'start-suggested-goal', 'build-from-plan', 'retry-run'];
+function liveControl(id) {
+  const node = document.getElementById(id);
+  return node && !node.hidden ? node : null;
+}
+function controlCaption(node) {
+  const siblings = [...(node.parentNode?.children || [])];
+  const next = siblings[siblings.indexOf(node) + 1];
+  return next?.classList?.contains('detail-caption') ? next.textContent : '';
+}
+function nowSummary(snapshot) {
+  const room = snapshot.room; const objective = currentObjective(snapshot); const run = snapshot.current_run;
+  const status = objective?.status; const outcome = terminalTeamState(snapshot) || snapshot.collaboration?.outcome?.state;
+  const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task === 'object');
+  const stage = Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : Number.isSafeInteger(run?.number) ? t("第 {p0} 轮", { p0: run.number }) : '';
+  const label = (text, time) => [text, stage, Number.isFinite(time) ? timeLabel(time) : ''].filter(Boolean).join(' · ');
+  const done = tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length;
+  if (!activeEntry(room)) return { tone: 'stop', label: lifecycleLabels[lifecycleState(room)], title: t("这份任务{p0}", { p0: lifecycleLabels[lifecycleState(room)] }),
+    text: t("聊天和交付仍可阅读。要继续，先在右上角“···”的“管理任务”里恢复。") };
+  if (status === 'needs_user' || !objective && outcome === 'needs_user') {
+    const next = boundObjectiveNextStep(snapshot);
+    const blocked = next?.origin === 'task_block' ? tasks.filter((task) => task.status === 'blocked') : [];
+    const question = !blocked.length && typeof next?.question === 'string' ? next.question.trim() : '';
+    const canAnswer = objective?.can_answer === true;
+    return { tone: 'ask', label: label(t("等你决定")), blocked, canAnswer,
+      title: blocked.length ? blocked.length === 1 ? t("「{p0}」卡住了，需要你拿主意", { p0: taskDisplayTitle(blocked[0].title || blocked[0].id) }) : t("{p0} 项任务卡住了，需要你拿主意", { p0: blocked.length }) : t("伙伴有个问题要你回答"),
+      question: question.length > 220 ? `${(question.split('\n').find((line) => line.trim()) || question).slice(0, 200)}…` : question,
+      text: blocked.length > 1 ? '' : canAnswer ? t("选一个处理方式，或在下面直接写你的决定，伙伴会沿原目标接着做。") : t("先看看问题；豆窝不会擅自重新开始。") };
+  }
+  if (status === 'paused') return objective.pause_requested === true
+    ? { tone: 'stop', label: label(t("正在暂停")), title: t("等当前这一步做完就停"), text: t("不会再派发新的工作。") }
+    : { tone: 'stop', label: label(t("已暂停")), title: t("推进已暂停"), text: t("继续后沿原目标接着做，已有成果都在。") };
+  if (status === 'awaiting_continue') {
+    const next = boundObjectiveNextStep(snapshot);
+    return { tone: 'ask', label: label(t("等你说继续")), title: t("这一阶段做完了"),
+      text: typeof next?.summary === 'string' && next.summary.trim() ? next.summary.trim().slice(0, 240) : t("点“继续推进”进入下一阶段，也可以先在下面补充要求。") };
+  }
+  if (status === 'complete' || ['ready_for_user', 'accepted'].includes(outcome)) {
+    const selfOnly = tasks.filter((task) => task.status === 'self_checked' || task.status === 'accepted' && task.review_kind === 'self_check').length;
+    const reviewed = tasks.filter((task) => task.status === 'accepted' && task.review_kind !== 'self_check').length;
+    const parts = [tasks.length ? selfOnly ? t("{p0} 项里 {p1} 项互审通过，{p2} 项只自检。", { p0: tasks.length, p1: reviewed, p2: selfOnly })
+      : t("{p0} 项都已互审通过。", { p0: reviewed }) : '', state.deliveryPending ? t("代码还有改动没交付，见“交付”。") : ''].filter(Boolean);
+    const accepted = Number.isFinite(run?.accepted_at) || outcome === 'accepted';
+    if (status === 'complete') return { tone: 'done', label: label(t("已完成")), title: accepted ? t("你已确认完成") : t("目标已完成"),
+      text: parts.join(' ') || t("有新要求可以直接在下面说。") };
+    return { tone: 'done', label: label(accepted ? t("已接受") : t("已交付")), title: accepted ? t("这一轮你已经接受") : t("伙伴说做完了，等你验收"),
+      text: parts.join(' ') || t("看看成果，不满意直接在下面说哪里不对。") };
+  }
+  if (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown') return { tone: 'bad', label: label(t("结果待确认")),
+    title: t("上一步的结果还没确认"), text: t("执行结果还没核对清楚，豆窝不会自动重跑。可以先看看讨论里的记录。") };
+  const stopped = ['stopped', 'interrupted'].includes(status) || outcome === 'stopped' || closedStatuses.has(room.status);
+  if (stopped) {
+    const reason = typeof objective?.stop_reason === 'string' ? objective.stop_reason : '';
+    const restarted = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(reason);
+    return { tone: 'stop', label: label(status === 'interrupted' ? t("已中断") : t("已停止"), room.updated_at),
+      title: hostResultInterruption(objective) ? t("伙伴的结果还没确认，推进停在这里") : restarted ? t("豆窝服务重启过，推进停在这里")
+        : reason === 'all_partners_quota_exhausted' ? t("伙伴额度都用完了，推进停在这里") : status === 'interrupted' ? t("推进中断了") : t("推进已停止"),
+      text: hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot)
+        : [reason ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。")].filter(Boolean).join(' ') };
+  }
+  const working = $('work-indicator').hidden ? '' : $('work-indicator-text').textContent;
+  if (['running', 'checkpoint'].includes(status) || working || ['running', 'queued'].includes(room.status) || outcome === 'in_progress') {
+    return { tone: 'go', label: label(t("进行中")), title: status === 'checkpoint' ? t("伙伴在核对这一阶段，安排下一步") : t("伙伴正在推进"),
+      text: [working, tasks.length ? t("{p0} / {p1} 项已完成。", { p0: done, p1: tasks.length }) : ''].filter(Boolean).join(' · ') };
+  }
+  return { tone: 'done', label: label($('room-status').textContent), title: t("这一轮已经回复"), text: t("有新要求可以直接在下面说。") };
+}
+function nowAction(id, label, className) {
+  const original = document.getElementById(id);
+  original.dataset.mirrored = 'true';
+  return { id, label: label || original.textContent, className, disabled: original.disabled, title: original.title || '', caption: original.disabled ? controlCaption(original) : '' };
+}
+function renderNowCard() {
+  const card = $('now-card'); const snapshot = state.snapshot;
+  $('conversation').classList.toggle('answering', currentObjective(snapshot)?.status === 'needs_user' && currentObjective(snapshot)?.can_answer === true && !$('message').disabled);
+  if (!snapshot || state.selected !== snapshot.room.id || state.reader) { card.hidden = true; return; }
+  const summary = nowSummary(snapshot);
+  const actions = [];
+  const primary = nowPrimaryIds.find((id) => liveControl(id));
+  const pause = liveControl('pause-objective'); const stop = liveControl('cancel-room');
+  if (stop) actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
+  if (pause) actions.push(nowAction('pause-objective', '', primary ? 'btn ghost' : 'btn pri'));
+  if (summary.tone === 'ask' && summary.canAnswer) actions.push({ id: 'message', label: t("写回复"), className: primary ? 'btn ghost' : 'btn pri', focus: true });
+  if (primary) {
+    const labels = { 'accept-run': t("验收这一轮") };
+    const original = document.getElementById(primary);
+    actions.push(nowAction(primary, labels[primary] || (original.textContent === t("继续") ? t("继续推进") : ''), 'btn pri'));
+  }
+  const blockedPrimary = actions.find((action) => action.className.includes('pri') && action.disabled);
+  if (blockedPrimary && !actions.some((action) => action.id === 'refresh')) actions.unshift({ id: 'refresh', label: t("重新读取状态"), className: 'btn ghost', disabled: $('refresh').disabled });
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), summary.tone, summary.label, summary.title, summary.text, summary.question,
+    (summary.blocked || []).map((task) => [task.id, task.title, task.blocked_reason, task.block_cause]), summary.canAnswer, $('message').disabled, actions]);
+  card.hidden = false;
+  if (card.dataset.fingerprint === fingerprint) return;
+  card.dataset.fingerprint = fingerprint;
+  card.className = `now-card tone-${summary.tone}`;
+  $('now-label').textContent = summary.label;
+  $('now-title').textContent = summary.title;
+  $('now-text').textContent = summary.text;
+  const detail = $('now-detail'); detail.replaceChildren();
+  if (summary.question) detail.append(element('p', summary.question, 'now-text'));
+  // One line per blocked task here; choices and raw codes stay on the progress board.
+  const blocked = summary.blocked || [];
+  if (blocked.length === 1) detail.append(blockedTaskBody(blocked[0], summary.canAnswer && !$('message').disabled, 'now-task'));
+  else for (const task of blocked.slice(0, 3)) {
+    const line = element('p', '', 'now-task-line');
+    line.append(element('b', taskDisplayTitle(task.title || task.id)), element('span', blockedTaskReason(task)));
+    line.title = t("{p0}：{p1}", { p0: taskDisplayTitle(task.title || task.id), p1: blockedTaskReason(task) });
+    detail.append(line);
+  }
+  if (blocked.length > 3) detail.append(element('p', t("另有 {p0} 项，见“进展”。", { p0: blocked.length - 3 }), 'now-text'));
+  if (blocked.length > 1) detail.append(element('p', t("在“进展”里逐项选择处理方式，或在下面直接回复。"), 'now-text'));
+  if (blockedPrimary?.caption) detail.append(element('p', t("“{p0}”暂时用不了：{p1}", { p0: blockedPrimary.label, p1: blockedPrimary.caption }), 'now-blocked'));
+  $('now-actions').replaceChildren(...actions.map((action) => {
+    const button = element('button', action.label, action.className); button.type = 'button';
+    button.disabled = !!action.disabled; button.dataset.mirror = action.id; if (action.title) button.title = action.title;
+    button.addEventListener('click', () => {
+      const target = document.getElementById(action.id);
+      if (action.focus) { target?.focus(); return; }
+      if (target && !target.disabled) target.click();
+    });
+    return button;
+  }));
+}
+
+function currentRoomTab() {
+  if (!state.snapshot || state.selected !== state.snapshot.room.id) return null;
+  if (state.reader) return 'reader';
+  if (materialsOpen()) return 'materials';
+  return state.roomTabs.get(state.snapshot.room.id) || ((state.snapshot.team?.tasks || []).length ? 'progress' : 'discussion');
+}
+function selectRoomTab(name) {
+  if (!state.snapshot || state.reader) return;
+  if (name === 'materials') { openMaterials(); return; }
+  state.roomTabs.set(state.snapshot.room.id, name);
+  if (materialsOpen()) state.materialsRoom = null;
+  renderControls();
+  $(`tab-${name}`).focus({ preventScroll: true });
+}
+function renderTabs() {
+  const tab = currentRoomTab(); const conversation = $('conversation');
+  if (tab) conversation.dataset.tab = tab; else delete conversation.dataset.tab;
+  $('room-tabs').hidden = !tab || tab === 'reader';
+  for (const name of ['progress', 'discussion', 'delivery', 'materials']) {
+    $(`tab-${name}`).setAttribute('aria-selected', String(tab === name));
+    $(`tab-${name}`).tabIndex = tab === name ? 0 : -1;
+  }
+  const tasks = (state.snapshot?.team?.tasks || []).filter((task) => task && typeof task === 'object');
+  const blocked = tasks.filter((task) => task.status === 'blocked').length;
+  const progressCount = $('tab-progress-count');
+  progressCount.hidden = !tasks.length;
+  progressCount.textContent = blocked ? t("{p0} 卡住", { p0: blocked }) : `${tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length}/${tasks.length}`;
+  progressCount.className = `tab-count${blocked ? ' ask' : ''}`;
+  $('tab-delivery-count').hidden = !state.deliveryPending;
+  $('tab-delivery-count').textContent = String(state.deliveryPending || '');
+  $('delivery-empty').hidden = !$('code-status-card').hidden;
+  renderProgressPane();
+}
+const progressChipLabels = localizedLabels({
+  open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '互审中', accepted: '互审通过',
+  self_checked: '只自检', blocked: '卡住了', unknown: '待确认', interrupted: '中断', cancelled: '已取消',
+});
+function progressTone(task) {
+  if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
+  return ({ self_checked: 'self', review: 'rev', working: 'wk', blocked: 'ask', waiting_peer: 'ask', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
+}
+function renderProgressPane() {
+  const pane = $('progress-pane'); const snapshot = state.snapshot;
+  if (!snapshot || state.selected !== snapshot.room.id) { pane.replaceChildren(); pane.dataset.fingerprint = ''; return; }
+  const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task.title === 'string');
+  const objective = currentObjective(snapshot);
+  const canAnswer = objective?.status === 'needs_user' && objective.can_answer === true && !$('message').disabled;
+  const summary = typeof snapshot.collaboration?.summary === 'string' ? snapshot.collaboration.summary.trim() : '';
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
+    snapshot.team?.phase, summary, snapshot.members.map((member) => [member.id, member.name, member.avatar])]);
+  if (pane.dataset.fingerprint === fingerprint) return;
+  pane.dataset.fingerprint = fingerprint;
+  const nodes = [];
+  if (tasks.length) {
+    const done = tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length;
+    const blocked = tasks.filter((task) => task.status === 'blocked').length;
+    const halted = tasks.filter((task) => ['interrupted', 'cancelled', 'unknown'].includes(task.status)).length;
+    const head = element('div', '', 'stage-head');
+    const phase = Object.hasOwn(teamStageLabels, snapshot.team?.phase) ? teamStageLabels[snapshot.team.phase] : '';
+    head.append(element('b', [Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : t("本轮分工"), phase].filter(Boolean).join(' · ')),
+      element('span', [t("{p0} / {p1} 完成", { p0: done, p1: tasks.length }), blocked ? t("{p0} 项卡住", { p0: blocked }) : '', halted ? t("{p0} 项中断", { p0: halted }) : ''].filter(Boolean).join(' · ')));
+    const segments = element('span', '', 'stage-seg'); segments.setAttribute('aria-hidden', 'true');
+    for (const task of tasks) segments.append(element('i', '', ({ ok: 'ok', self: 'ok', wk: 'wk', rev: 'rev', ask: 'ask', st: 'st' })[progressTone(task)] || ''));
+    head.append(segments); nodes.push(head);
+    if (summary) nodes.push(element('p', summary.length > 400 ? `${summary.slice(0, 400)}…` : summary, 'progress-summary'));
+    const list = element('ol', '', 'task-board');
+    for (const task of tasks) {
+      const tone = progressTone(task);
+      const row = element('li', '', `task-row${task.status === 'blocked' ? ' open' : ''}`);
+      row.append(element('span', ({ ok: '✓', self: '✓', ask: '!', st: 'Ⅱ' })[tone] || '', `si ${tone}`));
+      const name = element('span', taskDisplayTitle(task.title), 'task-name'); name.title = task.title;
+      if (typeof task.waiting_for === 'string' && task.waiting_for) name.append(element('small', t("等：{p0}", { p0: task.waiting_for })));
+      const who = element('span', '', 'task-who');
+      const member = (id) => snapshot.members.find((entry) => entry.id === id);
+      if (agentPattern.test(task.owner || '')) { const owner = avatar(task.owner, member(task.owner)); who.append(owner); who.title = displayName(task.owner); }
+      else who.append(element('span', t("待认领")));
+      if (agentPattern.test(task.reviewer || '') && task.reviewer !== task.owner) {
+        who.append(element('span', '→'), avatar(task.reviewer, member(task.reviewer)));
+        who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
+      }
+      const chip = element('span', task.status === 'accepted' && task.review_kind === 'self_check' ? progressChipLabels.self_checked
+        : Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("待确认"), `chip ${tone}`);
+      row.append(name, who, chip);
+      if (task.status === 'blocked') row.append(blockedTaskBody(task, canAnswer, 'task-why'));
+      list.append(row);
+    }
+    nodes.push(list);
+  } else {
+    nodes.push(element('p', snapshot.team?.phase === 'team_plan' ? t("伙伴正在分工，分好后会列在这里。") : t("这次没有拆分成任务，进展都在“讨论”里。"), 'pane-empty'));
+  }
+  pane.replaceChildren(...nodes);
+}
+
+function roomGroup(room) {
+  if (!activeEntry(room)) return 'none';
+  const activity = roomWorkActivity(room); const objective = room.objective_status;
+  if (activity && ['working', 'queued'].includes(activity.state) && objective !== 'paused') return 'go';
+  if (['needs_user', 'awaiting_continue'].includes(objective)) return 'ask';
+  if (['running', 'checkpoint'].includes(objective)) return 'go';
+  if (['paused', 'stopped', 'interrupted'].includes(objective)) return 'stop';
+  if (objective === 'complete') return 'done';
+  if (['needs_user', 'ready_for_user'].includes(room.outcome_state) || room.status === 'needs_user') return 'ask';
+  if (room.outcome_state === 'unknown' || room.status === 'unknown') return 'bad';
+  if (room.outcome_state === 'accepted' || room.status === 'completed') return 'done';
+  if (['running', 'queued'].includes(room.status) || room.outcome_state === 'in_progress') return 'go';
+  return 'stop';
+}
+const roomGroupLabels = localizedLabels({ ask: '需要你', go: '进行中', stop: '已停止', done: '已完成' });
+
+const themePreferenceKey = 'beanest:theme';
+function themePreference() {
+  try { const value = localStorage.getItem(themePreferenceKey); return ['light', 'dark'].includes(value) ? value : 'system'; } catch (_) { return 'system'; }
+}
+function applyTheme(preference = themePreference()) {
+  const root = document.documentElement;
+  if (root) { if (preference === 'system') delete root.dataset.theme; else root.dataset.theme = preference; }
+  const button = document.getElementById('interface-theme');
+  if (button) button.textContent = ({ light: t("外观：浅色"), dark: t("外观：深色") })[preference] || t("外观：跟随系统");
+}
+
+// Partner cards show the account-wide quota windows as bars; model-specific
+// windows stay in the detailed account panel.
+function quotaShortLabel(window) {
+  const named = ({ 'kimi:limit5h': t("5 小时"), 'kimi:limit7d': t("7 天"), 'kimi:monthTotal': t("本月"), 'kimi:monthCode': t("本月代码") })[window.name];
+  if (named) return named;
+  const minutes = window.window_minutes;
+  if (!Number.isFinite(minutes) || minutes <= 0) return t("额度");
+  return minutes % 1440 === 0 ? t("{p0} 天", { p0: minutes / 1440 }) : minutes % 60 === 0 ? t("{p0} 小时", { p0: minutes / 60 }) : t("{p0} 分钟", { p0: minutes });
+}
+function memberQuotaWindows(id) {
+  const quota = currentAccount(id).account?.quota;
+  const windows = (quota?.state === 'available' || quota?.stale === true) && Array.isArray(quota.windows) ? quota.windows : [];
+  return windows.filter((window) => window && typeof window === 'object' && !window.model && !window.surface)
+    .map((window) => {
+      const remaining = percentValue(window.remaining_percent); const used = percentValue(window.used_percent);
+      return { window, remaining: remaining !== null ? remaining : used !== null ? 100 - used : null, stale: quota.stale === true };
+    }).filter((entry) => entry.remaining !== null).slice(0, 3);
+}
+function renderMemberQuota(id) {
+  const holder = document.getElementById(`member-quota-${id}`);
+  if (!holder) return;
+  const entries = memberQuotaWindows(id); const blocked = availabilityInfo(id).blocked;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), entries, blocked]);
+  holder.parentNode?.classList.toggle('quota-blocked', blocked);
+  if (holder.dataset.fingerprint === fingerprint) return;
+  holder.dataset.fingerprint = fingerprint;
+  holder.replaceChildren(...entries.map(({ window, remaining, stale }) => {
+    const level = remaining <= 0 ? ' zero' : remaining < 20 ? ' low' : '';
+    const row = element('div', '', `quota-row${level}`);
+    const label = quotaShortLabel(window);
+    const meter = element('progress'); meter.max = 100; meter.value = remaining; meter.textContent = `${remaining}%`;
+    meter.setAttribute('aria-label', t("{p0}额度剩余 {p1}%", { p0: label, p1: remaining }));
+    const reset = Number.isFinite(window.resets_at) && remaining < 20 ? t(" · {p0} 重置", { p0: timeLabel(window.resets_at, true) }) : '';
+    const value = element('span', `${stale ? t("上次 ") : ''}${remaining}%${reset}`, 'quota-value');
+    if (Number.isFinite(window.resets_at)) value.title = t("重置：{p0}", { p0: timeLabel(window.resets_at, true) });
+    row.append(element('span', label), meter, value);
+    return row;
+  }));
+}
+function renderNavQuota() {
+  const holder = document.getElementById('nav-quota');
+  if (!holder) return;
+  const values = state.participantIds.map((id) => {
+    const blocked = availabilityInfo(id).blocked; const entries = memberQuotaWindows(id);
+    return [id, blocked ? 0 : entries.length ? Math.min(...entries.map((entry) => entry.remaining)) : null];
+  }).filter(([, value]) => value !== null);
+  const fingerprint = JSON.stringify(values);
+  if (holder.dataset.fingerprint === fingerprint) return;
+  holder.dataset.fingerprint = fingerprint;
+  holder.replaceChildren(...values.map(([id, value]) => {
+    const meter = element('progress', `${value}%`, value <= 0 ? 'zero' : value < 20 ? 'low' : ''); meter.max = 100; meter.value = value;
+    meter.title = t("{p0}：剩余 {p1}%", { p0: displayName(id), p1: value });
+    return meter;
+  }));
+}
+
 
 class RequestError extends Error {
   constructor(message, { uncertain = false, code = '' } = {}) {
@@ -526,7 +910,7 @@ function codeStateMessage(data) {
 function renderCodeStatus() {
   const roomId = state.snapshot?.room.id; const card = $('code-status-card');
   card.hidden = !state.codeStatusSupported || !roomId;
-  if (card.hidden) { state.codeStatusRendered = null; return; }
+  if (card.hidden) { state.codeStatusRendered = null; state.deliveryPending = 0; return; }
   const entry = codeStatusEntry(roomId); const data = entry.data;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [roomId, entry.workspaceId, data, entry.loading, entry.error, entry.repository, entry.repositoryEditing, entry.repositoryDraft, entry.repositorySaving, entry.repositoryError, state.connected, codeRunActive(), state.busy, !!state.pending, $('code-merge-target').value, naturalContinuation(state.snapshot, $('code-merge-target').value)?.canSend, state.snapshot?.members?.map((member) => member.id)]]);
   if (fingerprint === state.codeStatusRendered) return;
@@ -581,6 +965,7 @@ function renderCodeStatus() {
       ? t("GitHub 已同步的是当前主分支；上面的任务成果问题仍需核对，不能据此判断全部交付完成。")
       : t("主分支核对已提交代码，工作区核对尚未交付的成果；GitHub 核对当前主分支。");
   }
+  renderDeliverySteps(deliveryKnown ? delivery : null, data?.workspaces || [], codeRepository(entry));
   $('code-published-note').hidden = !deliveryKnown || !delivery.published;
   $('code-published-note').textContent = deliveryKnown && delivery.published
     ? (stale ? t("上次检查：") : '') + taskPublishedMessage(delivery.published) : '';
@@ -637,6 +1022,23 @@ function renderCodeStatus() {
   const remaining = Number.isSafeInteger(counts?.total) ? counts.total - (data.files?.length || 0) : 0;
   $('code-files-more').hidden = !available || remaining <= 0;
   $('code-files-more').textContent = remaining > 0 ? t("另有 {p0} 个文件未在本次状态中列出。", { p0: remaining }) : '';
+}
+function renderDeliverySteps(delivery, workspaces, repository) {
+  const steps = $('delivery-steps');
+  steps.hidden = !delivery || !!repository && repository.state !== 'bound';
+  $('code-status-card').classList.toggle('has-steps', !steps.hidden);
+  const cells = steps.hidden ? [] : [['workspace', t("工作区")], ['main', t("主分支")], ['remote', 'GitHub'], ['private', t("伙伴副本")]]
+    .filter(([kind]) => ['main', 'remote'].includes(kind) || delivery[kind]);
+  state.deliveryPending = cells.filter(([kind]) => delivery[kind]?.state === 'pending').length;
+  steps.replaceChildren(...cells.map(([kind, label]) => {
+    const value = delivery[kind]?.state; const text = taskDeliveryScopeStatus(delivery, kind, workspaces);
+    const tone = value === 'confirmed' ? 'ok' : value === 'pending' ? 'ask' : 'st';
+    const cell = element('div', '', `delivery-step ${value === 'pending' ? 'pending' : value === 'confirmed' ? 'confirmed' : 'unknown'}`);
+    const title = element('span', '', 'delivery-step-title');
+    title.append(element('span', ({ ok: '✓', ask: '!', st: '?' })[tone], `si ${tone}`), element('span', label));
+    cell.append(title, element('span', text.slice(text.indexOf('：') + 1)));
+    return cell;
+  }));
 }
 function codeDeliveryRequest(data, available) {
   if (!available) return null;
@@ -1427,11 +1829,15 @@ function memberCard(id, descriptor = {}) {
   const name = element('h3', names[id]); name.id = `name-${id}`;
   const status = element('span', t("未启动"), 'member-status'); status.id = `status-${id}`;
   const email = element('p', '', 'account-email'); email.id = `account-email-${id}`;
-  identity.append(name, status, email);
+  identity.append(name, email);
   const adapter = descriptor.adapter || descriptor.provider;
   if (adapter) identity.append(element('p', ({ claude: 'Claude Code', codex: 'Codex' })[adapter] || adapter, 'adapter-identity'));
-  heading.append(avatar(id, descriptor), identity);
+  const model = element('button', '', 'member-model'); model.type = 'button'; model.id = `member-model-${id}`;
+  model.setAttribute('aria-haspopup', 'dialog'); model.setAttribute('aria-controls', 'runtime-settings-popover');
+  model.addEventListener('click', () => void openRuntimePopover({ partnerId: id, trigger: model }));
+  heading.append(avatar(id, descriptor), identity, model);
   if (state.partners.some((partner) => partner.id === id)) heading.append(appearanceButton(id));
+  const doing = element('p', '', 'member-doing'); doing.append(status);
   const task = element('p', '', 'current-task'); task.id = `task-${id}`;
   const publicProgress = element('div', '', 'member-public-progress'); publicProgress.id = `public-progress-${id}`;
   const availability = element('p', '', 'member-availability'); availability.id = `availability-${id}`;
@@ -1442,7 +1848,8 @@ function memberCard(id, descriptor = {}) {
   const configurationHistory = element('p', '', 'detail-caption'); configurationHistory.id = `configuration-history-${id}`; configurationHistory.hidden = true;
   details.append(element('summary', t("任务会话与 Token")), session,
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
-  card.append(heading, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, usageSummary, details, accountFooter(id));
+  const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
+  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, usageSummary, details, accountFooter(id));
   return card;
 }
 
@@ -2101,6 +2508,12 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     button.title = `${partnerCaption}${displayName(id)} · ${fullModelLabel} · ${effort}${historical ? t(" · 仅查看") : ''}${model?.resolved_model ? t(" · 工具标识：{p0}", { p0: model.resolved_model }) : ''}`;
     button.setAttribute('aria-label', t("{p0}{p1}的模型与思考强度：{p2}，{p3}{p4}", { p0: partnerCaption, p1: displayName(id), p2: fullModelLabel, p3: effort, p4: historical ? t("，原有设置仅供查看") : !editable ? configuration ? t("，当前不可修改") : t("，本轮已固定") : '' }));
     button.setAttribute('aria-expanded', String(state.runtimePopoverOpen && state.runtimePartner === id));
+    const cardModel = document.getElementById(`member-model-${id}`);
+    if (cardModel) {
+      cardModel.textContent = `${modelLabel} · ${shortEffort} ⌄`; cardModel.title = button.title;
+      cardModel.setAttribute('aria-label', button.getAttribute('aria-label'));
+      cardModel.setAttribute('aria-expanded', button.getAttribute('aria-expanded'));
+    }
   }
   $('composer-usage-bar').dataset.nextRun = String(!!room && editable);
   $('composer-usage-bar').setAttribute('aria-label', t("{p0}伙伴模型与额度", { p0: caption }));
@@ -4206,6 +4619,14 @@ function renderRooms() {
     if (contextItemFingerprint(item) !== state.contextMenu.itemFingerprint) closeContextMenu({ restoreFocus: true });
   }
   const rooms = [...visibleRooms].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  const grouped = state.lifecycleViews.rooms === 'active';
+  $('rooms').classList.toggle('grouped', grouped);
+  const groups = new Map(); const firstInGroup = new Set();
+  for (const room of rooms) {
+    const group = roomGroup(room);
+    if (!groups.has(group)) { groups.set(group, 0); firstInGroup.add(room.id); }
+    groups.set(group, groups.get(group) + 1);
+  }
   for (const [position, room] of rooms.entries()) {
     remaining.add(room.id);
     let card = state.roomNodes.get(room.id);
@@ -4223,6 +4644,10 @@ function renderRooms() {
     }
     card.classList.toggle('selected', room.id === state.selected);
     card.setAttribute('aria-current', room.id === state.selected ? 'page' : 'false');
+    const group = roomGroup(room);
+    card.dataset.group = group;
+    card.dataset.groupFirst = String(grouped && firstInGroup.has(room.id) && Object.hasOwn(roomGroupLabels, group));
+    card.dataset.groupLabel = Object.hasOwn(roomGroupLabels, group) ? `${roomGroupLabels[group]} · ${groups.get(group)}` : '';
     card.disabled = state.busy && !canDetachPendingRequest();
     card.firstChild.textContent = roomTitle(room);
     card.title = typeof room.objective_goal === 'string' && room.objective_goal.trim() ? room.objective_goal : typeof room.goal === 'string' ? room.goal : t("目标");
@@ -4787,11 +5212,17 @@ function renderCurrentTaskQuestion(result, snapshot, objective, expanded) {
   result.hidden = false; result.className = 'collaboration-card outcome-card outcome-needs_user';
   result.append(element('h2', t("当前需要处理")));
   for (const task of snapshot.team?.tasks || []) {
-    if (next.origin === 'task_block' && task.status === 'blocked' && task.block_cause === 'permission_required') {
-      result.append(element('p', t("{p0}：需要权限确认", { p0: taskDisplayTitle(task.title || task.id) }), 'detail-caption'));
+    if (next.origin === 'task_block' && task.status === 'blocked') {
+      result.append(element('p', t("{p0}：{p1}", { p0: taskDisplayTitle(task.title || task.id), p1: blockedTaskReason(task) }), 'detail-caption'));
     }
   }
-  if (next.question.length > 400) {
+  // Task blocks are joined from stored reason codes; keep that literal record folded.
+  const codedQuestion = next.origin === 'task_block' && /[：:]\s*[a-z][a-z0-9_]{3,}\s*(?:[；;\n]|$)/m.test(next.question);
+  if (codedQuestion && next.question.length <= 400) {
+    const details = element('details', '', 'tech-details');
+    details.append(element('summary', t("技术细节（原始记录）")), element('p', next.question, 'outcome-question'));
+    result.append(details);
+  } else if (next.question.length > 400) {
     result.append(element('p', `${(next.question.split('\n').find(line => line.trim()) || next.question).slice(0, 160)}…`, 'outcome-question'));
     const details = element('details', '', 'current-task-question');
     details.dataset.outcomeDetail = 'current-task-question'; details.open = expanded.get('current-task-question') || false;
@@ -5931,6 +6362,7 @@ function renderMembers(snapshot) {
     const historicalWarning = configurationActivity?.historyWarning;
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
+    renderMemberQuota(provider);
     $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}：${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
     const usage = member?.usage;
     $(`usage-summary-${provider}`).textContent = usage == null ? t("任务用量快照不可用") : t("已收到任务用量快照");
@@ -5954,6 +6386,7 @@ function renderMembers(snapshot) {
     ? t("历史累计：{p0} 轮 · {p1} 次调用", { p0: Number.isFinite(conversation.run_count) ? conversation.run_count : t("不可用"), p1: Number.isFinite(conversation.used) ? conversation.used : t("不可用") }) : '';
   renderRunHistory(snapshot);
   renderComposerUsage();
+  renderNavQuota();
   renderPartnerActivity(snapshot);
   const jobs = snapshot?.jobs || [];
   $('job-count').textContent = pagedRoom(snapshot) && Number.isSafeInteger(snapshot.job_count) && snapshot.job_count > jobs.length ? t("共 {p0} · 当前与最近 {p1}", { p0: snapshot.job_count, p1: jobs.length }) : String(jobs.length);
@@ -6363,6 +6796,7 @@ function renderControls() {
   $('room-subtitle').textContent = loading ? t("正在读取已保存的记录，不会重新启动模型。") : (room ? t("{p0}{p1} · {p2}创建 · {p3}", { p0: runCaption, p1: workModeCaption, p2: timeLabel(room.created_at, true), p3: state.snapshot?.collaboration?.mode === 'team' ? t("分工、讨论与交付都在这里") : state.snapshot?.members.length === 1 ? t("单伙伴任务；打开只读取，不会重跑") : t("历史记录；打开只读取，不会重跑") }) : t("选工具，写下要做的事。"));
   $('room-status').hidden = !room;
   $('room-lifecycle-menu').hidden = !room;
+  $('room-more').hidden = !room;
   const lifecycleFingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [room?.id, lifecycleState(room), room?.status, room?.lifecycle_can_change, room?.lifecycle_blocked_reason, state.managementBusy, state.busy, !!state.pending,
     state.roomLifecycleSupported, state.lifecycleOperations.get(room?.id), state.connected, state.executionPolicySupported, state.snapshot?.current_run?.can_reassess_objective, runBinding(state.snapshot?.current_run), objective?.id,
     state.snapshot?.jobs.map((job) => [job.id, job.status])]]);
@@ -6456,6 +6890,8 @@ function renderControls() {
   $('task-options-partners').textContent = t("伙伴 · {p0}", { p0: state.participantIds.length });
   const linkedProject = room ? state.projects.find((project) => project.id === room.project_id) : selectedProject;
   $('task-options-project').textContent = linkedProject ? linkedProject.name : room?.project_id ? t("关联项目") : t("项目");
+  $('room-project-chip').hidden = !room?.project_id;
+  $('room-project-chip').textContent = room?.project_id ? linkedProject?.name || t("关联项目") : '';
   $('task-options-project').title = room ? room.project_id ? t("本任务关联项目：{p0}（固定）", { p0: linkedProject?.name || t("记录未找到") }) : t("本任务没有关联项目")
     : selectedProject ? t("关联项目：{p0}", { p0: selectedProject.name }) : t("选择关联项目");
   $('frozen-project').hidden = !room;
@@ -6581,6 +7017,8 @@ function renderControls() {
     $('retry-request').disabled = state.busy || !state.connected || state.scopeChanged || state.pending?.receiptBlocked === true;
     $('verify-request').disabled = state.busy || state.refreshing;
   }
+  renderTabs();
+  renderNowCard();
 }
 
 function applySnapshot(snapshot) {
@@ -7777,10 +8215,23 @@ function renderInterfaceLanguage() {
   for (const [id, open] of openDetails) if ($(id)) $(id).open = open;
   for (const [id, top] of positions) $(id).scrollTop = top;
   state.unseen = unseen;
-  renderLanguageControl();
+  renderLanguageControl(); applyTheme();
   if (focus?.id && $(focus.id)) $(focus.id).focus({ preventScroll: true });
 }
 renderLanguageControl();
+applyTheme();
+$('interface-theme').addEventListener('click', () => {
+  const next = ({ system: 'light', light: 'dark', dark: 'system' })[themePreference()];
+  try { localStorage.setItem(themePreferenceKey, next); } catch (_) { /* Session-only preference still applies. */ }
+  applyTheme(next);
+  if (document.documentElement?.dataset && next === 'system') delete document.documentElement.dataset.theme;
+});
+for (const name of ['progress', 'discussion', 'delivery', 'materials']) $(`tab-${name}`).addEventListener('click', () => selectRoomTab(name));
+$('room-tabs').addEventListener('keydown', (event) => {
+  const order = ['progress', 'discussion', 'delivery', 'materials']; const current = order.indexOf(currentRoomTab());
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || current < 0) return;
+  event.preventDefault(); selectRoomTab(order[(current + (event.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length]);
+});
 $('interface-language').addEventListener('click', () => {
   window.BeanestI18n.setLocale(window.BeanestI18n.getLocale() === 'en' ? 'zh-CN' : 'en');
 });

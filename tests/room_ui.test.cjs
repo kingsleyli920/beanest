@@ -9136,6 +9136,35 @@ test('current bound task block shows one actionable literal question with its st
   assert.match(ui.get('collaboration-outcome').textContent, /继续时沿用当前权限设置/);
   assert.equal(ui.posts().length, 0);
 });
+test('stored block codes read as plain language on the now card and progress board, and quick choices only fill the draft', async () => {
+  // Catches raw reason codes leaking into the decision UI and quick choices that send without review.
+  const saved = currentTaskBlockFixture();
+  saved.objective.next_step.question = '[0%] 实跑遗漏入口：team_task_permission';
+  saved.team.tasks = [{ id: 'blocked-file', title: '[0%] 实跑遗漏入口', owner: 'codex', status: 'blocked', blocked_reason: 'team_task_permission', block_cause: null }];
+  saved.collaboration.tasks = saved.team.tasks;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
+  const now = ui.get('now-card');
+  assert.equal(now.hidden, false);
+  assert.match(ui.get('now-title').textContent, /「实跑遗漏入口」卡住了，需要你拿主意/);
+  assert.match(now.textContent, /伙伴想改一项不归它负责的任务，被豆窝拦下了。/);
+  assert.match(ui.get('collaboration-outcome').textContent, /实跑遗漏入口：伙伴想改一项不归它负责的任务/);
+  const visibleText = (root) => descendants(root).filter((node) => !descendants(root).some((parent) => parent.tagName === 'DETAILS' && descendants(parent).includes(node) && node.tagName !== 'SUMMARY' && parent !== node)).map((node) => node._text).join('');
+  assert.doesNotMatch(visibleText(now), /team_task_permission/, 'the raw code stays folded under technical details');
+  assert.ok(descendants(now).some((node) => node.classList.contains('tech-details') && node.textContent.includes('team_task_permission')));
+  assert.equal(ui.get('conversation').dataset.tab, 'progress');
+  assert.match(ui.get('progress-pane').textContent, /卡住了/);
+  const retry = descendants(ui.get('progress-pane')).find((node) => node.tagName === 'BUTTON' && node.textContent === '按原分工重试');
+  assert.ok(retry, 'a blocked task offers a quick choice when the user can answer');
+  retry.fire('click'); await settle();
+  assert.equal(ui.get('message').value, '「实跑遗漏入口」按原分工重试：请负责人在自己的任务范围内重新提交。');
+  assert.equal(ui.posts().length, 0, 'a quick choice never sends by itself');
+  const timelineHidden = ui.get('timeline').hidden;
+  await ui.click('tab-discussion');
+  assert.equal(ui.get('conversation').dataset.tab, 'discussion');
+  assert.equal(ui.get('tab-discussion').getAttribute('aria-selected'), 'true');
+  assert.equal(ui.get('timeline').hidden, timelineHidden, 'views switch by layout only and leave reader state alone');
+  assert.equal(ui.get('rooms').children[0].dataset.group, 'ask');
+});
 test('current task question refuses stale bindings and never infers a permission category from free text or ordinary checkpoints', async () => {
   for (const variant of ['binding', 'origin', 'checkpoint', 'cause', 'coordination']) {
     const saved = currentTaskBlockFixture();
