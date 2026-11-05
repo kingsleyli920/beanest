@@ -117,10 +117,15 @@ def _structured_final_text(text):
 # Avoid its short foreground/auto-background defaults in Beanest-owned turns;
 # the host's explicit task deadline and cancellation remain independent.
 _CLAUDE_BASH_TIMEOUT_MS = '2147483647'
+# A background command or monitor wakes the model later in a new turn of the
+# same process, so one native call would end with several result events and be
+# rejected as incomplete. Long checks run in the foreground instead.
 _CLAUDE_BASH_ENV = {
     'BASH_DEFAULT_TIMEOUT_MS': _CLAUDE_BASH_TIMEOUT_MS,
     'BASH_MAX_TIMEOUT_MS': _CLAUDE_BASH_TIMEOUT_MS,
+    'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '1',
 }
+_CLAUDE_WAKEUP_TOOLS = 'Monitor,CronCreate,CronDelete,CronList,ScheduleWakeup'
 
 
 def _nonnegative_number(value):
@@ -697,7 +702,8 @@ def native_command(agent, session_id=None, *, permission='read_only',
                    '-p', '--output-format', 'stream-json', '--verbose',
                    '--permission-prompts', 'none']
         if permission in {'plan', 'full_access'}:
-            command += ['--permission-mode', 'plan' if permission == 'plan' else 'bypassPermissions']
+            command += ['--permission-mode', 'plan' if permission == 'plan' else 'bypassPermissions',
+                        '--disallowedTools=' + _CLAUDE_WAKEUP_TOOLS]
         else:
             # Compatibility only: existing restricted requests must not gain
             # native capabilities merely because the application was upgraded.
