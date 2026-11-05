@@ -4,6 +4,14 @@ const t = (key, params) => window.BeanestI18n.t(key, params);
 const localizedLabels = (value) => window.BeanestI18n.labels(value);
 const interfaceWordSpace = () => window.BeanestI18n.getLocale() === 'en' ? ' ' : '';
 const interfaceComma = () => window.BeanestI18n.getLocale() === 'en' ? ', ' : '，';
+// Joining punctuation for text assembled outside t(), so English never shows 、：；（）「」.
+const englishInterface = () => window.BeanestI18n.getLocale() === 'en';
+const interfaceList = (items) => items.join(englishInterface() ? ', ' : '、');
+const interfaceColon = () => englishInterface() ? ': ' : '：';
+const interfaceSemicolon = () => englishInterface() ? '; ' : '；';
+const interfaceParen = (text) => englishInterface() ? ` (${text})` : `（${text}）`;
+const interfaceQuote = (text) => englishInterface() ? `“${text}”` : `「${text}」`;
+const interfaceStop = () => englishInterface() ? '. ' : '。';
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="lac-token"]').content;
 let providers = [];
@@ -362,6 +370,20 @@ function autoContinueReady(snapshot) {
 function quotaWaitContinues(snapshot) {
   return autonomousObjective(snapshot) && objectivePolicy(snapshot)?.quota_failover === true;
 }
+// The service's own stop_kind decides when present ("auto", "quota_wait" or
+// null); the mirror above only serves an older service without it.
+function stopKind(snapshot, code) {
+  const repeated = stopContinuesAutomatically(code) && autonomousObjective(snapshot) && autoContinuedAlready(snapshot, code);
+  if (Object.hasOwn(snapshot, 'stop_kind')) return ['auto', 'quota_wait'].includes(snapshot.stop_kind) ? snapshot.stop_kind : repeated ? 'repeated' : null;
+  if (code === 'all_partners_quota_exhausted') return quotaWaitContinues(snapshot) ? 'quota_wait' : null;
+  if (!stopContinuesAutomatically(code) || !autonomousObjective(snapshot) || !autoContinueReady(snapshot)) return null;
+  return repeated ? 'repeated' : 'auto';
+}
+function roomStopKind(room) {
+  const snapshot = state.snapshot?.room.id === room.id ? state.snapshot : null;
+  const value = snapshot && Object.hasOwn(snapshot, 'stop_kind') ? snapshot.stop_kind : room.stop_kind;
+  return ['auto', 'quota_wait'].includes(value) ? value : null;
+}
 function blockedTaskReason(task) {
   if (task?.block_cause === 'permission_required') return t("需要权限确认：这一步要用到当前权限以外的操作。同意就按原计划做，不同意伙伴会换一种做法。");
   if (task?.block_cause === 'user_decision') {
@@ -444,7 +466,9 @@ function nowSummary(snapshot) {
     const next = boundObjectiveNextStep(snapshot);
     const blocked = next?.origin === 'task_block' ? tasks.filter(taskNeedsUser) : [];
     const canAnswer = objective?.can_answer === true;
-    if (next?.origin === 'task_block' && !blocked.length) return taskBlockContinuesAutomatically(snapshot, tasks.filter((task) => task.status === 'blocked'))
+    const blockAuto = Object.hasOwn(snapshot, 'stop_kind') ? snapshot.stop_kind === 'auto'
+      : taskBlockContinuesAutomatically(snapshot, tasks.filter((task) => task.status === 'blocked'));
+    if (next?.origin === 'task_block' && !blocked.length) return blockAuto
       ? { tone: 'go', autoContinue: true, label: label(t("马上自动继续")), canAnswer,
         title: t("有几项要重新安排，豆窝会自动接着做"), text: t("几秒后自动继续，不用你操作。想补充要求可以直接在下面说。") }
       : { tone: 'stop', label: label(t("已暂停")), canAnswer,
@@ -479,11 +503,12 @@ function nowSummary(snapshot) {
   const doneNote = done ? t("已完成的 {p0} 项成果都在。", { p0: done }) : t("已有成果和记录都在。");
   if (['stopped', 'interrupted'].includes(status) && !hostResultInterruption(objective)) {
     const stoppedLabel = label(t("已停止"), room.updated_at);
-    if (stopReason === 'all_partners_quota_exhausted' && quotaWaitContinues(snapshot)) return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
+    const kind = stopKind(snapshot, stopReason);
+    if (kind === 'quota_wait') return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
       title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。")].join(' ') };
-    if (stopContinuesAutomatically(stopReason) && autonomousObjective(snapshot) && autoContinueReady(snapshot)) {
+    if (kind === 'auto' || kind === 'repeated') {
       const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
-      return autoContinuedAlready(snapshot, stopReason)
+      return kind === 'repeated'
         ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过一次，又停在同一处"),
           text: [t("没有新进展，所以不再自动继续。点“继续推进”再试，或在下面补充要求。"), doneNote].join(' ') }
         : { tone: 'go', autoContinue: true, label: label(t("马上自动继续"), room.updated_at),
@@ -604,17 +629,20 @@ function renderTabs() {
 }
 const progressChipLabels = localizedLabels({
   open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '互审中', accepted: '互审通过',
-  self_checked: '只自检', unknown: '结果待确认', interrupted: '停下了', cancelled: '已取消',
+  self_checked: '只自检', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
 });
+// Only the user's own stop really cancels unfinished tasks; any other stop carries them into the next attempt.
+const userCancelCodes = new Set(['cancel_requested', 'lifecycle_requested']);
 // One color per meaning, shared by the bar, the row icon and the legend.
-const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '互审中', ask: '等你决定', wait: '待重新安排', st: '停下了', todo: '未开始' });
+const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '互审中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始' });
 function progressTone(task) {
   if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
   if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : 'wait';
   return ({ self_checked: 'self', review: 'rev', working: 'wk', waiting_peer: 'wk', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
 }
-function progressChip(task) {
+function progressChip(task, cancelled = false) {
   if (task.status === 'accepted' && task.review_kind === 'self_check') return progressChipLabels.self_checked;
+  if (cancelled && ['interrupted', 'cancelled'].includes(task.status)) return t("已取消");
   if (task.status === 'blocked') return taskNeedsUser(task) ? task.block_cause === 'permission_required' ? t("要你同意") : t("等你决定") : t("待重新安排");
   return Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("结果待确认");
 }
@@ -626,8 +654,11 @@ function renderProgressPane() {
   const canAnswer = objective?.status === 'needs_user' && objective.can_answer === true && !$('message').disabled;
   const summary = typeof snapshot.collaboration?.summary === 'string'
     ? platformDisplayText(snapshot.collaboration.summary, snapshot.collaboration.summary_i18n).trim() : '';
+  const resumes = ['auto', 'quota_wait'].includes(stopKind(snapshot, objective?.stop_reason));
+  const cancelled = userCancelCodes.has(objective?.stop_reason) || userCancelCodes.has(snapshot.team?.stop_reason);
+  const stLabel = cancelled ? t("已取消") : progressToneLabels.st;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
-    snapshot.team?.phase, summary, snapshot.members.map((member) => [member.id, member.name, member.avatar])]);
+    snapshot.team?.phase, summary, resumes, cancelled, snapshot.members.map((member) => [member.id, member.name, member.avatar])]);
   if (pane.dataset.fingerprint === fingerprint) return;
   pane.dataset.fingerprint = fingerprint;
   const nodes = [];
@@ -638,21 +669,25 @@ function renderProgressPane() {
     const phase = Object.hasOwn(teamStageLabels, snapshot.team?.phase) ? teamStageLabels[snapshot.team.phase] : '';
     head.append(element('b', [Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : t("本轮分工"), phase].filter(Boolean).join(' · ')),
       element('span', [t("{p0} / {p1} 完成", { p0: count('ok'), p1: tasks.length }), count('ask') ? t("{p0} 项等你决定", { p0: count('ask') }) : '',
-        count('wait') ? t("{p0} 项待重新安排", { p0: count('wait') }) : '', count('st') ? t("{p0} 项停下了", { p0: count('st') }) : ''].filter(Boolean).join(' · ')));
+        count('wait') ? t("{p0} 项待重新安排", { p0: count('wait') }) : '', count('st') ? cancelled ? t("{p0} 项已取消", { p0: count('st') }) : t("{p0} 项待继续", { p0: count('st') }) : ''].filter(Boolean).join(' · ')));
     const segments = element('span', '', 'stage-seg'); segments.setAttribute('aria-hidden', 'true');
     for (const tone of tones) segments.append(element('i', '', tone));
     head.append(segments); nodes.push(head);
     const legend = element('div', '', 'stage-legend');
     for (const tone of ['ok', 'wk', 'rev', 'ask', 'wait', 'st', 'todo']) {
       if (!count(tone)) continue;
-      const item = element('span', '', 'legend-item'); item.append(element('i', '', tone), element('span', `${progressToneLabels[tone]} ${count(tone)}`));
+      const item = element('span', '', 'legend-item'); item.append(element('i', '', tone), element('span', `${tone === 'st' ? stLabel : progressToneLabels[tone]} ${count(tone)}`));
       legend.append(item);
     }
     nodes.push(legend);
-    if (count('wait') || count('st')) nodes.push(element('p', count('wait') && count('st')
-      ? t("“待重新安排”和“停下了”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
-      : count('wait') ? t("“待重新安排”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
-      : t("“停下了”表示这项在豆窝停止时还没做完，点“继续推进”后会接着做。"), 'progress-note'));
+    const note = cancelled ? count('wait') ? t("“待重新安排”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。") : ''
+      : resumes ? count('wait') && count('st') ? t("“待重新安排”和“待继续”的任务不用逐项处理，自动继续后豆窝会先重新安排，再接着做。")
+        : count('wait') ? t("“待重新安排”的任务不用逐项处理，自动继续后豆窝会先重新安排，再接着做。")
+        : count('st') ? t("“待继续”的任务会在自动继续后接着做，不用逐项处理。") : ''
+      : count('wait') && count('st') ? t("“待重新安排”和“待继续”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
+        : count('wait') ? t("“待重新安排”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
+        : count('st') ? t("“待继续”的任务在豆窝停下时还没做完，点“继续推进”后会接着做。") : '';
+    if (note) nodes.push(element('p', note, 'progress-note'));
     if (summary) nodes.push(element('p', summary.length > 400 ? `${summary.slice(0, 400)}…` : summary, 'progress-summary'));
     const list = element('ol', '', 'task-board');
     for (const task of tasks) {
@@ -669,7 +704,7 @@ function renderProgressPane() {
         who.append(element('span', '→'), avatar(task.reviewer, member(task.reviewer)));
         who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
       }
-      row.append(name, who, element('span', progressChip(task), `chip ${tone}`));
+      row.append(name, who, element('span', progressChip(task, cancelled), `chip ${tone}`));
       if (task.status === 'blocked') row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
       list.append(row);
     }
@@ -684,6 +719,7 @@ function roomGroup(room) {
   if (!activeEntry(room)) return 'none';
   const activity = roomWorkActivity(room); const objective = room.objective_status;
   if (activity && ['working', 'queued'].includes(activity.state) && objective !== 'paused') return 'go';
+  if (roomStopKind(room)) return 'go';
   if (['needs_user', 'awaiting_continue'].includes(objective)) return 'ask';
   if (['running', 'checkpoint'].includes(objective)) return 'go';
   if (['paused', 'stopped', 'interrupted'].includes(objective)) return 'stop';
@@ -728,7 +764,8 @@ function memberQuotaWindows(id) {
 function renderMemberQuota(id) {
   const holder = document.getElementById(`member-quota-${id}`);
   if (!holder) return;
-  const entries = memberQuotaWindows(id); const blocked = availabilityInfo(id).blocked;
+  // Only a status in doubt outlines the card; running out of quota is an ordinary wait.
+  const entries = memberQuotaWindows(id); const blocked = memberAvailabilityLine(availabilityInfo(id))?.tone === 'ask';
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), entries, blocked]);
   holder.parentNode?.classList.toggle('quota-blocked', blocked);
   if (holder.dataset.fingerprint === fingerprint) return;
@@ -927,7 +964,7 @@ function taskDeliveryStatus(part, kind) {
     git_invalid_output: t("Git 返回的状态暂时无法识别"), git_failed: t("Git 查询未成功，可刷新重试"), unsupported_mainline_file: t("主分支中的文件类型暂无法核对"),
   };
   const fallback = part?.state === 'pending' ? t("还有成果待处理，来源未提供具体原因") : t("来源未提供可确认的核对结果");
-  return `${kind === 'main' ? t("主分支") : kind === 'private' ? t("伙伴工作区") : kind === 'workspace' ? t("工作区") : 'GitHub'}：${reasons[part?.reason] || fallback}`;
+  return `${kind === 'main' ? t("主分支") : kind === 'private' ? t("伙伴工作区") : kind === 'workspace' ? t("工作区") : 'GitHub'}${interfaceColon()}${reasons[part?.reason] || fallback}`;
 }
 function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
   const issues = (Array.isArray(delivery.issues) ? delivery.issues : []).filter((issue) => issue.scope === kind && issue.state !== 'confirmed');
@@ -937,7 +974,7 @@ function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
   const messages = [...new Set(problems.map((issue) => {
     const workspace = workspaces.find((item) => item.id === issue.workspace_id);
     const label = workspace && (state.snapshot?.members?.find((member) => member.id === workspace.provider)?.name || platformDisplayText(workspace.label, workspace.label_i18n));
-    return taskDeliveryStatus(issue, kind) + (label ? `（${label}）` : '');
+    return taskDeliveryStatus(issue, kind) + (label ? interfaceParen(label) : '');
   }))];
   return messages.map((message, index) => index ? message.slice(message.indexOf('：') + 1) : message).join('；');
 }
@@ -1943,7 +1980,7 @@ function observedQuotaLabel(id) {
   const window = windows.length === 1 ? windows[0] : null;
   const remaining = percentValue(window?.remaining_percent);
   return { quota, text: window && remaining !== null
-    ? t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowLabel(window.window_minutes).replace(t("窗口"), '') || t("账号额度"), p2: remaining })
+    ? t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(window.window_minutes) || t("账号额度"), p2: remaining })
     : t("{p0}取得 {p1} 个额度窗口", { p0: quota.stale ? t("上次") : t("已"), p1: windows.length }) };
 }
 function availabilityInfo(id) {
@@ -1965,6 +2002,24 @@ function availabilityInfo(id) {
     state.availabilityError ? t("这次更新未成功，显示的仍是已有记录") : ''].filter(Boolean).join(' · ') : '';
   return { value, blocked, stale, summary, detail };
 }
+// The partner card carries one plain line; the full record lives under 账号与额度.
+// A quota wait is an ordinary state, so only a login or status in doubt asks for attention.
+function memberAvailabilityLine(info) {
+  if (!info.value || !info.blocked) return null;
+  const reason = info.value.reason;
+  if (['subscription_limit_reached', 'quota_exhausted'].includes(reason)) return { tone: 'wait',
+    text: Number.isFinite(info.value.resets_at) ? t("额度用完 · {p0} 恢复", { p0: timeLabel(info.value.resets_at, true) }) : t("额度用完 · 恢复时间未知") };
+  if (reason === 'quota_reset_due') return { tone: 'wait', text: t("额度应已恢复 · 点“账号与额度”确认") };
+  if (reason === 'account_identity_unknown') return { tone: 'ask', text: t("登录待确认 · 点“账号与额度”刷新") };
+  return { tone: 'ask', text: t("状态待确认 · 点“账号与额度”刷新") };
+}
+// The card says only whether the partner is signed in; who it is shows under 账号与额度.
+function memberLoginCaption(account) {
+  if (!account || account.state === 'not_checked') return t("登录未检查");
+  if (account.stale) return t("登录待刷新");
+  if (account.state === 'error') return t("登录检查未成功");
+  return t("已登录");
+}
 function availabilityText(info) {
   const parts = info.detail ? info.detail.split(' · ') : [];
   if (!parts.length) return info.summary;
@@ -1973,7 +2028,7 @@ function availabilityText(info) {
 function blockedParticipants() { return state.participantIds.filter((id) => availabilityInfo(id).blocked); }
 function availabilityBlockMessage() {
   const blocked = blockedParticipants(); if (!blocked.length) return '';
-  const reasons = blocked.map((id) => `${displayName(id)}：${availabilityInfo(id).summary.split(' · ')[0]}`).join('；');
+  const reasons = blocked.map((id) => `${displayName(id)}${interfaceColon()}${availabilityInfo(id).summary.split(' · ')[0]}`).join(interfaceSemicolon());
   return state.selected ? state.memberInvitationSupported
     ? t("{p0}。等待状态更新，或在“伙伴”中查看可邀请的伙伴。", { p0: reasons })
     : t("{p0}。本任务成员固定；等待状态更新，或开新任务调整伙伴。", { p0: reasons })
@@ -1990,8 +2045,8 @@ function submissionAvailabilityMessage() {
   const failover = quotaFailoverSelection();
   if (!failover) return availabilityBlockMessage();
   const ongoing = ['running', 'checkpoint'].includes(currentObjective()?.status) && !terminalTeamState(state.snapshot);
-  return ongoing ? t("{p0} 正在接续任务；{p1} 额度不足。", { p0: failover.available.map(displayName).join('、'), p1: failover.blocked.map(displayName).join('、') })
-    : t("将由 {p0} 继续；{p1} 额度不足。", { p0: failover.available.map(displayName).join('、'), p1: failover.blocked.map(displayName).join('、') });
+  return ongoing ? t("{p0} 正在接续任务；{p1} 额度不足。", { p0: interfaceList(failover.available.map(displayName)), p1: interfaceList(failover.blocked.map(displayName)) })
+    : t("将由 {p0} 继续；{p1} 额度不足。", { p0: interfaceList(failover.available.map(displayName)), p1: interfaceList(failover.blocked.map(displayName)) });
 }
 function canRequestAvailabilityRecheck(id) {
   const info = availabilityInfo(id);
@@ -2172,6 +2227,13 @@ function trackAccountPanel(details, id) {
   if (details.open) void refreshWatchingAccounts();
 }
 function percentValue(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null; }
+// "5小时" / "5小时额度" as whole keys; stripping 窗口 from a translated label failed in English.
+function quotaWindowName(minutes, quota = false) {
+  if (!Number.isFinite(minutes) || minutes <= 0) return '';
+  if (minutes % 1440 === 0) return quota ? t("{p0}天额度", { p0: minutes / 1440 }) : t("{p0}天", { p0: minutes / 1440 });
+  if (minutes % 60 === 0) return quota ? t("{p0}小时额度", { p0: minutes / 60 }) : t("{p0}小时", { p0: minutes / 60 });
+  return quota ? t("{p0}分钟额度", { p0: minutes }) : t("{p0}分钟", { p0: minutes });
+}
 function quotaWindowLabel(minutes) {
   if (!Number.isFinite(minutes) || minutes <= 0) return '';
   return minutes % 1440 === 0 ? t("{p0}天窗口", { p0: minutes / 1440 }) : minutes % 60 === 0 ? t("{p0}小时窗口", { p0: minutes / 60 }) : t("{p0}分钟窗口", { p0: minutes });
@@ -2202,7 +2264,7 @@ function updateAccountFooter(details, id) {
   const sourceLabels = { kimi_managed_oauth: t("Kimi Code 本机会员登录"), codex_app_server: t("Codex 原生账号查询"), claude_auth_status: t("Claude Code 登录状态"), unsupported: t("当前接入方式未支持") };
   fact(t("账号来源"), sourceLabels[account?.source] || t("尚未获取"));
   if (compact) {
-    body.append(element('p', `${account?.stale ? t("上次确认") : t("当前登录")}：${accountLoginText(account)}`, 'compact-account-identity'),
+    body.append(element('p', `${account?.stale ? t("上次确认") : t("当前登录")}${interfaceColon()}${accountLoginText(account)}`, 'compact-account-identity'),
       element('p', `${accountFieldText(account, 'plan')} · ${Number.isFinite(account?.checked_at) ? `${timeLabel(account.checked_at, true)}${account.stale ? t(" · 旧快照") : ''}` : t("尚未查询")}`, 'detail-caption'));
     const more = element('details', '', 'compact-account-more'); more.append(element('summary', t("来源与账号范围")), facts); body.append(more);
   } else body.append(facts);
@@ -2223,9 +2285,13 @@ function updateAccountFooter(details, id) {
       const rawName = typeof window.name === 'string' && window.name.trim() ? window.name : '';
       const pool = rawName.match(/^([a-zA-Z0-9_-]+):(primary|secondary)$/);
       const kimiWindow = ({ 'kimi:limit5h': t("Kimi Code · 5小时额度"), 'kimi:limit7d': t("Kimi Code · 7天额度"), 'kimi:monthTotal': t("Kimi Code · 月度总额度"), 'kimi:monthCode': t("Kimi Code · 月度代码额度") })[rawName];
-      const label = typeof window.label === 'string' && window.label.trim() ? window.label.trim().slice(0, 200)
+      // adapters.py names Claude's windows in Chinese; known names are translated here like Kimi's.
+      const claudeModel = /^claude:model_scoped:/.test(rawName) && typeof window.label === 'string' ? window.label.split(' · ')[0].trim() : '';
+      const claudeWindow = ({ 'claude:five_hour': t("Claude · 5小时窗口"), 'claude:seven_day': t("Claude · 7天窗口") })[rawName]
+        || (claudeModel ? t("{p0} · 模型周额度", { p0: claudeModel }) : '');
+      const label = kimiWindow || claudeWindow || (typeof window.label === 'string' && window.label.trim() ? window.label.trim().slice(0, 200)
         : pool ? t("{p0} 额度池 · {p1}", { p0: ({ codex: 'Codex', claude: 'Claude Code' })[pool[1]] || pool[1], p1: duration || (pool[2] === 'primary' ? t("主窗口") : t("第二窗口")) })
-        : kimiWindow || rawName || duration || t("供应商额度窗口");
+        : rawName || duration || t("供应商额度窗口"));
       const heading = element('div', '', 'quota-window-heading');
       heading.append(element('strong', label), element('span', remaining !== null ? t("剩余 {p0}%", { p0: remaining }) : used !== null ? t("已用 {p0}%", { p0: used }) : t("比例未提供")));
       row.append(heading);
@@ -2253,7 +2319,7 @@ function updateAccountFooter(details, id) {
   if (usageLink) { usageLink.dataset.usageLink = id; body.append(usageLink, element('p', quota.usage_url, 'native-login-url')); }
   const shared = Array.isArray(account?.shared_profile_ids) ? account.shared_profile_ids.filter((value) => value !== id && agentPattern.test(value)) : [];
   const tool = ({ claude: 'Claude Code', codex: 'Codex', kimi: 'Kimi Code' })[partner?.adapter] || t("对应工具");
-  body.append(element('p', shared.length ? t("与{p0}共用本机 {p1} 登录。改名或新建会话不会切换账号。", { p0: shared.map(displayName).join('、'), p1: tool })
+  body.append(element('p', shared.length ? t("与{p0}共用本机 {p1} 登录。改名或新建会话不会切换账号。", { p0: interfaceList(shared.map(displayName)), p1: tool })
     : account?.scope === 'default_cli_login' || ['claude', 'codex', 'kimi'].includes(partner?.adapter)
       ? t("使用本机 {p0} 的当前登录。改名或新建会话不会切换账号。", { p0: tool }) : t("当前接入方式未提供独立账号信息。"), 'account-scope-note'));
   const refresh = element('button', state.accountRefreshId === id ? t("正在查询…") : t("刷新账号与额度"), 'quiet-button'); refresh.type = 'button'; refresh.dataset.focusKey = 'account-refresh';
@@ -2679,7 +2745,7 @@ function renderRuntimeSettings() {
     for (const model of models) { const option = element('option', runtimeModelLabel(model, models)); option.value = model.id;
       if (typeof model.resolved_model === 'string') option.title = t("工具标识：{p0}", { p0: model.resolved_model });
       modelSelect.append(option); }
-    if (choice.model && !models.some((model) => model.id === choice.model)) { const option = element('option', `${choice.model}（${historical ? t("原有设置") : t("已设置，尚未核对")}）`); option.value = choice.model; modelSelect.append(option); }
+    if (choice.model && !models.some((model) => model.id === choice.model)) { const option = element('option', `${choice.model}${interfaceParen(historical ? t("原有设置") : t("已设置，尚未核对"))}`); option.value = choice.model; modelSelect.append(option); }
     modelSelect.value = choice.model || ''; modelSelect.disabled = historical || locked || !supported;
     modelSelect.addEventListener('change', () => {
       if (modelSelect.disabled) return;
@@ -2693,7 +2759,7 @@ function renderRuntimeSettings() {
     const effortLabel = element('label', t("思考强度 ")); const effortSelect = element('select'); effortSelect.id = `runtime-effort-${id}`;
     const defaultEffort = element('option', t("工具默认")); defaultEffort.value = ''; effortSelect.append(defaultEffort);
     for (const effort of efforts) { const option = element('option', ({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[effort] || effort); option.value = effort; effortSelect.append(option); }
-    if (choice.effort && !efforts.includes(choice.effort)) { const option = element('option', `${choice.effort}（${historical ? t("原有设置") : t("已设置，尚未核对")}）`); option.value = choice.effort; effortSelect.append(option); }
+    if (choice.effort && !efforts.includes(choice.effort)) { const option = element('option', `${choice.effort}${interfaceParen(historical ? t("原有设置") : t("已设置，尚未核对"))}`); option.value = choice.effort; effortSelect.append(option); }
     effortSelect.value = choice.effort || ''; effortSelect.disabled = historical || locked || !supported || !selectedModel || !efforts.length;
     effortSelect.addEventListener('change', () => {
       if (effortSelect.disabled) return;
@@ -2784,7 +2850,7 @@ function accountQuotaSummary(id) {
   const weekly = shared.filter((window) => window?.kind === 'weekly_all' || window?.window_minutes === 10080);
   const selected = weekly.length === 1 ? weekly[0] : shared.length === 1 ? shared[0] : null;
   const remaining = percentValue(selected?.remaining_percent);
-  if (selected && remaining !== null) return { text: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowLabel(selected.window_minutes).replace(t("窗口"), t("额度")) || t("账号额度"), p2: remaining }), shortText: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowLabel(selected.window_minutes).replace(t("窗口"), ''), p2: remaining }), remaining };
+  if (selected && remaining !== null) return { text: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(selected.window_minutes, true) || t("账号额度"), p2: remaining }), shortText: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(selected.window_minutes), p2: remaining }), remaining };
   if (windows.length) return { text: t("{p0}{p1} 个{p2}额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length, p2: windows.every((window) => window?.scope === 'model') ? t("模型") : '' }) };
   return { text: quotaPendingLabel(id) };
 }
@@ -3280,7 +3346,7 @@ function lifecycleActions(kind, item, { beforeAction = () => {} } = {}) {
     const button = element('button', label, `quiet-button${action === 'remove' ? ' danger' : ''}`); button.type = 'button';
     button.dataset.lifecycleAction = action; button.dataset.lifecycleKind = kind; button.dataset.lifecycleId = item.id;
     button.disabled = state.managementBusy || (!permanent && (state.busy || !!state.pending)) || (permanent ? busy : action !== 'restore' && busy);
-    button.setAttribute('aria-label', `${label}${kind === 'rooms' ? t("任务") : kind === 'projects' ? t("项目") : t("伙伴")}：${item.name || roomTitle(item)}`);
+    button.setAttribute('aria-label', `${label}${kind === 'rooms' ? t("任务") : kind === 'projects' ? t("项目") : t("伙伴")}${interfaceColon()}${item.name || roomTitle(item)}`);
     if (permanent && busy) button.title = kind === 'partners' ? t("正在处理这个伙伴的操作。") : kind === 'projects' ? t("正在核对项目登记删除结果。") : t("正在停止任务并处理记录，请稍候。");
     else if (busy && action !== 'restore') button.title = item.lifecycle_blocked_reason === 'team_cleanup_unconfirmed'
       ? t("执行清理尚未确认，暂时不能归档或移除。") : t("任务仍在处理或等待清理，结束后可整理。");
@@ -3661,7 +3727,7 @@ function renderLegacyRoomReview() {
   status.hidden = !operations.length; status.replaceChildren();
   for (const operation of operations) {
     const row = element('div', '', 'lifecycle-operation');
-    row.append(element('p', `${roomTitle(state.rooms.find((room) => room.id === operation.room_id) || {})}：${lifecycleOperationText(operation)}`, 'detail-caption'));
+    row.append(element('p', `${roomTitle(state.rooms.find((room) => room.id === operation.room_id) || {})}${interfaceColon()}${lifecycleOperationText(operation)}`, 'detail-caption'));
     if (operation.status === 'unknown') {
       const check = element('button', t("核对处理结果"), 'quiet-button'); check.type = 'button';
       check.addEventListener('click', async () => { await checkLifecycleOperation(operation); renderRooms(); }); row.append(check);
@@ -3943,7 +4009,7 @@ function acceptPartners(result) {
     template && agentPattern.test(template.adapter) && typeof template.name === 'string' && template.protocol === 'beanest-json-v1') : [];
   state.connectionProtocol = result.connection_protocol?.id === 'beanest-json-v1' ? result.connection_protocol : null;
   renderDiscovery();
-  const combined = [...result.supported_adapters, ...state.connectionTemplates.map((template) => ({ id: template.adapter, name: template.name }))];
+  const combined = [...result.supported_adapters, ...state.connectionTemplates.map((template) => ({ id: template.adapter, name: t(template.name) }))];
   const adapters = combined.filter((adapter, index) => adapter && agentPattern.test(adapter.id) && combined.findIndex((item) => item.id === adapter.id) === index);
   acceptBeanStyles(result.bean_styles);
   rememberAgents(state.partners);
@@ -4084,7 +4150,7 @@ function renderDiscovery() {
   const found = discovery.tools.filter((tool) => tool.installed === true).map((tool) => tool.name);
   let message;
   if (discovery.state === 'unavailable') message = t("这次启动还没确认本机工具，现有设置保持不变。");
-  else if (found.length) message = t("已找到 {p0}。选好工具就可以开始。", { p0: found.join('、') });
+  else if (found.length) message = t("已找到 {p0}。选好工具就可以开始。", { p0: interfaceList(found) });
   else if (discovery.tools.length && discovery.tools.every((tool) => tool.installed === false)) message = t("还没在本机找到已支持的工具，可以到工具与状态中查看。");
   else message = t("还没确认本机有哪些支持的工具，可以到工具与状态中查看。");
   const hasDisabled = state.partners.some((partner) => partner.enabled === false
@@ -4428,7 +4494,7 @@ function renderGlobalPartners() {
     }
     for (const operation of state.partnerOperations.values()) if (!state.partners.some((partner) => partner.id === operation.provider)
         && (operation.status !== 'completed' || operation.error || operation.targets?.some((target) => !['done', 'superseded'].includes(target.state)))) {
-      $('partners-list').append(element('p', `${displayName(operation.provider)}：${partnerOperationText(operation)}`, 'detail-caption'));
+      $('partners-list').append(element('p', `${displayName(operation.provider)}${interfaceColon()}${partnerOperationText(operation)}`, 'detail-caption'));
     }
   }
 }
@@ -4457,7 +4523,7 @@ async function discoverOnOpen({ reopen = false, manual = false } = {}) {
     setCatalog(status.agents);
     renderMembers(state.snapshot);
     if (manual) $('discovery-feedback').textContent = state.discovery?.state === 'completed'
-      ? t("安装观察已更新{p0}；没有启动模型。", { p0: Number.isFinite(state.discovery.observed_at) ? `（${timeLabel(state.discovery.observed_at, true)}）` : '' })
+      ? t("安装观察已更新{p0}；没有启动模型。", { p0: Number.isFinite(state.discovery.observed_at) ? interfaceParen(timeLabel(state.discovery.observed_at, true)) : '' })
       : t("已刷新工具记录；安装观察尚未确认，没有启动模型。");
     return null;
   } catch (_error) {
@@ -4761,7 +4827,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'run_started') return t("{p0}协作已开始{p1}", { p0: Number.isSafeInteger(event.number) ? t("第 {p0} 轮", { p0: event.number }) : t("新一轮"), p1: event.retry ? t("，使用新的专用会话") : t("，保留此前交付和会话") });
   if (event.kind === 'native_readonly_discussion') return t("{p0} 正在只读讨论，已有改动保持。", { p0: displayName(event.sender) });
   if (event.kind === 'run_accepted') return t("你已接受本轮交付；这项记录不会启动模型。");
-  const taskTitle = typeof event.title === 'string' && event.title ? `「${taskDisplayTitle(event.title)}」` : t("子任务");
+  const taskTitle = typeof event.title === 'string' && event.title ? interfaceQuote(taskDisplayTitle(event.title)) : t("子任务");
   if (event.kind === 'team_command') {
     const action = { claim: t("已认领子任务"), complete: t("已提交子任务，等待互审"),
       request_help: t("请求伙伴协助，具体问题见其消息"), review: t("已提交审核结果"),
@@ -4786,7 +4852,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'artifact') return t("{p0} 关联文件版本 {p1}，未执行代码或测试。", { p0: displayName(event.sender), p1: event.revision });
   if (event.kind === 'warning') return executionMessage(event.code);
   if (event.kind === 'job_claimed') return t("{p0} 开始处理{p1}", { p0: displayName(event.sender), p1: ['review', 'team_review'].includes(jobKind(event, jobs)) ? t("审核任务") : t("任务") });
-  if (event.kind === 'job_finished') return `${displayName(event.sender)}：${statusLabels[statusClass(event.status)]}${event.error ? `。${executionMessage(event.error)}` : ''}`;
+  if (event.kind === 'job_finished') return `${displayName(event.sender)}${interfaceColon()}${statusLabels[statusClass(event.status)]}${event.error ? `${interfaceStop()}${executionMessage(event.error)}` : ''}`;
   if (event.kind === 'usage') return t("{p0} 的用量快照已更新", { p0: displayName(event.sender) });
   if (event.kind === 'job_created') {
     const kind = jobKind(event, jobs);
@@ -4796,7 +4862,7 @@ function progressText(event, jobs, archive = false) {
   }
   if (event.cancellation_confirmed === false) return t("停止尚未确认，请核对本次任务执行与会话身份。");
   if (event.cancellation_confirmed === true) return t("本服务登记的执行已确认停止。");
-  return `${eventLabels[event.kind] || t("进展")}：${statusLabels[statusClass(event.status)]}`;
+  return `${eventLabels[event.kind] || t("进展")}${interfaceColon()}${statusLabels[statusClass(event.status)]}`;
 }
 
 function progressNode(event, jobs, archive = false) {
@@ -5059,6 +5125,8 @@ const objectiveRoomLabels = localizedLabels({
 });
 function sidebarObjectiveLabel(room) {
   if (state.snapshot?.room.id === room.id && idleReadOnlyDiscussion(state.snapshot)) return t("方案讨论");
+  const stop = roomStopKind(room);
+  if (stop) return stop === 'quota_wait' ? t("等额度恢复") : t("马上自动继续");
   if (room.objective_status !== 'paused') return objectiveRoomLabels[room.objective_status];
   const activity = roomWorkActivity(room);
   if (activity) return activity.state === 'working' ? t("正在暂停") : t("已暂停");
@@ -5156,7 +5224,12 @@ function continuationAction(snapshot = state.snapshot) {
   if (objective?.status === 'paused' && objective.pause_requested !== true) return 'resume';
   return null;
 }
-function isContinueCommand(text) { return /^(?:请)?继续(?:工作|推进|吧)?[。！!\s]*$/u.test(text.trim()); }
+// The English interface tells people to type continue, so both languages count as the bare command.
+function isContinueCommand(text) {
+  const value = text.trim();
+  return /^(?:请)?继续(?:工作|推进|吧)?[。！!\s]*$/u.test(value)
+    || /^(?:please\s+)?(?:continue|keep going|resume)(?:\s+(?:working|please))?[.!\s]*$/iu.test(value);
+}
 async function continueCurrentWork(snapshot = state.snapshot, text = '') {
   const action = continuationAction(state.snapshot);
   if (!action || snapshot?.room.id !== state.selected || JSON.stringify(runBinding(snapshot.current_run)) !== JSON.stringify(runBinding(state.snapshot.current_run))) return;
@@ -5261,7 +5334,7 @@ function useCompletionSuggestion(snapshot, goal) {
 }
 function requestCompletionAdvice(snapshot) {
   if (completionSuggestion(snapshot) || completionSuggestion(state.snapshot)) return;
-  fillCompletionDraft(snapshot, completionAdviceQuestion);
+  fillCompletionDraft(snapshot, t(completionAdviceQuestion));
 }
 function completionReportSource(snapshot) {
   const next = boundObjectiveNextStep(snapshot), objective = currentObjective(snapshot);
@@ -5317,7 +5390,7 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
   const summaryLabel = foldQuestion ? t("此前记录") : objective.status === 'complete' ? t("完成情况") : t("下一步");
   const technical = questionShown || foldQuestion ? summaryTarget : result;
   if (typeof next?.summary === 'string' && next.summary && next.summary.trim() !== questionShown?.trim()
-      && ![...summaryTarget.children].some((node) => node.textContent.trim() === next.summary.trim())) summaryTarget.append(element('p', `${summaryLabel}：${next.summary}`, 'outcome-next'));
+      && ![...summaryTarget.children].some((node) => node.textContent.trim() === next.summary.trim())) summaryTarget.append(element('p', `${summaryLabel}${interfaceColon()}${next.summary}`, 'outcome-next'));
   if (typeof next?.question === 'string' && next.question && next.question.trim() !== questionShown?.trim()
       && !(foldQuestion && [...summaryTarget.children].some((node) => node.textContent.trim() === next.question.trim()))) (foldQuestion ? summaryTarget : result).append(element('p', next.question, 'outcome-question'));
   if (objective.can_answer === true && !questionShown && !foldQuestion) result.append(element('p', t("在下方回答后继续同一目标，仍使用现有目标和权限；不会新建目标。"), 'detail-caption'));
@@ -5347,7 +5420,7 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
     result.append(details);
   } else {
     if (next?.review_kind === 'self_check') result.append(element('p', t("本次完成评估由单个伙伴核对；各项成果的审核范围见文件与任务记录。"), 'review-scope-note'));
-    if (selfChecked.length) result.append(element('p', t("{p0} 项任务仅自检，未独立互审：{p1}。", { p0: selfChecked.length, p1: selfChecked.map((task) => task.title || task.id).join('、') }), 'review-scope-note'));
+    if (selfChecked.length) result.append(element('p', t("{p0} 项任务仅自检，未独立互审：{p1}。", { p0: selfChecked.length, p1: interfaceList(selfChecked.map((task) => task.title || task.id)) }), 'review-scope-note'));
   }
 }
 
@@ -5363,7 +5436,7 @@ function renderObjectiveTakeovers(result, snapshot, objective) {
   for (const [id, info] of retired) box.append(element('p', t("{p0}：{p1}本次执行已确认清理；仍保留在任务成员中。", { p0: displayName(id), p1: executionMessage(info.reason) }), 'detail-caption'));
   for (const event of events.slice(-16)) {
     const task = event.run_id === snapshot.current_run?.id ? snapshot.team?.tasks?.find((entry) => entry.id === event.task_id) : null;
-    box.append(element('p', t("{p0} 接手 {p1} 的{p2}。", { p0: displayName(event.owner), p1: displayName(event.previous_owner), p2: task?.title ? `「${taskDisplayTitle(task.title)}」` : t("子任务") }), 'detail-caption'));
+    box.append(element('p', t("{p0} 接手 {p1} 的{p2}。", { p0: displayName(event.owner), p1: displayName(event.previous_owner), p2: task?.title ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务") }), 'detail-caption'));
   }
   box.append(element('p', t("接手者沿用本目标冻结的权限与自身模型设置；单人完成会注明仅自检。"), 'detail-caption'));
   result.append(box);
@@ -6301,7 +6374,7 @@ function teamMemberTask(snapshot, member) {
       // Jobs currently expose no task_id in the public snapshot. Only name a
       // task when the recorded role and lifecycle identify exactly one.
       const task = candidates.length === 1 ? candidates[0] : null;
-      const title = task && typeof task.title === 'string' ? `「${taskDisplayTitle(task.title)}」` : t("子任务（具体任务待核对）");
+      const title = task && typeof task.title === 'string' ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务（具体任务待核对）");
       const mode = jobClaim(snapshot, job)?.work_mode || snapshot.room.work_mode || snapshot.current_run?.work_mode;
       let action = mode === 'plan' ? t("整理方案") : t("处理");
       if (job.kind === 'team_review') action = t("审核");
@@ -6320,10 +6393,13 @@ function teamMemberTask(snapshot, member) {
   if (pending) {
     const dependencies = Array.isArray(pending.dependencies) ? pending.dependencies
       .map((id) => tasks.find((task) => task.id === id)).filter((task) => task && !['accepted', 'self_checked'].includes(task.status)) : [];
-    return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: dependencies.map((task) => taskDisplayTitle(task.title)).join('、') }) : t("「{p0}」已认领，等待派发", { p0: taskDisplayTitle(pending.title) });
+    return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: interfaceList(dependencies.map((task) => taskDisplayTitle(task.title))) }) : t("「{p0}」已认领，等待派发", { p0: taskDisplayTitle(pending.title) });
   }
   const blocked = owned.find((task) => ['blocked', 'unknown', 'interrupted', 'cancelled'].includes(task.status));
-  if (blocked) return t("「{p0}」{p1}，具体原因见群聊任务清单", { p0: taskDisplayTitle(blocked.title), p1: taskStatusLabels[blocked.status] });
+  // Unfinished work carries into the next attempt unless the user stopped it, as on the progress board.
+  const userCancelled = userCancelCodes.has(currentObjective(snapshot)?.stop_reason) || userCancelCodes.has(snapshot?.team?.stop_reason);
+  if (blocked && ['interrupted', 'cancelled'].includes(blocked.status) && !userCancelled) return t("「{p0}」待继续", { p0: taskDisplayTitle(blocked.title) });
+  if (blocked) return t("「{p0}」{p1}，具体原因见“进展”", { p0: taskDisplayTitle(blocked.title), p1: taskStatusLabels[blocked.status] });
   return t("暂无在途任务；交付与验收状态见群聊");
 }
 
@@ -6402,10 +6478,12 @@ function renderMembers(snapshot) {
     const member = snapshot?.members.find((entry) => entry.id === provider);
     const { account } = currentAccount(provider);
     const availability = availabilityInfo(provider);
-    $(`availability-${provider}`).hidden = !availability.value;
-    $(`availability-${provider}`).textContent = availability.value ? availabilityText(availability) : '';
-    $(`availability-${provider}`).classList.toggle('blocked', availability.blocked);
-    $(`account-email-${provider}`).textContent = accountLoginCaption(account);
+    const line = memberAvailabilityLine(availability);
+    $(`availability-${provider}`).hidden = !line;
+    $(`availability-${provider}`).textContent = line ? line.text : '';
+    $(`availability-${provider}`).classList.toggle('blocked', line?.tone === 'ask');
+    $(`availability-${provider}`).classList.toggle('waiting', line?.tone === 'wait');
+    $(`account-email-${provider}`).textContent = memberLoginCaption(account);
     updateAccountFooter($(`provider-account-${provider}`), provider);
     const hasJobs = snapshot?.jobs?.some((job) => job.provider === provider);
     const waitingForPeer = member?.status === 'idle' && !member.identity_uncertain
@@ -6433,7 +6511,9 @@ function renderMembers(snapshot) {
     const pausedTask = paused === t("正在暂停") ? memberActivity(snapshot, member).task : t("继续后接着做。");
     const notStarted = (!snapshot && !loading) || (member && !member.identity_uncertain && !member.session_id && !hasJobs && displayStatus === 'idle');
     $(`name-${provider}`).textContent = member?.name || names[provider];
-    $(`status-${provider}`).textContent = preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
+    // While the room resumes by itself, a partner stopped with it reads as waiting to continue, like its tasks.
+    const resumes = snapshot && roomStopKind(snapshot.room) && ['interrupted', 'cancelled', 'stopped'].includes(member?.status) && !member.identity_uncertain;
+    $(`status-${provider}`).textContent = resumes ? t("待继续") : preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
     $(`status-${provider}`).className = `member-status ${preferredActivity ? statusClass(preferredActivity.status) : paused ? paused === t("正在暂停") ? 'working' : 'idle' : notStarted || loading ? '' : statusClass(preferredActivity?.status || taskActivity?.status || displayStatus)}`;
     $(`task-${provider}`).textContent = preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
       : teamMemberTask(snapshot, member) || (typeof member?.current_task === 'string' && member.current_task ? member.current_task
@@ -6442,7 +6522,7 @@ function renderMembers(snapshot) {
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
     renderMemberQuota(provider);
-    $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}：${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
+    $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}${interfaceColon()}${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
     const usage = member?.usage;
     $(`usage-summary-${provider}`).textContent = usage == null ? t("任务用量快照不可用") : t("已收到任务用量快照");
     const fields = $(`usage-${provider}`);
@@ -6626,7 +6706,7 @@ function renderProject(project) {
         else other += count;
       }
       if (other) counts.push(t("其它排除项 {p0} 项", { p0: other }));
-      $('project-files').append(element('p', t("跳过：{p0}（目录按一项计）。", { p0: counts.length ? counts.join('、') : t("0 项") }), 'detail-caption'));
+      $('project-files').append(element('p', t("跳过：{p0}（目录按一项计）。", { p0: counts.length ? interfaceList(counts) : t("0 项") }), 'detail-caption'));
     } else {
       $('project-files').append(element('p', t("跳过项统计暂不可用；目录按一项计，不推算目录内文件数量。"), 'detail-caption'));
     }
@@ -6777,7 +6857,7 @@ function renderNativeWorkspaceNotes(container, snapshot) {
     native_path_not_owned: t("超出本任务授权写入范围"), native_symlink_refused: t("符号链接未导入"), native_mode_change_not_imported: t("文件权限改动尚未导入"),
     native_change_too_large: t("改动超过本次导入范围"), native_merge_conflict: t("文件版本冲突"), native_unresolved_conflict: t("旧版本冲突尚未明确解决，改动未导入") };
   const list = element('ul');
-  for (const item of issues) list.append(element('li', `${displayName(item.provider)} · ${typeof item.path === 'string' ? item.path : t("文件路径未提供")}：${item.conflict ? t("需核对新旧版本冲突") : reasons[item.reason] || t("改动未导入，原因待核对")}`));
+  for (const item of issues) list.append(element('li', `${displayName(item.provider)} · ${typeof item.path === 'string' ? item.path : t("文件路径未提供")}${interfaceColon()}${item.conflict ? t("需核对新旧版本冲突") : reasons[item.reason] || t("改动未导入，原因待核对")}`));
   details.append(list, element('p', t("这些改动保留为待处理项，不表示已合入成果或完成目标。"), 'detail-caption')); container.append(details);
 }
 function renderNativeExecutions(snapshot) {
@@ -6853,7 +6933,7 @@ function renderWorkIndicator(snapshot) {
         : job.native_readonly_discussion ? t("正在讨论") : t("正在处理")}`;
   };
   const value = working.length ? working.map(jobText).join(' · ') : queued.length
-    ? t("{p0} 等待开始", { p0: [...new Set(queued.map((job) => displayName(job.provider)))].join('、') }) : '';
+    ? t("{p0} 等待开始", { p0: interfaceList([...new Set(queued.map((job) => displayName(job.provider)))]) }) : '';
   box.hidden = !value; box.classList.toggle('is-working', working.length > 0);
   // Polling may update timing elsewhere, but only a real phase/name transition
   // changes this polite live region. The animated dots carry no spoken content.
@@ -6966,7 +7046,7 @@ function renderControls() {
   $('project-workflow-control').hidden = !!room || !state.nativeProjectSupported || selectedProject?.selection_kind !== 'folder';
   $('project-workflow').value = nativeMode ? 'native_project' : 'project_folder'; $('project-workflow').disabled = blocked || !!room || !state.connected;
   $('frozen-participants').hidden = !state.selected;
-  $('frozen-participants').textContent = t("当前伙伴：{p0}{p1}", { p0: state.participantIds.map(displayName).join('、'), p1: state.memberInvitationSupported ? '' : t(" · 这份记录的成员固定") });
+  $('frozen-participants').textContent = t("当前伙伴：{p0}{p1}", { p0: interfaceList(state.participantIds.map(displayName)), p1: state.memberInvitationSupported ? '' : t(" · 这份记录的成员固定") });
   renderRoomMemberInvitation();
   $('task-options-partners').textContent = t("伙伴 · {p0}", { p0: state.participantIds.length });
   const linkedProject = room ? state.projects.find((project) => project.id === room.project_id) : selectedProject;
@@ -8156,7 +8236,7 @@ $('choose-project-files').addEventListener('click', async () => {
     $('project-files-input').value = selection.files.join('\n');
     if (!$('project-name').value.trim()) $('project-name').value = typeof selection.suggestedName === 'string'
       && selection.suggestedName.trim() ? selection.suggestedName.trim().slice(0, 80) : t("我的项目");
-    $('project-picker-note').textContent = t("已选 {p0} 个文件：{p1}。不会改动原项目，点“添加项目”后才保存。", { p0: selection.files.length, p1: selection.files.join('、') });
+    $('project-picker-note').textContent = t("已选 {p0} 个文件：{p1}。不会改动原项目，点“添加项目”后才保存。", { p0: selection.files.length, p1: interfaceList(selection.files) });
   } catch (error) {
     const labels = {
       project_selection_unavailable: t("暂时无法打开文件选择，请重试或展开手动填写。"),
