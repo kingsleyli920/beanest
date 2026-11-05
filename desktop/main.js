@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, dialog, Menu, ipcMain, powerSaveBlocker, shell } = require('electron');
+const { app, BrowserWindow, dialog, Menu, ipcMain, nativeTheme, powerSaveBlocker, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const { mkdirSync, chmodSync, readFileSync, existsSync } = require('node:fs');
 const path = require('node:path');
@@ -142,6 +142,8 @@ async function openWindow(url) {
     minHeight: 560,
     title: strings(currentLocale).displayName,
     show: false,
+    // Matches the page background so a dark system theme does not flash light.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#111311' : '#f3f3ef',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

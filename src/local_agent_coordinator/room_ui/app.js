@@ -4,6 +4,15 @@ const t = (key, params) => window.BeanestI18n.t(key, params);
 const localizedLabels = (value) => window.BeanestI18n.labels(value);
 const interfaceWordSpace = () => window.BeanestI18n.getLocale() === 'en' ? ' ' : '';
 const interfaceComma = () => window.BeanestI18n.getLocale() === 'en' ? ', ' : '，';
+// Joining punctuation for text assembled outside t(), so English never shows 、：；（）「」.
+const englishInterface = () => window.BeanestI18n.getLocale() === 'en';
+const interfaceList = (items) => items.join(englishInterface() ? ', ' : '、');
+const interfaceColon = () => englishInterface() ? ': ' : '：';
+const interfaceSemicolon = () => englishInterface() ? '; ' : '；';
+const interfaceParen = (text) => englishInterface() ? ` (${text})` : `（${text}）`;
+const interfaceQuote = (text) => englishInterface() ? `“${text}”` : `「${text}」`;
+const interfaceStop = () => englishInterface() ? '. ' : '。';
+const interfaceLead = () => englishInterface() ? ': ' : '';
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="lac-token"]').content;
 let providers = [];
@@ -48,7 +57,7 @@ const executionLabels = localizedLabels({
   execution_initialization_unconfirmed: '任务已记录，但隔离运行环境未就绪；没有派发模型或运行代码，请核对原请求。',
   execution_unavailable: '隔离执行环境未就绪，没有运行代码。',
   execution_limit_reached: '本次任务两次隔离运行额度已用完，后续修改保留为文件，等待你决定。',
-  execution_version_stale: '运行结果对应较早文件版本，没有冒充当前版本的验证。',
+  execution_version_stale: '运行结果对应较早的文件版本，不能算作当前版本的验证。',
   budget_exhausted: '本次任务调用预算已用完，后续工作没有自动派发。',
   deadline_exceeded: '本轮期限已到，执行结果仍需核对。',
   objective_calls_exhausted: '本目标的调用上限已到，进度已保留，没有继续派发。',
@@ -167,8 +176,8 @@ const errorLabels = localizedLabels({
   partner_disabled: '这个伙伴已停用。', partner_archived: '这个伙伴已归档。', partner_removed: '这个伙伴配置已移除。',
   partner_unavailable: '这个伙伴暂时不可用。', partner_lifecycle_pending: '正在处理这个伙伴的操作。',
   user_lifecycle_required: '归档、恢复与移除请在豆窝界面中操作。',
-  invalid_work_mode: '请选择“先聊方案”或“直接动手”，再发送任务。',
-  plan_read_only: '本轮选择了先聊方案，不能修改文件；方案完成后可选择“按方案开始”。',
+  invalid_work_mode: '请选择“方案”或“动手”，再发送任务。',
+  plan_read_only: '本轮选择了方案模式，不能修改文件；方案完成后可选择“按方案开始”。',
   permission_read_only: '本轮统一权限为只读，不能修改隔离副本。可在下一轮调整权限。',
   invalid_arguments: '这次输入不符合要求，请检查目标和接收者。',
   invalid_goal: '请填写目标。',
@@ -301,8 +310,501 @@ const state = {
   deliveryLimit: 256, deliveryScope: '',
   drafts: new Map(), roomNodes: new Map(), eventNodes: new Map(), progressNodes: new Map(),
   renderedRoom: null, jobsFingerprint: '', collaborationFingerprint: '', unseen: 0,
+  roomTabs: new Map(), deliveryPending: 0,
 };
 $('task-mode').value = 'text';
+
+// The "now" card, the four room views and the progress board. They read the
+// same snapshot as the conversation; actions forward to the existing controls
+// so every request still goes through one code path.
+// Only a block that asks for a human choice or a permission belongs in the
+// decision area. Reply mistakes, format errors and coordination blocks are
+// replanned by the service when work continues, so they read as progress.
+const decisionBlockCauses = new Set(['permission_required', 'user_decision']);
+function taskNeedsUser(task) { return task?.status === 'blocked' && decisionBlockCauses.has(task.block_cause); }
+// A task held only because partners ran out of quota simply waits to continue; nothing about it is rearranged.
+const quotaBlockCodes = new Set(['all_partners_quota_exhausted', 'subscription_limit_reached', 'agent_quota_exhausted', 'quota_exhausted']);
+function taskQuotaHeld(task) { return task?.status === 'blocked' && task.block_cause == null && quotaBlockCodes.has(task.blocked_reason); }
+function taskAutoBlocked(task) { return task?.status === 'blocked' && !decisionBlockCauses.has(task.block_cause) && !taskQuotaHeld(task); }
+const blockCodePattern = /^[a-z][a-z0-9_]{2,80}$/;
+// Mirrors native_outcome.REPLY_MISTAKES / FORMAT_ERRORS: the service corrects these itself.
+const selfCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 'invalid_target', 'team_files_forbidden',
+  'team_capability_unavailable', 'native_json_files_forbidden', 'team_write_path_conflict', 'invalid_agent_response',
+  'invalid_team_commands', 'invalid_team_task', 'invalid_team_dependencies', 'invalid_project_files', 'invalid_text',
+  'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required', 'team_scope_conflict']);
+// Mirrors stop_policy.py: only these stops wait for the user (USER_STOPS),
+// keep the scene for inspection (KEEP_SCENE) or have their own quota wait.
+// The host continues every other stop of an autonomous objective once per
+// board state; a stop that comes back without progress is the user's.
+const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt', 'budget_exhausted', 'deadline_exceeded',
+  'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit', 'objective_no_progress',
+  'objective_decision_required', 'objective_scope_confirmation', 'objective_checkpoint_disagreed']);
+const keepSceneCodes = new Set(['project_commit_unconfirmed', 'native_cleanup_unconfirmed', 'team_cleanup_unconfirmed',
+  'native_recovery_cleanup_unconfirmed', 'session_identity_changed', 'session_identity_unknown',
+  'native_recovery_unpublished_changes', 'native_side_effects_unconfirmed', 'execution_unknown']);
+function stopContinuesAutomatically(code) {
+  return typeof code === 'string' && !userStopCodes.has(code) && !keepSceneCodes.has(code) && code !== 'all_partners_quota_exhausted';
+}
+function objectivePolicy(snapshot) {
+  const objective = currentObjective(snapshot);
+  return objective?.execution_policy || snapshot.current_run?.execution_policy || (objective ? { mode: objective.mode } : null);
+}
+function autonomousObjective(snapshot) {
+  return activeEntry(snapshot.room) && objectivePolicy(snapshot)?.mode === 'autonomous';
+}
+function autoContinuedAlready(snapshot, code) {
+  const events = Array.isArray(snapshot.events) ? snapshot.events : [];
+  const lastUser = events.reduce((seq, event) => event.kind === 'message' && event.sender === 'user' && event.seq > seq ? event.seq : seq, 0);
+  return events.some((event) => event.kind === 'objective_auto_continued' && event.seq > lastUser
+    && event.code === code && event.run_id === snapshot.current_run?.id);
+}
+// A blocked board the host reopens by itself: coordination requests and
+// tasks the host blocked on a call's failure (team_store.resume_recoverable_block).
+function taskBlockContinuesAutomatically(snapshot, blocked) {
+  return autonomousObjective(snapshot) && blocked.length > 0 && !autoContinuedAlready(snapshot, 'task_block')
+    && blocked.every((task) => task.block_cause === 'coordination_required' || task.block_cause == null && stopContinuesAutomatically(task.blocked_reason));
+}
+// room_service._auto_continue sends only these natural continuations, and only when they can be sent.
+const autoContinueActions = ['restart-objective', 'recover-native'];
+function autoContinueReady(snapshot) {
+  const natural = snapshot.continuation;
+  if (natural && typeof natural === 'object' && typeof natural.action === 'string') return autoContinueActions.includes(natural.action) && natural.can_send === true;
+  return autoContinueActions.some((id) => liveControl(id) && !document.getElementById(id).disabled);
+}
+function quotaWaitContinues(snapshot) {
+  return autonomousObjective(snapshot) && objectivePolicy(snapshot)?.quota_failover === true;
+}
+// The service's own stop_kind decides when present ("auto", "quota_wait" or
+// null); the mirror above only serves an older service without it.
+function stopKind(snapshot, code) {
+  const repeated = stopContinuesAutomatically(code) && autonomousObjective(snapshot) && autoContinuedAlready(snapshot, code);
+  if (Object.hasOwn(snapshot, 'stop_kind')) return ['auto', 'quota_wait'].includes(snapshot.stop_kind) ? snapshot.stop_kind : repeated ? 'repeated' : null;
+  if (code === 'all_partners_quota_exhausted') return quotaWaitContinues(snapshot) ? 'quota_wait' : null;
+  if (!stopContinuesAutomatically(code) || !autonomousObjective(snapshot) || !autoContinueReady(snapshot)) return null;
+  return repeated ? 'repeated' : 'auto';
+}
+function roomStopKind(room) {
+  const snapshot = state.snapshot?.room.id === room.id ? state.snapshot : null;
+  const value = snapshot && Object.hasOwn(snapshot, 'stop_kind') ? snapshot.stop_kind : room.stop_kind;
+  return ['auto', 'quota_wait'].includes(value) ? value : null;
+}
+function blockedTaskReason(task) {
+  if (task?.block_cause === 'permission_required') return t("需要权限确认：这一步要用到当前权限以外的操作。同意就按原计划做，不同意伙伴会换一种做法。");
+  if (task?.block_cause === 'user_decision') {
+    const raw = typeof task.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
+    return raw && !blockCodePattern.test(raw) ? raw.length > 240 ? `${raw.slice(0, 240)}…` : raw : t("伙伴需要你定一个方向，具体问题见“讨论”。");
+  }
+  if (task?.block_cause === 'external_dependency') return t("在等外部条件，满足后点“继续”接着做。");
+  return t("这项需要重新安排，豆窝会接着处理，不用你选。");
+}
+function stopReasonMessage(code) {
+  return selfCorrectedCodes.has(code) ? t("有任务需要重新安排，点“继续推进”后会自动处理。") : executionMessage(code);
+}
+function blockedTaskTechnical(task) {
+  const raw = typeof task?.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
+  if (task?.block_cause === 'user_decision' && !blockCodePattern.test(raw)) return typeof task.block_cause === 'string' ? task.block_cause : '';
+  return [typeof task?.block_cause === 'string' ? task.block_cause : '', raw].filter(Boolean).join('\n');
+}
+function techDetails(raw, summary = t("技术细节")) {
+  const details = element('details', '', 'tech-details');
+  details.append(element('summary', summary), element('code', raw));
+  return details;
+}
+// Quick choices only fill the composer; the user still reviews and sends.
+function fillAnswerDraft(text) {
+  const message = $('message');
+  if (message.disabled) return;
+  const draft = message.value;
+  if (draft.includes(text)) { message.focus(); return; }
+  const combined = draft.trim() ? `${draft}\n${text}` : text;
+  if (!checkUserText(combined)) return;
+  message.value = combined; saveDraft(); renderControls(); message.focus();
+}
+function quickAnswers(task) {
+  if (task.block_cause !== 'permission_required') return [];
+  const title = taskDisplayTitle(task.title || task.id);
+  return [[t("同意，按原计划做"), t("同意「{p0}」需要的权限，按原计划继续。", { p0: title })],
+    [t("不同意，换个做法"), t("不同意「{p0}」需要的权限，请换一种不需要这个权限的做法。", { p0: title })]];
+}
+function blockedTaskBody(task, canAnswer, className) {
+  const body = element('div', '', className);
+  body.append(element('p', blockedTaskReason(task)));
+  const answers = canAnswer ? quickAnswers(task) : [];
+  if (answers.length) {
+    const row = element('div', '', 'quick-row');
+    for (const [label, text] of answers) {
+      const button = element('button', label, 'btn sm'); button.type = 'button'; button.title = t("填入输入框：{p0}", { p0: text });
+      button.addEventListener('click', () => fillAnswerDraft(text));
+      row.append(button);
+    }
+    body.append(row, element('p', t("点选项只会把回复填进输入框，确认后再发送。"), 'quick-note'));
+  }
+  const raw = blockedTaskTechnical(task);
+  if (raw) body.append(techDetails(raw));
+  return body;
+}
+
+const nowPrimaryIds = ['accept-run', 'continue-current', 'continue-objective', 'recover-native', 'native-handoff', 'restart-objective',
+  'start-objective', 'start-suggested-goal', 'build-from-plan', 'retry-run'];
+function liveControl(id) {
+  const node = document.getElementById(id);
+  return node && !node.hidden ? node : null;
+}
+function controlCaption(node) {
+  const siblings = [...(node.parentNode?.children || [])];
+  const next = siblings[siblings.indexOf(node) + 1];
+  return next?.classList?.contains('detail-caption') ? next.textContent : '';
+}
+function nowSummary(snapshot) {
+  const room = snapshot.room; const objective = currentObjective(snapshot); const run = snapshot.current_run;
+  const status = objective?.status; const outcome = terminalTeamState(snapshot) || snapshot.collaboration?.outcome?.state;
+  const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task === 'object');
+  const stage = Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : Number.isSafeInteger(run?.number) ? t("第 {p0} 轮", { p0: run.number }) : '';
+  const label = (text, time) => [text, stage, Number.isFinite(time) ? timeLabel(time) : ''].filter(Boolean).join(' · ');
+  const done = tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length;
+  if (!activeEntry(room)) return { tone: 'stop', label: lifecycleLabels[lifecycleState(room)], title: t("这份任务{p0}", { p0: lifecycleLabels[lifecycleState(room)] }),
+    text: t("聊天和交付仍可阅读。要继续，先在右上角“···”的“管理任务”里恢复。") };
+  const autoBlocked = tasks.filter(taskAutoBlocked);
+  const autoNote = autoBlocked.length ? t("有 {p0} 项需要重新安排，点“继续推进”后会自动处理。", { p0: autoBlocked.length }) : '';
+  if (status === 'needs_user' || !objective && outcome === 'needs_user') {
+    const next = boundObjectiveNextStep(snapshot);
+    const blocked = next?.origin === 'task_block' ? tasks.filter(taskNeedsUser) : [];
+    const canAnswer = objective?.can_answer === true;
+    const blockAuto = Object.hasOwn(snapshot, 'stop_kind') ? snapshot.stop_kind === 'auto'
+      : taskBlockContinuesAutomatically(snapshot, tasks.filter((task) => task.status === 'blocked'));
+    if (next?.origin === 'task_block' && !blocked.length) return blockAuto
+      ? { tone: 'go', autoContinue: true, label: label(t("马上自动继续")), canAnswer,
+        title: t("有几项要重新安排，豆窝会自动接着做"), text: t("几秒后自动继续，不用你操作。想补充要求可以直接在下面说。") }
+      : { tone: 'stop', label: label(t("已暂停")), canAnswer,
+        title: t("有几项需要重新安排"), text: t("点“继续推进”或在下面补充要求，豆窝会自动重新安排，不用逐项处理。") };
+    const question = !blocked.length && typeof next?.question === 'string' ? next.question.trim() : '';
+    const permission = blocked.length && blocked.every((task) => task.block_cause === 'permission_required');
+    return { tone: 'ask', label: label(t("等你决定")), blocked, canAnswer,
+      title: blocked.length ? permission ? t("有一步要你同意权限") : t("伙伴需要你定个方向") : t("伙伴有个问题要你回答"),
+      question: question.length > 220 ? `${(question.split('\n').find((line) => line.trim()) || question).slice(0, 200)}…` : question,
+      text: [canAnswer ? t("在下面回复后，伙伴会沿原目标接着做。") : t("先看看问题；在你回复前豆窝不会重新开始。"), autoNote].filter(Boolean).join(' ') };
+  }
+  if (status === 'paused') return objective.pause_requested === true
+    ? { tone: 'stop', label: label(t("正在暂停")), title: t("等当前这一步做完就停"), text: t("不会再派发新的工作。") }
+    : { tone: 'stop', label: label(t("已暂停")), title: t("推进已暂停"), text: [t("继续后沿原目标接着做，已有成果都在。"), autoNote].filter(Boolean).join(' ') };
+  if (status === 'awaiting_continue') {
+    const next = boundObjectiveNextStep(snapshot);
+    return { tone: 'ask', label: label(t("等你说继续")), title: t("这一阶段做完了"),
+      text: typeof next?.summary === 'string' && next.summary.trim() ? next.summary.trim().slice(0, 240) : t("点“继续推进”进入下一阶段，也可以先在下面补充要求。") };
+  }
+  if (status === 'complete' || ['ready_for_user', 'accepted'].includes(outcome)) {
+    const selfOnly = tasks.filter((task) => task.status === 'self_checked' || task.status === 'accepted' && task.review_kind === 'self_check').length;
+    const reviewed = tasks.filter((task) => task.status === 'accepted' && task.review_kind !== 'self_check').length;
+    const parts = [tasks.length ? selfOnly ? t("{p0} 项里 {p1} 项互审通过，{p2} 项仅自检。", { p0: tasks.length, p1: reviewed, p2: selfOnly })
+      : t("{p0} 项都已互审通过。", { p0: reviewed }) : '', state.deliveryPending ? t("代码还有改动没交付，见“交付”。") : ''].filter(Boolean);
+    const accepted = Number.isFinite(run?.accepted_at) || outcome === 'accepted';
+    if (status === 'complete') return { tone: 'done', label: label(t("已完成")), title: accepted ? t("你已确认完成") : t("目标已完成"),
+      text: parts.join(' ') || t("有新要求可以直接在下面说。") };
+    return { tone: 'done', label: label(accepted ? t("已接受") : t("已交付")), title: accepted ? t("这一轮你已经接受") : t("伙伴说做完了，等你验收"),
+      text: parts.join(' ') || t("看看成果，不满意直接在下面说哪里不对。") };
+  }
+  const stopReason = typeof objective?.stop_reason === 'string' ? objective.stop_reason : '';
+  const doneNote = done ? t("已完成的 {p0} 项成果都在。", { p0: done }) : t("已有成果和记录都在。");
+  if (['stopped', 'interrupted'].includes(status) && !hostResultInterruption(objective)) {
+    const stoppedLabel = label(t("已停止"), room.updated_at);
+    const kind = stopKind(snapshot, stopReason);
+    if (kind === 'quota_wait') return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
+      title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。")].join(' ') };
+    if (kind === 'auto' || kind === 'repeated') {
+      const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
+      return kind === 'repeated'
+        ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过一次，又停在同一处"),
+          text: [t("没有新进展，所以不再自动继续。点“继续推进”再试，或在下面补充要求。"), doneNote].join(' ') }
+        : { tone: 'go', autoContinue: true, label: label(t("马上自动继续"), room.updated_at),
+          title: restartedStop ? t("豆窝服务重启过，马上自动接着做") : t("推进停了一下，马上自动接着做"),
+          text: [t("几秒后自动继续，不用你操作。"), doneNote].join(' ') };
+    }
+  }
+  if (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown') return { tone: 'bad', label: label(t("结果待确认")),
+    title: t("上一步的结果还没确认"), text: t("执行结果还没核对清楚，豆窝不会自动重跑。可以先看看讨论里的记录。") };
+  const stopped = ['stopped', 'interrupted'].includes(status) || outcome === 'stopped' || closedStatuses.has(room.status);
+  if (stopped) {
+    const reason = typeof objective?.stop_reason === 'string' ? objective.stop_reason : '';
+    const restarted = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(reason);
+    return { tone: 'stop', label: label(status === 'interrupted' ? t("已中断") : t("已停止"), room.updated_at),
+      title: hostResultInterruption(objective) ? t("伙伴的结果还没确认，推进停在这里") : restarted ? t("豆窝服务重启过，推进停在这里")
+        : reason === 'all_partners_quota_exhausted' ? t("伙伴额度都用完了，推进停在这里") : status === 'interrupted' ? t("推进中断了") : t("推进已停止"),
+      text: hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot)
+        // A restart title already says what happened; the shutdown message would read as still closing.
+        : [reason && !selfCorrectedCodes.has(reason) && !restarted ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。"), autoNote].filter(Boolean).join(' ') };
+  }
+  const working = $('work-indicator').hidden ? '' : $('work-indicator-text').textContent;
+  if (['running', 'checkpoint'].includes(status) || working || ['running', 'queued'].includes(room.status) || outcome === 'in_progress') {
+    return { tone: 'go', label: label(t("进行中")), title: status === 'checkpoint' ? t("伙伴在核对这一阶段，安排下一步") : t("伙伴正在推进"),
+      text: [working, tasks.length ? t("{p0} / {p1} 项已完成。", { p0: done, p1: tasks.length }) : ''].filter(Boolean).join(' · ') };
+  }
+  return { tone: 'done', label: label($('room-status').textContent), title: t("这一轮已经回复"), text: t("有新要求可以直接在下面说。") };
+}
+function nowAction(id, label, className) {
+  const original = document.getElementById(id);
+  original.dataset.mirrored = 'true';
+  return { id, label: label || original.textContent, className, disabled: original.disabled, title: original.title || '', caption: original.disabled ? controlCaption(original) : '' };
+}
+function renderNowCard() {
+  const card = $('now-card'); const snapshot = state.snapshot;
+  $('conversation').classList.toggle('answering', currentObjective(snapshot)?.status === 'needs_user' && currentObjective(snapshot)?.can_answer === true && !$('message').disabled);
+  if (!snapshot || state.selected !== snapshot.room.id || state.reader) { card.hidden = true; return; }
+  const summary = nowSummary(snapshot);
+  const actions = [];
+  // Primary first, then secondary, the destructive stop last.
+  const primary = nowPrimaryIds.find((id) => liveControl(id));
+  const pause = liveControl('pause-objective'); const stop = liveControl('cancel-room');
+  if (primary) {
+    const labels = { 'accept-run': t("验收这一轮") };
+    const original = document.getElementById(primary);
+    // An automatic continue needs no click; the button only lets the user go now.
+    actions.push(nowAction(primary, labels[primary] || (original.textContent === t("继续") ? t("继续推进") : ''), summary.autoContinue ? 'btn' : 'btn pri'));
+  }
+  if (summary.tone === 'ask' && summary.canAnswer) actions.push({ id: 'message', label: t("写回复"), className: actions.length ? 'btn' : 'btn pri', focus: true });
+  if (pause) actions.push(nowAction('pause-objective', '', actions.length ? 'btn' : 'btn pri'));
+  const blockedPrimary = !summary.autoContinue && actions.find((action) => action.className.includes('pri') && action.disabled);
+  if (blockedPrimary) actions.push({ id: 'refresh', label: t("重新读取状态"), className: 'btn', disabled: $('refresh').disabled });
+  if (stop && summary.tone === 'go' && !summary.autoContinue) actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
+  else if (stop) delete stop.dataset.mirrored;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), summary.tone, summary.label, summary.title, summary.text, summary.question,
+    (summary.blocked || []).map((task) => [task.id, task.title, task.blocked_reason, task.block_cause]), summary.canAnswer, $('message').disabled, actions]);
+  card.hidden = false;
+  if (card.dataset.fingerprint === fingerprint) return;
+  card.dataset.fingerprint = fingerprint;
+  card.className = `now-card tone-${summary.tone}`;
+  $('now-label').textContent = summary.label;
+  $('now-title').textContent = summary.title;
+  $('now-text').textContent = summary.text;
+  const detail = $('now-detail'); detail.replaceChildren();
+  if (summary.question) detail.append(element('p', summary.question, 'now-text'));
+  // Decision tasks only; anything the service replans stays on the progress board.
+  const blocked = summary.blocked || [];
+  for (const task of blocked.slice(0, 3)) {
+    const box = blockedTaskBody(task, summary.canAnswer && !$('message').disabled, 'now-task');
+    box.insertBefore(element('b', taskDisplayTitle(task.title || task.id)), box.firstChild);
+    detail.append(box);
+  }
+  if (blocked.length > 3) detail.append(element('p', t("另有 {p0} 项，见“进展”。", { p0: blocked.length - 3 }), 'now-text'));
+  if (blockedPrimary?.caption) detail.append(element('p', t("“{p0}”暂时用不了：{p1}", { p0: blockedPrimary.label, p1: blockedPrimary.caption }), 'now-blocked'));
+  $('now-actions').replaceChildren(...actions.map((action) => {
+    const button = element('button', action.label, action.className); button.type = 'button';
+    button.disabled = !!action.disabled; button.dataset.mirror = action.id; if (action.title) button.title = action.title;
+    button.addEventListener('click', () => {
+      const target = document.getElementById(action.id);
+      if (action.focus) { target?.focus(); return; }
+      if (target && !target.disabled) target.click();
+    });
+    return button;
+  }));
+}
+
+function currentRoomTab() {
+  if (!state.snapshot || state.selected !== state.snapshot.room.id) return null;
+  if (state.reader) return 'reader';
+  if (materialsOpen()) return 'materials';
+  return state.roomTabs.get(state.snapshot.room.id) || ((state.snapshot.team?.tasks || []).length ? 'progress' : 'discussion');
+}
+function selectRoomTab(name) {
+  if (!state.snapshot || state.reader) return;
+  if (name === 'materials') { openMaterials(); return; }
+  state.roomTabs.set(state.snapshot.room.id, name);
+  if (materialsOpen()) state.materialsRoom = null;
+  renderControls();
+  $(`tab-${name}`).focus({ preventScroll: true });
+}
+function renderTabs() {
+  const tab = currentRoomTab(); const conversation = $('conversation');
+  if (tab) conversation.dataset.tab = tab; else delete conversation.dataset.tab;
+  $('room-tabs').hidden = !tab || tab === 'reader';
+  for (const name of ['progress', 'discussion', 'delivery', 'materials']) {
+    $(`tab-${name}`).setAttribute('aria-selected', String(tab === name));
+    $(`tab-${name}`).tabIndex = tab === name ? 0 : -1;
+  }
+  const tasks = (state.snapshot?.team?.tasks || []).filter((task) => task && typeof task === 'object');
+  const blocked = tasks.filter(taskNeedsUser).length;
+  const progressCount = $('tab-progress-count');
+  progressCount.hidden = !tasks.length;
+  progressCount.textContent = blocked ? t("{p0} 项等你", { p0: blocked }) : `${tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length}/${tasks.length}`;
+  progressCount.className = `tab-count${blocked ? ' ask' : ''}`;
+  $('tab-delivery-count').hidden = !state.deliveryPending;
+  $('tab-delivery-count').textContent = String(state.deliveryPending || '');
+  $('delivery-empty').hidden = !$('code-status-card').hidden;
+  renderProgressPane();
+}
+const progressChipLabels = localizedLabels({
+  open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '互审中', accepted: '互审通过',
+  self_checked: '仅自检', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
+});
+// Only the user's own stop really cancels unfinished tasks; any other stop carries them into the next attempt.
+const userCancelCodes = new Set(['cancel_requested', 'lifecycle_requested']);
+// One color per meaning, shared by the bar, the row icon and the legend.
+const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '互审中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始' });
+function progressTone(task) {
+  if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
+  if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : taskQuotaHeld(task) ? 'st' : 'wait';
+  return ({ self_checked: 'self', review: 'rev', working: 'wk', waiting_peer: 'wk', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
+}
+function progressChip(task, cancelled = false) {
+  if (task.status === 'accepted' && task.review_kind === 'self_check') return progressChipLabels.self_checked;
+  if (cancelled && ['interrupted', 'cancelled'].includes(task.status)) return t("已取消");
+  if (taskQuotaHeld(task)) return progressToneLabels.st;
+  if (task.status === 'blocked') return taskNeedsUser(task) ? task.block_cause === 'permission_required' ? t("要你同意") : t("等你决定") : t("待重新安排");
+  return Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("结果待确认");
+}
+function renderProgressPane() {
+  const pane = $('progress-pane'); const snapshot = state.snapshot;
+  if (!snapshot || state.selected !== snapshot.room.id) { pane.replaceChildren(); pane.dataset.fingerprint = ''; return; }
+  const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task.title === 'string');
+  const objective = currentObjective(snapshot);
+  const canAnswer = objective?.status === 'needs_user' && objective.can_answer === true && !$('message').disabled;
+  const summary = typeof snapshot.collaboration?.summary === 'string'
+    ? platformDisplayText(snapshot.collaboration.summary, snapshot.collaboration.summary_i18n).trim() : '';
+  const resumes = ['auto', 'quota_wait'].includes(stopKind(snapshot, objective?.stop_reason));
+  const cancelled = userCancelCodes.has(objective?.stop_reason) || userCancelCodes.has(snapshot.team?.stop_reason);
+  const stLabel = cancelled ? t("已取消") : progressToneLabels.st;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
+    snapshot.team?.phase, summary, resumes, cancelled, snapshot.members.map((member) => [member.id, member.name, member.avatar])]);
+  if (pane.dataset.fingerprint === fingerprint) return;
+  pane.dataset.fingerprint = fingerprint;
+  const nodes = [];
+  if (tasks.length) {
+    const tones = tasks.map(progressTone).map((tone) => tone === 'self' ? 'ok' : tone);
+    const count = (tone) => tones.filter((value) => value === tone).length;
+    const head = element('div', '', 'stage-head');
+    const phase = Object.hasOwn(teamStageLabels, snapshot.team?.phase) ? teamStageLabels[snapshot.team.phase] : '';
+    head.append(element('b', [Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : t("本轮分工"), phase].filter(Boolean).join(' · ')),
+      element('span', [t("{p0} / {p1} 完成", { p0: count('ok'), p1: tasks.length }), count('ask') ? t("{p0} 项等你决定", { p0: count('ask') }) : '',
+        count('wait') ? t("{p0} 项待重新安排", { p0: count('wait') }) : '', count('st') ? cancelled ? t("{p0} 项已取消", { p0: count('st') }) : t("{p0} 项待继续", { p0: count('st') }) : ''].filter(Boolean).join(' · ')));
+    const segments = element('span', '', 'stage-seg'); segments.setAttribute('aria-hidden', 'true');
+    for (const tone of tones) segments.append(element('i', '', tone));
+    head.append(segments); nodes.push(head);
+    const legend = element('div', '', 'stage-legend');
+    for (const tone of ['ok', 'wk', 'rev', 'ask', 'wait', 'st', 'todo']) {
+      if (!count(tone)) continue;
+      const item = element('span', '', 'legend-item'); item.append(element('i', '', tone), element('span', `${tone === 'st' ? stLabel : progressToneLabels[tone]} ${count(tone)}`));
+      legend.append(item);
+    }
+    nodes.push(legend);
+    const note = cancelled ? count('wait') ? t("“待重新安排”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。") : ''
+      : resumes ? count('wait') && count('st') ? t("“待重新安排”和“待继续”的任务不用逐项处理，自动继续后豆窝会先重新安排，再接着做。")
+        : count('wait') ? t("“待重新安排”的任务不用逐项处理，自动继续后豆窝会先重新安排，再接着做。")
+        : count('st') ? t("“待继续”的任务会在自动继续后接着做，不用逐项处理。") : ''
+      : count('wait') && count('st') ? t("“待重新安排”和“待继续”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
+        : count('wait') ? t("“待重新安排”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
+        : count('st') ? t("“待继续”的任务在豆窝停下时还没做完，点“继续推进”后会接着做。") : '';
+    if (note) nodes.push(element('p', note, 'progress-note'));
+    if (summary) nodes.push(element('p', summary.length > 400 ? `${summary.slice(0, 400)}…` : summary, 'progress-summary'));
+    const list = element('ol', '', 'task-board');
+    for (const task of tasks) {
+      const tone = progressTone(task);
+      const row = element('li', '', `task-row tone-${tone}${taskNeedsUser(task) ? ' open' : ''}`);
+      row.append(element('span', ({ ok: '✓', self: '✓', ask: '!', wait: '↻', st: 'Ⅱ' })[tone] || '', `si ${tone}`));
+      const name = element('span', taskDisplayTitle(task.title), 'task-name'); name.title = task.title;
+      if (typeof task.waiting_for === 'string' && task.waiting_for) name.append(element('small', t("等：{p0}", { p0: task.waiting_for })));
+      const who = element('span', '', 'task-who');
+      const member = (id) => snapshot.members.find((entry) => entry.id === id);
+      if (agentPattern.test(task.owner || '')) { who.append(avatar(task.owner, member(task.owner))); who.title = displayName(task.owner); }
+      else who.append(element('span', t("待认领")));
+      if (agentPattern.test(task.reviewer || '') && task.reviewer !== task.owner) {
+        who.append(element('span', '→'), avatar(task.reviewer, member(task.reviewer)));
+        who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
+      }
+      row.append(name, who, element('span', progressChip(task, cancelled), `chip ${tone}`));
+      if (task.status === 'blocked' && !taskQuotaHeld(task)) row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
+      list.append(row);
+    }
+    nodes.push(list);
+  } else {
+    nodes.push(element('p', snapshot.team?.phase === 'team_plan' ? t("伙伴正在分工，分好后会列在这里。") : t("这次没有拆分成任务，进展都在“讨论”里。"), 'pane-empty'));
+  }
+  pane.replaceChildren(...nodes);
+}
+
+function roomGroup(room) {
+  if (!activeEntry(room)) return 'none';
+  const activity = roomWorkActivity(room); const objective = room.objective_status;
+  if (activity && ['working', 'queued'].includes(activity.state) && objective !== 'paused') return 'go';
+  if (roomStopKind(room)) return 'go';
+  if (['needs_user', 'awaiting_continue'].includes(objective)) return 'ask';
+  if (['running', 'checkpoint'].includes(objective)) return 'go';
+  if (['paused', 'stopped', 'interrupted'].includes(objective)) return 'stop';
+  if (objective === 'complete') return 'done';
+  if (['needs_user', 'ready_for_user'].includes(room.outcome_state) || room.status === 'needs_user') return 'ask';
+  if (room.outcome_state === 'unknown' || room.status === 'unknown') return 'bad';
+  if (room.outcome_state === 'accepted' || room.status === 'completed') return 'done';
+  if (['running', 'queued'].includes(room.status) || room.outcome_state === 'in_progress') return 'go';
+  return 'stop';
+}
+const roomGroupLabels = localizedLabels({ ask: '需要你', go: '进行中', stop: '已停止', done: '已完成' });
+
+const themePreferenceKey = 'beanest:theme';
+function themePreference() {
+  try { const value = localStorage.getItem(themePreferenceKey); return ['light', 'dark'].includes(value) ? value : 'system'; } catch (_) { return 'system'; }
+}
+function applyTheme(preference = themePreference()) {
+  const root = document.documentElement;
+  if (root) { if (preference === 'system') delete root.dataset.theme; else root.dataset.theme = preference; }
+  const button = document.getElementById('interface-theme');
+  if (button) button.textContent = ({ light: t("外观：浅色"), dark: t("外观：深色") })[preference] || t("外观：跟随系统");
+}
+
+// Partner cards show the account-wide quota windows as bars; model-specific
+// windows stay in the detailed account panel.
+function quotaShortLabel(window) {
+  const named = ({ 'kimi:limit5h': t("5 小时"), 'kimi:limit7d': t("7 天"), 'kimi:monthTotal': t("本月"), 'kimi:monthCode': t("本月代码") })[window.name];
+  if (named) return named;
+  const minutes = window.window_minutes;
+  if (!Number.isFinite(minutes) || minutes <= 0) return t("额度");
+  return minutes % 1440 === 0 ? t("{p0} 天", { p0: minutes / 1440 }) : minutes % 60 === 0 ? t("{p0} 小时", { p0: minutes / 60 }) : t("{p0} 分钟", { p0: minutes });
+}
+function memberQuotaWindows(id) {
+  const quota = currentAccount(id).account?.quota;
+  const windows = (quota?.state === 'available' || quota?.stale === true) && Array.isArray(quota.windows) ? quota.windows : [];
+  return windows.filter((window) => window && typeof window === 'object' && !window.model && !window.surface)
+    .map((window) => {
+      const remaining = percentValue(window.remaining_percent); const used = percentValue(window.used_percent);
+      return { window, remaining: remaining !== null ? remaining : used !== null ? 100 - used : null, stale: quota.stale === true };
+    }).filter((entry) => entry.remaining !== null).slice(0, 3);
+}
+function renderMemberQuota(id) {
+  const holder = document.getElementById(`member-quota-${id}`);
+  if (!holder) return;
+  // Only a status in doubt outlines the card; running out of quota is an ordinary wait.
+  const entries = memberQuotaWindows(id); const blocked = memberAvailabilityLine(availabilityInfo(id))?.tone === 'ask';
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), entries, blocked]);
+  holder.parentNode?.classList.toggle('quota-blocked', blocked);
+  if (holder.dataset.fingerprint === fingerprint) return;
+  holder.dataset.fingerprint = fingerprint;
+  holder.replaceChildren(...entries.map(({ window, remaining, stale }) => {
+    const level = remaining <= 0 ? ' zero' : remaining < 20 ? ' low' : '';
+    const row = element('div', '', `quota-row${level}`);
+    const label = quotaShortLabel(window);
+    const meter = element('progress'); meter.max = 100; meter.value = remaining; meter.textContent = `${remaining}%`;
+    meter.setAttribute('aria-label', t("{p0}额度剩余 {p1}%", { p0: label, p1: remaining }));
+    const reset = Number.isFinite(window.resets_at) && remaining < 20 ? t(" · {p0} 重置", { p0: timeLabel(window.resets_at, true) }) : '';
+    const value = element('span', `${stale ? t("上次 ") : ''}${remaining}%${reset}`, 'quota-value');
+    if (Number.isFinite(window.resets_at)) value.title = t("重置：{p0}", { p0: timeLabel(window.resets_at, true) });
+    row.append(element('span', label), meter, value);
+    return row;
+  }));
+}
+function renderNavQuota() {
+  const holder = document.getElementById('nav-quota');
+  if (!holder) return;
+  const values = state.participantIds.map((id) => {
+    const blocked = availabilityInfo(id).blocked; const entries = memberQuotaWindows(id);
+    return [id, blocked ? 0 : entries.length ? Math.min(...entries.map((entry) => entry.remaining)) : null];
+  }).filter(([, value]) => value !== null);
+  const fingerprint = JSON.stringify(values);
+  if (holder.dataset.fingerprint === fingerprint) return;
+  holder.dataset.fingerprint = fingerprint;
+  holder.replaceChildren(...values.map(([id, value]) => {
+    const meter = element('progress', `${value}%`, value <= 0 ? 'zero' : value < 20 ? 'low' : ''); meter.max = 100; meter.value = value;
+    meter.title = t("{p0}：剩余 {p1}%", { p0: displayName(id), p1: value });
+    return meter;
+  }));
+}
+
 
 class RequestError extends Error {
   constructor(message, { uncertain = false, code = '' } = {}) {
@@ -467,7 +969,7 @@ function taskDeliveryStatus(part, kind) {
     git_invalid_output: t("Git 返回的状态暂时无法识别"), git_failed: t("Git 查询未成功，可刷新重试"), unsupported_mainline_file: t("主分支中的文件类型暂无法核对"),
   };
   const fallback = part?.state === 'pending' ? t("还有成果待处理，来源未提供具体原因") : t("来源未提供可确认的核对结果");
-  return `${kind === 'main' ? t("主分支") : kind === 'private' ? t("伙伴工作区") : kind === 'workspace' ? t("工作区") : 'GitHub'}：${reasons[part?.reason] || fallback}`;
+  return `${kind === 'main' ? t("主分支") : kind === 'private' ? t("伙伴工作区") : kind === 'workspace' ? t("工作区") : 'GitHub'}${interfaceColon()}${reasons[part?.reason] || fallback}`;
 }
 function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
   const issues = (Array.isArray(delivery.issues) ? delivery.issues : []).filter((issue) => issue.scope === kind && issue.state !== 'confirmed');
@@ -477,7 +979,7 @@ function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
   const messages = [...new Set(problems.map((issue) => {
     const workspace = workspaces.find((item) => item.id === issue.workspace_id);
     const label = workspace && (state.snapshot?.members?.find((member) => member.id === workspace.provider)?.name || platformDisplayText(workspace.label, workspace.label_i18n));
-    return taskDeliveryStatus(issue, kind) + (label ? `（${label}）` : '');
+    return taskDeliveryStatus(issue, kind) + (label ? interfaceParen(label) : '');
   }))];
   return messages.map((message, index) => index ? message.slice(message.indexOf('：') + 1) : message).join('；');
 }
@@ -526,7 +1028,7 @@ function codeStateMessage(data) {
 function renderCodeStatus() {
   const roomId = state.snapshot?.room.id; const card = $('code-status-card');
   card.hidden = !state.codeStatusSupported || !roomId;
-  if (card.hidden) { state.codeStatusRendered = null; return; }
+  if (card.hidden) { state.codeStatusRendered = null; state.deliveryPending = 0; return; }
   const entry = codeStatusEntry(roomId); const data = entry.data;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [roomId, entry.workspaceId, data, entry.loading, entry.error, entry.repository, entry.repositoryEditing, entry.repositoryDraft, entry.repositorySaving, entry.repositoryError, state.connected, codeRunActive(), state.busy, !!state.pending, $('code-merge-target').value, naturalContinuation(state.snapshot, $('code-merge-target').value)?.canSend, state.snapshot?.members?.map((member) => member.id)]]);
   if (fingerprint === state.codeStatusRendered) return;
@@ -581,6 +1083,7 @@ function renderCodeStatus() {
       ? t("GitHub 已同步的是当前主分支；上面的任务成果问题仍需核对，不能据此判断全部交付完成。")
       : t("主分支核对已提交代码，工作区核对尚未交付的成果；GitHub 核对当前主分支。");
   }
+  renderDeliverySteps(deliveryKnown ? delivery : null, data?.workspaces || [], codeRepository(entry));
   $('code-published-note').hidden = !deliveryKnown || !delivery.published;
   $('code-published-note').textContent = deliveryKnown && delivery.published
     ? (stale ? t("上次检查：") : '') + taskPublishedMessage(delivery.published) : '';
@@ -638,6 +1141,23 @@ function renderCodeStatus() {
   $('code-files-more').hidden = !available || remaining <= 0;
   $('code-files-more').textContent = remaining > 0 ? t("另有 {p0} 个文件未在本次状态中列出。", { p0: remaining }) : '';
 }
+function renderDeliverySteps(delivery, workspaces, repository) {
+  const steps = $('delivery-steps');
+  steps.hidden = !delivery || !!repository && repository.state !== 'bound';
+  $('code-status-card').classList.toggle('has-steps', !steps.hidden);
+  const cells = steps.hidden ? [] : [['workspace', t("工作区")], ['main', t("主分支")], ['remote', 'GitHub'], ['private', t("伙伴副本")]]
+    .filter(([kind]) => ['main', 'remote'].includes(kind) || delivery[kind]);
+  state.deliveryPending = cells.filter(([kind]) => delivery[kind]?.state === 'pending').length;
+  steps.replaceChildren(...cells.map(([kind, label]) => {
+    const value = delivery[kind]?.state; const text = taskDeliveryScopeStatus(delivery, kind, workspaces);
+    const tone = value === 'confirmed' ? 'ok' : value === 'pending' ? 'ask' : 'st';
+    const cell = element('div', '', `delivery-step ${value === 'pending' ? 'pending' : value === 'confirmed' ? 'confirmed' : 'unknown'}`);
+    const title = element('span', '', 'delivery-step-title');
+    title.append(element('span', ({ ok: '✓', ask: '!', st: '?' })[tone], `si ${tone}`), element('span', label));
+    cell.append(title, element('span', text.slice(text.indexOf('：') + 1)));
+    return cell;
+  }));
+}
 function codeDeliveryRequest(data, available) {
   if (!available) return null;
   if (data.delivery_summary?.scope === 'task_linked_workspaces') return data.delivery_summary.request;
@@ -688,8 +1208,10 @@ async function sendCodeMergeRequest() {
       || state.busy || state.managementBusy || state.pending || entry.repositorySaving
       || entry.data.workspace_id !== entry.workspaceId
       || (target !== 'all' && !snapshot.members.some((member) => member.id === target))) return;
-  const targets = Array.isArray(request.targets) ? request.targets.filter((item) => typeof item.repository_root === 'string' && typeof item.target_branch === 'string' && item.target_branch).map((item) => `${item.repository_root} → ${item.target_branch}`).join('；') : '';
-  const text = `请核对本任务所有伙伴已完成的相关成果，提交尚未提交的有效改动，核对实际默认主分支并合入，再推送到仓库已配置的 GitHub 远端，核对实际远端提交后报告结果。关联仓库：${(request.repository_roots || []).join('；')}。${targets ? `上次检查的主分支：${targets}（执行时核对实际状态）。` : ''}请保留其他改动与成果，逐项核对未跟踪文件，只提交本任务应纳入版本管理的内容，不要盲目 git add 全部文件，不要改写历史或强推，不要自行扩大权限；如无可用 GitHub 远端，请如实说明。`;
+  const targets = Array.isArray(request.targets) ? request.targets.filter((item) => typeof item.repository_root === 'string' && typeof item.target_branch === 'string' && item.target_branch).map((item) => `${item.repository_root} → ${item.target_branch}`).join(interfaceSemicolon()) : '';
+  // Sent as the user's own message, so it follows the interface language like anything else they send.
+  const text = t("请核对本任务所有伙伴已完成的相关成果，提交尚未提交的有效改动，核对实际默认主分支并合入，再推送到仓库已配置的 GitHub 远端，核对实际远端提交后报告结果。关联仓库：{p0}。{p1}请保留其他改动与成果，逐项核对未跟踪文件，只提交本任务应纳入版本管理的内容，不要一次 git add 全部文件，不要改写历史或强推，不要自行扩大权限；如无可用 GitHub 远端，请如实说明。",
+    { p0: (request.repository_roots || []).join(interfaceSemicolon()), p1: targets ? t("上次检查的主分支：{p0}（执行时核对实际状态）。", { p0: targets }) : '' });
   if (!checkUserText(text)) return;
   saveDraft();
   // A dedicated action is a normal durable user message, detached from the
@@ -840,7 +1362,8 @@ function renderMediaReader(reader) {
 function mediaCard(asset, media) {
   const card = element('article', '', 'media-card'); card.dataset.mediaId = asset.id;
   const view = element('button', '', 'media-open'); view.type = 'button'; view.disabled = !asset.available;
-  view.setAttribute('aria-label', t("查看{p0}：{p1}", { p0: asset.kind === 'video' ? t("视频") : asset.kind === 'audio' ? t("音频") : asset.kind === 'image' ? t("图片") : t("文件"), p1: asset.name }));
+  view.setAttribute('aria-label', (asset.kind === 'video' ? t("查看视频：{p0}", { p0: asset.name }) : asset.kind === 'audio' ? t("查看音频：{p0}", { p0: asset.name })
+    : asset.kind === 'image' ? t("查看图片：{p0}", { p0: asset.name }) : t("查看文件：{p0}", { p0: asset.name })));
   view.append(element('span', asset.kind === 'video' ? t("▶ 视频") : asset.kind === 'audio' ? t("♪ 音频") : asset.kind === 'image' ? t("图片") : t("文件"), 'media-kind'));
   if (asset.kind === 'image' && asset.available) {
     const image = element('img'); image.alt = asset.name; image.loading = 'lazy'; image.className = 'media-thumbnail'; view.append(image);
@@ -1427,11 +1950,15 @@ function memberCard(id, descriptor = {}) {
   const name = element('h3', names[id]); name.id = `name-${id}`;
   const status = element('span', t("未启动"), 'member-status'); status.id = `status-${id}`;
   const email = element('p', '', 'account-email'); email.id = `account-email-${id}`;
-  identity.append(name, status, email);
+  identity.append(name, email);
   const adapter = descriptor.adapter || descriptor.provider;
   if (adapter) identity.append(element('p', ({ claude: 'Claude Code', codex: 'Codex' })[adapter] || adapter, 'adapter-identity'));
-  heading.append(avatar(id, descriptor), identity);
+  const model = element('button', '', 'member-model'); model.type = 'button'; model.id = `member-model-${id}`;
+  model.setAttribute('aria-haspopup', 'dialog'); model.setAttribute('aria-controls', 'runtime-settings-popover');
+  model.addEventListener('click', () => void openRuntimePopover({ partnerId: id, trigger: model }));
+  heading.append(avatar(id, descriptor), identity, model);
   if (state.partners.some((partner) => partner.id === id)) heading.append(appearanceButton(id));
+  const doing = element('p', '', 'member-doing'); doing.append(status);
   const task = element('p', '', 'current-task'); task.id = `task-${id}`;
   const publicProgress = element('div', '', 'member-public-progress'); publicProgress.id = `public-progress-${id}`;
   const availability = element('p', '', 'member-availability'); availability.id = `availability-${id}`;
@@ -1442,7 +1969,8 @@ function memberCard(id, descriptor = {}) {
   const configurationHistory = element('p', '', 'detail-caption'); configurationHistory.id = `configuration-history-${id}`; configurationHistory.hidden = true;
   details.append(element('summary', t("任务会话与 Token")), session,
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
-  card.append(heading, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, usageSummary, details, accountFooter(id));
+  const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
+  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, usageSummary, details, accountFooter(id));
   return card;
 }
 
@@ -1460,7 +1988,7 @@ function observedQuotaLabel(id) {
   const window = windows.length === 1 ? windows[0] : null;
   const remaining = percentValue(window?.remaining_percent);
   return { quota, text: window && remaining !== null
-    ? t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowLabel(window.window_minutes).replace(t("窗口"), '') || t("账号额度"), p2: remaining })
+    ? t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(window.window_minutes) || t("账号额度"), p2: remaining })
     : t("{p0}取得 {p1} 个额度窗口", { p0: quota.stale ? t("上次") : t("已"), p1: windows.length }) };
 }
 function availabilityInfo(id) {
@@ -1482,6 +2010,24 @@ function availabilityInfo(id) {
     state.availabilityError ? t("这次更新未成功，显示的仍是已有记录") : ''].filter(Boolean).join(' · ') : '';
   return { value, blocked, stale, summary, detail };
 }
+// The partner card carries one plain line; the full record lives under 账号与额度.
+// A quota wait is an ordinary state, so only a login or status in doubt asks for attention.
+function memberAvailabilityLine(info) {
+  if (!info.value || !info.blocked) return null;
+  const reason = info.value.reason;
+  if (['subscription_limit_reached', 'quota_exhausted'].includes(reason)) return { tone: 'wait',
+    text: Number.isFinite(info.value.resets_at) ? t("额度用完 · {p0} 恢复", { p0: timeLabel(info.value.resets_at, true) }) : t("额度用完 · 恢复时间未知") };
+  if (reason === 'quota_reset_due') return { tone: 'wait', text: t("额度应已恢复 · 点“账号与额度”确认") };
+  if (reason === 'account_identity_unknown') return { tone: 'ask', text: t("登录待确认 · 点“账号与额度”刷新") };
+  return { tone: 'ask', text: t("状态待确认 · 点“账号与额度”刷新") };
+}
+// The card says only whether the partner is signed in; who it is shows under 账号与额度.
+function memberLoginCaption(account) {
+  if (!account || account.state === 'not_checked') return t("登录未检查");
+  if (account.stale) return t("登录待刷新");
+  if (account.state === 'error') return t("登录检查未成功");
+  return t("已登录");
+}
 function availabilityText(info) {
   const parts = info.detail ? info.detail.split(' · ') : [];
   if (!parts.length) return info.summary;
@@ -1490,7 +2036,7 @@ function availabilityText(info) {
 function blockedParticipants() { return state.participantIds.filter((id) => availabilityInfo(id).blocked); }
 function availabilityBlockMessage() {
   const blocked = blockedParticipants(); if (!blocked.length) return '';
-  const reasons = blocked.map((id) => `${displayName(id)}：${availabilityInfo(id).summary.split(' · ')[0]}`).join('；');
+  const reasons = blocked.map((id) => `${displayName(id)}${interfaceColon()}${availabilityInfo(id).summary.split(' · ')[0]}`).join(interfaceSemicolon());
   return state.selected ? state.memberInvitationSupported
     ? t("{p0}。等待状态更新，或在“伙伴”中查看可邀请的伙伴。", { p0: reasons })
     : t("{p0}。本任务成员固定；等待状态更新，或开新任务调整伙伴。", { p0: reasons })
@@ -1507,8 +2053,8 @@ function submissionAvailabilityMessage() {
   const failover = quotaFailoverSelection();
   if (!failover) return availabilityBlockMessage();
   const ongoing = ['running', 'checkpoint'].includes(currentObjective()?.status) && !terminalTeamState(state.snapshot);
-  return ongoing ? t("{p0} 正在接续任务；{p1} 额度不足。", { p0: failover.available.map(displayName).join('、'), p1: failover.blocked.map(displayName).join('、') })
-    : t("将由 {p0} 继续；{p1} 额度不足。", { p0: failover.available.map(displayName).join('、'), p1: failover.blocked.map(displayName).join('、') });
+  return ongoing ? t("{p0} 正在接续任务；{p1} 额度不足。", { p0: interfaceList(failover.available.map(displayName)), p1: interfaceList(failover.blocked.map(displayName)) })
+    : t("将由 {p0} 继续；{p1} 额度不足。", { p0: interfaceList(failover.available.map(displayName)), p1: interfaceList(failover.blocked.map(displayName)) });
 }
 function canRequestAvailabilityRecheck(id) {
   const info = availabilityInfo(id);
@@ -1689,6 +2235,13 @@ function trackAccountPanel(details, id) {
   if (details.open) void refreshWatchingAccounts();
 }
 function percentValue(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null; }
+// "5小时" / "5小时额度" as whole keys; stripping 窗口 from a translated label failed in English.
+function quotaWindowName(minutes, quota = false) {
+  if (!Number.isFinite(minutes) || minutes <= 0) return '';
+  if (minutes % 1440 === 0) return quota ? t("{p0}天额度", { p0: minutes / 1440 }) : t("{p0}天", { p0: minutes / 1440 });
+  if (minutes % 60 === 0) return quota ? t("{p0}小时额度", { p0: minutes / 60 }) : t("{p0}小时", { p0: minutes / 60 });
+  return quota ? t("{p0}分钟额度", { p0: minutes }) : t("{p0}分钟", { p0: minutes });
+}
 function quotaWindowLabel(minutes) {
   if (!Number.isFinite(minutes) || minutes <= 0) return '';
   return minutes % 1440 === 0 ? t("{p0}天窗口", { p0: minutes / 1440 }) : minutes % 60 === 0 ? t("{p0}小时窗口", { p0: minutes / 60 }) : t("{p0}分钟窗口", { p0: minutes });
@@ -1699,7 +2252,7 @@ function updateAccountFooter(details, id) {
   const quota = account?.quota;
   const windows = (quota?.state === 'available' || quota?.stale === true) && Array.isArray(quota.windows) ? quota.windows.filter((entry) => entry && typeof entry === 'object') : [];
   const status = state.accountRefreshId === id ? t("正在查询…") : !account || account.state === 'not_checked' ? t("未检查")
-    : windows.length ? t("{p0}个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
+    : windows.length ? t("{p0} 个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
   details.firstChild.lastChild.textContent = status;
   const body = details.lastChild;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
@@ -1719,7 +2272,7 @@ function updateAccountFooter(details, id) {
   const sourceLabels = { kimi_managed_oauth: t("Kimi Code 本机会员登录"), codex_app_server: t("Codex 原生账号查询"), claude_auth_status: t("Claude Code 登录状态"), unsupported: t("当前接入方式未支持") };
   fact(t("账号来源"), sourceLabels[account?.source] || t("尚未获取"));
   if (compact) {
-    body.append(element('p', `${account?.stale ? t("上次确认") : t("当前登录")}：${accountLoginText(account)}`, 'compact-account-identity'),
+    body.append(element('p', `${account?.stale ? t("上次确认") : t("当前登录")}${interfaceColon()}${accountLoginText(account)}`, 'compact-account-identity'),
       element('p', `${accountFieldText(account, 'plan')} · ${Number.isFinite(account?.checked_at) ? `${timeLabel(account.checked_at, true)}${account.stale ? t(" · 旧快照") : ''}` : t("尚未查询")}`, 'detail-caption'));
     const more = element('details', '', 'compact-account-more'); more.append(element('summary', t("来源与账号范围")), facts); body.append(more);
   } else body.append(facts);
@@ -1740,9 +2293,13 @@ function updateAccountFooter(details, id) {
       const rawName = typeof window.name === 'string' && window.name.trim() ? window.name : '';
       const pool = rawName.match(/^([a-zA-Z0-9_-]+):(primary|secondary)$/);
       const kimiWindow = ({ 'kimi:limit5h': t("Kimi Code · 5小时额度"), 'kimi:limit7d': t("Kimi Code · 7天额度"), 'kimi:monthTotal': t("Kimi Code · 月度总额度"), 'kimi:monthCode': t("Kimi Code · 月度代码额度") })[rawName];
-      const label = typeof window.label === 'string' && window.label.trim() ? window.label.trim().slice(0, 200)
+      // adapters.py names Claude's windows in Chinese; known names are translated here like Kimi's.
+      const claudeModel = /^claude:model_scoped:/.test(rawName) && typeof window.label === 'string' ? window.label.split(' · ')[0].trim() : '';
+      const claudeWindow = ({ 'claude:five_hour': t("Claude · 5小时窗口"), 'claude:seven_day': t("Claude · 7天窗口") })[rawName]
+        || (claudeModel ? t("{p0} · 模型周额度", { p0: claudeModel }) : '');
+      const label = kimiWindow || claudeWindow || (typeof window.label === 'string' && window.label.trim() ? window.label.trim().slice(0, 200)
         : pool ? t("{p0} 额度池 · {p1}", { p0: ({ codex: 'Codex', claude: 'Claude Code' })[pool[1]] || pool[1], p1: duration || (pool[2] === 'primary' ? t("主窗口") : t("第二窗口")) })
-        : kimiWindow || rawName || duration || t("供应商额度窗口");
+        : rawName || duration || t("供应商额度窗口"));
       const heading = element('div', '', 'quota-window-heading');
       heading.append(element('strong', label), element('span', remaining !== null ? t("剩余 {p0}%", { p0: remaining }) : used !== null ? t("已用 {p0}%", { p0: used }) : t("比例未提供")));
       row.append(heading);
@@ -1770,7 +2327,7 @@ function updateAccountFooter(details, id) {
   if (usageLink) { usageLink.dataset.usageLink = id; body.append(usageLink, element('p', quota.usage_url, 'native-login-url')); }
   const shared = Array.isArray(account?.shared_profile_ids) ? account.shared_profile_ids.filter((value) => value !== id && agentPattern.test(value)) : [];
   const tool = ({ claude: 'Claude Code', codex: 'Codex', kimi: 'Kimi Code' })[partner?.adapter] || t("对应工具");
-  body.append(element('p', shared.length ? t("与{p0}共用本机 {p1} 登录。改名或新建会话不会切换账号。", { p0: shared.map(displayName).join('、'), p1: tool })
+  body.append(element('p', shared.length ? t("与{p0}共用本机 {p1} 登录。改名或新建会话不会切换账号。", { p0: interfaceList(shared.map(displayName)), p1: tool })
     : account?.scope === 'default_cli_login' || ['claude', 'codex', 'kimi'].includes(partner?.adapter)
       ? t("使用本机 {p0} 的当前登录。改名或新建会话不会切换账号。", { p0: tool }) : t("当前接入方式未提供独立账号信息。"), 'account-scope-note'));
   const refresh = element('button', state.accountRefreshId === id ? t("正在查询…") : t("刷新账号与额度"), 'quiet-button'); refresh.type = 'button'; refresh.dataset.focusKey = 'account-refresh';
@@ -2078,7 +2635,7 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
   const { room, editable, recorded, choices, workMode, newGoal, nativeRecovery, configuration, unsent } = context;
   const caption = configuration ? unsent ? t("待发送 · ") : configuration.pending ? t("后续工作生效 · ") : t("设置 · ") : room ? editable ? newGoal ? t("新目标 · ") : t("下一轮 · ") : t("本轮 · ") : '';
   $('runtime-settings-summary').textContent = configuration ? t("{p0}权限：{p1}", { p0: caption, p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) }) : nativeRecovery ? t("继续沿用本任务设置") : !editable && !recorded ? t("权限：未记录")
-    : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标") : t("下轮") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
+    : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
   for (const id of state.participantIds) {
     const group = state.partnerControls.get(id); if (!group) continue;
     const button = group.firstChild;
@@ -2101,6 +2658,12 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     button.title = `${partnerCaption}${displayName(id)} · ${fullModelLabel} · ${effort}${historical ? t(" · 仅查看") : ''}${model?.resolved_model ? t(" · 工具标识：{p0}", { p0: model.resolved_model }) : ''}`;
     button.setAttribute('aria-label', t("{p0}{p1}的模型与思考强度：{p2}，{p3}{p4}", { p0: partnerCaption, p1: displayName(id), p2: fullModelLabel, p3: effort, p4: historical ? t("，原有设置仅供查看") : !editable ? configuration ? t("，当前不可修改") : t("，本轮已固定") : '' }));
     button.setAttribute('aria-expanded', String(state.runtimePopoverOpen && state.runtimePartner === id));
+    const cardModel = document.getElementById(`member-model-${id}`);
+    if (cardModel) {
+      cardModel.textContent = `${modelLabel} · ${shortEffort} ⌄`; cardModel.title = button.title;
+      cardModel.setAttribute('aria-label', button.getAttribute('aria-label'));
+      cardModel.setAttribute('aria-expanded', button.getAttribute('aria-expanded'));
+    }
   }
   $('composer-usage-bar').dataset.nextRun = String(!!room && editable);
   $('composer-usage-bar').setAttribute('aria-label', t("{p0}伙伴模型与额度", { p0: caption }));
@@ -2113,7 +2676,7 @@ function renderRuntimeSettings() {
   renderRuntimeShortcuts();
   const permission = choices.permission;
   $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型与思考强度", { p0: displayName(state.runtimePartner) })
-    : t("{p0}任务权限", { p0: editable && room ? newGoal ? t("新目标") : t("下一轮") : '' });
+    : t("{p0}任务权限", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '' });
   $('runtime-settings-note').textContent = !editable ? workMode === 'plan' ? t("本轮设置已经固定，方案阶段强制只读。预设的动手权限不会在本轮生效。") : t("本轮设置已经固定，不会改变正在处理的任务。")
     : workMode === 'plan' ? t("方案阶段强制只读。下面预设开始动手后的权限；选择只读后，下一轮也不会自动提升权限。")
       : t("按所选权限处理任务；本机工具使用对应的原生权限模式。");
@@ -2190,7 +2753,7 @@ function renderRuntimeSettings() {
     for (const model of models) { const option = element('option', runtimeModelLabel(model, models)); option.value = model.id;
       if (typeof model.resolved_model === 'string') option.title = t("工具标识：{p0}", { p0: model.resolved_model });
       modelSelect.append(option); }
-    if (choice.model && !models.some((model) => model.id === choice.model)) { const option = element('option', `${choice.model}（${historical ? t("原有设置") : t("已设置，尚未核对")}）`); option.value = choice.model; modelSelect.append(option); }
+    if (choice.model && !models.some((model) => model.id === choice.model)) { const option = element('option', `${choice.model}${interfaceParen(historical ? t("原有设置") : t("已设置，尚未核对"))}`); option.value = choice.model; modelSelect.append(option); }
     modelSelect.value = choice.model || ''; modelSelect.disabled = historical || locked || !supported;
     modelSelect.addEventListener('change', () => {
       if (modelSelect.disabled) return;
@@ -2204,7 +2767,7 @@ function renderRuntimeSettings() {
     const effortLabel = element('label', t("思考强度 ")); const effortSelect = element('select'); effortSelect.id = `runtime-effort-${id}`;
     const defaultEffort = element('option', t("工具默认")); defaultEffort.value = ''; effortSelect.append(defaultEffort);
     for (const effort of efforts) { const option = element('option', ({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[effort] || effort); option.value = effort; effortSelect.append(option); }
-    if (choice.effort && !efforts.includes(choice.effort)) { const option = element('option', `${choice.effort}（${historical ? t("原有设置") : t("已设置，尚未核对")}）`); option.value = choice.effort; effortSelect.append(option); }
+    if (choice.effort && !efforts.includes(choice.effort)) { const option = element('option', `${choice.effort}${interfaceParen(historical ? t("原有设置") : t("已设置，尚未核对"))}`); option.value = choice.effort; effortSelect.append(option); }
     effortSelect.value = choice.effort || ''; effortSelect.disabled = historical || locked || !supported || !selectedModel || !efforts.length;
     effortSelect.addEventListener('change', () => {
       if (effortSelect.disabled) return;
@@ -2295,8 +2858,9 @@ function accountQuotaSummary(id) {
   const weekly = shared.filter((window) => window?.kind === 'weekly_all' || window?.window_minutes === 10080);
   const selected = weekly.length === 1 ? weekly[0] : shared.length === 1 ? shared[0] : null;
   const remaining = percentValue(selected?.remaining_percent);
-  if (selected && remaining !== null) return { text: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowLabel(selected.window_minutes).replace(t("窗口"), t("额度")) || t("账号额度"), p2: remaining }), shortText: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowLabel(selected.window_minutes).replace(t("窗口"), ''), p2: remaining }), remaining };
-  if (windows.length) return { text: t("{p0}{p1} 个{p2}额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length, p2: windows.every((window) => window?.scope === 'model') ? t("模型") : '' }) };
+  if (selected && remaining !== null) return { text: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(selected.window_minutes, true) || t("账号额度"), p2: remaining }), shortText: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(selected.window_minutes), p2: remaining }), remaining };
+  if (windows.length) return { text: windows.every((window) => window?.scope === 'model')
+    ? t("{p0}{p1} 个模型额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length }) : t("{p0}{p1} 个额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length }) };
   return { text: quotaPendingLabel(id) };
 }
 function renderComposerUsage() {
@@ -2791,7 +3355,7 @@ function lifecycleActions(kind, item, { beforeAction = () => {} } = {}) {
     const button = element('button', label, `quiet-button${action === 'remove' ? ' danger' : ''}`); button.type = 'button';
     button.dataset.lifecycleAction = action; button.dataset.lifecycleKind = kind; button.dataset.lifecycleId = item.id;
     button.disabled = state.managementBusy || (!permanent && (state.busy || !!state.pending)) || (permanent ? busy : action !== 'restore' && busy);
-    button.setAttribute('aria-label', `${label}${kind === 'rooms' ? t("任务") : kind === 'projects' ? t("项目") : t("伙伴")}：${item.name || roomTitle(item)}`);
+    button.setAttribute('aria-label', `${label}${kind === 'rooms' ? t("任务") : kind === 'projects' ? t("项目") : t("伙伴")}${interfaceColon()}${item.name || roomTitle(item)}`);
     if (permanent && busy) button.title = kind === 'partners' ? t("正在处理这个伙伴的操作。") : kind === 'projects' ? t("正在核对项目登记删除结果。") : t("正在停止任务并处理记录，请稍候。");
     else if (busy && action !== 'restore') button.title = item.lifecycle_blocked_reason === 'team_cleanup_unconfirmed'
       ? t("执行清理尚未确认，暂时不能归档或移除。") : t("任务仍在处理或等待清理，结束后可整理。");
@@ -3065,7 +3629,8 @@ function lifecycleOperationText(operation) {
     const reasons = { team_cleanup_unconfirmed: t("执行清理尚未确认"), purge_files_incomplete: t("文件清理未完成"),
       purge_workspace_busy: t("工作副本仍在使用"), purge_source_in_use: t("仍有任务依赖这份记录"),
       purge_dependency_unconfirmed: t("关联资料尚未核对"), purge_reference_conflict: t("关联资料存在冲突"), storage_unavailable: t("本地存储暂不可用") };
-    return t("{p0}未完成：{p1}。记录仍保留。", { p0: operation.action === 'remove' ? t("删除") : t("整理"), p1: reasons[operation.error] || t("本地整理遇到问题") });
+    const reason = reasons[operation.error] || t("本地整理遇到问题");
+    return operation.action === 'remove' ? t("永久删除未完成：{p0}。记录仍保留。", { p0: reason }) : t("整理未完成：{p0}。记录仍保留。", { p0: reason });
   }
   return operation.action === 'remove' ? t("任务已永久删除。") : operation.action === 'archive' ? t("任务已归档。") : t("任务已恢复。");
 }
@@ -3172,7 +3737,7 @@ function renderLegacyRoomReview() {
   status.hidden = !operations.length; status.replaceChildren();
   for (const operation of operations) {
     const row = element('div', '', 'lifecycle-operation');
-    row.append(element('p', `${roomTitle(state.rooms.find((room) => room.id === operation.room_id) || {})}：${lifecycleOperationText(operation)}`, 'detail-caption'));
+    row.append(element('p', `${roomTitle(state.rooms.find((room) => room.id === operation.room_id) || {})}${interfaceColon()}${lifecycleOperationText(operation)}`, 'detail-caption'));
     if (operation.status === 'unknown') {
       const check = element('button', t("核对处理结果"), 'quiet-button'); check.type = 'button';
       check.addEventListener('click', async () => { await checkLifecycleOperation(operation); renderRooms(); }); row.append(check);
@@ -3207,14 +3772,23 @@ function validPartnerIntent(intent) {
   return ['enable', 'disable'].includes(intent.action) ? intent.suffix === 'enabled' && intent.body.enabled === (intent.action === 'enable')
     : intent.suffix === 'lifecycle' && ['archive', 'restore', 'remove'].includes(intent.action) && intent.body.action === intent.action;
 }
+// One whole sentence per action: an action verb dropped into a shared sentence read "Partner configuration Disable." in English.
+const partnerOperationSentences = {
+  enable: { failed: "启用未完成。{p0}", unknown: "正在核对启用结果，原请求已保留。", pending: "启用尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已启用。{p0}" },
+  disable: { failed: "停用未完成。{p0}", unknown: "正在核对停用结果，原请求已保留。", pending: "停用尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已停用。{p0}" },
+  archive: { failed: "归档未完成。{p0}", unknown: "正在核对归档结果，原请求已保留。", pending: "归档尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已归档。{p0}" },
+  restore: { failed: "恢复未完成。{p0}", unknown: "正在核对恢复结果，原请求已保留。", pending: "恢复尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已恢复。{p0}" },
+  remove: { failed: "移除配置未完成。{p0}", unknown: "正在核对移除结果，原请求已保留。", pending: "移除尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴配置已移除。{p0}" },
+  other: { failed: "伙伴操作未完成。{p0}", unknown: "正在核对伙伴操作结果，原请求已保留。", pending: "伙伴操作尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴操作已完成。{p0}" },
+};
 function partnerOperationText(operation) {
-  const name = ({ enable: t("启用"), disable: t("停用"), archive: t("归档"), restore: t("恢复"), remove: t("移除配置") })[operation.action] || t("处理");
-  if (operation.status === 'failed') return t("{p0}未完成。{p1}", { p0: name, p1: errorLabels[operation.error] || executionMessage(operation.error) });
-  if (operation.status === 'unknown') return t("正在核对{p0}结果，原请求已保留。", { p0: name });
+  const sentences = partnerOperationSentences[operation.action] || partnerOperationSentences.other;
+  if (operation.status === 'failed') return t(sentences.failed, { p0: errorLabels[operation.error] || executionMessage(operation.error) });
+  if (operation.status === 'unknown') return t(sentences.unknown);
   const error = operation.error ? errorLabels[operation.error] || executionMessage(operation.error) : '';
-  if (operation.status !== 'completed') return t("{p0}尚未完成，正在保留改动并确认停止。{p1}", { p0: name, p1: error ? ` ${error}` : '' });
+  if (operation.status !== 'completed') return t(sentences.pending, { p0: error ? ` ${error}` : '' });
   const waiting = operation.targets?.some((target) => !['done', 'superseded'].includes(target.state));
-  return t("伙伴配置已{p0}。{p1}", { p0: name === t("移除配置") ? t("移除") : name, p1: waiting ? t("已有工作的改动已保留，接手情况见原聊天。") : t("已有聊天和成果保留。") });
+  return t(sentences.done, { p0: waiting ? t("已有工作的改动已保留，接手情况见原聊天。") : t("已有聊天和成果保留。") });
 }
 function acceptPartnerOperation(operation, expected = null, context = null) {
   if (!operation || !uuidPattern.test(operation.id) || !uuidPattern.test(operation.request_id) || !agentPattern.test(operation.provider)
@@ -3273,7 +3847,8 @@ async function mutatePartnerOperation(provider, action) {
 
 function confirmLifecycle(kind, item) {
   state.lifecycleConfirm = { kind, id: item.id, previousFocus: document.activeElement };
-  $('lifecycle-confirm-title').textContent = t("移除{p0}“{p1}”？", { p0: kind === 'projects' ? t("项目") : kind === 'partners' ? t("伙伴") : t("任务"), p1: item.name || roomTitle(item) });
+  const removing = item.name || roomTitle(item);
+  $('lifecycle-confirm-title').textContent = kind === 'projects' ? t("移除项目“{p0}”？", { p0: removing }) : kind === 'partners' ? t("移除伙伴“{p0}”？", { p0: removing }) : t("移除任务“{p0}”？", { p0: removing });
   $('lifecycle-confirm-description').textContent = kind === 'projects'
     ? t("只移除豆窝里的项目登记。磁盘上的项目文件和已有聊天都会保留。")
     : kind === 'partners' ? t("只移除豆窝里的伙伴配置。不会卸载工具、删除 Claude 或 Codex 的原生会话；已有聊天会保留。")
@@ -3454,7 +4029,7 @@ function acceptPartners(result) {
     template && agentPattern.test(template.adapter) && typeof template.name === 'string' && template.protocol === 'beanest-json-v1') : [];
   state.connectionProtocol = result.connection_protocol?.id === 'beanest-json-v1' ? result.connection_protocol : null;
   renderDiscovery();
-  const combined = [...result.supported_adapters, ...state.connectionTemplates.map((template) => ({ id: template.adapter, name: template.name }))];
+  const combined = [...result.supported_adapters, ...state.connectionTemplates.map((template) => ({ id: template.adapter, name: t(template.name) }))];
   const adapters = combined.filter((adapter, index) => adapter && agentPattern.test(adapter.id) && combined.findIndex((item) => item.id === adapter.id) === index);
   acceptBeanStyles(result.bean_styles);
   rememberAgents(state.partners);
@@ -3595,7 +4170,7 @@ function renderDiscovery() {
   const found = discovery.tools.filter((tool) => tool.installed === true).map((tool) => tool.name);
   let message;
   if (discovery.state === 'unavailable') message = t("这次启动还没确认本机工具，现有设置保持不变。");
-  else if (found.length) message = t("已找到 {p0}。选好工具就可以开始。", { p0: found.join('、') });
+  else if (found.length) message = t("已找到 {p0}。选好工具就可以开始。", { p0: interfaceList(found) });
   else if (discovery.tools.length && discovery.tools.every((tool) => tool.installed === false)) message = t("还没在本机找到已支持的工具，可以到工具与状态中查看。");
   else message = t("还没确认本机有哪些支持的工具，可以到工具与状态中查看。");
   const hasDisabled = state.partners.some((partner) => partner.enabled === false
@@ -3939,7 +4514,7 @@ function renderGlobalPartners() {
     }
     for (const operation of state.partnerOperations.values()) if (!state.partners.some((partner) => partner.id === operation.provider)
         && (operation.status !== 'completed' || operation.error || operation.targets?.some((target) => !['done', 'superseded'].includes(target.state)))) {
-      $('partners-list').append(element('p', `${displayName(operation.provider)}：${partnerOperationText(operation)}`, 'detail-caption'));
+      $('partners-list').append(element('p', `${displayName(operation.provider)}${interfaceColon()}${partnerOperationText(operation)}`, 'detail-caption'));
     }
   }
 }
@@ -3968,7 +4543,7 @@ async function discoverOnOpen({ reopen = false, manual = false } = {}) {
     setCatalog(status.agents);
     renderMembers(state.snapshot);
     if (manual) $('discovery-feedback').textContent = state.discovery?.state === 'completed'
-      ? t("安装观察已更新{p0}；没有启动模型。", { p0: Number.isFinite(state.discovery.observed_at) ? `（${timeLabel(state.discovery.observed_at, true)}）` : '' })
+      ? t("安装观察已更新{p0}；没有启动模型。", { p0: Number.isFinite(state.discovery.observed_at) ? interfaceParen(timeLabel(state.discovery.observed_at, true)) : '' })
       : t("已刷新工具记录；安装观察尚未确认，没有启动模型。");
     return null;
   } catch (_error) {
@@ -4206,6 +4781,14 @@ function renderRooms() {
     if (contextItemFingerprint(item) !== state.contextMenu.itemFingerprint) closeContextMenu({ restoreFocus: true });
   }
   const rooms = [...visibleRooms].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  const grouped = state.lifecycleViews.rooms === 'active';
+  $('rooms').classList.toggle('grouped', grouped);
+  const groups = new Map(); const firstInGroup = new Set();
+  for (const room of rooms) {
+    const group = roomGroup(room);
+    if (!groups.has(group)) { groups.set(group, 0); firstInGroup.add(room.id); }
+    groups.set(group, groups.get(group) + 1);
+  }
   for (const [position, room] of rooms.entries()) {
     remaining.add(room.id);
     let card = state.roomNodes.get(room.id);
@@ -4223,6 +4806,10 @@ function renderRooms() {
     }
     card.classList.toggle('selected', room.id === state.selected);
     card.setAttribute('aria-current', room.id === state.selected ? 'page' : 'false');
+    const group = roomGroup(room);
+    card.dataset.group = group;
+    card.dataset.groupFirst = String(grouped && firstInGroup.has(room.id) && Object.hasOwn(roomGroupLabels, group));
+    card.dataset.groupLabel = Object.hasOwn(roomGroupLabels, group) ? `${roomGroupLabels[group]} · ${groups.get(group)}` : '';
     card.disabled = state.busy && !canDetachPendingRequest();
     card.firstChild.textContent = roomTitle(room);
     card.title = typeof room.objective_goal === 'string' && room.objective_goal.trim() ? room.objective_goal : typeof room.goal === 'string' ? room.goal : t("目标");
@@ -4260,7 +4847,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'run_started') return t("{p0}协作已开始{p1}", { p0: Number.isSafeInteger(event.number) ? t("第 {p0} 轮", { p0: event.number }) : t("新一轮"), p1: event.retry ? t("，使用新的专用会话") : t("，保留此前交付和会话") });
   if (event.kind === 'native_readonly_discussion') return t("{p0} 正在只读讨论，已有改动保持。", { p0: displayName(event.sender) });
   if (event.kind === 'run_accepted') return t("你已接受本轮交付；这项记录不会启动模型。");
-  const taskTitle = typeof event.title === 'string' && event.title ? `「${taskDisplayTitle(event.title)}」` : t("子任务");
+  const taskTitle = typeof event.title === 'string' && event.title ? interfaceQuote(taskDisplayTitle(event.title)) : t("子任务");
   if (event.kind === 'team_command') {
     const action = { claim: t("已认领子任务"), complete: t("已提交子任务，等待互审"),
       request_help: t("请求伙伴协助，具体问题见其消息"), review: t("已提交审核结果"),
@@ -4284,18 +4871,21 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'artifact_pending') return t("{p0} 的文件提案正在核对版本，尚未确认保存。", { p0: displayName(event.sender) });
   if (event.kind === 'artifact') return t("{p0} 关联文件版本 {p1}，未执行代码或测试。", { p0: displayName(event.sender), p1: event.revision });
   if (event.kind === 'warning') return executionMessage(event.code);
-  if (event.kind === 'job_claimed') return t("{p0} 开始处理{p1}", { p0: displayName(event.sender), p1: ['review', 'team_review'].includes(jobKind(event, jobs)) ? t("审核任务") : t("任务") });
-  if (event.kind === 'job_finished') return `${displayName(event.sender)}：${statusLabels[statusClass(event.status)]}${event.error ? `。${executionMessage(event.error)}` : ''}`;
+  if (event.kind === 'job_claimed') return ['review', 'team_review'].includes(jobKind(event, jobs))
+    ? t("{p0} 开始处理审核任务", { p0: displayName(event.sender) }) : t("{p0} 开始处理任务", { p0: displayName(event.sender) });
+  if (event.kind === 'job_finished') return `${displayName(event.sender)}${interfaceColon()}${statusLabels[statusClass(event.status)]}${event.error ? `${interfaceStop()}${executionMessage(event.error)}` : ''}`;
   if (event.kind === 'usage') return t("{p0} 的用量快照已更新", { p0: displayName(event.sender) });
   if (event.kind === 'job_created') {
     const kind = jobKind(event, jobs);
     if (kind === 'feedback') return t("{p0} 的反馈已排队给 {p1}", { p0: displayName(event.sender), p1: displayName(event.recipient) });
-    if (peerRequest(event, jobs)) return t("{p0} 向 {p1} 发起{p2}", { p0: displayName(event.sender), p1: displayName(event.recipient), p2: kind === 'review' ? t("审核请求") : t("求助") });
+    if (peerRequest(event, jobs)) return kind === 'review'
+      ? t("{p0} 向 {p1} 发起审核请求", { p0: displayName(event.sender), p1: displayName(event.recipient) })
+      : t("{p0} 向 {p1} 发起求助", { p0: displayName(event.sender), p1: displayName(event.recipient) });
     return t("任务已登记，交给 {p0}", { p0: displayName(event.recipient) });
   }
   if (event.cancellation_confirmed === false) return t("停止尚未确认，请核对本次任务执行与会话身份。");
   if (event.cancellation_confirmed === true) return t("本服务登记的执行已确认停止。");
-  return `${eventLabels[event.kind] || t("进展")}：${statusLabels[statusClass(event.status)]}`;
+  return `${eventLabels[event.kind] || t("进展")}${interfaceColon()}${statusLabels[statusClass(event.status)]}`;
 }
 
 function progressNode(event, jobs, archive = false) {
@@ -4558,6 +5148,8 @@ const objectiveRoomLabels = localizedLabels({
 });
 function sidebarObjectiveLabel(room) {
   if (state.snapshot?.room.id === room.id && idleReadOnlyDiscussion(state.snapshot)) return t("方案讨论");
+  const stop = roomStopKind(room);
+  if (stop) return stop === 'quota_wait' ? t("等额度恢复") : t("马上自动继续");
   if (room.objective_status !== 'paused') return objectiveRoomLabels[room.objective_status];
   const activity = roomWorkActivity(room);
   if (activity) return activity.state === 'working' ? t("正在暂停") : t("已暂停");
@@ -4599,7 +5191,12 @@ function hostResultInterruptionMessage(snapshot) {
   const action = boundPlatformDisplayText(outcome?.next_action, outcome?.next_action_i18n);
   return reason && action ? [reason, action].join(interfaceWordSpace()) : t(hostResultInterruptionText);
 }
-function objectiveLabel(objective) { if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return t("方案讨论"); if (objective.status === 'complete' && isReadOnlyDiscussion()) return t("讨论已结束"); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
+function objectiveLabel(objective) {
+  // A stop the service resumes by itself is titled like the card at the top, never as a plain stop.
+  const resume = state.snapshot && Object.hasOwn(state.snapshot, 'stop_kind') ? state.snapshot.stop_kind : null;
+  if (['stopped', 'interrupted', 'needs_user'].includes(objective.status) && resume === 'quota_wait') return t("等额度恢复");
+  if (['stopped', 'interrupted', 'needs_user'].includes(objective.status) && resume === 'auto') return t("马上自动继续");
+  if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return t("方案讨论"); if (objective.status === 'complete' && isReadOnlyDiscussion()) return t("讨论已结束"); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
 function currentObjective(snapshot = state.snapshot) {
   const objective = snapshot?.objective;
   return state.executionPolicySupported && objective && uuidPattern.test(objective.id)
@@ -4655,7 +5252,12 @@ function continuationAction(snapshot = state.snapshot) {
   if (objective?.status === 'paused' && objective.pause_requested !== true) return 'resume';
   return null;
 }
-function isContinueCommand(text) { return /^(?:请)?继续(?:工作|推进|吧)?[。！!\s]*$/u.test(text.trim()); }
+// The English interface tells people to type continue, so both languages count as the bare command.
+function isContinueCommand(text) {
+  const value = text.trim();
+  return /^(?:请)?继续(?:工作|推进|吧)?[。！!\s]*$/u.test(value)
+    || /^(?:please\s+)?(?:continue|keep going|resume)(?:\s+(?:working|please))?[.!\s]*$/iu.test(value);
+}
 async function continueCurrentWork(snapshot = state.snapshot, text = '') {
   const action = continuationAction(state.snapshot);
   if (!action || snapshot?.room.id !== state.selected || JSON.stringify(runBinding(snapshot.current_run)) !== JSON.stringify(runBinding(state.snapshot.current_run))) return;
@@ -4668,7 +5270,7 @@ function objectiveBudgetText(objective) {
   return t("已开始 {p0} 次 · 排队 {p1} 次", { p0: count(budget?.used), p1: count(budget?.queued) });
 }
 async function submitNativeRecovery(snapshot, text = '') {
-  if (naturalContinuation(state.snapshot)) { await submitNaturalContinuation(text || "继续", snapshot); return; }
+  if (naturalContinuation(state.snapshot)) { await submitNaturalContinuation(text || t("继续"), snapshot); return; }
   if (!state.nativeProjectSupported || state.busy || state.managementBusy || state.pending || !state.connected
       || snapshot?.room.id !== state.selected || snapshot.room.mode !== 'native_project' || !activeEntry(state.snapshot?.room)
       || state.snapshot?.current_run?.can_recover_native !== true) return;
@@ -4695,7 +5297,7 @@ async function submitObjectiveReassessment(snapshot) {
 }
 async function submitObjectiveAction(kind, snapshot = state.snapshot, text = '') {
   if (naturalContinuation(state.snapshot) && ['restart', 'continue', 'answer', 'resume'].includes(kind)) {
-    await submitNaturalContinuation(text || "继续", snapshot); return;
+    await submitNaturalContinuation(text || t("继续"), snapshot); return;
   }
   if (!state.executionPolicySupported || state.busy || state.managementBusy || state.pending || !state.connected
       || !state.selected || !activeEntry(state.snapshot?.room) || snapshot?.room.id !== state.selected) return;
@@ -4760,7 +5362,7 @@ function useCompletionSuggestion(snapshot, goal) {
 }
 function requestCompletionAdvice(snapshot) {
   if (completionSuggestion(snapshot) || completionSuggestion(state.snapshot)) return;
-  fillCompletionDraft(snapshot, completionAdviceQuestion);
+  fillCompletionDraft(snapshot, t(completionAdviceQuestion));
 }
 function completionReportSource(snapshot) {
   const next = boundObjectiveNextStep(snapshot), objective = currentObjective(snapshot);
@@ -4787,11 +5389,19 @@ function renderCurrentTaskQuestion(result, snapshot, objective, expanded) {
   result.hidden = false; result.className = 'collaboration-card outcome-card outcome-needs_user';
   result.append(element('h2', t("当前需要处理")));
   for (const task of snapshot.team?.tasks || []) {
-    if (next.origin === 'task_block' && task.status === 'blocked' && task.block_cause === 'permission_required') {
-      result.append(element('p', t("{p0}：需要权限确认", { p0: taskDisplayTitle(task.title || task.id) }), 'detail-caption'));
+    if (next.origin === 'task_block' && taskNeedsUser(task)) {
+      result.append(element('p', t("{p0}：{p1}", { p0: taskDisplayTitle(task.title || task.id), p1: blockedTaskReason(task) }), 'detail-caption'));
     }
   }
-  if (next.question.length > 400) {
+  const replanned = next.origin === 'task_block' ? (snapshot.team?.tasks || []).filter(taskAutoBlocked).length : 0;
+  if (replanned) result.append(element('p', t("有 {p0} 项需要重新安排，点“继续推进”后会自动处理。", { p0: replanned }), 'detail-caption'));
+  // Task blocks are joined from stored reason codes; keep that literal record folded.
+  const codedQuestion = next.origin === 'task_block' && /[：:]\s*[a-z][a-z0-9_]{3,}\s*(?:[；;\n]|$)/m.test(next.question);
+  if (codedQuestion && next.question.length <= 400) {
+    const details = element('details', '', 'tech-details');
+    details.append(element('summary', t("技术细节（原始记录）")), element('p', next.question, 'outcome-question'));
+    result.append(details);
+  } else if (next.question.length > 400) {
     result.append(element('p', `${(next.question.split('\n').find(line => line.trim()) || next.question).slice(0, 160)}…`, 'outcome-question'));
     const details = element('details', '', 'current-task-question');
     details.dataset.outcomeDetail = 'current-task-question'; details.open = expanded.get('current-task-question') || false;
@@ -4808,7 +5418,7 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
   const summaryLabel = foldQuestion ? t("此前记录") : objective.status === 'complete' ? t("完成情况") : t("下一步");
   const technical = questionShown || foldQuestion ? summaryTarget : result;
   if (typeof next?.summary === 'string' && next.summary && next.summary.trim() !== questionShown?.trim()
-      && ![...summaryTarget.children].some((node) => node.textContent.trim() === next.summary.trim())) summaryTarget.append(element('p', `${summaryLabel}：${next.summary}`, 'outcome-next'));
+      && ![...summaryTarget.children].some((node) => node.textContent.trim() === next.summary.trim())) summaryTarget.append(element('p', `${summaryLabel}${interfaceColon()}${next.summary}`, 'outcome-next'));
   if (typeof next?.question === 'string' && next.question && next.question.trim() !== questionShown?.trim()
       && !(foldQuestion && [...summaryTarget.children].some((node) => node.textContent.trim() === next.question.trim()))) (foldQuestion ? summaryTarget : result).append(element('p', next.question, 'outcome-question'));
   if (objective.can_answer === true && !questionShown && !foldQuestion) result.append(element('p', t("在下方回答后继续同一目标，仍使用现有目标和权限；不会新建目标。"), 'detail-caption'));
@@ -4821,7 +5431,7 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
   } else if (!next && objective.status === 'awaiting_continue') result.append(element('p', recorded
     ? t("下一步的范围或版本尚未确认，当前不会自动开始。") : t("还没有明确的下一步，请补充要求；不会猜测后直接开工。"), 'detail-caption'));
   if (typeof objective.stop_reason === 'string' && objective.stop_reason) {
-    const explanation = executionMessage(objective.stop_reason);
+    const explanation = stopReasonMessage(objective.stop_reason);
     if (explanation.trim() !== questionShown?.trim() && ![...technical.children].some((node) => node.textContent.trim() === explanation.trim())) {
       technical.append(element('p', explanation, 'detail-caption'));
     }
@@ -4838,7 +5448,7 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
     result.append(details);
   } else {
     if (next?.review_kind === 'self_check') result.append(element('p', t("本次完成评估由单个伙伴核对；各项成果的审核范围见文件与任务记录。"), 'review-scope-note'));
-    if (selfChecked.length) result.append(element('p', t("{p0} 项任务仅自检，未独立互审：{p1}。", { p0: selfChecked.length, p1: selfChecked.map((task) => task.title || task.id).join('、') }), 'review-scope-note'));
+    if (selfChecked.length) result.append(element('p', t("{p0} 项任务仅自检，未独立互审：{p1}。", { p0: selfChecked.length, p1: interfaceList(selfChecked.map((task) => task.title || task.id)) }), 'review-scope-note'));
   }
 }
 
@@ -4854,7 +5464,7 @@ function renderObjectiveTakeovers(result, snapshot, objective) {
   for (const [id, info] of retired) box.append(element('p', t("{p0}：{p1}本次执行已确认清理；仍保留在任务成员中。", { p0: displayName(id), p1: executionMessage(info.reason) }), 'detail-caption'));
   for (const event of events.slice(-16)) {
     const task = event.run_id === snapshot.current_run?.id ? snapshot.team?.tasks?.find((entry) => entry.id === event.task_id) : null;
-    box.append(element('p', t("{p0} 接手 {p1} 的{p2}。", { p0: displayName(event.owner), p1: displayName(event.previous_owner), p2: task?.title ? `「${taskDisplayTitle(task.title)}」` : t("子任务") }), 'detail-caption'));
+    box.append(element('p', t("{p0} 接手 {p1} 的{p2}。", { p0: displayName(event.owner), p1: displayName(event.previous_owner), p2: task?.title ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务") }), 'detail-caption'));
   }
   box.append(element('p', t("接手者沿用本目标冻结的权限与自身模型设置；单人完成会注明仅自检。"), 'detail-caption'));
   result.append(box);
@@ -5046,7 +5656,10 @@ function renderCollaboration(snapshot) {
   const singlePartner = collaboration.mode === 'legacy' && snapshot.members.length === 1;
   const singlePartnerReasons = { in_progress: t("伙伴正在直接处理你的目标，回复与进展见对话。"),
     round_finished: t("本轮回复已结束，请阅读回复及交付内容。"), needs_user: t("请查看伙伴的回复，补充它需要的信息。") };
-  const reason = discussionIdle ? t("暂无在途工作，可继续讨论或切到动手。已有成果和改动保留。") : singlePartner && Object.hasOwn(singlePartnerReasons, outcomeState) ? singlePartnerReasons[outcomeState] : outcome.reason;
+  const resumeKind = Object.hasOwn(snapshot, 'stop_kind') && ['auto', 'quota_wait'].includes(snapshot.stop_kind) ? snapshot.stop_kind : null;
+  // The stop line under the title already says why and what happens next; the generic stop text would contradict it.
+  const reason = discussionIdle ? t("暂无在途工作，可继续讨论或切到动手。已有成果和改动保留。") : resumeKind ? resumeKind === 'auto' ? t("几秒后自动继续，不用你操作。") : ''
+    : singlePartner && Object.hasOwn(singlePartnerReasons, outcomeState) ? singlePartnerReasons[outcomeState] : outcome.reason;
   const accepted = Number.isFinite(snapshot.current_run?.accepted_at);
   const technicalInterruption = hostResultInterruption(objective);
   const completed = !discussionIdle && (objective ? objective.status === 'complete'
@@ -5146,7 +5759,7 @@ function renderCollaboration(snapshot) {
     add.addEventListener('click', () => useCompletionSuggestion(snapshot, suggestion)); actions.append(add);
   } else if (!completed && !currentQuotaHandoff(snapshot, quotaFailure) && natural && (terminalTeamState(snapshot) || ['stopped', 'interrupted', 'paused', 'awaiting_continue'].includes(objective?.status))) {
     const next = element('button', t("继续"), 'quiet-button primary-action'); next.type = 'button'; next.id = 'continue-current';
-    next.disabled = !natural.canSend; next.addEventListener('click', () => void submitNaturalContinuation("继续", snapshot));
+    next.disabled = !natural.canSend; next.addEventListener('click', () => void submitNaturalContinuation(t("继续"), snapshot));
     actions.append(next);
     if (!natural.canSend) actions.append(element('span', errorLabels[natural.reason] || executionMessage(natural.reason), 'detail-caption'));
   } else if (!completed && continuation === 'continue') {
@@ -5248,7 +5861,7 @@ function renderCollaboration(snapshot) {
   const remaining = Array.isArray(outcome.remaining) ? outcome.remaining.filter((item) => typeof item === 'string' && item) : [];
   const details = element('details', '', 'delivery-details');
   details.open = deliveryExpanded;
-  details.append(element('summary', `${snapshot.current_run ? t("查看检查与文件清单") : t("查看检查与交付详情")}${artifacts.length ? t(" · {p0} 个{p1}文件", { p0: artifacts.length, p1: snapshot.current_run ? t("已保存") : '' }) : ''}${remaining.length ? t(" · {p0} 项待处理", { p0: remaining.length }) : ''}`));
+  details.append(element('summary', `${snapshot.current_run ? t("查看检查与文件清单") : t("查看检查与交付详情")}${artifacts.length ? (snapshot.current_run ? t(" · {p0} 个已保存文件", { p0: artifacts.length }) : t(" · {p0} 个文件", { p0: artifacts.length })) : ''}${remaining.length ? t(" · {p0} 项待处理", { p0: remaining.length }) : ''}`));
   if (validation) {
     const scope = Object.hasOwn(validationLabels, validation.scope) ? validationLabels[validation.scope] : t("验证范围待确认");
     const revision = Number.isSafeInteger(validation.revision) ? t(" · 文件版本 {p0}", { p0: validation.revision }) : '';
@@ -5297,7 +5910,7 @@ function renderUsage(fields, usage) {
   }
   const row = (label, value) => fields.append(element('dt', label), element('dd', value));
   row(t("来源"), typeof usage.source === 'string' ? usage.source : t("不可用"));
-  row(t("口径"), usage.scope === 'provider_reported_latest_result' ? t("供应商最新一次结果快照") : t("历史快照，口径未确认"));
+  row(t("统计方式"), usage.scope === 'provider_reported_latest_result' ? t("供应商最新一次结果快照") : t("历史快照，统计方式未确认"));
   // Current snapshots wrap provider fields in values; older local records may
   // contain the fields directly. Neither form is summed into a session total.
   const values = usage.values && typeof usage.values === 'object' ? usage.values : usage;
@@ -5651,7 +6264,7 @@ function memberActivity(snapshot, member) {
   }
   else if (!job && objective && ['stopped', 'interrupted', 'needs_user'].includes(objective.status)) {
     status = objective.status === 'needs_user' ? 'needs_user' : objective.status;
-    label = objectiveLabel(objective); task = hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot) : objective.stop_reason ? executionMessage(objective.stop_reason)
+    label = objectiveLabel(objective); task = hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot) : objective.stop_reason ? stopReasonMessage(objective.stop_reason)
       : objective.next_step?.question || t("当前进度已保留，请查看下一步与任务记录。");
   } else if (!job && objective?.status === 'complete') { label = isReadOnlyDiscussion(snapshot) ? t("讨论已结束") : Number.isFinite(snapshot.current_run?.accepted_at) ? t("目标已确认完成") : t("目标已交付"); task = isReadOnlyDiscussion(snapshot) ? t("回复与建议已保留；已有改动未发布。可继续讨论，或切到动手后接着做。") : t("查看本目标成果；仅自检的部分会单独注明。"); }
   else if (!job && retired?.cleanup_confirmed === true) {
@@ -5779,7 +6392,7 @@ function teamMemberTask(snapshot, member) {
   const job = jobs.find((entry) => entry.status === 'working') || jobs.find((entry) => entry.status === 'queued');
   if (job) {
     const waiting = job.status === 'queued';
-    const prefix = (waiting ? t("等待开始") : t("正在")) + interfaceWordSpace();
+    const prefix = (waiting ? t("等待开始") : t("正在")) + interfaceLead();
     if (['team_plan', 'team_coordinate', 'team_user'].includes(job.kind)) return prefix + teamStageLabels[job.kind];
     const bindings = {
       team_work: ['owner', waiting ? 'assigned' : 'working'],
@@ -5792,7 +6405,7 @@ function teamMemberTask(snapshot, member) {
       // Jobs currently expose no task_id in the public snapshot. Only name a
       // task when the recorded role and lifecycle identify exactly one.
       const task = candidates.length === 1 ? candidates[0] : null;
-      const title = task && typeof task.title === 'string' ? `「${taskDisplayTitle(task.title)}」` : t("子任务（具体任务待核对）");
+      const title = task && typeof task.title === 'string' ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务（具体任务待核对）");
       const mode = jobClaim(snapshot, job)?.work_mode || snapshot.room.work_mode || snapshot.current_run?.work_mode;
       let action = mode === 'plan' ? t("整理方案") : t("处理");
       if (job.kind === 'team_review') action = t("审核");
@@ -5811,10 +6424,13 @@ function teamMemberTask(snapshot, member) {
   if (pending) {
     const dependencies = Array.isArray(pending.dependencies) ? pending.dependencies
       .map((id) => tasks.find((task) => task.id === id)).filter((task) => task && !['accepted', 'self_checked'].includes(task.status)) : [];
-    return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: dependencies.map((task) => taskDisplayTitle(task.title)).join('、') }) : t("「{p0}」已认领，等待派发", { p0: taskDisplayTitle(pending.title) });
+    return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: interfaceList(dependencies.map((task) => taskDisplayTitle(task.title))) }) : t("「{p0}」已认领，等待派发", { p0: taskDisplayTitle(pending.title) });
   }
   const blocked = owned.find((task) => ['blocked', 'unknown', 'interrupted', 'cancelled'].includes(task.status));
-  if (blocked) return t("「{p0}」{p1}，具体原因见群聊任务清单", { p0: taskDisplayTitle(blocked.title), p1: taskStatusLabels[blocked.status] });
+  // Unfinished work carries into the next attempt unless the user stopped it, as on the progress board.
+  const userCancelled = userCancelCodes.has(currentObjective(snapshot)?.stop_reason) || userCancelCodes.has(snapshot?.team?.stop_reason);
+  if (blocked && (['interrupted', 'cancelled'].includes(blocked.status) && !userCancelled || taskQuotaHeld(blocked))) return t("「{p0}」待继续", { p0: taskDisplayTitle(blocked.title) });
+  if (blocked) return t("「{p0}」{p1}，具体原因见“进展”", { p0: taskDisplayTitle(blocked.title), p1: taskStatusLabels[blocked.status] });
   return t("暂无在途任务；交付与验收状态见群聊");
 }
 
@@ -5840,9 +6456,10 @@ function renderMemberPublicProgress(snapshot, member) {
   holder.hidden = !snapshot;
   if (!snapshot) return;
   if (!publicMessage) {
-    const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceWordSpace() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
+    const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceLead() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
-    holder.append(element('p', text, 'public-progress-fallback')); return;
+    // The idle line repeats the member's task line, so the card hides it.
+    holder.append(element('p', text, `public-progress-fallback${!tool && !active ? ' idle' : ''}`)); return;
   }
   const details = element('details', '', 'public-progress-details'); details.open = expanded;
   const summary = element('summary');
@@ -5892,10 +6509,12 @@ function renderMembers(snapshot) {
     const member = snapshot?.members.find((entry) => entry.id === provider);
     const { account } = currentAccount(provider);
     const availability = availabilityInfo(provider);
-    $(`availability-${provider}`).hidden = !availability.value;
-    $(`availability-${provider}`).textContent = availability.value ? availabilityText(availability) : '';
-    $(`availability-${provider}`).classList.toggle('blocked', availability.blocked);
-    $(`account-email-${provider}`).textContent = accountLoginCaption(account);
+    const line = memberAvailabilityLine(availability);
+    $(`availability-${provider}`).hidden = !line;
+    $(`availability-${provider}`).textContent = line ? line.text : '';
+    $(`availability-${provider}`).classList.toggle('blocked', line?.tone === 'ask');
+    $(`availability-${provider}`).classList.toggle('waiting', line?.tone === 'wait');
+    $(`account-email-${provider}`).textContent = memberLoginCaption(account);
     updateAccountFooter($(`provider-account-${provider}`), provider);
     const hasJobs = snapshot?.jobs?.some((job) => job.provider === provider);
     const waitingForPeer = member?.status === 'idle' && !member.identity_uncertain
@@ -5923,15 +6542,21 @@ function renderMembers(snapshot) {
     const pausedTask = paused === t("正在暂停") ? memberActivity(snapshot, member).task : t("继续后接着做。");
     const notStarted = (!snapshot && !loading) || (member && !member.identity_uncertain && !member.session_id && !hasJobs && displayStatus === 'idle');
     $(`name-${provider}`).textContent = member?.name || names[provider];
-    $(`status-${provider}`).textContent = preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
+    // While the room resumes by itself, a partner stopped with it reads as waiting to continue, like its tasks.
+    const resumes = snapshot && roomStopKind(snapshot.room) && ['interrupted', 'cancelled', 'stopped'].includes(member?.status) && !member.identity_uncertain;
+    // Out of quota while the room waits for it: say so once; the line below already gives the return time.
+    const quotaWaiting = snapshot && roomStopKind(snapshot.room) === 'quota_wait' && member && !member.identity_uncertain
+      && ['agent_quota_exhausted', 'subscription_limit_reached'].includes(retirement?.reason);
+    $(`status-${provider}`).textContent = quotaWaiting ? t("等额度恢复") : resumes ? t("待继续") : preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
     $(`status-${provider}`).className = `member-status ${preferredActivity ? statusClass(preferredActivity.status) : paused ? paused === t("正在暂停") ? 'working' : 'idle' : notStarted || loading ? '' : statusClass(preferredActivity?.status || taskActivity?.status || displayStatus)}`;
-    $(`task-${provider}`).textContent = preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
+    $(`task-${provider}`).textContent = quotaWaiting ? teamMemberTask(snapshot, member) || t("额度恢复后接着做。") : preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
       : teamMemberTask(snapshot, member) || (typeof member?.current_task === 'string' && member.current_task ? member.current_task
         : loading ? t("正在读取本次任务的实际分工…") : notStarted ? t("开始任务后，在这里查看分工。") : t("暂无在途任务"));
     const historicalWarning = configurationActivity?.historyWarning;
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
-    $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}：${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
+    renderMemberQuota(provider);
+    $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}${interfaceColon()}${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
     const usage = member?.usage;
     $(`usage-summary-${provider}`).textContent = usage == null ? t("任务用量快照不可用") : t("已收到任务用量快照");
     const fields = $(`usage-${provider}`);
@@ -5954,6 +6579,7 @@ function renderMembers(snapshot) {
     ? t("历史累计：{p0} 轮 · {p1} 次调用", { p0: Number.isFinite(conversation.run_count) ? conversation.run_count : t("不可用"), p1: Number.isFinite(conversation.used) ? conversation.used : t("不可用") }) : '';
   renderRunHistory(snapshot);
   renderComposerUsage();
+  renderNavQuota();
   renderPartnerActivity(snapshot);
   const jobs = snapshot?.jobs || [];
   $('job-count').textContent = pagedRoom(snapshot) && Number.isSafeInteger(snapshot.job_count) && snapshot.job_count > jobs.length ? t("共 {p0} · 当前与最近 {p1}", { p0: snapshot.job_count, p1: jobs.length }) : String(jobs.length);
@@ -6114,7 +6740,7 @@ function renderProject(project) {
         else other += count;
       }
       if (other) counts.push(t("其它排除项 {p0} 项", { p0: other }));
-      $('project-files').append(element('p', t("跳过：{p0}（目录按一项计）。", { p0: counts.length ? counts.join('、') : t("0 项") }), 'detail-caption'));
+      $('project-files').append(element('p', t("跳过：{p0}（目录按一项计）。", { p0: counts.length ? interfaceList(counts) : t("0 项") }), 'detail-caption'));
     } else {
       $('project-files').append(element('p', t("跳过项统计暂不可用；目录按一项计，不推算目录内文件数量。"), 'detail-caption'));
     }
@@ -6265,7 +6891,7 @@ function renderNativeWorkspaceNotes(container, snapshot) {
     native_path_not_owned: t("超出本任务授权写入范围"), native_symlink_refused: t("符号链接未导入"), native_mode_change_not_imported: t("文件权限改动尚未导入"),
     native_change_too_large: t("改动超过本次导入范围"), native_merge_conflict: t("文件版本冲突"), native_unresolved_conflict: t("旧版本冲突尚未明确解决，改动未导入") };
   const list = element('ul');
-  for (const item of issues) list.append(element('li', `${displayName(item.provider)} · ${typeof item.path === 'string' ? item.path : t("文件路径未提供")}：${item.conflict ? t("需核对新旧版本冲突") : reasons[item.reason] || t("改动未导入，原因待核对")}`));
+  for (const item of issues) list.append(element('li', `${displayName(item.provider)} · ${typeof item.path === 'string' ? item.path : t("文件路径未提供")}${interfaceColon()}${item.conflict ? t("需核对新旧版本冲突") : reasons[item.reason] || t("改动未导入，原因待核对")}`));
   details.append(list, element('p', t("这些改动保留为待处理项，不表示已合入成果或完成目标。"), 'detail-caption')); container.append(details);
 }
 function renderNativeExecutions(snapshot) {
@@ -6341,7 +6967,7 @@ function renderWorkIndicator(snapshot) {
         : job.native_readonly_discussion ? t("正在讨论") : t("正在处理")}`;
   };
   const value = working.length ? working.map(jobText).join(' · ') : queued.length
-    ? t("{p0} 等待开始", { p0: [...new Set(queued.map((job) => displayName(job.provider)))].join('、') }) : '';
+    ? t("{p0} 等待开始", { p0: interfaceList([...new Set(queued.map((job) => displayName(job.provider)))]) }) : '';
   box.hidden = !value; box.classList.toggle('is-working', working.length > 0);
   // Polling may update timing elsewhere, but only a real phase/name transition
   // changes this polite live region. The animated dots carry no spoken content.
@@ -6355,7 +6981,9 @@ function renderControls() {
   const inactive = !!room && !activeEntry(room);
   const blocked = state.busy || !!state.pending || state.managementBusy;
   const title = room ? roomTitle(objective ? { ...room, objective_goal: objective.original_goal } : room) : (loading ? roomTitle(state.rooms.find((entry) => entry.id === state.selected)) : t("新任务"));
-  $('room-title').textContent = title;
+  const headerGoal = typeof (objective?.original_goal ?? room?.goal) === 'string' ? (objective?.original_goal ?? room.goal).trim().replace(/\s+/g, ' ') : '';
+  const headerSentence = headerGoal.split(/[。！？\n]/u)[0] || headerGoal;
+  $('room-title').textContent = room && headerSentence ? headerSentence.length > 200 ? `${headerSentence.slice(0, 200)}…` : headerSentence : title;
   $('room-title').title = objective?.original_goal || room?.goal || title;
   const runCaption = Number.isSafeInteger(state.snapshot?.current_run?.number) ? t("第 {p0} 轮 · ", { p0: state.snapshot.current_run.number }) : '';
   const displayedWorkMode = actualWorkMode();
@@ -6363,6 +6991,7 @@ function renderControls() {
   $('room-subtitle').textContent = loading ? t("正在读取已保存的记录，不会重新启动模型。") : (room ? t("{p0}{p1} · {p2}创建 · {p3}", { p0: runCaption, p1: workModeCaption, p2: timeLabel(room.created_at, true), p3: state.snapshot?.collaboration?.mode === 'team' ? t("分工、讨论与交付都在这里") : state.snapshot?.members.length === 1 ? t("单伙伴任务；打开只读取，不会重跑") : t("历史记录；打开只读取，不会重跑") }) : t("选工具，写下要做的事。"));
   $('room-status').hidden = !room;
   $('room-lifecycle-menu').hidden = !room;
+  $('room-more').hidden = !room;
   const lifecycleFingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [room?.id, lifecycleState(room), room?.status, room?.lifecycle_can_change, room?.lifecycle_blocked_reason, state.managementBusy, state.busy, !!state.pending,
     state.roomLifecycleSupported, state.lifecycleOperations.get(room?.id), state.connected, state.executionPolicySupported, state.snapshot?.current_run?.can_reassess_objective, runBinding(state.snapshot?.current_run), objective?.id,
     state.snapshot?.jobs.map((job) => [job.id, job.status])]]);
@@ -6402,7 +7031,7 @@ function renderControls() {
     button.disabled = blocked || inactive || !state.connected || !modeEditable;
     button.setAttribute('aria-pressed', String((modeEditable ? state.workMode : currentWorkMode) === value));
   }
-  $('work-mode-note').textContent = teamStopped ? t("本轮已停止，已有内容保留，不会自动继续。") : room && !modeEditable
+  $('work-mode-note').textContent = teamStopped ? t("本轮已停止，已有内容保留。") : room && !modeEditable
     ? currentWorkMode === 'plan' ? t("正在先聊方案，这轮不会修改文件。") : currentWorkMode === 'build' ? t("正在按目标推进，完成后给你看成果。") : t("这份旧记录没有区分方案与动手模式。")
     : state.workMode === 'plan' ? t("先讨论和查资料，不修改文件。聊清楚后，可以点“按方案开始”。")
       : t("直接分工并制作成果，遇到需要你决定的事再问你。");
@@ -6411,7 +7040,7 @@ function renderControls() {
     ? t("正在暂停，等当前处理结束。") : t("已暂停，继续后接着做。");
   else if (objective?.status === 'complete') $('work-mode-note').textContent = t("本目标已交付，无需确认；有新要求可直接发送消息。");
   else if (objective?.status === 'awaiting_continue') $('work-mode-note').textContent = t("点“继续”接着完成原目标，无需先确认交付。");
-  else if (objective?.status === 'needs_user') $('work-mode-note').textContent = canAnswer ? t("回答当前问题，沿原目标继续。") : t("请先查看需要你决定的问题；不会擅自重新开始。");
+  else if (objective?.status === 'needs_user') $('work-mode-note').textContent = canAnswer ? t("回答当前问题，沿原目标继续。") : t("请先查看需要你决定的问题；在你回复前不会重新开始。");
   else if (objective && ['stopped', 'interrupted'].includes(objective.status)) $('work-mode-note').textContent = state.continuousObjectiveSupported && currentRun?.can_restart_objective === true
     ? t("点“继续”接着做，已有成果和记录保留。") : t("本目标已停下，记录与成果保留；不会自动重新开始。");
   $('room-status').textContent = room ? (inactive ? lifecycleLabels[lifecycleState(room)] : !teamStopped && Number.isFinite(currentRun?.accepted_at) ? t("本轮已接受") : Object.hasOwn(outcomeLabels, outcomeState) ? outcomeLabels[outcomeState] : statusLabels[statusClass(room.status)]) : '';
@@ -6451,11 +7080,13 @@ function renderControls() {
   $('project-workflow-control').hidden = !!room || !state.nativeProjectSupported || selectedProject?.selection_kind !== 'folder';
   $('project-workflow').value = nativeMode ? 'native_project' : 'project_folder'; $('project-workflow').disabled = blocked || !!room || !state.connected;
   $('frozen-participants').hidden = !state.selected;
-  $('frozen-participants').textContent = t("当前伙伴：{p0}{p1}", { p0: state.participantIds.map(displayName).join('、'), p1: state.memberInvitationSupported ? '' : t(" · 这份记录的成员固定") });
+  $('frozen-participants').textContent = t("当前伙伴：{p0}{p1}", { p0: interfaceList(state.participantIds.map(displayName)), p1: state.memberInvitationSupported ? '' : t(" · 这份记录的成员固定") });
   renderRoomMemberInvitation();
   $('task-options-partners').textContent = t("伙伴 · {p0}", { p0: state.participantIds.length });
   const linkedProject = room ? state.projects.find((project) => project.id === room.project_id) : selectedProject;
   $('task-options-project').textContent = linkedProject ? linkedProject.name : room?.project_id ? t("关联项目") : t("项目");
+  $('room-project-chip').hidden = !room?.project_id;
+  $('room-project-chip').textContent = room?.project_id ? linkedProject?.name || t("关联项目") : '';
   $('task-options-project').title = room ? room.project_id ? t("本任务关联项目：{p0}（固定）", { p0: linkedProject?.name || t("记录未找到") }) : t("本任务没有关联项目")
     : selectedProject ? t("关联项目：{p0}", { p0: selectedProject.name }) : t("选择关联项目");
   $('frozen-project').hidden = !room;
@@ -6581,6 +7212,8 @@ function renderControls() {
     $('retry-request').disabled = state.busy || !state.connected || state.scopeChanged || state.pending?.receiptBlocked === true;
     $('verify-request').disabled = state.busy || state.refreshing;
   }
+  renderTabs();
+  renderNowCard();
 }
 
 function applySnapshot(snapshot) {
@@ -7637,7 +8270,7 @@ $('choose-project-files').addEventListener('click', async () => {
     $('project-files-input').value = selection.files.join('\n');
     if (!$('project-name').value.trim()) $('project-name').value = typeof selection.suggestedName === 'string'
       && selection.suggestedName.trim() ? selection.suggestedName.trim().slice(0, 80) : t("我的项目");
-    $('project-picker-note').textContent = t("已选 {p0} 个文件：{p1}。不会改动原项目，点“添加项目”后才保存。", { p0: selection.files.length, p1: selection.files.join('、') });
+    $('project-picker-note').textContent = t("已选 {p0} 个文件：{p1}。不会改动原项目，点“添加项目”后才保存。", { p0: selection.files.length, p1: interfaceList(selection.files) });
   } catch (error) {
     const labels = {
       project_selection_unavailable: t("暂时无法打开文件选择，请重试或展开手动填写。"),
@@ -7777,10 +8410,23 @@ function renderInterfaceLanguage() {
   for (const [id, open] of openDetails) if ($(id)) $(id).open = open;
   for (const [id, top] of positions) $(id).scrollTop = top;
   state.unseen = unseen;
-  renderLanguageControl();
+  renderLanguageControl(); applyTheme();
   if (focus?.id && $(focus.id)) $(focus.id).focus({ preventScroll: true });
 }
 renderLanguageControl();
+applyTheme();
+$('interface-theme').addEventListener('click', () => {
+  const next = ({ system: 'light', light: 'dark', dark: 'system' })[themePreference()];
+  try { localStorage.setItem(themePreferenceKey, next); } catch (_) { /* Session-only preference still applies. */ }
+  applyTheme(next);
+  if (document.documentElement?.dataset && next === 'system') delete document.documentElement.dataset.theme;
+});
+for (const name of ['progress', 'discussion', 'delivery', 'materials']) $(`tab-${name}`).addEventListener('click', () => selectRoomTab(name));
+$('room-tabs').addEventListener('keydown', (event) => {
+  const order = ['progress', 'discussion', 'delivery', 'materials']; const current = order.indexOf(currentRoomTab());
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || current < 0) return;
+  event.preventDefault(); selectRoomTab(order[(current + (event.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length]);
+});
 $('interface-language').addEventListener('click', () => {
   window.BeanestI18n.setLocale(window.BeanestI18n.getLocale() === 'en' ? 'zh-CN' : 'en');
 });

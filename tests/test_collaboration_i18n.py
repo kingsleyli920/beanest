@@ -34,5 +34,19 @@ class CollaborationI18nTests(unittest.TestCase):
         self.assertNotIn('reason_i18n', result['outcome'])
         self.assertNotIn('waiting_for_i18n', result['tasks'][0])
         self.assertEqual(result['outcome']['reason'], value['objective']['next_step']['question'])
-        self.assertIsNone(result['outcome']['remaining_i18n'][0])
+        # Only the joining colon is platform copy; the model's reason stays a literal part.
+        self.assertEqual(result['outcome']['remaining_i18n'][0]['parts'],
+                         [{'text': 'Deliver result'}, {'key': '：', 'params': {}}, {'text': '等待独立审核'}])
         self.assertEqual(result['outcome']['remaining'][0], 'Deliver result：等待独立审核')
+
+    def test_lists_and_delivery_sentences_leave_punctuation_and_spacing_to_the_translation(self):
+        # Catches 、 and fragment splicing that English cannot punctuate (copy audit §1.1 #1, #10, §1.5 #30).
+        value = snapshot(status='assigned', phase='working')
+        value['team']['tasks'][0]['dependencies'] = ['t1', 't2']
+        parts = collaboration_view(value)['tasks'][0]['waiting_for_i18n']['parts']
+        self.assertEqual(parts, [{'key': '等待依赖：', 'params': {}}, {'text': 't1'}, {'key': '、', 'params': {}}, {'text': 't2'}])
+        for status, key in (('accepted', '子任务已交付并互审，等待你验收。'), ('self_checked', '子任务已交付并自检，等待你验收。')):
+            done = snapshot(status=status, phase='ready_for_user')
+            done['team']['tasks'][0]['result_version'] = 1
+            reason = collaboration_view(done)['outcome']
+            self.assertEqual(reason.get('reason_i18n', {}).get('parts'), [{'key': key, 'params': {}}], status)

@@ -2613,8 +2613,10 @@ test('provider quota displays observed account windows separately from task Toke
     account: agent.id === 'codex' ? accountFixture({ shared_profile_ids: ['codex', 'codex_review'] }) : null }));
   partners.push({ id: 'codex_review', name: 'Codex 审核', adapter: 'codex', enabled: true, account: accountFixture({ shared_profile_ids: ['codex', 'codex_review'] }) });
   const ui = await browser({ rooms: [saved.room], saved, partners });
-  assert.match(ui.get('account-email-codex').textContent, /reader@example.com/);
-  assert.doesNotMatch(ui.get('account-email-codex').textContent, /old-session/);
+  // The card only says the partner is signed in; who it is stays under 账号与额度 (README screenshots use this page).
+  assert.equal(ui.get('account-email-codex').textContent, '已登录');
+  assert.match(ui.get('provider-account-codex').textContent, /reader@example.com/);
+  assert.doesNotMatch(ui.get('provider-account-codex').textContent, /old-session/);
   const footer = ui.get('provider-account-codex'); footer.open = true;
   const meters = descendants(footer).filter((node) => node.tagName === 'PROGRESS');
   assert.deepEqual(meters.map((node) => node.value), [72, 0], 'observed zero is distinguishable from unknown');
@@ -2646,12 +2648,14 @@ test('unavailable provider quota and malformed percentages stay unknown despite 
     ] } }) }));
   const ui = await browser({ rooms: [saved.room], saved, partners });
   const claude = ui.get('provider-account-claude');
-  assert.match(ui.get('account-email-claude').textContent, /claude-reader@example.com.*待刷新/);
+  assert.equal(ui.get('account-email-claude').textContent, '登录待刷新');
+  assert.match(claude.textContent, /claude-reader@example.com/);
   assert.match(claude.textContent, /当前接入尚未取得订阅额度/);
   assert.equal(descendants(claude).some((node) => node.tagName === 'PROGRESS'), false);
   assert.doesNotMatch(claude.textContent, /剩余 0%|100000|20000/);
   const codex = ui.get('provider-account-codex');
-  assert.match(ui.get('account-email-codex').textContent, /邮箱未获取/);
+  assert.doesNotMatch(ui.get('account-email-codex').textContent, /邮箱|@/);
+  assert.match(codex.textContent, /邮箱未获取/);
   assert.match(codex.textContent, /比例未提供.*重置时间未提供/);
   assert.equal(descendants(codex).some((node) => node.tagName === 'PROGRESS'), false);
   assert.equal(ui.posts().length, 0);
@@ -2681,7 +2685,7 @@ test('account refresh is explicit and single flight while reading and drafts rem
   waiting.resolve(); await settle();
   assert.equal(ui.get('reader-body').firstChild, heading); assert.equal(ui.get('reader-body').scrollTop, 319);
   assert.equal(ui.get('message').value, '保留这段草稿');
-  assert.match(ui.get('account-email-codex').textContent, /reader@example.com/);
+  assert.match(ui.get('provider-account-codex').textContent, /reader@example.com/);
   await ui.poll(); assert.equal(ui.posts().length, 1);
   assert.equal(ui.posts()[0].path, '/api/partners/codex/account/refresh', 'no room or model dispatch happens');
 });
@@ -2715,9 +2719,9 @@ test('a failed account check labels retained email and quota as last observation
   account.quota = { ...account.quota, state: 'error', stale: true, reason: 'provider_usage_unavailable' };
   const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, account: agent.id === 'codex' ? account : null }));
   const ui = await browser({ partners });
-  assert.match(ui.get('account-email-codex').textContent, /上次确认.*reader@example.com.*待刷新/);
-  assert.doesNotMatch(ui.get('account-email-codex').textContent, /当前登录/);
+  assert.equal(ui.get('account-email-codex').textContent, '登录待刷新');
   const footer = ui.get('provider-account-codex');
+  assert.match(footer.textContent, /上次确认登录.*reader@example.com/);
   assert.match(footer.textContent, /旧快照/);
   assert.match(footer.textContent, /这次检查超时/);
   assert.deepEqual(descendants(footer).filter((node) => node.tagName === 'PROGRESS').map((node) => node.value), [72, 0]);
@@ -2893,7 +2897,7 @@ test('compact partner controls stay outside the form and sidebar while latest ro
   assert.match(ui.get('composer-usage-codex').textContent, /剩余 0%/, 'reported zero remains a real observation');
   assert.doesNotMatch(bar.textContent, /Token|上次检查|888,888|99,999|上下文.*%/);
   assert.equal(ui.posts().length, 0, 'painting the compact footer starts neither account checks nor models');
-  for (const [id, pattern] of [['claude', /输入 Token0.*输出 Token0/], ['codex', /输入 Token1234.*输出 Token56/], ['test_peer', /历史快照，口径未确认.*输入 Token99999/], ['fourth', /暂无可靠|尚未取得|未提供/]]) {
+  for (const [id, pattern] of [['claude', /输入 Token0.*输出 Token0/], ['codex', /输入 Token1234.*输出 Token56/], ['test_peer', /历史快照，统计方式未确认.*输入 Token99999/], ['fourth', /暂无可靠|尚未取得|未提供/]]) {
     await ui.click(`composer-usage-${id}`);
     assert.match(ui.get('composer-usage-token-fields').textContent, pattern);
     assert.doesNotMatch(ui.get('composer-usage-token-fields').textContent, /888888|888,888/);
@@ -3238,7 +3242,11 @@ test('a newly blocked selected partner remains selected and removable while send
   assert.equal(ui.get('message').disabled, false, 'users may keep drafting while they adjust the team');
   assert.match(ui.get('composer-note').textContent, /Codex.*额度已用完.*取消勾选/);
   assert.match(ui.get('composer-usage-codex').title, /额度已用完.*旧快照.*预计重置/);
-  assert.match(ui.get('availability-codex').textContent, /供应商共享额度已用完/);
+  // One plain line on the card, in the ordinary waiting style; the full record is under 账号与额度.
+  assert.match(ui.get('availability-codex').textContent, /^额度用完 · .+恢复$/);
+  assert.equal(ui.get('availability-codex').classList.contains('waiting'), true);
+  assert.equal(ui.get('availability-codex').classList.contains('blocked'), false, 'running out of quota is not an error');
+  assert.match(ui.get('provider-account-codex').textContent, /供应商共享额度已用完/);
   const before = ui.posts().length; await ui.submit(); assert.equal(ui.posts().length, before, 'form submission cannot bypass the quota guard');
   await ui.invite('codex', false); assert.equal(participantInput(ui, 'codex').disabled, true);
   assert.match(ui.get('participant-count').textContent, /1 已选/); assert.equal(ui.get('send').disabled, false);
@@ -4727,8 +4735,9 @@ test('availability surfaces deduplicate the same observation and keep current me
   const longGoal = '继续推进虚构项目现有任务，' + '需要核对已有实现和实际结果。'.repeat(40);
   partners[0].monitor = { status: 'working', current_tasks: [{ room_id: roomId, room_goal: longGoal, status: 'working', current_task: '核对已有实现' }] };
   const ui = await browser({ partners, rooms: [saved.room], saved, executionPolicySupport: true });
-  assert.equal((ui.get('availability-claude').textContent.match(/最近检查未见额度阻塞/g) || []).length, 1);
-  assert.match(ui.get('availability-claude').textContent, /上次检查/);
+  assert.equal(ui.get('availability-claude').hidden, true, 'an unblocked partner card carries no status box');
+  assert.equal((ui.get('provider-account-claude').textContent.match(/最近检查未见额度阻塞/g) || []).length, 1);
+  assert.match(ui.get('provider-account-claude').textContent, /上次检查/);
   await ui.click('open-partners');
   const card = ui.get('partners-list').children.find((node) => node.dataset.partner === 'claude');
   const note = card.children.find((node) => node.classList.contains('availability-note'));
@@ -6000,7 +6009,7 @@ test('partner lifecycle accepts one profile intent during pending chat and repor
   assert.match(ui.get('partners-list').textContent, /停用尚未完成/); assert.doesNotMatch(ui.get('manager-notice').textContent, /已停用|已经停止/);
   assert.equal(partners[2].enabled, true); assert.equal(ui.posts().some((request) => request.path.includes('claude_other/')), false);
   operation = { ...operation, status: 'completed', stage: 'completed', error: null, targets: [{ room_id: roomId, state: 'waiting_receiver', reason: 'objective_paused' }] }; partners[0].enabled = false;
-  await ui.poll(); assert.match(ui.get('partners-list').textContent, /伙伴配置已停用.*已有工作的改动已保留/);
+  await ui.poll(); assert.match(ui.get('partners-list').textContent, /伙伴已停用.*已有工作的改动已保留/);
   messageResponse.resolve(saved); await settle();
 });
 
@@ -6037,7 +6046,7 @@ test('partner unknown receipts use the original profile request and only authori
     assert.equal(sent.length, outcome === 'missing' ? 2 : 1, outcome); if (sent.length === 2) assert.deepEqual(structuredClone(sent[0].body), structuredClone(sent[1].body));
     const lookup = ui.requests.find((request) => request.path.startsWith('/api/partners/lifecycle-operations/'));
     assert.equal(lookup.method, 'GET'); assert.ok(lookup.path.endsWith(sent[0].body.request_id));
-    if (['network', 'conflict'].includes(outcome)) assert.doesNotMatch(ui.get('manager-notice').textContent, /配置已归档/);
+    if (['network', 'conflict'].includes(outcome)) assert.doesNotMatch(ui.get('manager-notice').textContent, /伙伴已归档/);
     if (outcome === 'conflict') { await ui.poll(); assert.equal(ui.posts().filter((request) => request.path.endsWith('/lifecycle')).length, 1); }
   }
 });
@@ -6085,7 +6094,7 @@ test('held old partner journal cannot overwrite a newer intent, revive removed c
     assert.equal(cached.find((operation) => operation.request_id === oldOperation.request_id).status, 'completed');
     if (nextAction === 'enable') {
       const current = descendants(ui.get('partners-list')).find((node) => node.dataset.focusKey === 'enabled'); assert.equal(current.textContent, '停用'); assert.equal(current.disabled, false);
-      assert.match(ui.get('manager-notice').textContent, /配置已启用/); assert.doesNotMatch(ui.get('partners-list').textContent, /停用尚未完成/);
+      assert.match(ui.get('manager-notice').textContent, /伙伴已启用/); assert.doesNotMatch(ui.get('partners-list').textContent, /停用尚未完成/);
     } else {
       assert.equal(ui.get('partners-list').children.some((node) => node.dataset.partner === 'claude'), false);
       assert.match(ui.get('manager-notice').textContent, /配置已移除/);
@@ -7970,12 +7979,12 @@ test('Kimi quota windows show supplied remaining values and an explicit official
   const link = descendants(footer).find((node) => node.dataset.usageLink === 'kimi');
   assert.equal(link.href, 'https://www.kimi.com/code/console'); assert.equal(link.target, '_blank');
   assert.doesNotMatch(footer.textContent, /Plus|剩余 0%/);
-  assert.match(ui.get('availability-kimi').textContent, /5小时剩余 99%/);
-  assert.doesNotMatch(ui.get('availability-kimi').textContent, /未取得|未支持/);
+  assert.equal(ui.get('availability-kimi').hidden, true);
+  assert.match(footer.textContent, /5小时剩余 99%/);
   assert.doesNotMatch(ui.get('composer-usage-kimi').title, /未取得|未支持/);
   partners[2].availability = availabilityFixture({ state: 'blocked', selectable: false, reason: 'quota_exhausted' });
   const limited = await browser({ agents, partners, rooms: [saved.room], saved });
-  assert.match(limited.get('availability-kimi').textContent, /额度已用完/);
+  assert.match(limited.get('availability-kimi').textContent, /^额度用完 · 恢复时间未知$/);
   assert.equal(limited.get('composer-usage-kimi').classList.contains('quota-blocked'), true);
 });
 
@@ -9136,6 +9145,190 @@ test('current bound task block shows one actionable literal question with its st
   assert.match(ui.get('collaboration-outcome').textContent, /继续时沿用当前权限设置/);
   assert.equal(ui.posts().length, 0);
 });
+test('reply-mistake blocks read as automatic replanning, while only a permission block offers a choice that fills the draft', async () => {
+  // Catches internal correction codes being offered to the user as decisions, and choices that send without review.
+  const saved = currentTaskBlockFixture();
+  saved.objective.next_step.question = '[0%] 实跑遗漏入口：team_task_permission；全量测试：team_write_path_conflict';
+  saved.team.tasks = [
+    { id: 'reply-mistake', title: '[0%] 实跑遗漏入口', owner: 'codex', status: 'blocked', blocked_reason: 'team_task_permission', block_cause: null },
+    { id: 'coordination', title: '[0%] 执行全量注册测试', owner: 'claude', status: 'blocked', blocked_reason: '需要内部重规划补一个修复任务。', block_cause: 'coordination_required' }];
+  saved.collaboration.tasks = saved.team.tasks;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
+  const now = ui.get('now-card');
+  assert.equal(now.hidden, false);
+  // The host reopens these blocks itself (stop_policy), so nothing waits on a click.
+  assert.match(ui.get('now-label').textContent, /马上自动继续/);
+  assert.doesNotMatch(now.textContent, /等你决定|team_task_permission|按原分工重试|先跳过|停止任务/);
+  assert.equal(descendants(now).some((node) => node.tagName === 'BUTTON' && node.classList.contains('pri')), false, 'no primary click is needed');
+  const outcomeLines = descendants(ui.get('collaboration-outcome')).filter((node) => node.classList.contains('detail-caption')).map((node) => node.textContent).join('\n');
+  assert.doesNotMatch(outcomeLines, /实跑遗漏入口：/, 'replanned tasks are not listed as decisions');
+  assert.match(outcomeLines, /2 项需要重新安排，点“继续推进”后会自动处理/);
+  const pane = ui.get('progress-pane');
+  assert.equal(ui.get('conversation').dataset.tab, 'progress');
+  assert.match(pane.textContent, /2 项待重新安排/);
+  assert.match(pane.textContent, /豆窝会接着处理，不用你选/);
+  assert.equal(descendants(pane).filter((node) => node.tagName === 'BUTTON').length, 0, 'no per-task choice for automatic replanning');
+  assert.ok(descendants(pane).some((node) => node.classList.contains('tech-details') && node.textContent.includes('team_task_permission')));
+  // Once the host already continued this board since the user last spoke, the repeat is the user's.
+  saved.events.push({ seq: 40, kind: 'objective_auto_continued', sender: 'system', code: 'task_block', run_id: saved.current_run.id, created_at: 1040 });
+  await ui.poll();
+  assert.match(ui.get('now-title').textContent, /有几项需要重新安排/);
+  assert.doesNotMatch(ui.get('now-card').textContent, /马上自动继续|等你决定/);
+
+  const permission = currentTaskBlockFixture();
+  const second = await browser({ rooms: [permission.room], saved: permission, executionPolicySupport: true, naturalContinuationSupport: true });
+  assert.match(second.get('now-title').textContent, /有一步要你同意权限/);
+  const approve = descendants(second.get('now-card')).find((node) => node.tagName === 'BUTTON' && node.textContent === '同意，按原计划做');
+  assert.ok(approve, 'a permission block offers an explicit choice');
+  approve.fire('click'); await settle();
+  assert.equal(second.get('message').value, '同意「核对文件修改」需要的权限，按原计划继续。');
+  assert.equal(second.posts().length, 0, 'a quick choice never sends by itself');
+  const timelineHidden = second.get('timeline').hidden;
+  await second.click('tab-discussion');
+  assert.equal(second.get('conversation').dataset.tab, 'discussion');
+  assert.equal(second.get('timeline').hidden, timelineHidden, 'views switch by layout only and leave reader state alone');
+});
+test('stops the host continues by itself never read as a decision, and only user stops leave the click to the user', async () => {
+  // Catches automatic stops (stop_policy) shown as waiting on the user, and user or keep-scene stops falsely promised to resume.
+  const cases = [
+    ['all_partners_quota_exhausted', /等额度恢复/, /伙伴额度都用完了，恢复后自动继续/, /有伙伴额度恢复后豆窝会自己接着做，不用你操作/],
+    ['service_restarted', /马上自动继续/, /豆窝服务重启过，马上自动接着做/, /几秒后自动继续，不用你操作/],
+    ['cli_nonzero_exit', /马上自动继续/, /推进停了一下，马上自动接着做/, /几秒后自动继续/],
+    ['objective_calls_exhausted', /已停止/, /推进已停止/, /不会自动重跑/],
+    ['session_identity_unknown', /已停止/, /推进已停止/, /不会自动重跑/],
+  ];
+  for (const [reason, label, title, text] of cases) {
+    const saved = restartSnapshot(); saved.objective.stop_reason = reason;
+    saved.objective.execution_policy = { ...saved.current_run.execution_policy };
+    const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+    const now = ui.get('now-card');
+    assert.match(ui.get('now-label').textContent, label, reason);
+    assert.match(ui.get('now-title').textContent, title, reason);
+    assert.match(ui.get('now-text').textContent, text, reason);
+    assert.doesNotMatch(now.textContent, /等你决定|同意，按原计划做|写回复/, reason);
+    const automatic = !['objective_calls_exhausted', 'session_identity_unknown'].includes(reason);
+    const primary = descendants(now).find((node) => node.tagName === 'BUTTON' && node.dataset.mirror === 'restart-objective');
+    assert.ok(primary, `${reason} still lets the user continue now`);
+    assert.equal(primary.classList.contains('pri'), !automatic, `${reason}: a click is only the main action when nothing resumes by itself`);
+    assert.equal(ui.posts().length, 0);
+  }
+  // A step-by-step objective and a run without quota failover are never promised an automatic resume.
+  const manual = restartSnapshot(); manual.objective.stop_reason = 'service_restarted';
+  manual.objective.execution_policy = { ...manual.current_run.execution_policy, mode: 'step' };
+  const manualUi = await browser({ rooms: [manual.room], saved: manual, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.doesNotMatch(manualUi.get('now-card').textContent, /自动继续|自动接着做/);
+  const noFailover = restartSnapshot(); noFailover.objective.stop_reason = 'all_partners_quota_exhausted';
+  noFailover.objective.execution_policy = { ...noFailover.current_run.execution_policy, quota_failover: false };
+  const noFailoverUi = await browser({ rooms: [noFailover.room], saved: noFailover, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.doesNotMatch(noFailoverUi.get('now-title').textContent, /恢复后自动继续/);
+  // With natural continuation the service's own action decides: a continuation it cannot send never resumes by itself.
+  for (const canSend of [true, false]) {
+    const natural = restartSnapshot(); natural.objective.stop_reason = 'service_shutdown';
+    natural.objective.execution_policy = { ...natural.current_run.execution_policy };
+    natural.continuation = { action: 'restart-objective', can_send: canSend, reason: canSend ? null : 'team_cleanup_unconfirmed',
+      binding: { run_id: natural.current_run.id, revision: natural.current_run.revision, digest: natural.current_run.digest } };
+    const naturalUi = await browser({ rooms: [natural.room], saved: natural, executionPolicySupport: true, continuousObjectiveSupport: true, naturalContinuationSupport: true });
+    assert.equal(/马上自动继续/.test(naturalUi.get('now-label').textContent), canSend, `natural continuation can_send=${canSend}`);
+    assert.doesNotMatch(naturalUi.get('now-card').textContent, /等你决定/);
+  }
+  // The same automatic stop coming back after one automatic continue waits for the user.
+  const repeated = restartSnapshot(); repeated.objective.stop_reason = 'service_restarted';
+  repeated.objective.execution_policy = { ...repeated.current_run.execution_policy };
+  repeated.events.push({ seq: 90, kind: 'objective_auto_continued', sender: 'system', code: 'service_restarted', run_id: repeated.current_run.id, created_at: 1090 });
+  const repeatedUi = await browser({ rooms: [repeated.room], saved: repeated, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.match(repeatedUi.get('now-title').textContent, /自动继续过一次，又停在同一处/);
+  assert.ok(descendants(repeatedUi.get('now-card')).find((node) => node.dataset.mirror === 'restart-objective').classList.contains('pri'));
+});
+test('the service stop_kind keeps the card, the room list and the task board telling the same story', async () => {
+  // Catches a list saying 已停止, unfinished tasks saying 已取消, or a note asking for a click while the card promises to resume.
+  const fixture = (reason, kind) => {
+    const saved = restartSnapshot(); saved.objective.stop_reason = reason;
+    saved.stop_kind = kind; saved.room.objective_status = 'stopped'; saved.room.stop_kind = kind;
+    saved.team = { ...(saved.team || {}), phase: 'stopped', stop_reason: reason };
+    saved.team.tasks = [{ id: 'done', title: '已完成的一项', owner: 'codex', status: 'accepted', review_kind: 'independent_review' },
+      { id: 'left', title: '没做完的一项', owner: 'claude', status: 'cancelled' }];
+    saved.collaboration.tasks = saved.team.tasks;
+    saved.members[0].status = 'interrupted';
+    return saved;
+  };
+  const open = (saved) => browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true, naturalContinuationSupport: true });
+  const partner = (saved) => `status-${saved.members[0].id}`;
+  for (const [reason, kind, label] of [['service_shutdown', 'auto', '马上自动继续'], ['all_partners_quota_exhausted', 'quota_wait', '等额度恢复']]) {
+    const ui = await open(fixture(reason, kind));
+    assert.match(ui.get('now-label').textContent, new RegExp(label), kind);
+    const card = ui.get('rooms').children[0];
+    assert.match(card.textContent, new RegExp(label), `${kind}: the list says what the card says`);
+    assert.doesNotMatch(card.textContent, /已停止/, kind); assert.equal(card.dataset.group, 'go', kind);
+    const pane = ui.get('progress-pane');
+    assert.match(pane.textContent, /1 项待继续/, kind);
+    assert.match(pane.textContent, /自动继续后接着做/, kind);
+    assert.doesNotMatch(pane.textContent, /已取消|点“继续推进”/, kind);
+    assert.equal(ui.get(partner(fixture(reason, kind))).textContent, '待继续', `${kind}: the partner card agrees`);
+    assert.equal(ui.posts().length, 0);
+  }
+  // The service's null wins over a code that looks automatic: the next step is the user's.
+  const manualSaved = fixture('service_shutdown', null); const manual = await open(manualSaved);
+  assert.notEqual(manual.get(partner(manualSaved)).textContent, '待继续');
+  assert.doesNotMatch(manual.get('now-card').textContent, /自动继续|自动接着做/);
+  assert.match(manual.get('rooms').children[0].textContent, /目标已停止/);
+  assert.match(manual.get('progress-pane').textContent, /点“继续推进”后会接着做/);
+  // Only the user's own stop really cancels unfinished tasks.
+  const cancelled = await open(fixture('cancel_requested', null));
+  assert.match(cancelled.get('progress-pane').textContent, /1 项已取消/);
+  assert.doesNotMatch(cancelled.get('progress-pane').textContent, /待继续/);
+});
+test('English accepts typed continue as the bare command, joins names with English punctuation and names Claude windows', async () => {
+  // Catches the English hint telling people to type continue while only 继续 worked, 、 leaking into English lists, and Chinese Claude window names.
+  for (const text of ['continue', 'Keep going.', 'please continue']) {
+    const saved = restartSnapshot();
+    const ui = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true,
+      route(request) { if (request.path.endsWith('/restart-objective')) return saved; } });
+    ui.type(text); await ui.submit();
+    assert.equal(ui.posts().at(-1)?.path, `/api/rooms/${roomId}/restart-objective`, text);
+  }
+  const extra = restartSnapshot();
+  const notCommand = await browser({ language: 'en', rooms: [extra.room], saved: extra, executionPolicySupport: true, continuousObjectiveSupport: true });
+  notCommand.type('continue with the README too'); await notCommand.submit();
+  assert.equal(notCommand.posts().length, 0, 'a real addition is kept, not taken as the bare command');
+
+  const account = accountFixture({ quota: { state: 'available', stale: false, checked_at: 1000, scope: 'provider_account_and_model', windows: [
+    { name: 'claude:five_hour', label: 'Claude · 5小时窗口', remaining_percent: 60, used_percent: 40, window_minutes: 300, resets_at: 2000 },
+    { name: 'claude:seven_day', label: 'Claude · 7天窗口', remaining_percent: 30, used_percent: 70, window_minutes: 10080, resets_at: 3000 },
+    { name: 'claude:model_scoped:2', label: 'Opus · 模型周额度', remaining_percent: 80, used_percent: 20, window_minutes: 10080, resets_at: 3000 }] } });
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, account: agent.id === 'claude' ? account : null }));
+  const saved = restartSnapshot();
+  const ui = await browser({ language: 'en', rooms: [saved.room], saved, partners });
+  const footer = ui.get('provider-account-claude').textContent;
+  assert.match(footer, /Claude · 5-hour window/); assert.match(footer, /Claude · 7-day window/); assert.match(footer, /Opus · weekly model quota/);
+  assert.doesNotMatch(footer, /小时|天窗口|模型周额度/);
+  assert.match(ui.get('frozen-participants').textContent, /Claude Code, Codex|Codex, Claude Code/);
+  assert.doesNotMatch(ui.get('frozen-participants').textContent, /、/);
+});
+test('waiting for quota reads the same on the board and every partner card, without rearranging or repeating the stop', async () => {
+  // Shape of the real 九烛 room after #19: tasks held by all_partners_quota_exhausted, partners retired for quota.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'all_partners_quota_exhausted';
+  saved.stop_kind = 'quota_wait'; saved.room.objective_status = 'stopped'; saved.room.stop_kind = 'quota_wait';
+  saved.team = { ...(saved.team || {}), phase: 'stopped', stop_reason: 'all_partners_quota_exhausted' };
+  const [first, second] = saved.members;
+  saved.team.tasks = [{ id: 'done', title: '已完成的一项', owner: first.id, status: 'self_checked' },
+    { id: 'held', title: '被额度挡住的一项', owner: first.id, status: 'blocked', block_cause: null, blocked_reason: 'all_partners_quota_exhausted' }];
+  saved.collaboration.tasks = saved.team.tasks;
+  saved.collaboration.outcome.reason = '协作因异常停止，未完成项仍保留。';
+  for (const member of saved.members) member.status = 'needs_user';
+  saved.objective.retired_partners = { [first.id]: { reason: 'agent_quota_exhausted', cleanup_confirmed: true }, [second.id]: { reason: 'subscription_limit_reached', cleanup_confirmed: true } };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true, naturalContinuationSupport: true });
+  const pane = ui.get('progress-pane');
+  assert.match(pane.textContent, /1 项待继续/);
+  assert.doesNotMatch(pane.textContent, /待重新安排|all_partners_quota_exhausted|技术细节/, 'a quota hold is not a replan and shows no code');
+  for (const member of [first, second]) assert.equal(ui.get(`status-${member.id}`).textContent, '等额度恢复', member.id);
+  assert.equal(ui.get(`task-${first.id}`).textContent, '「被额度挡住的一项」待继续');
+  const cards = [first, second].map((member) => ui.get(`task-${member.id}`).textContent).join('\n');
+  assert.doesNotMatch(cards, /伙伴的额度都用完了/, 'the stop reason is said once, on the card at the top');
+  const outcome = ui.get('collaboration-outcome').textContent;
+  assert.match(outcome, /等额度恢复/, 'the discussion outcome is titled like the card');
+  assert.doesNotMatch(outcome, /异常停止|目标推进已停止/);
+  assert.equal(ui.posts().length, 0);
+});
 test('current task question refuses stale bindings and never infers a permission category from free text or ordinary checkpoints', async () => {
   for (const variant of ['binding', 'origin', 'checkpoint', 'cause', 'coordination']) {
     const saved = currentTaskBlockFixture();
@@ -9168,7 +9361,7 @@ test('official Kimi display identity prefers actual email then masked phone then
     const account = accountFixture({ source: 'kimi_managed_oauth', email, plan: 'Plus', display_identity: display, stale,
       field_reasons: { email: email ? null : 'provider_not_provided', plan: null } });
     const ui = await browser({ agents: [agent], partners: [{ ...agent, adapter: 'kimi', enabled: true, account }] });
-    assert.match(ui.get('account-email-kimi').textContent, expected);
+    assert.equal(ui.get('account-email-kimi').textContent, stale ? '登录待刷新' : '已登录', 'no phone, nickname or email fragment on the card');
     const footer = ui.get('provider-account-kimi');
     if (!stale) assert.match(footer.textContent, expected);
     else assert.match(footer.textContent, /上次确认登录/);
@@ -9480,7 +9673,9 @@ test('English working status separates system fragments from raw task names and 
   saved.room.objective_status = 'running';
   const room = saved.room;
   const ui = await browser({language:'en',rooms:[room],saved});
-  assert.match(ui.get('partner-activity-claude').textContent,/In progress Develop 「用户原文标题」/);
+  // English quotes a task name with “ ” instead of leaking 「」 (hard-coded punctuation audit).
+  assert.match(ui.get('partner-activity-claude').textContent,/In progress: Develop “用户原文标题”/);
+  assert.doesNotMatch(ui.get('partner-activity-claude').textContent,/[「」、：；（）]/);
   const labels = descendants(ui.get('rooms')).map(node=>node.getAttribute('aria-label')).filter(Boolean);
   assert.ok(labels.some(label=>label.includes(', Working')), JSON.stringify(labels));
   assert.ok(labels.every(label=>!label.includes('，')));

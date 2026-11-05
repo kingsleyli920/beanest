@@ -20,7 +20,7 @@ from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached
-from .stop_policy import continues_automatically
+from .stop_policy import continues_automatically, host_block_recoverable
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError
 from .project_catalog import ProjectCatalog, ProjectCatalogError
@@ -442,6 +442,7 @@ class RoomService:
         self._quota_waits = {}
         self._quota_stop_audits = {}
         self._auto_continues = {}
+        self._stop_kinds = {}
         self._late_cleanup_checks = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
@@ -1273,8 +1274,8 @@ class RoomService:
             outcome["state"] = "interrupted"
             explanation = (("reason", "审核被旧的负责人校验误拒，原任务和已提交结果仍保留。"),
                            ("next_action", "继续后只补审核，不会重复执行已完成的工作。")) if text_failure.get("review_only") else (
-                           ("reason", "结果提交被宿主格式校验拒绝，原任务和结果仍保留。"),
-                           ("next_action", "继续后由伙伴重新提交并核对，无需补充业务决定。"))
+                           ("reason", "结果提交没有通过格式校验，原任务和结果仍保留。"),
+                           ("next_action", "继续后由伙伴重新提交并核对，不需要你做额外决定。"))
             for field, text in explanation:
                 outcome[field] = text
                 outcome[field + "_i18n"] = {"parts": [{"key": text, "params": {}}]}
@@ -1416,8 +1417,62 @@ class RoomService:
                 recipient = self._natural_continuation(snapshot, target=member["id"])
                 snapshot["continuation"]["recipients"][member["id"]] = {
                     key: recipient[key] for key in ("can_send", "reason")}
+        snapshot["stop_kind"] = self._stop_kind(snapshot, continuation)
+        self._stop_kinds[snapshot["room"]["id"]] = (self._stop_kind_key(snapshot), snapshot["stop_kind"])
         snapshot["room"]["work_activity"] = self._room_work_activity(snapshot, self.store.job_roles(snapshot["room"]["id"]))
         return snapshot
+
+    @staticmethod
+    def _stop_kind_key(snapshot):
+        return ((snapshot.get("current_run") or {}).get("id"), (snapshot.get("team") or {}).get("stop_reason"),
+                (snapshot.get("objective") or {}).get("status"))
+
+    def _listed_stop_kind(self, snapshot):
+        """The list never runs the full read (its private-tree audit), so an
+        automatic continue shows only once the room's own read judged this
+        same stop; a quota wait needs no continuation to judge."""
+        candidate = self._stop_kind_candidate(snapshot)
+        if candidate != "auto":
+            return candidate
+        cached = self._stop_kinds.get(snapshot["room"]["id"])
+        return cached[1] if cached and cached[0] == self._stop_kind_key(snapshot) else None
+
+    @staticmethod
+    def _stop_kind_candidate(snapshot):
+        """The cheap half of _stop_kind: an active autonomous objective that
+        stopped the way _schedule_auto_continue or _schedule_quota_wait resumes."""
+        objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
+        policy = objective.get("execution_policy") or {}
+        if snapshot["room"]["lifecycle_state"] != "active" or policy.get("mode") != "autonomous":
+            return None
+        if objective.get("status") == "needs_user" and (objective.get("next_step") or {}).get("origin") == "task_block":
+            blocked = [task for task in team.get("tasks") or [] if task.get("status") == "blocked"]
+            recoverable = blocked and all(task.get("block_cause") == "coordination_required"
+                                          or host_block_recoverable({"block_cause": task.get("block_cause"),
+                                                                     "blocked_reason": task.get("blocked_reason")})
+                                          for task in blocked)
+            return "auto" if recoverable else None
+        if team.get("phase") == "stopped" and team.get("stop_reason") == "all_partners_quota_exhausted":
+            return "quota_wait" if policy.get("quota_failover") else None
+        if (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted"}
+                and continues_automatically(team.get("stop_reason"))):
+            return "auto"
+        return None
+
+    def _stop_kind(self, snapshot, continuation):
+        """How a stopped objective resumes without the user, so the room page and
+        the room list say the same thing: "auto", "quota_wait", or None when the
+        next step is the user's."""
+        kind = self._stop_kind_candidate(snapshot)
+        if kind != "auto":
+            return kind
+        if self.store.auto_continue_state(snapshot["room"]["id"])[1]:
+            return None  # The same stop came back without progress: it is the user's now.
+        if (snapshot["objective"]["status"] != "needs_user"
+                and (continuation is None or not continuation["can_send"]
+                     or continuation["action"] not in {"restart-objective", "recover-native"})):
+            return None
+        return kind
 
     def _natural_continuation(self, snapshot, *, target="all"):
         run, objective = snapshot.get("current_run"), snapshot.get("objective")
@@ -3387,6 +3442,7 @@ class RoomService:
             if room.get("collaboration"):
                 snapshot = self._snapshot(room["id"], list_view=True)
                 room["outcome_state"] = snapshot["collaboration"]["outcome"]["state"]
+                room["stop_kind"] = self._listed_stop_kind(snapshot)
                 if snapshot.get("objective"):
                     room["objective_status"] = snapshot["objective"]["status"]
                     room["objective_id"] = snapshot["objective"]["id"]
