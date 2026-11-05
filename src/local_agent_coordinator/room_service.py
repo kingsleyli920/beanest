@@ -4434,7 +4434,10 @@ class RoomService:
             return
         if objective.get("status") == "needs_user" and (objective.get("next_step") or {}).get("origin") == "task_block":
             code = "task_block"
-        elif (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted"}
+        # Quitting the app leaves the team cancelled; the stop code, not the
+        # phase, tells it apart from the user's own stop.
+        elif (objective.get("status") in {"stopped", "interrupted"}
+              and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
               and continues_automatically(team.get("stop_reason"))):
             code = team["stop_reason"]
         else:
