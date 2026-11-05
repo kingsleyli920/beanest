@@ -4410,7 +4410,8 @@ class RoomStore:
                         or step["binding"] != binding or team["current_run_id"] != binding["run_id"]):
                     raise RoomError("objective_answer_unavailable")
                 decision = {"text": checked_message(answer), "at": self.clock(), "run_id": binding["run_id"]}
-                resumed_format = self._team.resume_host_text_failure(db, room_id, recipients=recipients)
+                resumed_format = (self._team.resume_host_text_failure(db, room_id, recipients=recipients)
+                                  or self._team.resume_coordination_block(db, room_id))
                 if not resumed_format and room["mode"] == "native_project" and db.execute(
                         "SELECT 1 FROM events e JOIN shared_tasks t ON t.room_id=e.room_id "
                         "AND t.run_id=json_extract(e.value_json,'$.run_id') AND t.id=json_extract(e.value_json,'$.task_id') "

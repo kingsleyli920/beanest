@@ -344,6 +344,8 @@ class TeamStore:
                 resumable.add(text_failure["code"])
         tasks = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid",
                            (source_room_id or room_id, source_run_id)).fetchall()
+        current = self.objectives.current(db, room_id)
+        autonomous = current is not None and json.loads(current["policy_json"])["mode"] == "autonomous"
         for task in tasks:
             values = dict(task)
             values.update(room_id=room_id, run_id=target_run_id, ownership_grant_json=None,
@@ -360,6 +362,10 @@ class TeamStore:
                     values["status"] = ("review" if task["result_version"] and task["review_reason"] is None else
                                         "assigned" if task["owner"] else "open")
                     values["blocked_reason"] = None
+                elif task["status"] == "blocked" and task["block_cause"] == "coordination_required":
+                    # The old binding names a planning revision of the source
+                    # run. Continuing asks for a fresh replan, not the user.
+                    values["internal_replan_revision"] = -1 if autonomous else None
             columns = list(values)
             db.execute("INSERT INTO shared_tasks(" + ",".join(columns) + ") VALUES (" +
                        ",".join("?" for _ in columns) + ")", [values[key] for key in columns])
@@ -603,6 +609,32 @@ class TeamStore:
                    "WHEN owner IS NOT NULL THEN 'assigned' ELSE 'open' END,blocked_reason=NULL,reviewer=NULL "
                    "WHERE room_id=? AND run_id=? AND status='blocked'" + scope,
                    (room_id, team["current_run_id"], *task_ids))
+        self.reconcile(db, room_id)
+        return True
+
+    def resume_coordination_block(self, db, room_id):
+        """Answering a question that only asked for another task replans the same board.
+
+        An older carry kept the source run's planning revision, so the new run
+        asked the user instead of replanning. Accepted work stays as it is.
+        """
+        team, objective = self.team(db, room_id), self.objectives.current(db, room_id)
+        checkpoint = json.loads(objective["checkpoint_json"] or "{}") if objective else {}
+        if (objective is None or objective["status"] != "needs_user" or checkpoint.get("origin") != "task_block"
+                or json.loads(objective["policy_json"])["mode"] != "autonomous"
+                or team["phase"] != "working" or self.pending(db, room_id) or self.store._room(db, room_id)["stop_requested"]):
+            return False
+        blocked = db.execute("SELECT id,block_cause FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked'",
+                             (room_id, team["current_run_id"])).fetchall()
+        if not blocked or any(task["block_cause"] != "coordination_required" for task in blocked):
+            return False
+        db.execute("UPDATE shared_tasks SET internal_replan_revision=-1 WHERE room_id=? AND run_id=? AND status='blocked'",
+                   (room_id, team["current_run_id"]))
+        db.execute("UPDATE objectives SET status='running',stop_reason=NULL,checkpoint_json=NULL WHERE id=?", (objective["id"],))
+        db.execute("UPDATE team_runs SET status='working' WHERE id=?", (team["current_run_id"],))
+        db.execute("UPDATE rooms SET blocked_reason=NULL,status='running' WHERE id=?", (room_id,))
+        self.store._event(db, room_id, "coordination_block_resumed", sender="user", run_id=team["current_run_id"],
+                          task_ids=[task["id"] for task in blocked], previous_checkpoint=checkpoint)
         self.reconcile(db, room_id)
         return True
 

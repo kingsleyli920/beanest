@@ -3,7 +3,11 @@ import asyncio
 import hashlib
 from pathlib import Path
 import threading
+from uuid import uuid4
 import unittest
+from unittest.mock import patch
+
+from local_agent_coordinator.team_store import TeamStore
 
 from test_native_help_scope_http import HelpScopeFixture
 from test_native_room_service import native_reply
@@ -172,6 +176,76 @@ class InternalReplanHTTPTests(unittest.TestCase):
         self.assertEqual(fixture.overlaps, 2)
         self.assertFalse(any(job['status'] in {'queued', 'working'} for job in final['jobs']))
         self.assertFalse(any(task['id'] == 'T4' for task in final['team']['tasks']))
+
+    def test_continuing_after_a_stopped_replan_replans_again_instead_of_asking_the_user(self):
+        # Catches: the carried coordination task kept the old run's planning
+        # revision, so the new run never replanned and asked the user instead.
+        fixture = OverlappingPrerequisiteFixture(repeat_overlap=True)
+        self.addCleanup(fixture.close)
+        fixture.create()
+        stopped = fixture.settled()
+        self.assertEqual(stopped['team']['stop_reason'], 'team_write_path_conflict')
+        fixture.repeat_overlap = False
+        code, response = fixture.request('POST', f'/api/rooms/{fixture.room_id}/messages', {
+            'text': '继续', 'target': 'all', 'request_id': str(uuid4()),
+            'intent': 'continue', 'binding': stopped['continuation']['binding']})
+        self.assertEqual(code, 200, response)
+        final = fixture.wait(lambda snapshot: snapshot['current_run']['id'] != stopped['current_run']['id']
+                             and snapshot['objective']['status'] != 'running'
+                             and not any(job['status'] in {'queued', 'working'} for job in snapshot['jobs']))
+        self.assertEqual(final['objective']['status'], 'complete', (final['objective'], final['team']))
+        run = final['current_run']['id']
+        self.assertFalse(any(event['kind'] == 'objective_decision_required' and event.get('run_id') == run
+                             for event in final['events']))
+        self.assertTrue(any(event['kind'] == 'internal_replan_started' and event.get('run_id') == run
+                            for event in final['events']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual(tasks['T4']['write_paths'], ['README.md'])
+        self.assertIn('T4', tasks['T3']['dependencies'])
+        self.assertTrue(all(task['status'] == 'accepted' for task in tasks.values()))
+
+    def test_answering_a_coordination_question_replans_the_carried_board(self):
+        # Catches: a room an older release left asking the user about a
+        # coordination block restarted planning from an empty board on reply.
+        fixture = OverlappingPrerequisiteFixture(repeat_overlap=True)
+        self.addCleanup(fixture.close)
+        fixture.create()
+        stopped = fixture.settled()
+        carry = TeamStore.carry_unfinished
+
+        def legacy_carry(team, db, room_id, source_run_id, target_run_id, **options):
+            # The older release copied the source run's planning revision as is.
+            carry(team, db, room_id, source_run_id, target_run_id, **options)
+            db.execute("UPDATE shared_tasks SET internal_replan_revision=(SELECT internal_replan_revision "
+                       "FROM shared_tasks old WHERE old.room_id=shared_tasks.room_id AND old.run_id=? "
+                       "AND old.id=shared_tasks.id) WHERE room_id=? AND run_id=?",
+                       (source_run_id, room_id, target_run_id))
+        with patch.object(TeamStore, 'carry_unfinished', legacy_carry):
+            code, response = fixture.request('POST', f'/api/rooms/{fixture.room_id}/messages', {
+                'text': '继续', 'target': 'all', 'request_id': str(uuid4()),
+                'intent': 'continue', 'binding': stopped['continuation']['binding']})
+            self.assertEqual(code, 200, response)
+            asked = fixture.wait(lambda snapshot: snapshot['objective']['status'] == 'needs_user'
+                                 and snapshot['current_run']['id'] != stopped['current_run']['id'])
+        self.assertEqual(asked['objective']['stop_reason'], 'objective_decision_required')
+        board_run = asked['current_run']['id']
+        fixture.repeat_overlap = False
+        objective = asked['objective']
+        code, response = fixture.request('POST', f'/api/rooms/{fixture.room_id}/answer', {
+            **objective['next_step']['binding'], 'request_id': str(uuid4()),
+            'objective_id': objective['id'], 'text': '继续'})
+        self.assertEqual(code, 200, response)
+        final = fixture.wait(lambda snapshot: snapshot['objective']['status'] != 'running'
+                             and not any(job['status'] in {'queued', 'working'} for job in snapshot['jobs']))
+        self.assertEqual(final['objective']['status'], 'complete', (final['objective'], final['team']))
+        self.assertEqual(final['current_run']['id'], board_run)
+        self.assertTrue(any(event['kind'] == 'internal_replan_started' and event.get('run_id') == board_run
+                            for event in final['events']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual(tasks['T4']['write_paths'], ['README.md'])
+        self.assertTrue(all(task['status'] == 'accepted' for task in tasks.values()))
+        self.assertEqual(fixture.work_tasks.count('T1'), 1)
+        self.assertEqual(fixture.work_tasks.count('T2'), 1)
 
     def test_real_permission_and_user_decision_are_not_relabelled_by_reason_text(self):
         for cause in ('permission_required', 'user_decision'):
