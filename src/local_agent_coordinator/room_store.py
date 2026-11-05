@@ -3410,7 +3410,8 @@ class RoomStore:
     def recover_native(self, room_id, request_id, binding, *, baseline, audit_digest, legacy_attestation=None,
                        metadata_correction=None, partial_works=(), receiver_workspaces=None,
                        quota_blocked=(), ownership_files=(), user_message=None, request_identity=None, runtime_change=None,
-                       help_repair=None, message_target="all", directed_followup=False, recovery_source="user"):
+                       help_repair=None, message_target="all", directed_followup=False, recovery_source="user",
+                       quota_returned=()):
         if recovery_source not in {"user", "system"}:
             raise RoomError("invalid_request")
         with self._connection(write=True) as db:
@@ -3501,7 +3502,8 @@ class RoomStore:
                     proven_quota.add(partial["provider"])
                 # This evidence applies to this room/run only; it does not invent
                 # a global account identity or modify the historical failure.
-                quota_blocked = set(quota_blocked) | proven_quota
+                # A source whose quota has since returned takes its own task back.
+                quota_blocked = set(quota_blocked) | (proven_quota - set(quota_returned))
                 if recovery_source == "system":
                     objective = self._team.objectives.current(db, room_id)
                     policy = json.loads(objective["policy_json"]) if objective else {}

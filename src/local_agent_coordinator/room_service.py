@@ -1431,6 +1431,8 @@ class RoomService:
         """The list never runs the full read (its private-tree audit), so an
         automatic continue shows only once the room's own read judged this
         same stop; a quota wait needs no continuation to judge."""
+        if self._quota_handoff_waiting(snapshot):
+            return "quota_wait"
         candidate = self._stop_kind_candidate(snapshot)
         if candidate != "auto":
             return candidate
@@ -1459,10 +1461,23 @@ class RoomService:
             return "auto"
         return None
 
+    def _quota_handoff_waiting(self, snapshot):
+        """A call that ran out of quota left retained work, and no partner,
+        its own source included, has quota to take it yet."""
+        objective, run = snapshot.get("objective") or {}, snapshot.get("current_run") or {}
+        policy = objective.get("execution_policy") or {}
+        handoff = self._quota_handoffs.get(snapshot["room"]["id"])
+        return bool(snapshot["room"]["lifecycle_state"] == "active" and policy.get("mode") == "autonomous"
+                    and policy.get("quota_failover") and objective.get("status") in {"stopped", "interrupted"}
+                    and handoff and handoff["run_id"] == run.get("id")
+                    and handoff["state"] == "blocked" and handoff["reason"] == "agent_quota_exhausted")
+
     def _stop_kind(self, snapshot, continuation):
         """How a stopped objective resumes without the user, so the room page and
         the room list say the same thing: "auto", "quota_wait", or None when the
         next step is the user's."""
+        if self._quota_handoff_waiting(snapshot):
+            return "quota_wait"
         kind = self._stop_kind_candidate(snapshot)
         if kind != "auto":
             return kind
@@ -1908,6 +1923,9 @@ class RoomService:
             if reason:
                 raise RoomError(reason)
             quota_failure = current.get("native_quota_failure")
+            quota_returned = []
+            if quota_failure and self._quota_source_back(snapshot, quota_failure["provider"], quota_failure["source_job_id"]):
+                quota_returned, quota_failure = [quota_failure["provider"]], None
             # An exact exhausted source is being retired, not checked as a
             # possible recipient. Its login cache cannot veto healthy receivers.
             # Partners already retired from this objective receive no work; an
@@ -2025,7 +2043,8 @@ class RoomService:
                                           help_repair=help_repair,
                                           quota_blocked=quota_blocked, ownership_files=ownership_files, user_message=user_message,
                                           request_identity=_request_identity, runtime_change=runtime_change, message_target=_message_target,
-                                          directed_followup=directed_followup, recovery_source=source)
+                                          directed_followup=directed_followup, recovery_source=source,
+                                          quota_returned=quota_returned)
             except BaseException:
                 for provider, prepared in receiver_workspaces.items():
                     self._discard_partial_receiver(room_id, provider, prepared)
@@ -2139,7 +2158,8 @@ class RoomService:
         receivers = {}
         used = set()
         quota_failure = (snapshot.get("current_run") or {}).get("native_quota_failure")
-        blocked = set(blocked or []) | ({quota_failure["provider"]} if quota_failure else set())
+        blocked = set(blocked or []) | ({quota_failure["provider"]} if quota_failure and not self._quota_source_back(
+            snapshot, quota_failure["provider"], quota_failure["source_job_id"]) else set())
         # Reserve available original owners before assigning a quota fallback;
         # one owner's retained tree must never replace another owner's D.
         def available(provider):
@@ -2168,6 +2188,21 @@ class RoomService:
             used.add(choices[0])
         return receivers
 
+    def _quota_source_back(self, snapshot, provider, job_id):
+        """The partner whose quota stopped a call takes its own task back once
+        its quota has positively returned; until then only a peer can. Usage
+        read before that call failed proves nothing about now."""
+        if self.partner_manager is None:
+            return False
+        failed_at = max((event["created_at"] for event in snapshot["events"]
+                         if event["kind"] == "job_finished" and event.get("job_id") == job_id), default=None)
+        try:
+            checked = ((self.partner_manager.get(provider).get("account") or {}).get("quota") or {}).get("checked_at")
+        except PartnerError:
+            return False
+        return (failed_at is not None and type(checked) in (int, float) and checked > failed_at
+                and self._quota_returned([provider]))
+
     def _partial_recovery_receiver(self, snapshot, *, blocked=None):
         receivers = self._partial_recovery_receivers(snapshot, blocked=blocked)
         return next(iter(receivers.values()), None) if receivers is not None else None
@@ -2176,7 +2211,11 @@ class RoomService:
         if self.partner_manager is not None:
             profiles = {profile["id"]: profile for profile in self.partner_manager.profiles()
                         if profile["enabled"] and profile["lifecycle_state"] == "active"}
-            states = [profiles[member["id"]]["availability"] for member in snapshot["members"] if member["id"] in profiles]
+            # The partner whose call just ran out of quota is not a receiver to wait on.
+            quota_failure = (snapshot.get("current_run") or {}).get("native_quota_failure")
+            source = quota_failure["provider"] if quota_failure else None
+            states = [profiles[member["id"]]["availability"] for member in snapshot["members"]
+                      if member["id"] in profiles and member["id"] != source]
             if not states:
                 return "no_available_partner"
             if any(item["state"] != "blocked" or item.get("reason") == "account_identity_unknown" for item in states):
@@ -4447,18 +4486,37 @@ class RoomService:
                 # timer or a new checked_at timestamp elapsed.
                 availability.append([member["id"], profile["adapter"], profile["enabled"],
                     profile["lifecycle_state"], state["state"], state.get("reason")])
-        key = hashlib.sha256(json.dumps([binding, candidates, availability], sort_keys=True).encode()).hexdigest()
+        returned = sorted({item["provider"] for item in quota
+                           if self._quota_source_back(snapshot, item["provider"], item["job_id"])})
+        key = hashlib.sha256(json.dumps([binding, candidates, availability, returned], sort_keys=True).encode()).hexdigest()
         previous = self._quota_handoffs.get(room_id)
         if previous and previous["key"] == key:
-            return  # Same failed evidence cannot spin an automatic retry loop.
+            # Same failed evidence cannot spin an automatic retry loop. While no
+            # partner has quota, recheck accounts the way the quota wait does,
+            # so the source's own reset or a peer's brings the task back.
+            if (previous["state"] == "blocked" and previous["reason"] == "agent_quota_exhausted"
+                    and self.partner_manager is not None and self.invoke is None
+                    and self.clock() - previous["checked_at"] >= _QUOTA_WAIT_RECHECK_SECONDS):
+                previous["checked_at"] = self.clock()
+                refresh = asyncio.create_task(self._refresh_quota_handoff_partners(
+                    [member["id"] for member in snapshot["members"]]))
+                refresh.add_done_callback(self._worker_done)
+            return
         task = self._quota_handoff_tasks.get(room_id)
         if task is not None and not task.done():
             return
-        status = {"key": key, "run_id": run["id"], "source_job_id": quota[0]["job_id"], "state": "pending", "reason": None}
+        status = {"key": key, "run_id": run["id"], "source_job_id": quota[0]["job_id"], "state": "pending", "reason": None,
+                  "checked_at": self.clock()}
         self._quota_handoffs[room_id] = status
         task = asyncio.create_task(self._automatic_quota_handoff(room_id, status, binding))
         self._quota_handoff_tasks[room_id] = task
         task.add_done_callback(self._worker_done)
+
+    async def _refresh_quota_handoff_partners(self, providers):
+        try:
+            await self.partner_manager.refresh_availability(providers)
+        except (PartnerError, OSError, ValueError):
+            pass  # The next recheck tries again.
 
     def _confirm_late_cleanup(self, room_id, snapshot):
         """A call cancelled while the service shut down can record cleanup as
