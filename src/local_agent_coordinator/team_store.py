@@ -332,7 +332,9 @@ class TeamStore:
         """Carry a frozen board, not old calls or previous ownership grants."""
         resumable = {"budget_exhausted", "objective_calls_exhausted", "objective_deadline_exceeded",
                      "objective_stage_limit", "deadline_exceeded", "cancelled", "service_shutdown",
-                     "invoke_interrupted", "explicit_new_attempt", "invalid_team_commands"}
+                     "invoke_interrupted", "explicit_new_attempt", "invalid_team_commands",
+                     # Running out of quota pauses a task; it is not a question for the user.
+                     "all_partners_quota_exhausted", "agent_quota_exhausted", "subscription_limit_reached"}
         # A reply mistake applied nothing; the carried task is redone, not a
         # question for the user.
         resumable.update(REPLY_MISTAKES)

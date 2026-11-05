@@ -308,6 +308,52 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["objective"]["budget"]["used"], len(self.fake.calls))
         self.assertEqual(sum(job["status"] == "failed" for job in result["jobs"]), 1)
 
+    async def test_every_partner_out_of_quota_waits_then_continues_the_same_board_when_one_is_back(self):
+        # Catches: once every partner was out of quota the room stayed stopped
+        # after the quota came back, until the user pressed continue by hand.
+        original, exhausted = self.handler, {"claude", "codex"}
+        def handler(agent, context):
+            if agent in exhausted and context["job"]["job_phase"] == "work":
+                return {"adapter_failure": "subscription_limit_reached"}
+            return original(agent, context)
+        async def guard(members):
+            if any(member in exhausted for member in members):
+                raise RoomError("agent_quota_exhausted")
+        created = await self.create()
+        self.fake.handler = handler
+        await self.settle()
+        room = created["room"]["id"]
+        stopped = await self.service.read_room(room)
+        self.assertEqual(stopped["team"]["stop_reason"], "all_partners_quota_exhausted")
+        self.assertEqual(sorted(stopped["objective"]["retired_partners"]), ["claude", "codex"])
+        self.service._guard_availability = guard
+        calls = len(self.fake.calls)
+
+        async def tick():
+            await self.service.expire_tasks()
+            wait = self.service._quota_waits.get(room)
+            if wait is not None:
+                await wait["task"]
+            await self.settle()
+            return await self.service.read_room(room)
+
+        waiting = await tick()
+        self.assertEqual(waiting["current_run"]["id"], stopped["current_run"]["id"])
+        self.assertEqual(waiting["team"]["phase"], "stopped")
+        self.assertEqual(len(self.fake.calls), calls)
+        exhausted.discard("codex")
+        self.now += 60
+        # Rechecks are spaced out, so a quota that just returned waits for the next one.
+        self.assertEqual((await tick())["current_run"]["id"], stopped["current_run"]["id"])
+        self.now += 300
+        final = await tick()
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertNotEqual(final["current_run"]["id"], stopped["current_run"]["id"])
+        self.assertEqual(final["objective"]["continuation"]["preserved_task_ids"], ["main"])
+        self.assertEqual(final["team"]["tasks"][0]["owner"], "codex")
+        self.assertFalse(any(call["agent"] == "claude" for call in self.fake.calls[calls:]))
+        self.assertTrue(any(event["kind"] == "quota_wait_resumed" for event in final["events"]))
+
     async def test_preclaim_quota_reassigns_planning_without_charging_retired_member(self):
         async def guard(members):
             if "claude" in members:
