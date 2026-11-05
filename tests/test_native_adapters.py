@@ -633,14 +633,15 @@ for index in range(3):
         self.assertEqual(result['status'], 'completed')
 
     async def test_claude_command_timers_are_process_local_and_settings_cannot_lower_them(self):
-        expected = {'BASH_DEFAULT_TIMEOUT_MS': '2147483647', 'BASH_MAX_TIMEOUT_MS': '2147483647'}
+        expected = {'BASH_DEFAULT_TIMEOUT_MS': '2147483647', 'BASH_MAX_TIMEOUT_MS': '2147483647',
+                    'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '1'}
         events = [{'type': 'system', 'subtype': 'init', 'session_id': SESSION},
                   {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'structured_output': FINAL}]
         before = (f"expected={expected!r}; "
                   "assert {key:os.environ.get(key) for key in expected} == expected; "
                   "settings=json.loads(sys.argv[sys.argv.index('--settings')+1]); "
                   "assert settings == {'apiKeyHelper':'','env':expected}")
-        inherited = {'BASH_DEFAULT_TIMEOUT_MS': '1', 'BASH_MAX_TIMEOUT_MS': '2'}
+        inherited = {'BASH_DEFAULT_TIMEOUT_MS': '1', 'BASH_MAX_TIMEOUT_MS': '2', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '0'}
         with patch.dict(os.environ, inherited):
             with self.make_stub(events, agent='claude', before=before):
                 result = await native.invoke_native('claude', 'hello', self.root,
@@ -1085,6 +1086,10 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(claude[claude.index('--permission-mode') + 1],
                                  'plan' if mode == 'plan' else 'bypassPermissions')
                 self.assertEqual(json.loads(claude[claude.index('--settings') + 1])['apiKeyHelper'], '')
+                # Catches: a background command or monitor waking the model in a
+                # later turn, ending one call with several result events.
+                self.assertEqual(json.loads(claude[claude.index('--settings') + 1])['env']['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'], '1')
+                self.assertIn('--disallowedTools=Monitor,CronCreate,CronDelete,CronList,ScheduleWakeup', claude)
             for mode in ('read_only', 'workspace_write'):
                 codex = native.native_command('codex', permission=mode)
                 self.assertIn('--ignore-rules', codex)

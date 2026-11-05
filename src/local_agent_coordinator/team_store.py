@@ -1162,6 +1162,9 @@ class TeamStore:
             "team_capability_unavailable": " The requested capability is unavailable in this room; use text.",
             "native_json_files_forbidden": (" Native calls write files directly in the private project tree; leave "
                                             "files and edits empty in the JSON reply."),
+            "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
+                                         "neither depends on the other. Add that existing task to the new task's dependencies, "
+                                         "or choose write_paths no other task writes."),
         }.get(error, "")
         diagnostic = (rejection_evidence or {}).get("response_validation") or {}
         for issue in diagnostic.get("commands", []):
@@ -2144,14 +2147,16 @@ class TeamStore:
     def _stop_if_planning_blocked(self, db, room_id, providers):
         """Stop when every planner still needed repeated a refused reply.
 
-        A refused correction blocks only that member's plan phase. During
-        planning nothing else can advance, so waiting would leave the room
-        planning forever with no call queued and no way forward.
+        A refused correction blocks only that member's plan or coordinate
+        phase (internal replanning coordinates). During planning nothing else
+        can advance, so waiting would leave the room planning forever with no
+        call queued and no way forward.
         """
         if not providers or db.execute("SELECT 1 FROM jobs WHERE room_id=? AND status IN ('queued','working')",
                                        (room_id,)).fetchone():
             return False
-        if not all(self.response_blocked(db, room_id, provider, "plan") for provider in providers):
+        if not all(self.response_blocked(db, room_id, provider, "plan")
+                   or self.response_blocked(db, room_id, provider, "coordinate") for provider in providers):
             return False
         row = db.execute("SELECT json_extract(value_json,'$.code') FROM events WHERE room_id=? "
             "AND json_extract(value_json,'$.kind')='native_response_blocked' "
