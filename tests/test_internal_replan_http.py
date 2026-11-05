@@ -73,6 +73,26 @@ class InternalReplanFixture(HelpScopeFixture):
         return super().reply(agent, context, cwd)
 
 
+class OverlappingPrerequisiteFixture(InternalReplanFixture):
+    """The author's prerequisite first writes an accepted task's path with no dependency."""
+    def __init__(self, *, repeat_overlap=False):
+        super().__init__()
+        self.repeat_overlap = repeat_overlap
+        self.overlaps = 0
+
+    def reply(self, agent, context, cwd):
+        board = context['team']['tasks']
+        if (context['job']['job_phase'] in {'plan', 'coordinate'} and self.t3_calls and agent == 'kimi'
+                and not any(item['id'] == 'T4' for item in board)
+                and (self.repeat_overlap or 'neither depends on the other' not in context['job']['text'])):
+            self.overlaps += 1
+            self.replan_prompts.append(context['job']['text'])
+            # peer.md belongs to accepted T2; the new task neither depends on it nor it on T4.
+            return native_reply(context, [proposal('T4', paths=['peer.md']), {'type': 'claim', 'task_id': 'T4'},
+                                          {'type': 'plan_ready'}])
+        return super().reply(agent, context, cwd)
+
+
 class InternalReplanHTTPTests(unittest.TestCase):
     def fixture(self, *args, **options):
         fixture = InternalReplanFixture(*args, **options)
@@ -120,6 +140,38 @@ class InternalReplanHTTPTests(unittest.TestCase):
         self.assertTrue(all(call['permission'] == 'full_access' for call in fixture.calls))
         self.assertFalse(any(member['identity_uncertain'] for member in final['members']))
         self.assertTrue(all(item['result']['native_execution']['cleanup_confirmed'] for item in fixture.results))
+
+    def test_prerequisite_overlapping_an_existing_path_is_corrected_instead_of_stopping(self):
+        # Catches: an internal-replan proposal writing another task's path with
+        # no dependency raised team_write_path_conflict and stopped the objective.
+        fixture = OverlappingPrerequisiteFixture()
+        self.addCleanup(fixture.close)
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertEqual(fixture.overlaps, 1)
+        corrections = [event['code'] for event in final['events'] if event['kind'] == 'format_correction_queued']
+        self.assertEqual(corrections, ['team_write_path_conflict'])
+        self.assertFalse(any(event['kind'] == 'objective_stopped' for event in final['events']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual(tasks['T4']['write_paths'], ['README.md'])
+        self.assertEqual(tasks['T2']['write_paths'], ['peer.md'])
+        self.assertTrue(all(task['status'] == 'accepted' for task in tasks.values()))
+
+    def test_prerequisite_repeating_the_overlap_stops_instead_of_hanging(self):
+        # Catches: after its one correction was refused as repeated evidence,
+        # the replanning author was left needing the user with nothing queued.
+        fixture = OverlappingPrerequisiteFixture(repeat_overlap=True)
+        self.addCleanup(fixture.close)
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['team']['phase'], 'stopped', final['team'])
+        self.assertEqual(final['team']['stop_reason'], 'team_write_path_conflict')
+        # The stop still offers a way forward: the user can continue the objective.
+        self.assertTrue(final['current_run']['can_restart_objective'], final['current_run'].get('restart_objective_reason'))
+        self.assertEqual(fixture.overlaps, 2)
+        self.assertFalse(any(job['status'] in {'queued', 'working'} for job in final['jobs']))
+        self.assertFalse(any(task['id'] == 'T4' for task in final['team']['tasks']))
 
     def test_real_permission_and_user_decision_are_not_relabelled_by_reason_text(self):
         for cause in ('permission_required', 'user_decision'):
