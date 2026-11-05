@@ -4413,9 +4413,14 @@ class RoomService:
             return
         job = {"id": candidate["job_id"], "room_id": room_id, "provider": candidate["provider"],
                "team": {"job_phase": candidate["phase"], "task_id": candidate["task_id"]}}
-        if candidate["job_id"] not in self._quota_stop_audits:
-            self._quota_stop_audits[candidate["job_id"]] = self._tree_unchanged(job, candidate["own_paths"])
-        if not self._quota_stop_audits[candidate["job_id"]]:
+        audit = self._quota_stop_audits.setdefault(candidate["job_id"], {"at": self.clock(), "clean": None})
+        # The same pause as the automatic continue, so dedicated recoveries and
+        # cleanup receipts settle before the tree is judged.
+        if self.clock() - audit["at"] < _AUTO_CONTINUE_DELAY_SECONDS:
+            return
+        if audit["clean"] is None:
+            audit["clean"] = self._tree_unchanged(job, candidate["own_paths"])
+        if not audit["clean"]:
             return
         settled = self.store.settle_clean_stop(room_id, candidate["job_id"])
         if settled is None or settled["reason"] != "subscription_limit_reached":

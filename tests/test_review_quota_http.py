@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from local_agent_coordinator import room_service
 from local_agent_coordinator.room_service import RoomService
 from test_kimi_work_quota_http import WorkQuotaFixture
 
@@ -32,6 +33,11 @@ class ReviewQuotaFixture(WorkQuotaFixture):
 
 
 class ReviewQuotaHTTPTests(unittest.TestCase):
+    def setUp(self):
+        delay = patch.object(room_service, '_AUTO_CONTINUE_DELAY_SECONDS', 0)
+        delay.start()
+        self.addCleanup(delay.stop)
+
     def fixture(self, **kwargs):
         value = ReviewQuotaFixture(**kwargs)
         self.addCleanup(value.close)
