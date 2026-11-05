@@ -29,7 +29,7 @@ const COPY = {
     actualSize: 'Actual Size', zoomIn: 'Zoom In', zoomOut: 'Zoom Out', fullscreen: 'Toggle Full Screen', window: 'Window', minimize: 'Minimize',
     zoomWindow: 'Zoom Window', front: 'Bring All to Front', help: 'Help', howTo: 'How to Use Beanest', ok: 'OK',
     credits: 'A local workspace for collaborating with AI partners', helpTitle: 'Work toward a goal with your partners',
-    helpDetail: 'Choose the partners for this task, then enter a goal. They collaborate in the same chat.\n\nOpen Tools & status to check connections and recent usage. To use an existing project, choose its folder and click Add project. Partners inspect files as needed after you send the task; changes are kept in isolated copies.',
+    helpDetail: 'Choose the partners for this task, then enter a goal. They collaborate in the same chat.\n\nOpen Tools & Status to check connections and recent usage. To use an existing project, choose its folder and click Add Project. Partners inspect files as needed after you send the task; changes are kept in isolated copies.',
     startupFailed: 'Beanest could not start', startupRetry: 'Restart using scripts/start-coordinator.command in the project. If this still fails, check that the project Python environment is installed.',
     cleanupUnknown: 'The background service has not confirmed that it stopped. Check Beanest’s active processes and confirm they have ended before trying again.',
     stopUnknown: 'Beanest’s background tasks have not confirmed that they stopped', stopDetail: 'Check Beanest’s active processes. Closing the window does not mean background tasks have ended.',
