@@ -23,7 +23,7 @@
 
 ## 快速开始
 
-需要 **Python 3.11+**；桌面启动还需要 **Node.js 22.12+**。至少安装并登录一个已支持的官方 Agent CLI。模型权限、会员额度及使用条款由各供应商管理。
+需要 **Python 3.12+**；桌面启动还需要 **Node.js 22.12+**。至少安装并登录一个已支持的官方 Agent CLI。模型权限、会员额度及使用条款由各供应商管理。
 
 ```sh
 git clone https://github.com/kingsleyli920/beanest.git

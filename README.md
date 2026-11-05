@@ -23,7 +23,7 @@ Beanest is an independent, early-stage project for a single user on their own co
 
 ## Quick start
 
-You need **Python 3.11+**, **Node.js 22.12+** for the desktop launcher, and at least one supported agent CLI installed and signed in. Provider access, supported models, subscription limits, and terms are managed by each provider.
+You need **Python 3.12+**, **Node.js 22.12+** for the desktop launcher, and at least one supported agent CLI installed and signed in. Provider access, supported models, subscription limits, and terms are managed by each provider.
 
 ```sh
 git clone https://github.com/kingsleyli920/beanest.git
