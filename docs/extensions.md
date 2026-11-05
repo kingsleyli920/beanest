@@ -1,20 +1,20 @@
 # 扩展本地 Agent
 
-成员、头像、能力与用量字段由 `AgentRegistry` 提供。服务、HTTP、MCP 和 UI 不再各自维护参与成员名单。当前默认仅注册经过真实验证的 Claude Code 与 Codex；DeepSeek、Kimi、Cursor 等尚未接入。
+成员、头像、能力与用量字段由 `AgentRegistry` 提供。服务、HTTP、MCP 和 UI 都从这里读取成员。内置 Claude Code、Codex 和 Kimi Code 三个原生适配器（Kimi 被发现后加入）；DeepSeek、Cursor 等尚未接入。
 
 ## 自动发现与手动添加
 
-应用打开时刷新已支持工具的安装情况；复用已有服务的窗口也可请求 `POST /api/partners/discover`，正文为 `{}`。发现只检查 Claude Code / Codex 的 PATH 和固定安装位置，不启动 CLI，不读取聊天、项目或凭据，不调用模型。GET 继续返回最近一次观察，不因页面轮询重复检测。已手动停用的工具保持停用，不创建重复身份，也不把新工具塞进旧房间。
+应用打开时刷新已支持工具的安装情况；复用已有服务的窗口也可请求 `POST /api/partners/discover`，正文为 `{}`。发现检查 Claude Code、Codex 和 Kimi Code 的 PATH 和固定安装位置；Kimi 已安装时会启动一次不发提示词的握手确认登录状态。不读取聊天、项目或凭据，不调用模型。GET 继续返回最近一次观察，不因页面轮询重复检测。已手动停用的工具保持停用，不创建重复身份，也不把新工具塞进旧房间。
 
 安装、接入检查和当前任务是三件事：找到可执行文件不代表已登录；接入检查通过不代表正在工作；旧用量不代表剩余额度。“检查连接”是显式、有界的无推理检查，结果保留检查时间；认证、费用或余额无法核实时显示未知。
 
 手动添加有三种用途：
 
 - **已有工具的独立会话**：选择 `claude` / `codex`，增加名称和形象。它们复用本机已验证的原生适配器和同一登录，不是新增供应商、账号或额度。
-- **先保存待配置工具**：`kimi`、`deepseek` 模板允许先保存。没有兼容连接器时显示“待配置”，不参与任务，也不会自行安装软件或调用 API。
+- **先保存待配置工具**：`deepseek` 等模板允许先保存（以前保存的 Kimi JSON 连接器配置仍按原协议保留）。没有兼容连接器时显示“待配置”，不参与任务，也不会自行安装软件或调用 API。
 - **接入兼容本机 CLI**：选择 `local_json`，或给上述模板配置实现 `beanest-json-v1` 的本机连接器。只有可执行文件存在、显式接入检查通过且没有停用，才进入新任务的可选名单。
 
-Kimi、DeepSeek 的名字只是模板，**不表示其原厂 CLI 已经适配**。把任意厂商命令填进去不会自动转换协议。原生适配器仍是未来优先的扩展方式；通用连接器为已有兼容工具和自行维护的本机封装提供一个明确入口。
+DeepSeek 等名字只是模板，**不表示其原厂 CLI 已经适配**。把任意厂商命令填进去不会自动转换协议。原生适配器仍是未来优先的扩展方式；通用连接器为已有兼容工具和自行维护的本机封装提供一个明确入口。
 
 `PartnerManager` 私有保存最多32个配置，每个新房间明确选择1–8位。新工具先登记身份和接入，再选择参与者。形象 `bean_style` 只作装饰，可选 `sprout`、`peach`、`sky`、`lavender`、`sunshine`、`cocoa`，不代表能力或权限。
 
@@ -24,7 +24,7 @@ Kimi、DeepSeek 的名字只是模板，**不表示其原厂 CLI 已经适配**�
 
 这是一个**显式信任本机可执行程序**的高级入口，不是插件下载器或操作系统沙箱。豆窝使用 `create_subprocess_exec` 传入字面 argv，不拼 shell 命令、不展开变量或占位符，不接受环境变量配置；直接 shell 启动器及指向它们的符号链接会被拒绝。它仍不能阻止一个被你信任的程序在内部做其他事。只连接自己维护或了解来源的程序，连接器须关闭自己的工具、文件写入与外部委派功能。
 
-进程只继承操作系统必需环境，不传递 API key、提供方路由或代理覆盖。不要把密钥写入参数。`billing` 只接受 `local`（本地运行）或 `existing_subscription`（现有订阅）；没有新增付费 API 模式，也不会帮你购买或注册服务。通用连接器的账务字段是**配置和连接器的声明**，豆窝没有据此核实厂商订阅或账单，`subscription_confirmed`、费用和余额保持未知；不要把“连接可用”理解为免费或订阅已获确认。Claude / Codex 的原生订阅检查仍单独处理。
+进程只继承操作系统必需环境，以及你自己的代理和 CA 证书设置（如 `HTTPS_PROXY`、`SSL_CERT_FILE`），不传递 API key 或提供方路由。不要把密钥写入参数。`billing` 只接受 `local`（本地运行）或 `existing_subscription`（现有订阅）；没有新增付费 API 模式，也不会帮你购买或注册服务。通用连接器的账务字段是**配置和连接器的声明**，豆窝没有据此核实厂商订阅或账单，`subscription_confirmed`、费用和余额保持未知；不要把“连接可用”理解为免费或订阅已获确认。Claude / Codex / Kimi 的原生订阅检查单独处理。
 
 先保存待配置模板：
 
@@ -131,7 +131,7 @@ helper = AgentSpec(
 
 适配器也可显式提供 `AgentSpec.invoke_structured`：签名在 `invoke` 基础上接收 `response_schema` 关键字参数，返回同样的结果字典。服务只向该hook发送当前模式与成员对应的schema；自定义适配器未声明时继续使用原来的 `invoke`，不猜测参数或因TypeError重试。`default_registry(custom_invoke)`不会启用内置结构化hook。
 
-默认两种CLI现在使用原生格式约束：Codex的 `--output-schema` 和Claude的 `--json-schema`。Claude只读取唯一成功结果的 `structured_output`，不回退说明文字；其原生 `StructuredOutput` 仅视为格式事件，其他工具仍拒绝。Codex仅解析最后一条完整的非commentary回复，不拼接片段。临时schema在私有目录保存并清理，Unicode按实际UTF-8字节计上限；服务仍严格检查完整响应、身份、文件负责人和版本。参见[Codex官方命令说明](https://learn.chatgpt.com/docs/developer-commands#codex-exec)及[Claude官方结构化输出说明](https://code.claude.com/docs/en/headless#get-structured-output)。原生格式约束不增加执行权限，也不保证代码或审核结论正确。
+内置 CLI 使用原生格式约束：Codex 的 `--output-schema`、Claude 的 `--json-schema`，Kimi 也接收同一份 `response_schema`。Claude只读取唯一成功结果的 `structured_output`，不回退说明文字；其原生 `StructuredOutput` 仅视为格式事件，其他工具仍拒绝。Codex仅解析最后一条完整的非commentary回复，不拼接片段。临时schema在私有目录保存并清理，Unicode按实际UTF-8字节计上限；服务仍严格检查完整响应、身份、文件负责人和版本。参见[Codex官方命令说明](https://learn.chatgpt.com/docs/developer-commands#codex-exec)及[Claude官方结构化输出说明](https://code.claude.com/docs/en/headless#get-structured-output)。原生格式约束不增加执行权限，也不保证代码或审核结论正确。
 
 - `text` 是一个协作响应 JSON，契约见 [room-contract.md](room-contract.md)。仅一个完整 JSON 代码框可被兼容解析，正文外夹带说明仍拒绝。
 - `session_id` 必须是供应商实际返回的显式续接标识。默认 Claude/Codex 用 UUID 校验；其他适配器可提供 `normalize_session_id`，但最终仍受长度和字符边界限制，身份改变不会被静默接纳。
@@ -140,15 +140,15 @@ helper = AgentSpec(
 
 ## 共享任务协议与能力边界
 
-UI新建并选择2–8位成员时使用`collaboration:true`，HTTP/MCP调用者也可显式选择；省略或false保持旧actions协议，单工具房间不使用共享协议。新协议不是新的供应商适配器：仍调用各成员的原生CLI专用会话，工具关闭，完整响应改为`{message,state,commands}`，文件模式另带base_revision/files。结构化hook收到对应schema，自定义invoke仍由服务严格校验，不能把任意工具事件当作协作命令。
+UI新建并选择2–8位成员时使用`collaboration:true`，HTTP/MCP调用者也可显式选择；省略或false保持旧actions协议，单工具房间不使用共享协议。新协议不是新的供应商适配器：仍调用各成员的原生CLI专用会话；文字和文件模式下工具关闭（`native_project` 另见[项目协作](projects.md)），完整响应改为`{message,state,commands}`，文件模式另带base_revision/files。结构化hook收到对应schema，自定义invoke仍由服务严格校验，不能把任意工具事件当作协作命令。
 
 `team_store.py`是共享清单和状态单源：初始接收者提出最多8项真实交付，各成员对确切清单revision确认并各自claim；依赖必须构成DAG。每成员最多一个在途调用，不同成员可在不同路径并行；同路径不能跨负责人覆盖，文件提交仍由协调层检查owner、hash及版本。request_help绑定具体task、接收者、能力和问题，回答作为help_result返回原负责人；complete记录具体result及其实际结果版本/文件hash，再安排非作者review，不能凭模型正文自称完成。
 
 所有子任务accepted只是ready_for_user，表示交付并互审、等待用户验收。`collaboration_view.py`基于记录生成tasks和outcome，保留具体原因、下一步、未完成项、文件版本与检查范围；只有当前版本精确匹配的隔离进程退出0且清理确认，才展示sandbox_execution，仍不等于目标验收。旧room保留team:null与round_finished语义，不补造共享分工或全局验收。
 
-团队固定最多32次派发、7200秒、8项任务，单次调用最多600秒并受剩余期限约束；旧协议默认8次、900秒、120秒。适配器必须遵守实际传入timeout及取消清理，不因任务未完成而无界重试或绕过额度。失败、未知、取消及重启不会自动重放；2小时是上限，不能把等待或用满预算当作1–2小时真实协作通过。
+团队一次最多提出 8 项任务，单次调用最多 600 秒；不按总调用次数或总时长停止。适配器必须遵守实际传入timeout及取消清理，不因任务未完成而无界重试或绕过额度。失败、未知、取消及重启不会自动重放；自主目标下可恢复的停下按[停止策略](room-contract.md#停止策略)自动继续一次。
 
-当前可用能力只有文字，以及文件模式中的选定文本隔离稿/新建Python文件提案。image对所有当前成员明确不可用；需要image的提案或求助记录capability_unavailable并等待用户，不把工具名称、装饰形象或注册能力声明当作实际图片接入，不自动新增API或改变计费路径。内置原生适配器关闭shell、源目录编辑和其它外部工具；通用连接器的无工具约束还取决于受信任程序正确实现协议，不是操作系统沙箱。python_sandbox的运行由协调层把固定快照交给已准备的受限runner，不授予模型工具权限。新增能力需另行实现真实边界与验证，不能由共享任务协议推导为任意项目自由开发。
+当前可用能力只有文字，以及文件模式中的选定文本隔离稿/新建Python文件提案。image对所有当前成员明确不可用；需要image的提案或求助记录capability_unavailable（自主目标下按停止策略自动重开一次，仍不可用则等待用户），不把工具名称、装饰形象或注册能力声明当作实际图片接入，不自动新增API或改变计费路径。文字和文件模式下，内置原生适配器关闭shell、源目录编辑和其它外部工具；通用连接器的无工具约束还取决于受信任程序正确实现协议，不是操作系统沙箱。python_sandbox的运行由协调层把固定快照交给已准备的受限runner，不授予模型工具权限。新增能力需另行实现真实边界与验证，不能由共享任务协议推导为任意项目自由开发。
 
 在应用启动时把完整 registry 传给 `RoomService(..., registry=registry)`。内置目录在 `agent_registry.default_registry()`；若开发者决定加入新适配器，只在目录注册入口组合，UI、存储和 MCP 不应出现它的专用条件分支。自动安装发现仅支持显式可信resolver，新增原生供应商还须实现并验证自己的接入和定位路径。不会自动运行发现的未知命令；通用连接器只有经用户显式配置后才能执行握手，通过后才可派发。显式注入registry/manager不会隐式扫描本机，便于受控集成和测试。
 

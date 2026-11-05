@@ -1,0 +1,52 @@
+name: Bug report · 问题反馈
+description: Something in Beanest does not work as described. · 豆窝的表现和说明不一致。
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste credentials, `connection.json`, runtime databases, full transcripts, or screenshots with personal information. Security issues go to [private vulnerability reporting](https://github.com/kingsleyli920/beanest/security/advisories/new).
+        不要贴凭据、`connection.json`、运行数据库、完整聊天记录或带个人信息的截图。安全问题请走[私密漏洞报告](https://github.com/kingsleyli920/beanest/security/advisories/new)。
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened · 发生了什么
+      description: What you did, what you expected, and what you saw instead. · 你做了什么，预期是什么，实际看到什么。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce · 复现步骤
+      description: Use fictional data where possible. · 尽量用虚构数据。
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How you run Beanest · 运行方式
+      options:
+        - macOS desktop app · macOS 桌面版
+        - Local browser (room_server) · 本机浏览器
+    validations:
+      required: true
+  - type: input
+    id: agents
+    attributes:
+      label: Agents and versions · 伙伴与版本
+      description: e.g. Claude Code 2.x, Codex 0.x, Kimi Code 1.x
+  - type: input
+    id: env
+    attributes:
+      label: Beanest commit, OS, Python, Node · 豆窝提交、系统、Python、Node
+      description: "`git rev-parse --short HEAD`, macOS version, `python3 --version`, `node --version`"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error text · 报错文字
+      description: Only the relevant lines, with paths and account names removed. · 只贴相关几行，去掉路径和账号名。
+      render: text

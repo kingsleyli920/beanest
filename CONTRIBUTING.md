@@ -14,7 +14,7 @@ Use [issues](https://github.com/kingsleyli920/beanest/issues) for reproducible b
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 .venv/bin/python -m unittest discover -s tests -v
-node --test tests/room_ui.test.cjs
+node --test tests/room_ui.test.cjs tests/room_i18n.test.cjs
 npm --prefix desktop ci
 npm --prefix desktop test
 ```
