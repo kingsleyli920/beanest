@@ -1590,8 +1590,8 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
   .app-shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar { display: none; }
 }
-/* A narrow partner column gives the name the whole first row; the model and the appearance link stack below it. */
-@media (max-width: 1180px) {
+/* A narrow partner column (laptop widths) gives the name the whole first row; the model and the appearance link stack below it. */
+@media (max-width: 1366px) {
   .member-heading > div { grid-column: 2 / -1; }
   .member-heading > .member-model { grid-column: 2 / -1; grid-row: 2; justify-self: start; max-width: 100%; }
   .member-heading .appearance-button, html[lang="en"] .member-heading > .appearance-button { grid-column: 2 / -1; grid-row: 3; }
@@ -1604,3 +1604,16 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .provider-account > summary { flex-wrap: nowrap; }
 .provider-account > summary > span { white-space: nowrap; }
 .provider-account > summary > .quota-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The settings button names the permission in full; it has room beside the other composer actions. */
+.composer-bottom > #runtime-settings.composer-action { max-width: 260px; }
+/* Outside the chat, the card at the top already says who is working; the strip above the composer would repeat it over the list. */
+.conversation[data-tab="progress"] .work-indicator, .conversation[data-tab="delivery"] .work-indicator,
+.conversation[data-tab="materials"] .work-indicator { display: none; }
+/* Task titles get two lines in the list, as in the design, before they are cut. */
+.room-card-title { display: -webkit-box; white-space: normal; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* A progress line with nothing new to say takes no room, and the narrow heading packs its rows tighter. */
+.member-public-progress:not(:has(> :not(.idle))) { display: none; }
+@media (max-width: 1366px) {
+  .member-heading { row-gap: 4px; }
+  .member-card .provider-account { margin-top: 4px; }
+}

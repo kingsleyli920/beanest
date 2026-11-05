@@ -25,7 +25,7 @@ test('English catalog covers all three source shards without blank copy or chang
 test('localization substitutes authored parameters verbatim and translates only seeded labels', () => {
   const {api} = runtime();
   const opaque = '新任务 <script>不会执行</script> {p1}';
-  assert.ok(api.t('第{p0}阶段 · ',{p0:opaque}).includes(opaque));
+  assert.ok(api.t('第 {p0} 阶段 · ',{p0:opaque}).includes(opaque));
   const original = { system: '新任务' }; const labels = api.labels(original);
   assert.equal(labels.system,'New task'); original.user = '新任务'; assert.equal(labels.user,'新任务');
   original.system = '用户的新任务'; assert.equal(labels.system,'用户的新任务');
@@ -44,7 +44,8 @@ test('every English entry is still used by the source, so renamed copy cannot le
   const sources = [path.join(asset, 'app.js'), path.join(asset, 'markdown.js'), path.join(asset, 'index.html'),
     ...fs.readdirSync(path.join(root, 'src/local_agent_coordinator')).filter(name => name.endsWith('.py')).map(name => path.join(root, 'src/local_agent_coordinator', name))]
     .map(file => fs.readFileSync(file, 'utf8')).join('\n');
-  const literal = key => [JSON.stringify(key), `'${key}'`, JSON.stringify(key).slice(1, -1)].some(form => sources.includes(form));
+  // Only a whole quoted literal counts; a key that merely appears inside a longer string is unused.
+  const literal = key => [JSON.stringify(key), `'${JSON.stringify(key).slice(1, -1)}'`].some(form => sources.includes(form));
   const unused = Object.keys(dictionary).filter(key => !literal(key));
   assert.deepEqual(unused, []);
 });
@@ -55,7 +56,8 @@ test('English sentences built from parts keep their spaces and never splice a ve
   assert.equal(api.t('伙伴已停用。{p0}', { p0: api.t('已有聊天和成果保留。') }).startsWith('Partner disabled. '), true);
   assert.equal(api.t('{p0} 开始处理审核任务', { p0: 'Claude' }), 'Claude started a review');
   assert.equal(api.t('{p0} 向 {p1} 发起求助', { p0: 'Claude', p1: 'Codex' }), 'Claude asked Codex for help');
-  assert.equal(api.t('正在{p0}', { p0: 'Read file' }), 'In progress: Read file');
+  assert.equal(api.t('正在读取文件'), 'Reading a file', 'a running tool action is one sentence, not "In progress: Read file"');
+  assert.equal(api.t('处理中 · 最近完成：执行命令'), 'Working · just ran a command');
   assert.equal(api.t('本轮已交付') === api.t('阶段已交付'), false, 'a round and a stage read differently');
 });
 test('every literal the interface translates has English copy, from the page and from the service', () => {

@@ -41,8 +41,12 @@ def bean_styles() -> list[dict]:
             for identifier, name, description in BEAN_STYLES]
 
 
+# Each built-in tool starts with its own look, so partners stay apart without setup.
+_DEFAULT_BEAN_STYLES = {"claude": "peach", "codex": "sprout", "kimi": "sky"}
+
+
 def default_bean_style(adapter: str) -> str:
-    return "peach" if adapter == "claude" else "sprout"
+    return _DEFAULT_BEAN_STYLES.get(adapter, "sprout")
 
 
 def safe_agent_id(value: object) -> bool:
