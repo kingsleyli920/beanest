@@ -759,7 +759,7 @@ def publish_connection(server: RoomUIServer, runtime: Path) -> Path:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Local Agent Coordinator peer rooms")
+    parser = argparse.ArgumentParser(description="Beanest local agent rooms")
     parser.add_argument("--runtime", type=Path, default=Path("runtime/rooms"))
     parser.add_argument("--port", type=int, default=8769)
     args = parser.parse_args()
