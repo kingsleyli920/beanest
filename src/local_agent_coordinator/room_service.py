@@ -436,6 +436,7 @@ class RoomService:
         self._quota_handoffs = {}
         self._quota_handoff_tasks = {}
         self._quota_waits = {}
+        self._quota_stop_audits = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
         self._lifecycle_retry_after: dict[str, float] = {}
@@ -4397,6 +4398,23 @@ class RoomService:
         self._quota_handoff_tasks[room_id] = task
         task.add_done_callback(self._worker_done)
 
+    def _settle_clean_quota_stop(self, room_id):
+        """A review or planning call that ran out of quota stopped the room as
+        unconfirmed side effects. With its private tree unchanged it was an
+        ordinary refusal, so record it as one and continue the same board."""
+        candidate = self.store.clean_quota_stop_candidate(room_id)
+        if candidate is None or self._closed:
+            return
+        job = {"id": candidate["job_id"], "room_id": room_id, "provider": candidate["provider"],
+               "team": {"job_phase": candidate["phase"], "task_id": candidate["task_id"]}}
+        if candidate["job_id"] not in self._quota_stop_audits:
+            self._quota_stop_audits[candidate["job_id"]] = self._quota_left_tree_unchanged(job)
+        if not self._quota_stop_audits[candidate["job_id"]] or not self.store.settle_clean_quota_stop(room_id, candidate["job_id"]):
+            return
+        self._retire_quota(room_id, candidate["provider"], "subscription_limit_reached")
+        task = asyncio.create_task(self._resume_after_quota_wait(room_id, candidate["run_id"]))
+        task.add_done_callback(self._worker_done)
+
     def _schedule_quota_wait(self, room_id, snapshot):
         """Every partner out of quota is a wait, not the end of the objective."""
         objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
@@ -6306,6 +6324,7 @@ class RoomService:
             snapshot = self.store.snapshot(room["id"])
             self._schedule_quota_handoff(room["id"])
             self._schedule_quota_wait(room["id"], snapshot)
+            self._settle_clean_quota_stop(room["id"])
             objective = snapshot.get("objective")
             deadline = objective["deadline"] if objective else snapshot["budget"]["deadline"]
             if room["status"] == "running" and deadline_reached(deadline, self.clock()):

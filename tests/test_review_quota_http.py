@@ -2,7 +2,9 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
+from local_agent_coordinator.room_service import RoomService
 from test_kimi_work_quota_http import WorkQuotaFixture
 
 
@@ -51,6 +53,30 @@ class ReviewQuotaHTTPTests(unittest.TestCase):
         tasks = {task['id']: task for task in final['team']['tasks']}
         self.assertEqual(tasks[fixture.failed_review['task_id']]['status'], 'accepted')
         self.assertNotEqual(tasks[fixture.failed_review['task_id']]['reviewer'], 'kimi')
+
+    def test_room_an_older_release_stopped_on_a_clean_reviewer_quota_continues_on_its_own(self):
+        # Catches: a room already stopped as unconfirmed side effects by an
+        # older release stayed stopped with continue unavailable.
+        fixture = self.fixture()
+        audit = RoomService._quota_left_tree_unchanged
+        audits = []
+
+        def older_release_then_real(service, job):
+            audits.append(job['id'])
+            return False if len(audits) == 1 else audit(service, job)
+        with patch.object(RoomService, '_quota_left_tree_unchanged', older_release_then_real):
+            fixture.create()
+            final = fixture.wait(lambda snapshot: snapshot['objective']['status'] == 'complete'
+                                 and not any(job['status'] in {'queued', 'working'} for job in snapshot['jobs']))
+        events = [event['kind'] for event in final['events']]
+        self.assertIn('objective_stopped', events)
+        self.assertIn('native_quota_stop_settled', events)
+        job = next(job for job in final['jobs'] if job['id'] == fixture.failed_review['job_id'])
+        self.assertEqual(job['error'], 'subscription_limit_reached')
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertTrue(all(task['status'] in {'accepted', 'self_checked'} for task in tasks.values()), tasks)
+        self.assertTrue(any(event['kind'] == 'partner_retired' and event.get('provider') == 'kimi'
+                            and event.get('code') == 'subscription_limit_reached' for event in final['events']))
 
     def test_reviewer_quota_with_a_changed_private_tree_keeps_it_instead_of_retiring(self):
         # Catches: retiring on a quota failure without checking the private
