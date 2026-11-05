@@ -9,6 +9,10 @@ import tempfile
 import unittest
 from uuid import uuid4
 
+from unittest.mock import AsyncMock
+
+from local_agent_coordinator.agent_registry import default_registry
+from local_agent_coordinator.partner_manager import PartnerManager
 from local_agent_coordinator.room_service import RoomService, RoomError
 from local_agent_coordinator.room_store import RoomStore
 from test_team_service import FakeTeamProvider, reply, changed_file
@@ -383,6 +387,51 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
             value = await self.tick(room)
         self.assertEqual(value["current_run"]["id"], stopped["current_run"]["id"])
         self.assertFalse(any(event["kind"] == "objective_auto_continued" for event in value["events"]))
+
+    async def test_a_partner_the_gate_cannot_block_waits_while_its_usage_shows_none_left(self):
+        # Catches: Kimi's gate is never "blocked", so a room whose partners were
+        # all out of quota restarted every few seconds and failed again.
+        usage = {"used_percent": 100}
+        manager = PartnerManager(self.root / "partners", default_registry(), startup_discovery=False)
+        real_get = manager.get
+        # The account gate leaves this partner "unknown", as it does Kimi; only usage says it is out.
+        manager.get = lambda provider: {**real_get(provider),
+            "availability": {"state": "unknown", "reason": "quota_unknown", "selectable": True},
+            "account": {**real_get(provider)["account"], "quota": {"stale": False, "windows": [dict(usage)]}}}
+        manager.refresh_availability = AsyncMock()
+
+        original = self.handler
+        def handler(agent, context):
+            if context["job"]["job_phase"] == "work" and usage["used_percent"] >= 100:
+                return {"adapter_failure": "subscription_limit_reached"}
+            return original(agent, context)
+        created = await self.create()
+        self.fake.handler = handler
+        await self.settle()
+        room = created["room"]["id"]
+        stopped = await self.service.read_room(room)
+        self.assertEqual(stopped["team"]["stop_reason"], "all_partners_quota_exhausted")
+        self.service.partner_manager = manager
+
+        async def tick():
+            await self.service.expire_tasks()
+            wait = self.service._quota_waits.get(room)
+            if wait is not None:
+                await wait["task"]
+            await self.settle()
+            return await self.service.read_room(room)
+
+        calls = len(self.fake.calls)
+        for _ in range(4):
+            self.now += 301
+            value = await tick()
+        self.assertEqual(value["current_run"]["id"], stopped["current_run"]["id"])
+        self.assertEqual(len(self.fake.calls), calls)
+        usage["used_percent"] = 40
+        self.now += 301
+        final = await tick()
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertEqual(sum(event["kind"] == "quota_wait_resumed" for event in final["events"]), 1)
 
     async def test_preclaim_quota_reassigns_planning_without_charging_retired_member(self):
         async def guard(members):
