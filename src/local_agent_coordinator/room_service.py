@@ -5325,6 +5325,19 @@ class RoomService:
                 or binding.get("result_version") != job["team"]["result_version"]):
             raise RoomError("native_recovery_binding_changed")
 
+    def _quota_left_tree_unchanged(self, job):
+        """A review or planning call never publishes files, so an unchanged
+        private tree shows its quota stop left nothing behind to keep."""
+        team = job.get("team") or {}
+        if (team.get("job_phase") not in {"plan", "coordinate", "review", "help"}
+                or job.get("native_partial_inspection") or job.get("partner_handoff_inspection")):
+            return False
+        try:
+            state = self.store.native_workspace(job["room_id"], job["provider"])
+            return state is not None and not self._audited_native_changes(job, state, [], [])["blocked"]
+        except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError):
+            return False
+
     def _audited_native_changes(self, job, state, allowed, resolved):
         # Other tasks' operation-audited D may share this provider's stable
         # tree. It remains frozen and private until that exact task works.
@@ -5720,7 +5733,8 @@ class RoomService:
                         pass
                 quota_refused = (result.get("failure_code") == "subscription_limit_reached"
                                  and cleanup_confirmed
-                                 and (not native or not observation.get("side_effects_possible"))
+                                 and (not native or not observation.get("side_effects_possible")
+                                      or self._quota_left_tree_unchanged(job))
                                  and self.store.finish_quota_job(job["id"]))
                 if not quota_refused:
                     self._finish(job, result)
