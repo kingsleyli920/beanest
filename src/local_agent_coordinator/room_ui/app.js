@@ -3133,7 +3133,8 @@ function roomTitle(room) {
   const original = typeof objectiveText === 'string' && objectiveText.trim() ? objectiveText : goalText;
   const goal = typeof original === 'string' ? original.trim().replace(/\s+/g, ' ') : '';
   const firstLine = goal.split(/[。！？\n]/u)[0] || goal;
-  return firstLine.length > 32 ? `${firstLine.slice(0, 32)}…` : firstLine || t("未命名任务");
+  // The list clamps titles to two lines; this cap only bounds very long first sentences (English needs more than 32).
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine || t("未命名任务");
 }
 
 function roomFromLocation() {
@@ -6459,7 +6460,8 @@ function renderMemberPublicProgress(snapshot, member) {
     const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceLead() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
     // The idle line repeats the member's task line, so the card hides it.
-    holder.append(element('p', text, `public-progress-fallback${!tool && !active ? ' idle' : ''}`)); return;
+    // Without a progress message the line only repeats the status above it (idle, or the latest tool action).
+    holder.append(element('p', text, `public-progress-fallback${!active || tool ? ' idle' : ''}`)); return;
   }
   const details = element('details', '', 'public-progress-details'); details.open = expanded;
   const summary = element('summary');
@@ -6962,9 +6964,11 @@ function renderWorkIndicator(snapshot) {
   const jobText = (job) => {
     const name = displayName(job.provider);
     const phase = job.phase || job.team?.job_phase;
-    return `${name} ${objective?.status === 'paused' || objective?.pause_requested ? t("正在结束当前处理") : job.native_partial_inspection || job.partner_handoff_inspection ? t("正在核对上次进度")
-      : ['checkpoint', 'checkpoint_review'].includes(phase) ? t("正在核对下一步")
-        : job.native_readonly_discussion ? t("正在讨论") : t("正在处理")}`;
+    // Whole sentences: "Kimi Code Working" read as a label in English.
+    return objective?.status === 'paused' || objective?.pause_requested ? t("{p0} 正在结束当前处理", { p0: name })
+      : job.native_partial_inspection || job.partner_handoff_inspection ? t("{p0} 正在核对上次进度", { p0: name })
+        : ['checkpoint', 'checkpoint_review'].includes(phase) ? t("{p0} 正在核对下一步", { p0: name })
+          : job.native_readonly_discussion ? t("{p0} 正在讨论", { p0: name }) : t("{p0} 正在处理", { p0: name });
   };
   const value = working.length ? working.map(jobText).join(' · ') : queued.length
     ? t("{p0} 等待开始", { p0: interfaceList([...new Set(queued.map((job) => displayName(job.provider)))]) }) : '';
@@ -7012,7 +7016,7 @@ function renderControls() {
   const teamDelivered = state.snapshot?.collaboration?.mode === 'team' && outcomeState === 'ready_for_user';
   const currentRun = state.snapshot?.current_run;
   const canAnswer = objective?.status === 'needs_user' && objective.can_answer === true;
-  if (objective) $('room-subtitle').textContent = `${Number.isSafeInteger(objective.stage) ? t("第{p0}阶段 · ", { p0: objective.stage }) : ''}${objective.mode === 'autonomous' ? t("自主推进") : t("逐步推进")} · ${workModeCaption}`;
+  if (objective) $('room-subtitle').textContent = `${Number.isSafeInteger(objective.stage) ? t("第 {p0} 阶段 · ", { p0: objective.stage }) : ''}${objective.mode === 'autonomous' ? t("自主推进") : t("逐步推进")} · ${workModeCaption}`;
   if (idleReadOnlyDiscussion()) $('room-subtitle').textContent = t("方案讨论 · 原目标与进度保留");
   $('source-plan-note').hidden = !currentRun?.source_plan;
   $('source-plan-note').textContent = currentRun?.source_plan?.truncated

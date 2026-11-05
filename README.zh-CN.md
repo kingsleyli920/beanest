@@ -8,7 +8,7 @@
 
 这是一个独立的早期项目，面向用户自己的电脑和单用户场景。桌面启动器目前面向 macOS，也可以在本机浏览器使用相同界面。项目与 OpenAI、Anthropic、Moonshot AI 没有官方隶属或背书关系。
 
-![Beanest interface](docs/assets/beanest-zh-CN.jpg)
+![豆窝任务页：三位伙伴分工处理一个示例任务，能看到已互审的任务、进行中的工作和每位伙伴的额度](docs/assets/beanest-zh-CN.jpg)
 
 *使用虚构数据的界面示例，没有调用真实模型。*
 

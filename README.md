@@ -8,7 +8,7 @@ Give Beanest a goal, choose your installed agents, and follow their work in one 
 
 Beanest is an independent, early-stage project for a single user on their own computer. The desktop launcher currently targets macOS. You can also run the same interface in a local browser. It is not affiliated with OpenAI, Anthropic, or Moonshot AI.
 
-![Beanest interface](docs/assets/beanest-en.jpg)
+![Beanest room page: three partners split a sample task, with peer-reviewed work, work in progress and each partner's quota](docs/assets/beanest-en.jpg)
 
 *A demonstration with fictional data; no real agent calls.*
 
