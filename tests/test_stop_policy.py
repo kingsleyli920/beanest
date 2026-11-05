@@ -62,5 +62,26 @@ class StopPolicyTests(unittest.TestCase):
         self.assertFalse(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": "native_cleanup_unconfirmed"}))
 
 
+class AutoContinueGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quitting_the_app_is_continued_but_the_users_own_stop_is_not(self):
+        # Catches: a room left cancelled by quitting the app never resuming, and
+        # the same phase from the user's 停止 being resumed against their wish.
+        import tempfile
+        from local_agent_coordinator.room_service import RoomService
+        with tempfile.TemporaryDirectory() as root:
+            service = RoomService(Path(root) / "rooms.sqlite3", Path(root) / "workspaces", invoke=lambda *a, **k: None)
+            try:
+                def snapshot(code):
+                    return {"room": {"lifecycle_state": "active"}, "jobs": [], "executions": [],
+                            "objective": {"status": "stopped", "execution_policy": {"mode": "autonomous"}},
+                            "team": {"phase": "cancelled", "stop_reason": code}, "current_run": {"id": "run"}}
+                service._schedule_auto_continue("quit", snapshot("service_shutdown"))
+                service._schedule_auto_continue("user", snapshot("cancel_requested"))
+                self.assertEqual(service._auto_continues["quit"]["key"], ("run", "service_shutdown"))
+                self.assertNotIn("user", service._auto_continues)
+            finally:
+                await service.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

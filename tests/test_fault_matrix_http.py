@@ -2,6 +2,7 @@
 
 Real HTTP/SQLite with fictional CLIs; each case fails exactly one call.
 """
+import time
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,19 @@ class FaultMatrixHTTPTests(unittest.TestCase):
         delay.start()
         self.addCleanup(delay.stop)
 
+    def finished(self, fixture, timeout=60):
+        # A failure plus one automatic continue is two rounds of real CLI
+        # processes, which takes longer than the fixture's default wait on CI.
+        deadline = time.monotonic() + timeout
+        while True:
+            value = fixture.read()
+            if (value['objective']['status'] == 'complete'
+                    and not any(job['status'] in {'queued', 'working'} for job in value['jobs'])):
+                return value
+            if time.monotonic() > deadline:
+                self.fail({'team': value['team'], 'jobs': [(j['provider'], j['status'], j['error']) for j in value['jobs']]})
+            time.sleep(.05)
+
     def test_one_native_failure_in_any_phase_finishes_without_the_user(self):
         # Catches: any single crash, unpaired tool or missing wire leaving the
         # objective stopped or asking the user instead of continuing itself.
@@ -33,8 +47,7 @@ class FaultMatrixHTTPTests(unittest.TestCase):
                     fixture = OneFailureFixture(phase, failure)
                     try:
                         fixture.create()
-                        final = fixture.wait(lambda value: value['objective']['status'] == 'complete'
-                                             and not any(job['status'] in {'queued', 'working'} for job in value['jobs']))
+                        final = self.finished(fixture)
                         self.assertEqual(fixture.occurrences, 1)
                         self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
                         self.assertLessEqual(sum(event['kind'] == 'objective_auto_continued' for event in final['events']), 1)
