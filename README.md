@@ -23,11 +23,12 @@ Beanest is an independent, early-stage project for a single user on their own co
 
 ## Quick start
 
-You need **Python 3.12+**, **Node.js 22.12+** for the desktop launcher, and at least one supported agent CLI installed and signed in. Provider access, supported models, subscription limits, and terms are managed by each provider.
+You need **Python 3.12+**, **Node.js 22.12+** for the desktop launcher, and at least one supported agent CLI installed and signed in. Provider access, supported models, subscription limits, and terms are managed by each provider. The `python3` that ships with macOS is 3.9 and will not work; install a newer one, for example with `brew install python`, and use it to create `.venv`.
 
 ```sh
 git clone https://github.com/kingsleyli920/beanest.git
 cd beanest
+python3 --version   # must be 3.12 or newer
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
@@ -46,7 +47,7 @@ For a local browser instead:
 .venv/bin/python -m local_agent_coordinator.room_server
 ```
 
-Open the loopback URL printed in the terminal. The desktop and browser modes use separate runtime directories by default. Keep the service local; this project does not provide a public, multi-user hosting mode.
+Open the loopback URL printed in the terminal. If port 8769 is taken, add `--port` with a free port. The desktop and browser modes use separate runtime directories by default. Keep the service local; this project does not provide a public, multi-user hosting mode.
 
 ## Using Beanest
 

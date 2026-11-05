@@ -219,3 +219,26 @@ class RoomHTTPTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupTests(unittest.TestCase):
+    def test_an_occupied_port_names_the_port_without_a_traceback(self):
+        # Catches: a busy default port crashing with a traceback (server_close
+        # touched a loop that never started) instead of saying what to do.
+        import socket
+        import subprocess
+        import sys
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        holder.listen()
+        self.addCleanup(holder.close)
+        port = holder.getsockname()[1]
+        with tempfile.TemporaryDirectory() as root:
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
+            result = subprocess.run([sys.executable, "-m", "local_agent_coordinator.room_server",
+                                     "--runtime", str(Path(root) / "rooms"), "--port", str(port)],
+                                    capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"Port {port} is already in use", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")

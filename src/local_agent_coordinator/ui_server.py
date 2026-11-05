@@ -193,7 +193,9 @@ class LocalUIServer(ThreadingHTTPServer):
             return
         self._closed = True
         super().server_close()
-        self.runner.close()
+        # socketserver closes a socket that failed to bind before the loop exists.
+        if hasattr(self, "runner"):
+            self.runner.close()
 
     def handle_error(self, request, client_address):
         pass  # A malformed/disconnected HTTP client must not print a private traceback.
