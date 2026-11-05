@@ -2897,7 +2897,7 @@ test('compact partner controls stay outside the form and sidebar while latest ro
   assert.match(ui.get('composer-usage-codex').textContent, /剩余 0%/, 'reported zero remains a real observation');
   assert.doesNotMatch(bar.textContent, /Token|上次检查|888,888|99,999|上下文.*%/);
   assert.equal(ui.posts().length, 0, 'painting the compact footer starts neither account checks nor models');
-  for (const [id, pattern] of [['claude', /输入 Token0.*输出 Token0/], ['codex', /输入 Token1234.*输出 Token56/], ['test_peer', /历史快照，口径未确认.*输入 Token99999/], ['fourth', /暂无可靠|尚未取得|未提供/]]) {
+  for (const [id, pattern] of [['claude', /输入 Token0.*输出 Token0/], ['codex', /输入 Token1234.*输出 Token56/], ['test_peer', /历史快照，统计方式未确认.*输入 Token99999/], ['fourth', /暂无可靠|尚未取得|未提供/]]) {
     await ui.click(`composer-usage-${id}`);
     assert.match(ui.get('composer-usage-token-fields').textContent, pattern);
     assert.doesNotMatch(ui.get('composer-usage-token-fields').textContent, /888888|888,888/);
@@ -9303,6 +9303,31 @@ test('English accepts typed continue as the bare command, joins names with Engli
   assert.doesNotMatch(footer, /小时|天窗口|模型周额度/);
   assert.match(ui.get('frozen-participants').textContent, /Claude Code, Codex|Codex, Claude Code/);
   assert.doesNotMatch(ui.get('frozen-participants').textContent, /、/);
+});
+test('waiting for quota reads the same on the board and every partner card, without rearranging or repeating the stop', async () => {
+  // Shape of the real 九烛 room after #19: tasks held by all_partners_quota_exhausted, partners retired for quota.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'all_partners_quota_exhausted';
+  saved.stop_kind = 'quota_wait'; saved.room.objective_status = 'stopped'; saved.room.stop_kind = 'quota_wait';
+  saved.team = { ...(saved.team || {}), phase: 'stopped', stop_reason: 'all_partners_quota_exhausted' };
+  const [first, second] = saved.members;
+  saved.team.tasks = [{ id: 'done', title: '已完成的一项', owner: first.id, status: 'self_checked' },
+    { id: 'held', title: '被额度挡住的一项', owner: first.id, status: 'blocked', block_cause: null, blocked_reason: 'all_partners_quota_exhausted' }];
+  saved.collaboration.tasks = saved.team.tasks;
+  saved.collaboration.outcome.reason = '协作因异常停止，未完成项仍保留。';
+  for (const member of saved.members) member.status = 'needs_user';
+  saved.objective.retired_partners = { [first.id]: { reason: 'agent_quota_exhausted', cleanup_confirmed: true }, [second.id]: { reason: 'subscription_limit_reached', cleanup_confirmed: true } };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true, naturalContinuationSupport: true });
+  const pane = ui.get('progress-pane');
+  assert.match(pane.textContent, /1 项待继续/);
+  assert.doesNotMatch(pane.textContent, /待重新安排|all_partners_quota_exhausted|技术细节/, 'a quota hold is not a replan and shows no code');
+  for (const member of [first, second]) assert.equal(ui.get(`status-${member.id}`).textContent, '等额度恢复', member.id);
+  assert.equal(ui.get(`task-${first.id}`).textContent, '「被额度挡住的一项」待继续');
+  const cards = [first, second].map((member) => ui.get(`task-${member.id}`).textContent).join('\n');
+  assert.doesNotMatch(cards, /伙伴的额度都用完了/, 'the stop reason is said once, on the card at the top');
+  const outcome = ui.get('collaboration-outcome').textContent;
+  assert.match(outcome, /等额度恢复/, 'the discussion outcome is titled like the card');
+  assert.doesNotMatch(outcome, /异常停止|目标推进已停止/);
+  assert.equal(ui.posts().length, 0);
 });
 test('current task question refuses stale bindings and never infers a permission category from free text or ordinary checkpoints', async () => {
   for (const variant of ['binding', 'origin', 'checkpoint', 'cause', 'coordination']) {

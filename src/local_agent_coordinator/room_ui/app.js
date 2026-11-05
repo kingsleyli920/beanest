@@ -57,7 +57,7 @@ const executionLabels = localizedLabels({
   execution_initialization_unconfirmed: '任务已记录，但隔离运行环境未就绪；没有派发模型或运行代码，请核对原请求。',
   execution_unavailable: '隔离执行环境未就绪，没有运行代码。',
   execution_limit_reached: '本次任务两次隔离运行额度已用完，后续修改保留为文件，等待你决定。',
-  execution_version_stale: '运行结果对应较早文件版本，没有冒充当前版本的验证。',
+  execution_version_stale: '运行结果对应较早的文件版本，不能算作当前版本的验证。',
   budget_exhausted: '本次任务调用预算已用完，后续工作没有自动派发。',
   deadline_exceeded: '本轮期限已到，执行结果仍需核对。',
   objective_calls_exhausted: '本目标的调用上限已到，进度已保留，没有继续派发。',
@@ -322,7 +322,10 @@ $('task-mode').value = 'text';
 // replanned by the service when work continues, so they read as progress.
 const decisionBlockCauses = new Set(['permission_required', 'user_decision']);
 function taskNeedsUser(task) { return task?.status === 'blocked' && decisionBlockCauses.has(task.block_cause); }
-function taskAutoBlocked(task) { return task?.status === 'blocked' && !decisionBlockCauses.has(task.block_cause); }
+// A task held only because partners ran out of quota simply waits to continue; nothing about it is rearranged.
+const quotaBlockCodes = new Set(['all_partners_quota_exhausted', 'subscription_limit_reached', 'agent_quota_exhausted', 'quota_exhausted']);
+function taskQuotaHeld(task) { return task?.status === 'blocked' && task.block_cause == null && quotaBlockCodes.has(task.blocked_reason); }
+function taskAutoBlocked(task) { return task?.status === 'blocked' && !decisionBlockCauses.has(task.block_cause) && !taskQuotaHeld(task); }
 const blockCodePattern = /^[a-z][a-z0-9_]{2,80}$/;
 // Mirrors native_outcome.REPLY_MISTAKES / FORMAT_ERRORS: the service corrects these itself.
 const selfCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 'invalid_target', 'team_files_forbidden',
@@ -479,7 +482,7 @@ function nowSummary(snapshot) {
     return { tone: 'ask', label: label(t("等你决定")), blocked, canAnswer,
       title: blocked.length ? permission ? t("有一步要你同意权限") : t("伙伴需要你定个方向") : t("伙伴有个问题要你回答"),
       question: question.length > 220 ? `${(question.split('\n').find((line) => line.trim()) || question).slice(0, 200)}…` : question,
-      text: [canAnswer ? t("在下面回复后，伙伴会沿原目标接着做。") : t("先看看问题；豆窝不会擅自重新开始。"), autoNote].filter(Boolean).join(' ') };
+      text: [canAnswer ? t("在下面回复后，伙伴会沿原目标接着做。") : t("先看看问题；在你回复前豆窝不会重新开始。"), autoNote].filter(Boolean).join(' ') };
   }
   if (status === 'paused') return objective.pause_requested === true
     ? { tone: 'stop', label: label(t("正在暂停")), title: t("等当前这一步做完就停"), text: t("不会再派发新的工作。") }
@@ -638,12 +641,13 @@ const userCancelCodes = new Set(['cancel_requested', 'lifecycle_requested']);
 const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '互审中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始' });
 function progressTone(task) {
   if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
-  if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : 'wait';
+  if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : taskQuotaHeld(task) ? 'st' : 'wait';
   return ({ self_checked: 'self', review: 'rev', working: 'wk', waiting_peer: 'wk', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
 }
 function progressChip(task, cancelled = false) {
   if (task.status === 'accepted' && task.review_kind === 'self_check') return progressChipLabels.self_checked;
   if (cancelled && ['interrupted', 'cancelled'].includes(task.status)) return t("已取消");
+  if (taskQuotaHeld(task)) return progressToneLabels.st;
   if (task.status === 'blocked') return taskNeedsUser(task) ? task.block_cause === 'permission_required' ? t("要你同意") : t("等你决定") : t("待重新安排");
   return Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("结果待确认");
 }
@@ -706,7 +710,7 @@ function renderProgressPane() {
         who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
       }
       row.append(name, who, element('span', progressChip(task, cancelled), `chip ${tone}`));
-      if (task.status === 'blocked') row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
+      if (task.status === 'blocked' && !taskQuotaHeld(task)) row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
       list.append(row);
     }
     nodes.push(list);
@@ -1358,7 +1362,8 @@ function renderMediaReader(reader) {
 function mediaCard(asset, media) {
   const card = element('article', '', 'media-card'); card.dataset.mediaId = asset.id;
   const view = element('button', '', 'media-open'); view.type = 'button'; view.disabled = !asset.available;
-  view.setAttribute('aria-label', t("查看{p0}：{p1}", { p0: asset.kind === 'video' ? t("视频") : asset.kind === 'audio' ? t("音频") : asset.kind === 'image' ? t("图片") : t("文件"), p1: asset.name }));
+  view.setAttribute('aria-label', (asset.kind === 'video' ? t("查看视频：{p0}", { p0: asset.name }) : asset.kind === 'audio' ? t("查看音频：{p0}", { p0: asset.name })
+    : asset.kind === 'image' ? t("查看图片：{p0}", { p0: asset.name }) : t("查看文件：{p0}", { p0: asset.name })));
   view.append(element('span', asset.kind === 'video' ? t("▶ 视频") : asset.kind === 'audio' ? t("♪ 音频") : asset.kind === 'image' ? t("图片") : t("文件"), 'media-kind'));
   if (asset.kind === 'image' && asset.available) {
     const image = element('img'); image.alt = asset.name; image.loading = 'lazy'; image.className = 'media-thumbnail'; view.append(image);
@@ -2247,7 +2252,7 @@ function updateAccountFooter(details, id) {
   const quota = account?.quota;
   const windows = (quota?.state === 'available' || quota?.stale === true) && Array.isArray(quota.windows) ? quota.windows.filter((entry) => entry && typeof entry === 'object') : [];
   const status = state.accountRefreshId === id ? t("正在查询…") : !account || account.state === 'not_checked' ? t("未检查")
-    : windows.length ? t("{p0}个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
+    : windows.length ? t("{p0} 个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
   details.firstChild.lastChild.textContent = status;
   const body = details.lastChild;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
@@ -2854,7 +2859,8 @@ function accountQuotaSummary(id) {
   const selected = weekly.length === 1 ? weekly[0] : shared.length === 1 ? shared[0] : null;
   const remaining = percentValue(selected?.remaining_percent);
   if (selected && remaining !== null) return { text: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(selected.window_minutes, true) || t("账号额度"), p2: remaining }), shortText: t("{p0}{p1}剩余 {p2}%", { p0: quota.stale ? t("上次：") : '', p1: quotaWindowName(selected.window_minutes), p2: remaining }), remaining };
-  if (windows.length) return { text: t("{p0}{p1} 个{p2}额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length, p2: windows.every((window) => window?.scope === 'model') ? t("模型") : '' }) };
+  if (windows.length) return { text: windows.every((window) => window?.scope === 'model')
+    ? t("{p0}{p1} 个模型额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length }) : t("{p0}{p1} 个额度窗口", { p0: quota.stale ? t("上次：") : '', p1: windows.length }) };
   return { text: quotaPendingLabel(id) };
 }
 function renderComposerUsage() {
@@ -3841,7 +3847,8 @@ async function mutatePartnerOperation(provider, action) {
 
 function confirmLifecycle(kind, item) {
   state.lifecycleConfirm = { kind, id: item.id, previousFocus: document.activeElement };
-  $('lifecycle-confirm-title').textContent = t("移除{p0}“{p1}”？", { p0: kind === 'projects' ? t("项目") : kind === 'partners' ? t("伙伴") : t("任务"), p1: item.name || roomTitle(item) });
+  const removing = item.name || roomTitle(item);
+  $('lifecycle-confirm-title').textContent = kind === 'projects' ? t("移除项目“{p0}”？", { p0: removing }) : kind === 'partners' ? t("移除伙伴“{p0}”？", { p0: removing }) : t("移除任务“{p0}”？", { p0: removing });
   $('lifecycle-confirm-description').textContent = kind === 'projects'
     ? t("只移除豆窝里的项目登记。磁盘上的项目文件和已有聊天都会保留。")
     : kind === 'partners' ? t("只移除豆窝里的伙伴配置。不会卸载工具、删除 Claude 或 Codex 的原生会话；已有聊天会保留。")
@@ -5184,7 +5191,12 @@ function hostResultInterruptionMessage(snapshot) {
   const action = boundPlatformDisplayText(outcome?.next_action, outcome?.next_action_i18n);
   return reason && action ? [reason, action].join(interfaceWordSpace()) : t(hostResultInterruptionText);
 }
-function objectiveLabel(objective) { if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return t("方案讨论"); if (objective.status === 'complete' && isReadOnlyDiscussion()) return t("讨论已结束"); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
+function objectiveLabel(objective) {
+  // A stop the service resumes by itself is titled like the card at the top, never as a plain stop.
+  const resume = state.snapshot && Object.hasOwn(state.snapshot, 'stop_kind') ? state.snapshot.stop_kind : null;
+  if (['stopped', 'interrupted', 'needs_user'].includes(objective.status) && resume === 'quota_wait') return t("等额度恢复");
+  if (['stopped', 'interrupted', 'needs_user'].includes(objective.status) && resume === 'auto') return t("马上自动继续");
+  if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return t("方案讨论"); if (objective.status === 'complete' && isReadOnlyDiscussion()) return t("讨论已结束"); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
 function currentObjective(snapshot = state.snapshot) {
   const objective = snapshot?.objective;
   return state.executionPolicySupported && objective && uuidPattern.test(objective.id)
@@ -5644,7 +5656,10 @@ function renderCollaboration(snapshot) {
   const singlePartner = collaboration.mode === 'legacy' && snapshot.members.length === 1;
   const singlePartnerReasons = { in_progress: t("伙伴正在直接处理你的目标，回复与进展见对话。"),
     round_finished: t("本轮回复已结束，请阅读回复及交付内容。"), needs_user: t("请查看伙伴的回复，补充它需要的信息。") };
-  const reason = discussionIdle ? t("暂无在途工作，可继续讨论或切到动手。已有成果和改动保留。") : singlePartner && Object.hasOwn(singlePartnerReasons, outcomeState) ? singlePartnerReasons[outcomeState] : outcome.reason;
+  const resumeKind = Object.hasOwn(snapshot, 'stop_kind') && ['auto', 'quota_wait'].includes(snapshot.stop_kind) ? snapshot.stop_kind : null;
+  // The stop line under the title already says why and what happens next; the generic stop text would contradict it.
+  const reason = discussionIdle ? t("暂无在途工作，可继续讨论或切到动手。已有成果和改动保留。") : resumeKind ? resumeKind === 'auto' ? t("几秒后自动继续，不用你操作。") : ''
+    : singlePartner && Object.hasOwn(singlePartnerReasons, outcomeState) ? singlePartnerReasons[outcomeState] : outcome.reason;
   const accepted = Number.isFinite(snapshot.current_run?.accepted_at);
   const technicalInterruption = hostResultInterruption(objective);
   const completed = !discussionIdle && (objective ? objective.status === 'complete'
@@ -5846,7 +5861,7 @@ function renderCollaboration(snapshot) {
   const remaining = Array.isArray(outcome.remaining) ? outcome.remaining.filter((item) => typeof item === 'string' && item) : [];
   const details = element('details', '', 'delivery-details');
   details.open = deliveryExpanded;
-  details.append(element('summary', `${snapshot.current_run ? t("查看检查与文件清单") : t("查看检查与交付详情")}${artifacts.length ? t(" · {p0} 个{p1}文件", { p0: artifacts.length, p1: snapshot.current_run ? t("已保存") : '' }) : ''}${remaining.length ? t(" · {p0} 项待处理", { p0: remaining.length }) : ''}`));
+  details.append(element('summary', `${snapshot.current_run ? t("查看检查与文件清单") : t("查看检查与交付详情")}${artifacts.length ? (snapshot.current_run ? t(" · {p0} 个已保存文件", { p0: artifacts.length }) : t(" · {p0} 个文件", { p0: artifacts.length })) : ''}${remaining.length ? t(" · {p0} 项待处理", { p0: remaining.length }) : ''}`));
   if (validation) {
     const scope = Object.hasOwn(validationLabels, validation.scope) ? validationLabels[validation.scope] : t("验证范围待确认");
     const revision = Number.isSafeInteger(validation.revision) ? t(" · 文件版本 {p0}", { p0: validation.revision }) : '';
@@ -5895,7 +5910,7 @@ function renderUsage(fields, usage) {
   }
   const row = (label, value) => fields.append(element('dt', label), element('dd', value));
   row(t("来源"), typeof usage.source === 'string' ? usage.source : t("不可用"));
-  row(t("口径"), usage.scope === 'provider_reported_latest_result' ? t("供应商最新一次结果快照") : t("历史快照，口径未确认"));
+  row(t("统计方式"), usage.scope === 'provider_reported_latest_result' ? t("供应商最新一次结果快照") : t("历史快照，统计方式未确认"));
   // Current snapshots wrap provider fields in values; older local records may
   // contain the fields directly. Neither form is summed into a session total.
   const values = usage.values && typeof usage.values === 'object' ? usage.values : usage;
@@ -6414,7 +6429,7 @@ function teamMemberTask(snapshot, member) {
   const blocked = owned.find((task) => ['blocked', 'unknown', 'interrupted', 'cancelled'].includes(task.status));
   // Unfinished work carries into the next attempt unless the user stopped it, as on the progress board.
   const userCancelled = userCancelCodes.has(currentObjective(snapshot)?.stop_reason) || userCancelCodes.has(snapshot?.team?.stop_reason);
-  if (blocked && ['interrupted', 'cancelled'].includes(blocked.status) && !userCancelled) return t("「{p0}」待继续", { p0: taskDisplayTitle(blocked.title) });
+  if (blocked && (['interrupted', 'cancelled'].includes(blocked.status) && !userCancelled || taskQuotaHeld(blocked))) return t("「{p0}」待继续", { p0: taskDisplayTitle(blocked.title) });
   if (blocked) return t("「{p0}」{p1}，具体原因见“进展”", { p0: taskDisplayTitle(blocked.title), p1: taskStatusLabels[blocked.status] });
   return t("暂无在途任务；交付与验收状态见群聊");
 }
@@ -6529,9 +6544,12 @@ function renderMembers(snapshot) {
     $(`name-${provider}`).textContent = member?.name || names[provider];
     // While the room resumes by itself, a partner stopped with it reads as waiting to continue, like its tasks.
     const resumes = snapshot && roomStopKind(snapshot.room) && ['interrupted', 'cancelled', 'stopped'].includes(member?.status) && !member.identity_uncertain;
-    $(`status-${provider}`).textContent = resumes ? t("待继续") : preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
+    // Out of quota while the room waits for it: say so once; the line below already gives the return time.
+    const quotaWaiting = snapshot && roomStopKind(snapshot.room) === 'quota_wait' && member && !member.identity_uncertain
+      && ['agent_quota_exhausted', 'subscription_limit_reached'].includes(retirement?.reason);
+    $(`status-${provider}`).textContent = quotaWaiting ? t("等额度恢复") : resumes ? t("待继续") : preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
     $(`status-${provider}`).className = `member-status ${preferredActivity ? statusClass(preferredActivity.status) : paused ? paused === t("正在暂停") ? 'working' : 'idle' : notStarted || loading ? '' : statusClass(preferredActivity?.status || taskActivity?.status || displayStatus)}`;
-    $(`task-${provider}`).textContent = preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
+    $(`task-${provider}`).textContent = quotaWaiting ? teamMemberTask(snapshot, member) || t("额度恢复后接着做。") : preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
       : teamMemberTask(snapshot, member) || (typeof member?.current_task === 'string' && member.current_task ? member.current_task
         : loading ? t("正在读取本次任务的实际分工…") : notStarted ? t("开始任务后，在这里查看分工。") : t("暂无在途任务"));
     const historicalWarning = configurationActivity?.historyWarning;
@@ -7022,7 +7040,7 @@ function renderControls() {
     ? t("正在暂停，等当前处理结束。") : t("已暂停，继续后接着做。");
   else if (objective?.status === 'complete') $('work-mode-note').textContent = t("本目标已交付，无需确认；有新要求可直接发送消息。");
   else if (objective?.status === 'awaiting_continue') $('work-mode-note').textContent = t("点“继续”接着完成原目标，无需先确认交付。");
-  else if (objective?.status === 'needs_user') $('work-mode-note').textContent = canAnswer ? t("回答当前问题，沿原目标继续。") : t("请先查看需要你决定的问题；不会擅自重新开始。");
+  else if (objective?.status === 'needs_user') $('work-mode-note').textContent = canAnswer ? t("回答当前问题，沿原目标继续。") : t("请先查看需要你决定的问题；在你回复前不会重新开始。");
   else if (objective && ['stopped', 'interrupted'].includes(objective.status)) $('work-mode-note').textContent = state.continuousObjectiveSupported && currentRun?.can_restart_objective === true
     ? t("点“继续”接着做，已有成果和记录保留。") : t("本目标已停下，记录与成果保留；不会自动重新开始。");
   $('room-status').textContent = room ? (inactive ? lifecycleLabels[lifecycleState(room)] : !teamStopped && Number.isFinite(currentRun?.accepted_at) ? t("本轮已接受") : Object.hasOwn(outcomeLabels, outcomeState) ? outcomeLabels[outcomeState] : statusLabels[statusClass(room.status)]) : '';

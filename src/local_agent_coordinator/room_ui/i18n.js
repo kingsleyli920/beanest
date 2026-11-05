@@ -22,7 +22,9 @@
   try { localStorage.setItem(preferenceKey, locale); } catch (_) { /* Session-only preference remains usable. */ }
   function t(key, params = {}) {
     const copy = locale === 'en' && Object.hasOwn(english, key) ? english[key] : key;
-    return copy.replace(/\{(p\d+)\}/g, (token, name) => Object.hasOwn(params, name) ? String(params[name]) : token);
+    // English copy may pick a noun by count: {p0:item|items} reads "1 item" / "2 items".
+    return copy.replace(/\{(p\d+):([^|{}]*)\|([^{}]*)\}/g, (token, name, one, many) => Object.hasOwn(params, name) ? (Number(params[name]) === 1 ? one : many) : token)
+      .replace(/\{(p\d+)\}/g, (token, name) => Object.hasOwn(params, name) ? String(params[name]) : token);
   }
   function labels(value) {
     if (!value || typeof value !== 'object') return value;

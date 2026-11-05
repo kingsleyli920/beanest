@@ -1600,3 +1600,7 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .room-card-meta { flex-wrap: wrap; column-gap: 8px; }
 .room-card-meta .room-card-status { flex-shrink: 0; max-width: 100%; }
 .composer-status { white-space: normal; }
+/* One line: when the label and count wrapped, the button grew to the full width with its text pushed right. */
+.provider-account > summary { flex-wrap: nowrap; }
+.provider-account > summary > span { white-space: nowrap; }
+.provider-account > summary > .quota-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

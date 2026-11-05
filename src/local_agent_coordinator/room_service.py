@@ -1274,8 +1274,8 @@ class RoomService:
             outcome["state"] = "interrupted"
             explanation = (("reason", "审核被旧的负责人校验误拒，原任务和已提交结果仍保留。"),
                            ("next_action", "继续后只补审核，不会重复执行已完成的工作。")) if text_failure.get("review_only") else (
-                           ("reason", "结果提交被宿主格式校验拒绝，原任务和结果仍保留。"),
-                           ("next_action", "继续后由伙伴重新提交并核对，无需补充业务决定。"))
+                           ("reason", "结果提交没有通过格式校验，原任务和结果仍保留。"),
+                           ("next_action", "继续后由伙伴重新提交并核对，不需要你做额外决定。"))
             for field, text in explanation:
                 outcome[field] = text
                 outcome[field + "_i18n"] = {"parts": [{"key": text, "params": {}}]}

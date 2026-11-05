@@ -32,6 +32,14 @@ def _system(key, *values):
     return _SystemText(text, [{"key": key, "params": params}])
 
 
+def _listed(items):
+    """Raw items joined by a translated separator, so English never shows 、."""
+    joined = _SystemText("", [])
+    for index, item in enumerate(items):
+        joined = (joined + _system("、") if index else joined) + str(item)
+    return joined
+
+
 def _with_display_i18n(view):
     # Only explicitly authored system strings carry metadata. Model questions,
     # task titles, results, and unrecognized provider reasons remain literal.
@@ -56,6 +64,7 @@ def _with_display_i18n(view):
 
 
 _REASONS = {
+    "all_partners_quota_exhausted": _system("伙伴的额度都用完了，进度已保留。有伙伴额度恢复后会自动继续。"),
     "plan_read_only": _system("本轮只讨论方案，未保存文件修改；需要动手时可明确开始新一轮。"),
     "permission_read_only": _system("本轮统一为只读，不能修改文件或运行项目；需要动手时可在下一轮调整权限。"),
     "invalid_team_task": _system("伙伴提交的任务清单缺少有效信息，尚未接受这次交付。"),
@@ -77,9 +86,9 @@ _REASONS = {
     "budget_exhausted": _system("本次调用上限已到，未完成的任务保留在清单里。"),
     "objective_calls_exhausted": _system("你设置的调用预算已用完，未完成的任务保留在清单里。"),
     "objective_deadline_exceeded": _system("你设置的结束时间已到，现有成果和未完成任务已保留。"),
-    "objective_no_progress": _system("伙伴反复得到相同证据或提交未变化的结果，已暂停，避免继续空转。"),
+    "objective_no_progress": _system("伙伴连续几次给出相同的证据或没有变化的结果，已暂停，免得空转。"),
     "deadline_exceeded": _system("本次任务期限已到，未继续派发工作。"),
-    "capability_unavailable": _system("这项工作需要尚未接入的能力，不能假装已经完成。"),
+    "capability_unavailable": _system("这项工作需要尚未接入的能力，暂时无法完成。"),
     "team_capability_unavailable": _system("当前执行方式不具备这项工作所需的能力。"),
     "execution_failed": _system("隔离检查没有通过，交付仍需修正。"),
     "execution_unknown": _system("隔离检查或清理结果尚未确认，协作已停止。"),
@@ -102,7 +111,7 @@ _REASONS = {
     "interrupted": _system("任务已中断，未确认的工作没有自动重跑。"),
     "native_no_progress": _system("同一工具失败反复出现，授权文件没有变化；工作副本已保留，任务暂停。"),
     "native_progress_unconfirmed": _system("无法确认原生工具是否仍有实际进展；已保留工作副本，等待核对。"),
-    "native_side_effects_unconfirmed": _system("伙伴遇到额度限制，原生工具可能已修改私有文件；保留现场，尚未盲目重派。"),
+    "native_side_effects_unconfirmed": _system("伙伴遇到额度限制，原生工具可能已修改私有文件；已保留现场，核对后再重新分派。"),
     "native_cleanup_unconfirmed": _system("原生进程清理未确认，停止新增派发。"),
     "native_changes_not_imported": _system("工作副本有尚不能导入的改动，请查看对应伙伴的文件状态。"),
     "native_review_unobserved": _system("这次审核缺少精确版本或实际工具观察，未当作独立审核通过。"),
@@ -158,12 +167,12 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         waiting = (task.get("blocked_reason") or
                    (_system("等待 {p0} 的协助", names.get(task.get("help_to"), task.get("help_to"))) if task["status"] == "waiting_peer" else
                     _system("等待独立审核") if task["status"] == "review" else
-                    _system("等待依赖：") + "、".join(task["dependencies"]) if task["status"] == "assigned" and task["dependencies"] else ""))
+                    _system("等待依赖：") + _listed(task["dependencies"]) if task["status"] == "assigned" and task["dependencies"] else ""))
         tasks.append({"id": task["id"], "title": task["title"], "owner": task["owner"],
                       "status": task["status"], "waiting_for": _REASONS.get(waiting, waiting),
                       "result": task.get("result") or ""})
         if not task_finished(task):
-            remaining.append(task["title"] + ("：" + _REASONS.get(waiting, waiting) if waiting else _system("：尚未交付并通过互审")))
+            remaining.append(task["title"] + (_system("：") + _REASONS.get(waiting, waiting) if waiting else _system("：尚未交付并通过互审")))
         if task_finished(task):
             for file in task.get("result_files") or []:
                 if current_files.get(file["path"], {}).get("sha256") != file["sha256"]:
@@ -180,7 +189,8 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     if phase in {"unknown", "interrupted", "cancelled", "stopped"}:
         state = "unknown" if phase == "unknown" else "stopped"
         reason = reason or _system("协作因异常停止，未完成项仍保留。")
-        next_action = _system("先核对停止原因和现有交付；未确认结果不会自动重跑。")
+        next_action = (_system("不用你操作；有伙伴额度恢复后会自动继续。") if reason_code == "all_partners_quota_exhausted"
+                       else _system("先核对停止原因和现有交付；未确认结果不会自动重跑。"))
     elif stale or room["status"] == "needs_user" or any(task["status"] == "blocked" for task in tasks):
         state = "needs_user"
         reason = reason or _system("有工作尚未完成，需要补充信息或确认处理方式。")
@@ -199,9 +209,10 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
             remaining.append(_system("当前版本的隔离检查未确认通过。"))
         else:
             checked_by_self = sum(task["status"] == "self_checked" for task in tasks)
-            review_label = (_system("自检") if checked_by_self == len(tasks) and tasks else
-                            _system("互审和自检") if checked_by_self else _system("互审"))
-            state, reason = "ready_for_user", _system("子任务已交付并") + review_label + _system("，等待你验收。")
+            # One whole sentence each; three spliced fragments left English without control of spacing.
+            state, reason = "ready_for_user", (_system("子任务已交付并自检，等待你验收。") if checked_by_self == len(tasks) and tasks else
+                                               _system("子任务已交付并互审和自检，等待你验收。") if checked_by_self else
+                                               _system("子任务已交付并互审，等待你验收。"))
             next_action = _system("查看成果和检查范围；可以接受本轮，也可以在这里继续提出修改。")
             if current_run.get("can_continue") is False:
                 next_action = _system("查看成果和检查范围；可以接受本轮。此聊天已到轮数上限，新目标请点“新任务”。")
@@ -235,9 +246,9 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         elif current_run.get("accepted_at") is None:
             state, reason, next_action = "ready_for_user", _system("本目标已交付，可以查看成果后验收。"), _system("查看本目标的交付、检查范围及下一步建议。")
         if any(task["status"] == "self_checked" for task in tasks):
-            reason += _system(" 含伙伴自检，不代表全部经过独立互审。")
+            reason += _system("含伙伴自检，不代表全部经过独立互审。")
     if room["mode"] == "project_folder":
-        validation["summary"] += _system(" 改动保存在隔离副本；原项目未回写，项目和测试未运行。")
+        validation["summary"] += _system("改动保存在隔离副本；原项目未回写，项目和测试未运行。")
     if room["mode"] == "native_project":
         proofs = [entry for entry in snapshot.get("native_executions", []) if entry.get("phase") == "review"
                   and entry.get("status") == "completed" and entry.get("cleanup_confirmed") is True
@@ -253,7 +264,7 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         else:
             validation.update(scope="self_check" if any(task["status"] == "self_checked" for task in tasks) else "not_run",
                 summary=_system("可查看原生工具的实际运行记录；模型结论不能代替测试验收。"))
-        validation["summary"] += _system(" 改动保存在私有副本，豆窝未自动合回原目录；Full Access 不是沙箱。")
+        validation["summary"] += _system("改动保存在私有副本，豆窝未自动合回原目录；Full Access 不是沙箱。")
     return _with_display_i18n({"mode": "team", "phase": phase,
             "summary": _system("共享任务 {p0}/{p1} 已交付并检查", sum(task_finished(task) for task in tasks), len(tasks)),
             "tasks": tasks, "outcome": {"state": state, "reason": reason, "next_action": next_action,
