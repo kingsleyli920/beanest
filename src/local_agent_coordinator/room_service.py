@@ -1466,7 +1466,7 @@ class RoomService:
         its own source included, has quota to take it yet."""
         objective, run = snapshot.get("objective") or {}, snapshot.get("current_run") or {}
         policy = objective.get("execution_policy") or {}
-        handoff = self._quota_handoffs.get(snapshot["room"]["id"])
+        handoff = getattr(self, "_quota_handoffs", {}).get(snapshot["room"]["id"])
         return bool(snapshot["room"]["lifecycle_state"] == "active" and policy.get("mode") == "autonomous"
                     and policy.get("quota_failover") and objective.get("status") in {"stopped", "interrupted"}
                     and handoff and handoff["run_id"] == run.get("id")
