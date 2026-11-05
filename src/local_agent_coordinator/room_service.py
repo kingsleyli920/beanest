@@ -4479,14 +4479,34 @@ class RoomService:
                 or team.get("phase") != "stopped" or team.get("stop_reason") != "all_partners_quota_exhausted"
                 or policy.get("mode") != "autonomous" or not policy.get("quota_failover")):
             return
-        run_id = snapshot["current_run"]["id"]
+        # Per room, not per run: each continue starts a new run, and keying on
+        # the run let a still-exhausted room restart every few seconds.
         previous = self._quota_waits.get(room_id)
-        if previous and previous["run_id"] == run_id and (not previous["task"].done()
-                or self.clock() - previous["checked_at"] < _QUOTA_WAIT_RECHECK_SECONDS):
+        if previous and (not previous["task"].done()
+                         or self.clock() - previous["checked_at"] < _QUOTA_WAIT_RECHECK_SECONDS):
             return
-        task = asyncio.create_task(self._resume_after_quota_wait(room_id, run_id))
-        self._quota_waits[room_id] = {"run_id": run_id, "checked_at": self.clock(), "task": task}
+        task = asyncio.create_task(self._resume_after_quota_wait(room_id, snapshot["current_run"]["id"]))
+        self._quota_waits[room_id] = {"checked_at": self.clock(), "task": task,
+                                      "evidence_free_at": (previous or {}).get("evidence_free_at")}
         task.add_done_callback(self._worker_done)
+
+    def _quota_returned(self, providers):
+        """Positive evidence that a partner can work again: a confirmed available
+        state, or fresh usage windows with room left. Kimi is never blocked by
+        the account gate, so an unblocked state alone proves nothing."""
+        for provider in providers:
+            try:
+                profile = self.partner_manager.get(provider)
+            except PartnerError:
+                continue
+            if profile["availability"]["state"] == "available":
+                return True
+            quota = (profile.get("account") or {}).get("quota") or {}
+            windows = [row for row in quota.get("windows") or [] if isinstance(row, dict)
+                       and type(row.get("used_percent")) in (int, float)]
+            if quota.get("stale") is False and windows and all(row["used_percent"] < 100 for row in windows):
+                return True
+        return False
 
     async def _resume_after_quota_wait(self, room_id, run_id):
         """Continue the same board the way the user's 继续 would, once a partner is back."""
@@ -4494,12 +4514,31 @@ class RoomService:
         continuation = self._natural_continuation(snapshot)
         if snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]:
             return
+        if self.partner_manager is not None:
+            retired = list((snapshot.get("objective") or {}).get("retired_partners") or {})
+            if self.invoke is None:
+                await self.partner_manager.refresh_availability(retired)
+            if not self._quota_returned(retired):
+                wait = self._quota_waits.get(room_id) or {}
+                # Without any usage evidence, try at most hourly rather than never.
+                if wait.get("evidence_free_at") is not None and self.clock() - wait["evidence_free_at"] < 3600:
+                    return
+                if any(self._usage_known(provider) for provider in retired):
+                    return
+                wait["evidence_free_at"] = self.clock()
         try:
             await self._send_natural_action(snapshot, continuation["action"], None, "quota-wait-" + str(uuid4()),
                                             continuation["binding"], None)
         except RoomError:
             return  # Still exhausted, or the room changed; a later recheck decides again.
         self.store.note_quota_wait_resumed(room_id, run_id)
+
+    def _usage_known(self, provider):
+        try:
+            quota = (self.partner_manager.get(provider).get("account") or {}).get("quota") or {}
+        except PartnerError:
+            return False
+        return quota.get("stale") is False and bool(quota.get("windows"))
 
     async def _automatic_quota_handoff(self, room_id, status, binding):
         status["state"] = "in_progress"
