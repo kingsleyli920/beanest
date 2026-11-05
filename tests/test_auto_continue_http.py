@@ -94,5 +94,46 @@ class AutoContinueHTTPTests(unittest.TestCase):
         self.assertEqual(len(fixture.calls), calls)
 
 
+    def test_cleanup_recorded_too_early_at_shutdown_is_confirmed_from_the_calls_own_receipt(self):
+        # Catches: quitting the app mid-call recorded cleanup as unconfirmed
+        # before the adapter wrote its receipt, leaving continue unavailable.
+        case = next(c for c in CORPUS['cases'] if c['id'] == 'illegal_json')
+        fixture = self.keep(LimitedDependencyFixture(case, bad_times=0))
+        fixture.create()
+        fixture.settled()
+        service, room = fixture.service, fixture.room_id
+        kimi = [job for job in service.store.snapshot(room)['jobs'] if job['provider'] == 'kimi']
+        last, earlier = kimi[-1], kimi[0]
+
+        def interrupt(job):
+            with service.store._connection(write=True) as db:
+                db.execute("UPDATE jobs SET status='interrupted' WHERE id=?", (job['id'],))
+                db.execute("DELETE FROM events WHERE json_extract(value_json,'$.kind')='job_cleanup' "
+                           "AND json_extract(value_json,'$.job_id')=?", (job['id'],))
+            service.store.record_job_cleanup(job['id'], confirmed=False)
+
+        def confirmed(job):
+            service._late_cleanup_checks.clear()
+            service._confirm_late_cleanup(room, service.store.snapshot(room))
+            return any(event['kind'] == 'job_cleanup' and event['job_id'] == job['id'] and event['cleanup_confirmed'] is True
+                       for event in service.store.snapshot(room)['events'])
+
+        interrupt(earlier)
+        self.assertFalse(confirmed(earlier), "A reused session's receipts cannot be told apart by session alone.")
+        interrupt(last)
+        session = next(event['session_id'] for event in service.store.snapshot(room)['events']
+                       if event['kind'] == 'native_session_cleanup_identity' and event['job_id'] == last['id'])
+        receipts = [path for path in (service.workspace.parent / 'native-receipts' / room).iterdir()
+                    if json.loads(path.read_text().splitlines()[0]).get('session_id') == session]
+        own = [path for path in receipts if path.stat().st_mtime >= next(
+            event['created_at'] for event in service.store.snapshot(room)['events']
+            if event['kind'] == 'job_claimed' and event['job_id'] == last['id'])]
+        self.assertEqual(len(own), 1)
+        original = own[0].read_text()
+        own[0].write_text(original.replace('"cleanup_confirmed": true', '"cleanup_confirmed": false', 1))
+        self.assertFalse(confirmed(last), "A receipt without cleanup proof keeps the scene.")
+        own[0].write_text(original)
+        self.assertTrue(confirmed(last))
+
 if __name__ == '__main__':
     unittest.main()
