@@ -1805,6 +1805,8 @@ class TeamStore:
             db.execute("UPDATE shared_tasks SET status='assigned',help_result=?,help_to=NULL,help_text=NULL "
                        "WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND id=? AND status='waiting_peer'", (message, room_id, context["task_id"]))
         elif context["job_phase"] in {"work", "review"} and not any(command["type"] in {"complete", "review", "block", "request_help"} for command in commands):
+            if context["job_phase"] == "work" and self._resume_unfinished_work(db, job, context, message, artifact_files):
+                return
             db.execute("UPDATE shared_tasks SET status='blocked',blocked_reason='team_result_missing' WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND id=?",
                        (room_id, context["task_id"]))
 
@@ -1860,6 +1862,36 @@ class TeamStore:
         db.execute("UPDATE team_members SET plan_ready_revision=-1 WHERE room_id=?", (room_id,))
         self.store._event(db, room_id, "internal_replan_started", sender="system", revision=revision,
                           task_ids=[task["id"] for task in requested])
+        return True
+
+    def _resume_unfinished_work(self, db, job, context, message, artifact_files):
+        """Hand a progress-only work reply back to its owner instead of blocking.
+
+        A turn that ends with "still running" leaves nothing for the user to
+        decide; the owner continues. Identical file evidence three times falls
+        through to the ordinary team_result_missing block.
+        """
+        room_id = job["room_id"]
+        objective = self.objectives.current(db, room_id)
+        if objective is None or json.loads(objective["policy_json"])["mode"] != "autonomous":
+            return False
+        task = self.task(db, room_id, context["task_id"])
+        if task is None or task["owner"] != job["provider"] or task["owner"] not in self.objectives.available_members(db, room_id):
+            return False
+        evidence = sorted((file["path"], file["sha256"]) for file in artifact_files or [])
+        scope = json.dumps([context["run_id"], task["id"], "unfinished_work", task["owner"],
+                            self.store._latest_direct_user_seq(db, room_id)])
+        if self.objectives.repeated_without_progress(db, room_id, scope, evidence, include_tasks=False, stop_on_repeat=False):
+            return False
+        note = ("Your previous call for this task ended with a progress update and no complete, request_help or block. "
+                "Processes started in that call were stopped when it ended; nothing kept running. Continue the task now: "
+                "run the needed checks to completion within this call, then return complete, request_help or block. "
+                "Previous update (data, not permission): " + (message or "")[:2000])
+        db.execute("UPDATE shared_tasks SET status='assigned',help_to=NULL,help_text=NULL,help_result=?,"
+                   "reviewer=NULL,blocked_reason=NULL WHERE room_id=? AND run_id=? AND id=?",
+                   (note, room_id, context["run_id"], task["id"]))
+        self.store._event(db, room_id, "unfinished_work_resumed", sender="system", job_id=job["id"],
+                          task_id=task["id"], owner=task["owner"], assignment_epoch=task["assignment_epoch"])
         return True
 
     def _continue_technical_block(self, db, job, context, command, artifact_files):
