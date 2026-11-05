@@ -308,41 +308,34 @@ $('task-mode').value = 'text';
 // The "now" card, the four room views and the progress board. They read the
 // same snapshot as the conversation; actions forward to the existing controls
 // so every request still goes through one code path.
-const blockReasonLabels = localizedLabels({
-  team_task_permission: '伙伴想改一项不归它负责的任务，被豆窝拦下了。',
-  team_plan_locked: '分工已经定下，伙伴想改分工，被豆窝拦下了。',
-  team_scope_conflict: '两位伙伴要改的范围重叠，要先定由谁来改。',
-  invalid_target: '伙伴的回复指向了不存在的任务或伙伴，这次回复没有生效。',
-  team_files_forbidden: '伙伴在不允许改文件的步骤里交了文件，豆窝没有采用。',
-  team_capability_unavailable: '伙伴用了当前接入不支持的操作。',
-  native_json_files_forbidden: '伙伴把文件内容直接写进了回复，豆窝没有采用。',
-  native_changes_not_imported: '伙伴工作区里的改动还没并回共享项目。',
-  native_review_unobserved: '没看到审核的伙伴真正检查过这项改动。',
-  native_turn_unconfirmed: '伙伴这一轮是否做完没能确认。',
-  native_protocol_unknown: '伙伴的回复格式认不出来，这次结果没有采用。',
-  native_protocol_invalid: '伙伴的回复格式不对，这次结果没有采用。',
-  invalid_response_json: '伙伴的回复格式不对，这次结果没有采用。',
-  invalid_text: '伙伴的回复格式不对，这次结果没有采用。',
-  invalid_team_commands: '伙伴发出的协作指令格式不对，这次没有生效。',
-  native_unchanged_reason_required: '伙伴说没有改文件，但没说明原因。',
-  native_side_effects_unconfirmed: '伙伴可能已经在本机做了改动，结果没能确认。',
-  team_assignment_changed: '分工已经变了，这项需要重新安排。',
-  project_file_unavailable: '要用到的文件暂时读不到。',
-});
+// Only a block that asks for a human choice or a permission belongs in the
+// decision area. Reply mistakes, format errors and coordination blocks are
+// replanned by the service when work continues, so they read as progress.
+const decisionBlockCauses = new Set(['permission_required', 'user_decision']);
+function taskNeedsUser(task) { return task?.status === 'blocked' && decisionBlockCauses.has(task.block_cause); }
+function taskAutoBlocked(task) { return task?.status === 'blocked' && !decisionBlockCauses.has(task.block_cause); }
 const blockCodePattern = /^[a-z][a-z0-9_]{2,80}$/;
+// Mirrors native_outcome.REPLY_MISTAKES / FORMAT_ERRORS: the service corrects these itself.
+const selfCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 'invalid_target', 'team_files_forbidden',
+  'team_capability_unavailable', 'native_json_files_forbidden', 'team_write_path_conflict', 'invalid_agent_response',
+  'invalid_team_commands', 'invalid_team_task', 'invalid_team_dependencies', 'invalid_project_files', 'invalid_text',
+  'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required', 'team_scope_conflict']);
 function blockedTaskReason(task) {
-  if (task?.block_cause === 'permission_required') return t("需要权限确认：伙伴要做的事超出了当前权限，等你同意。");
-  const raw = typeof task?.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
-  if (!raw) return t("需要你补充决定。");
-  if (blockCodePattern.test(raw)) {
-    return Object.hasOwn(blockReasonLabels, raw) ? blockReasonLabels[raw] : Object.hasOwn(executionLabels, raw)
-      ? executionLabels[raw] : t("伙伴卡住了，这个原因还没有对应的说明，原始代码在技术细节里。");
+  if (task?.block_cause === 'permission_required') return t("需要权限确认：这一步要用到当前权限以外的操作。同意就按原计划做，不同意伙伴会换一种做法。");
+  if (task?.block_cause === 'user_decision') {
+    const raw = typeof task.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
+    return raw && !blockCodePattern.test(raw) ? raw.length > 240 ? `${raw.slice(0, 240)}…` : raw : t("伙伴需要你定一个方向，具体问题见“讨论”。");
   }
-  return raw.length > 240 ? `${raw.slice(0, 240)}…` : raw;
+  if (task?.block_cause === 'external_dependency') return t("在等外部条件，满足后点“继续”接着做。");
+  return t("这项需要重新安排，点“继续”后会自动处理，不用你选。");
+}
+function stopReasonMessage(code) {
+  return selfCorrectedCodes.has(code) ? t("有任务需要重新安排，点“继续推进”后会自动处理。") : executionMessage(code);
 }
 function blockedTaskTechnical(task) {
   const raw = typeof task?.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
-  return [blockCodePattern.test(raw) ? raw : '', typeof task?.block_cause === 'string' ? task.block_cause : ''].filter(Boolean).join(' · ');
+  if (task?.block_cause === 'user_decision' && !blockCodePattern.test(raw)) return typeof task.block_cause === 'string' ? task.block_cause : '';
+  return [typeof task?.block_cause === 'string' ? task.block_cause : '', raw].filter(Boolean).join('\n');
 }
 function techDetails(raw, summary = t("技术细节")) {
   const details = element('details', '', 'tech-details');
@@ -360,25 +353,23 @@ function fillAnswerDraft(text) {
   message.value = combined; saveDraft(); renderControls(); message.focus();
 }
 function quickAnswers(task) {
+  if (task.block_cause !== 'permission_required') return [];
   const title = taskDisplayTitle(task.title || task.id);
-  if (task.block_cause === 'permission_required') return [
-    [t("同意并继续"), t("同意「{p0}」需要的权限，继续。", { p0: title })],
-    [t("不同意"), t("不同意「{p0}」需要的权限，请换一种不需要这个权限的做法。", { p0: title })]];
-  return [
-    [t("按原分工重试"), t("「{p0}」按原分工重试：请负责人在自己的任务范围内重新提交。", { p0: title })],
-    [t("先跳过这项"), t("「{p0}」先跳过，继续其它任务，最后告诉我还差什么。", { p0: title })]];
+  return [[t("同意，按原计划做"), t("同意「{p0}」需要的权限，按原计划继续。", { p0: title })],
+    [t("不同意，换个做法"), t("不同意「{p0}」需要的权限，请换一种不需要这个权限的做法。", { p0: title })]];
 }
 function blockedTaskBody(task, canAnswer, className) {
   const body = element('div', '', className);
   body.append(element('p', blockedTaskReason(task)));
-  if (canAnswer) {
+  const answers = canAnswer ? quickAnswers(task) : [];
+  if (answers.length) {
     const row = element('div', '', 'quick-row');
-    for (const [label, text] of quickAnswers(task)) {
-      const button = element('button', label, 'btn sm'); button.type = 'button'; button.title = text;
+    for (const [label, text] of answers) {
+      const button = element('button', label, 'btn sm'); button.type = 'button'; button.title = t("填入输入框：{p0}", { p0: text });
       button.addEventListener('click', () => fillAnswerDraft(text));
       row.append(button);
     }
-    body.append(row);
+    body.append(row, element('p', t("点选项只会把回复填进输入框，确认后再发送。"), 'quick-note'));
   }
   const raw = blockedTaskTechnical(task);
   if (raw) body.append(techDetails(raw));
@@ -405,19 +396,24 @@ function nowSummary(snapshot) {
   const done = tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length;
   if (!activeEntry(room)) return { tone: 'stop', label: lifecycleLabels[lifecycleState(room)], title: t("这份任务{p0}", { p0: lifecycleLabels[lifecycleState(room)] }),
     text: t("聊天和交付仍可阅读。要继续，先在右上角“···”的“管理任务”里恢复。") };
+  const autoBlocked = tasks.filter(taskAutoBlocked);
+  const autoNote = autoBlocked.length ? t("有 {p0} 项需要重新安排，点“继续推进”后会自动处理。", { p0: autoBlocked.length }) : '';
   if (status === 'needs_user' || !objective && outcome === 'needs_user') {
     const next = boundObjectiveNextStep(snapshot);
-    const blocked = next?.origin === 'task_block' ? tasks.filter((task) => task.status === 'blocked') : [];
-    const question = !blocked.length && typeof next?.question === 'string' ? next.question.trim() : '';
+    const blocked = next?.origin === 'task_block' ? tasks.filter(taskNeedsUser) : [];
     const canAnswer = objective?.can_answer === true;
+    if (next?.origin === 'task_block' && !blocked.length) return { tone: 'stop', label: label(t("已暂停")), canAnswer,
+      title: t("有几项需要重新安排"), text: t("点“继续推进”或在下面补充要求，豆窝会自动重新安排，不用逐项处理。") };
+    const question = !blocked.length && typeof next?.question === 'string' ? next.question.trim() : '';
+    const permission = blocked.length && blocked.every((task) => task.block_cause === 'permission_required');
     return { tone: 'ask', label: label(t("等你决定")), blocked, canAnswer,
-      title: blocked.length ? blocked.length === 1 ? t("「{p0}」卡住了，需要你拿主意", { p0: taskDisplayTitle(blocked[0].title || blocked[0].id) }) : t("{p0} 项任务卡住了，需要你拿主意", { p0: blocked.length }) : t("伙伴有个问题要你回答"),
+      title: blocked.length ? permission ? t("有一步要你同意权限") : t("伙伴需要你定个方向") : t("伙伴有个问题要你回答"),
       question: question.length > 220 ? `${(question.split('\n').find((line) => line.trim()) || question).slice(0, 200)}…` : question,
-      text: blocked.length > 1 ? '' : canAnswer ? t("选一个处理方式，或在下面直接写你的决定，伙伴会沿原目标接着做。") : t("先看看问题；豆窝不会擅自重新开始。") };
+      text: [canAnswer ? t("在下面回复后，伙伴会沿原目标接着做。") : t("先看看问题；豆窝不会擅自重新开始。"), autoNote].filter(Boolean).join(' ') };
   }
   if (status === 'paused') return objective.pause_requested === true
     ? { tone: 'stop', label: label(t("正在暂停")), title: t("等当前这一步做完就停"), text: t("不会再派发新的工作。") }
-    : { tone: 'stop', label: label(t("已暂停")), title: t("推进已暂停"), text: t("继续后沿原目标接着做，已有成果都在。") };
+    : { tone: 'stop', label: label(t("已暂停")), title: t("推进已暂停"), text: [t("继续后沿原目标接着做，已有成果都在。"), autoNote].filter(Boolean).join(' ') };
   if (status === 'awaiting_continue') {
     const next = boundObjectiveNextStep(snapshot);
     return { tone: 'ask', label: label(t("等你说继续")), title: t("这一阶段做完了"),
@@ -444,7 +440,7 @@ function nowSummary(snapshot) {
       title: hostResultInterruption(objective) ? t("伙伴的结果还没确认，推进停在这里") : restarted ? t("豆窝服务重启过，推进停在这里")
         : reason === 'all_partners_quota_exhausted' ? t("伙伴额度都用完了，推进停在这里") : status === 'interrupted' ? t("推进中断了") : t("推进已停止"),
       text: hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot)
-        : [reason ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。")].filter(Boolean).join(' ') };
+        : [reason && !selfCorrectedCodes.has(reason) ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。"), autoNote].filter(Boolean).join(' ') };
   }
   const working = $('work-indicator').hidden ? '' : $('work-indicator-text').textContent;
   if (['running', 'checkpoint'].includes(status) || working || ['running', 'queued'].includes(room.status) || outcome === 'in_progress') {
@@ -464,18 +460,20 @@ function renderNowCard() {
   if (!snapshot || state.selected !== snapshot.room.id || state.reader) { card.hidden = true; return; }
   const summary = nowSummary(snapshot);
   const actions = [];
+  // Primary first, then secondary, the destructive stop last.
   const primary = nowPrimaryIds.find((id) => liveControl(id));
   const pause = liveControl('pause-objective'); const stop = liveControl('cancel-room');
-  if (stop) actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
-  if (pause) actions.push(nowAction('pause-objective', '', primary ? 'btn ghost' : 'btn pri'));
-  if (summary.tone === 'ask' && summary.canAnswer) actions.push({ id: 'message', label: t("写回复"), className: primary ? 'btn ghost' : 'btn pri', focus: true });
   if (primary) {
     const labels = { 'accept-run': t("验收这一轮") };
     const original = document.getElementById(primary);
     actions.push(nowAction(primary, labels[primary] || (original.textContent === t("继续") ? t("继续推进") : ''), 'btn pri'));
   }
+  if (summary.tone === 'ask' && summary.canAnswer) actions.push({ id: 'message', label: t("写回复"), className: actions.length ? 'btn' : 'btn pri', focus: true });
+  if (pause) actions.push(nowAction('pause-objective', '', actions.length ? 'btn' : 'btn pri'));
   const blockedPrimary = actions.find((action) => action.className.includes('pri') && action.disabled);
-  if (blockedPrimary && !actions.some((action) => action.id === 'refresh')) actions.unshift({ id: 'refresh', label: t("重新读取状态"), className: 'btn ghost', disabled: $('refresh').disabled });
+  if (blockedPrimary) actions.push({ id: 'refresh', label: t("重新读取状态"), className: 'btn', disabled: $('refresh').disabled });
+  if (stop && summary.tone === 'go') actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
+  else if (stop) delete stop.dataset.mirrored;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), summary.tone, summary.label, summary.title, summary.text, summary.question,
     (summary.blocked || []).map((task) => [task.id, task.title, task.blocked_reason, task.block_cause]), summary.canAnswer, $('message').disabled, actions]);
   card.hidden = false;
@@ -487,17 +485,14 @@ function renderNowCard() {
   $('now-text').textContent = summary.text;
   const detail = $('now-detail'); detail.replaceChildren();
   if (summary.question) detail.append(element('p', summary.question, 'now-text'));
-  // One line per blocked task here; choices and raw codes stay on the progress board.
+  // Decision tasks only; anything the service replans stays on the progress board.
   const blocked = summary.blocked || [];
-  if (blocked.length === 1) detail.append(blockedTaskBody(blocked[0], summary.canAnswer && !$('message').disabled, 'now-task'));
-  else for (const task of blocked.slice(0, 3)) {
-    const line = element('p', '', 'now-task-line');
-    line.append(element('b', taskDisplayTitle(task.title || task.id)), element('span', blockedTaskReason(task)));
-    line.title = t("{p0}：{p1}", { p0: taskDisplayTitle(task.title || task.id), p1: blockedTaskReason(task) });
-    detail.append(line);
+  for (const task of blocked.slice(0, 3)) {
+    const box = blockedTaskBody(task, summary.canAnswer && !$('message').disabled, 'now-task');
+    box.insertBefore(element('b', taskDisplayTitle(task.title || task.id)), box.firstChild);
+    detail.append(box);
   }
   if (blocked.length > 3) detail.append(element('p', t("另有 {p0} 项，见“进展”。", { p0: blocked.length - 3 }), 'now-text'));
-  if (blocked.length > 1) detail.append(element('p', t("在“进展”里逐项选择处理方式，或在下面直接回复。"), 'now-text'));
   if (blockedPrimary?.caption) detail.append(element('p', t("“{p0}”暂时用不了：{p1}", { p0: blockedPrimary.label, p1: blockedPrimary.caption }), 'now-blocked'));
   $('now-actions').replaceChildren(...actions.map((action) => {
     const button = element('button', action.label, action.className); button.type = 'button';
@@ -534,10 +529,10 @@ function renderTabs() {
     $(`tab-${name}`).tabIndex = tab === name ? 0 : -1;
   }
   const tasks = (state.snapshot?.team?.tasks || []).filter((task) => task && typeof task === 'object');
-  const blocked = tasks.filter((task) => task.status === 'blocked').length;
+  const blocked = tasks.filter(taskNeedsUser).length;
   const progressCount = $('tab-progress-count');
   progressCount.hidden = !tasks.length;
-  progressCount.textContent = blocked ? t("{p0} 卡住", { p0: blocked }) : `${tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length}/${tasks.length}`;
+  progressCount.textContent = blocked ? t("{p0} 项等你", { p0: blocked }) : `${tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length}/${tasks.length}`;
   progressCount.className = `tab-count${blocked ? ' ask' : ''}`;
   $('tab-delivery-count').hidden = !state.deliveryPending;
   $('tab-delivery-count').textContent = String(state.deliveryPending || '');
@@ -546,11 +541,19 @@ function renderTabs() {
 }
 const progressChipLabels = localizedLabels({
   open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '互审中', accepted: '互审通过',
-  self_checked: '只自检', blocked: '卡住了', unknown: '待确认', interrupted: '中断', cancelled: '已取消',
+  self_checked: '只自检', unknown: '结果待确认', interrupted: '停下了', cancelled: '已取消',
 });
+// One color per meaning, shared by the bar, the row icon and the legend.
+const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '互审中', ask: '等你决定', wait: '待重新安排', st: '停下了', todo: '未开始' });
 function progressTone(task) {
   if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
-  return ({ self_checked: 'self', review: 'rev', working: 'wk', blocked: 'ask', waiting_peer: 'ask', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
+  if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : 'wait';
+  return ({ self_checked: 'self', review: 'rev', working: 'wk', waiting_peer: 'wk', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
+}
+function progressChip(task) {
+  if (task.status === 'accepted' && task.review_kind === 'self_check') return progressChipLabels.self_checked;
+  if (task.status === 'blocked') return taskNeedsUser(task) ? task.block_cause === 'permission_required' ? t("要你同意") : t("等你决定") : t("待重新安排");
+  return Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("结果待确认");
 }
 function renderProgressPane() {
   const pane = $('progress-pane'); const snapshot = state.snapshot;
@@ -565,36 +568,45 @@ function renderProgressPane() {
   pane.dataset.fingerprint = fingerprint;
   const nodes = [];
   if (tasks.length) {
-    const done = tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length;
-    const blocked = tasks.filter((task) => task.status === 'blocked').length;
-    const halted = tasks.filter((task) => ['interrupted', 'cancelled', 'unknown'].includes(task.status)).length;
+    const tones = tasks.map(progressTone).map((tone) => tone === 'self' ? 'ok' : tone);
+    const count = (tone) => tones.filter((value) => value === tone).length;
     const head = element('div', '', 'stage-head');
     const phase = Object.hasOwn(teamStageLabels, snapshot.team?.phase) ? teamStageLabels[snapshot.team.phase] : '';
     head.append(element('b', [Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : t("本轮分工"), phase].filter(Boolean).join(' · ')),
-      element('span', [t("{p0} / {p1} 完成", { p0: done, p1: tasks.length }), blocked ? t("{p0} 项卡住", { p0: blocked }) : '', halted ? t("{p0} 项中断", { p0: halted }) : ''].filter(Boolean).join(' · ')));
+      element('span', [t("{p0} / {p1} 完成", { p0: count('ok'), p1: tasks.length }), count('ask') ? t("{p0} 项等你决定", { p0: count('ask') }) : '',
+        count('wait') ? t("{p0} 项待重新安排", { p0: count('wait') }) : '', count('st') ? t("{p0} 项停下了", { p0: count('st') }) : ''].filter(Boolean).join(' · ')));
     const segments = element('span', '', 'stage-seg'); segments.setAttribute('aria-hidden', 'true');
-    for (const task of tasks) segments.append(element('i', '', ({ ok: 'ok', self: 'ok', wk: 'wk', rev: 'rev', ask: 'ask', st: 'st' })[progressTone(task)] || ''));
+    for (const tone of tones) segments.append(element('i', '', tone));
     head.append(segments); nodes.push(head);
+    const legend = element('div', '', 'stage-legend');
+    for (const tone of ['ok', 'wk', 'rev', 'ask', 'wait', 'st', 'todo']) {
+      if (!count(tone)) continue;
+      const item = element('span', '', 'legend-item'); item.append(element('i', '', tone), element('span', `${progressToneLabels[tone]} ${count(tone)}`));
+      legend.append(item);
+    }
+    nodes.push(legend);
+    if (count('wait') || count('st')) nodes.push(element('p', count('wait') && count('st')
+      ? t("“待重新安排”和“停下了”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
+      : count('wait') ? t("“待重新安排”的任务不用逐项处理：点“继续推进”后，豆窝会先重新安排，再接着做。")
+      : t("“停下了”表示这项在豆窝停止时还没做完，点“继续推进”后会接着做。"), 'progress-note'));
     if (summary) nodes.push(element('p', summary.length > 400 ? `${summary.slice(0, 400)}…` : summary, 'progress-summary'));
     const list = element('ol', '', 'task-board');
     for (const task of tasks) {
       const tone = progressTone(task);
-      const row = element('li', '', `task-row${task.status === 'blocked' ? ' open' : ''}`);
-      row.append(element('span', ({ ok: '✓', self: '✓', ask: '!', st: 'Ⅱ' })[tone] || '', `si ${tone}`));
+      const row = element('li', '', `task-row tone-${tone}${taskNeedsUser(task) ? ' open' : ''}`);
+      row.append(element('span', ({ ok: '✓', self: '✓', ask: '!', wait: '↻', st: 'Ⅱ' })[tone] || '', `si ${tone}`));
       const name = element('span', taskDisplayTitle(task.title), 'task-name'); name.title = task.title;
       if (typeof task.waiting_for === 'string' && task.waiting_for) name.append(element('small', t("等：{p0}", { p0: task.waiting_for })));
       const who = element('span', '', 'task-who');
       const member = (id) => snapshot.members.find((entry) => entry.id === id);
-      if (agentPattern.test(task.owner || '')) { const owner = avatar(task.owner, member(task.owner)); who.append(owner); who.title = displayName(task.owner); }
+      if (agentPattern.test(task.owner || '')) { who.append(avatar(task.owner, member(task.owner))); who.title = displayName(task.owner); }
       else who.append(element('span', t("待认领")));
       if (agentPattern.test(task.reviewer || '') && task.reviewer !== task.owner) {
         who.append(element('span', '→'), avatar(task.reviewer, member(task.reviewer)));
         who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
       }
-      const chip = element('span', task.status === 'accepted' && task.review_kind === 'self_check' ? progressChipLabels.self_checked
-        : Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("待确认"), `chip ${tone}`);
-      row.append(name, who, chip);
-      if (task.status === 'blocked') row.append(blockedTaskBody(task, canAnswer, 'task-why'));
+      row.append(name, who, element('span', progressChip(task), `chip ${tone}`));
+      if (task.status === 'blocked') row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
       list.append(row);
     }
     nodes.push(list);
@@ -5212,10 +5224,12 @@ function renderCurrentTaskQuestion(result, snapshot, objective, expanded) {
   result.hidden = false; result.className = 'collaboration-card outcome-card outcome-needs_user';
   result.append(element('h2', t("当前需要处理")));
   for (const task of snapshot.team?.tasks || []) {
-    if (next.origin === 'task_block' && task.status === 'blocked') {
+    if (next.origin === 'task_block' && taskNeedsUser(task)) {
       result.append(element('p', t("{p0}：{p1}", { p0: taskDisplayTitle(task.title || task.id), p1: blockedTaskReason(task) }), 'detail-caption'));
     }
   }
+  const replanned = next.origin === 'task_block' ? (snapshot.team?.tasks || []).filter(taskAutoBlocked).length : 0;
+  if (replanned) result.append(element('p', t("有 {p0} 项需要重新安排，点“继续推进”后会自动处理。", { p0: replanned }), 'detail-caption'));
   // Task blocks are joined from stored reason codes; keep that literal record folded.
   const codedQuestion = next.origin === 'task_block' && /[：:]\s*[a-z][a-z0-9_]{3,}\s*(?:[；;\n]|$)/m.test(next.question);
   if (codedQuestion && next.question.length <= 400) {
@@ -5252,7 +5266,7 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
   } else if (!next && objective.status === 'awaiting_continue') result.append(element('p', recorded
     ? t("下一步的范围或版本尚未确认，当前不会自动开始。") : t("还没有明确的下一步，请补充要求；不会猜测后直接开工。"), 'detail-caption'));
   if (typeof objective.stop_reason === 'string' && objective.stop_reason) {
-    const explanation = executionMessage(objective.stop_reason);
+    const explanation = stopReasonMessage(objective.stop_reason);
     if (explanation.trim() !== questionShown?.trim() && ![...technical.children].some((node) => node.textContent.trim() === explanation.trim())) {
       technical.append(element('p', explanation, 'detail-caption'));
     }
@@ -6082,7 +6096,7 @@ function memberActivity(snapshot, member) {
   }
   else if (!job && objective && ['stopped', 'interrupted', 'needs_user'].includes(objective.status)) {
     status = objective.status === 'needs_user' ? 'needs_user' : objective.status;
-    label = objectiveLabel(objective); task = hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot) : objective.stop_reason ? executionMessage(objective.stop_reason)
+    label = objectiveLabel(objective); task = hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot) : objective.stop_reason ? stopReasonMessage(objective.stop_reason)
       : objective.next_step?.question || t("当前进度已保留，请查看下一步与任务记录。");
   } else if (!job && objective?.status === 'complete') { label = isReadOnlyDiscussion(snapshot) ? t("讨论已结束") : Number.isFinite(snapshot.current_run?.accepted_at) ? t("目标已确认完成") : t("目标已交付"); task = isReadOnlyDiscussion(snapshot) ? t("回复与建议已保留；已有改动未发布。可继续讨论，或切到动手后接着做。") : t("查看本目标成果；仅自检的部分会单独注明。"); }
   else if (!job && retired?.cleanup_confirmed === true) {
@@ -6788,7 +6802,9 @@ function renderControls() {
   const inactive = !!room && !activeEntry(room);
   const blocked = state.busy || !!state.pending || state.managementBusy;
   const title = room ? roomTitle(objective ? { ...room, objective_goal: objective.original_goal } : room) : (loading ? roomTitle(state.rooms.find((entry) => entry.id === state.selected)) : t("新任务"));
-  $('room-title').textContent = title;
+  const headerGoal = typeof (objective?.original_goal ?? room?.goal) === 'string' ? (objective?.original_goal ?? room.goal).trim().replace(/\s+/g, ' ') : '';
+  const headerSentence = headerGoal.split(/[。！？\n]/u)[0] || headerGoal;
+  $('room-title').textContent = room && headerSentence ? headerSentence.length > 200 ? `${headerSentence.slice(0, 200)}…` : headerSentence : title;
   $('room-title').title = objective?.original_goal || room?.goal || title;
   const runCaption = Number.isSafeInteger(state.snapshot?.current_run?.number) ? t("第 {p0} 轮 · ", { p0: state.snapshot.current_run.number }) : '';
   const displayedWorkMode = actualWorkMode();

@@ -9136,34 +9136,41 @@ test('current bound task block shows one actionable literal question with its st
   assert.match(ui.get('collaboration-outcome').textContent, /继续时沿用当前权限设置/);
   assert.equal(ui.posts().length, 0);
 });
-test('stored block codes read as plain language on the now card and progress board, and quick choices only fill the draft', async () => {
-  // Catches raw reason codes leaking into the decision UI and quick choices that send without review.
+test('reply-mistake blocks read as automatic replanning, while only a permission block offers a choice that fills the draft', async () => {
+  // Catches internal correction codes being offered to the user as decisions, and choices that send without review.
   const saved = currentTaskBlockFixture();
-  saved.objective.next_step.question = '[0%] 实跑遗漏入口：team_task_permission';
-  saved.team.tasks = [{ id: 'blocked-file', title: '[0%] 实跑遗漏入口', owner: 'codex', status: 'blocked', blocked_reason: 'team_task_permission', block_cause: null }];
+  saved.objective.next_step.question = '[0%] 实跑遗漏入口：team_task_permission；全量测试：team_write_path_conflict';
+  saved.team.tasks = [
+    { id: 'reply-mistake', title: '[0%] 实跑遗漏入口', owner: 'codex', status: 'blocked', blocked_reason: 'team_task_permission', block_cause: null },
+    { id: 'coordination', title: '[0%] 执行全量注册测试', owner: 'claude', status: 'blocked', blocked_reason: '需要内部重规划补一个修复任务。', block_cause: 'coordination_required' }];
   saved.collaboration.tasks = saved.team.tasks;
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
   const now = ui.get('now-card');
   assert.equal(now.hidden, false);
-  assert.match(ui.get('now-title').textContent, /「实跑遗漏入口」卡住了，需要你拿主意/);
-  assert.match(now.textContent, /伙伴想改一项不归它负责的任务，被豆窝拦下了。/);
-  assert.match(ui.get('collaboration-outcome').textContent, /实跑遗漏入口：伙伴想改一项不归它负责的任务/);
-  const visibleText = (root) => descendants(root).filter((node) => !descendants(root).some((parent) => parent.tagName === 'DETAILS' && descendants(parent).includes(node) && node.tagName !== 'SUMMARY' && parent !== node)).map((node) => node._text).join('');
-  assert.doesNotMatch(visibleText(now), /team_task_permission/, 'the raw code stays folded under technical details');
-  assert.ok(descendants(now).some((node) => node.classList.contains('tech-details') && node.textContent.includes('team_task_permission')));
+  assert.match(ui.get('now-title').textContent, /有几项需要重新安排/);
+  assert.doesNotMatch(now.textContent, /team_task_permission|按原分工重试|先跳过/);
+  const outcomeLines = descendants(ui.get('collaboration-outcome')).filter((node) => node.classList.contains('detail-caption')).map((node) => node.textContent).join('\n');
+  assert.doesNotMatch(outcomeLines, /实跑遗漏入口：/, 'replanned tasks are not listed as decisions');
+  assert.match(outcomeLines, /2 项需要重新安排，点“继续推进”后会自动处理/);
+  const pane = ui.get('progress-pane');
   assert.equal(ui.get('conversation').dataset.tab, 'progress');
-  assert.match(ui.get('progress-pane').textContent, /卡住了/);
-  const retry = descendants(ui.get('progress-pane')).find((node) => node.tagName === 'BUTTON' && node.textContent === '按原分工重试');
-  assert.ok(retry, 'a blocked task offers a quick choice when the user can answer');
-  retry.fire('click'); await settle();
-  assert.equal(ui.get('message').value, '「实跑遗漏入口」按原分工重试：请负责人在自己的任务范围内重新提交。');
-  assert.equal(ui.posts().length, 0, 'a quick choice never sends by itself');
-  const timelineHidden = ui.get('timeline').hidden;
-  await ui.click('tab-discussion');
-  assert.equal(ui.get('conversation').dataset.tab, 'discussion');
-  assert.equal(ui.get('tab-discussion').getAttribute('aria-selected'), 'true');
-  assert.equal(ui.get('timeline').hidden, timelineHidden, 'views switch by layout only and leave reader state alone');
-  assert.equal(ui.get('rooms').children[0].dataset.group, 'ask');
+  assert.match(pane.textContent, /2 项待重新安排/);
+  assert.match(pane.textContent, /点“继续”后会自动处理，不用你选/);
+  assert.equal(descendants(pane).filter((node) => node.tagName === 'BUTTON').length, 0, 'no per-task choice for automatic replanning');
+  assert.ok(descendants(pane).some((node) => node.classList.contains('tech-details') && node.textContent.includes('team_task_permission')));
+
+  const permission = currentTaskBlockFixture();
+  const second = await browser({ rooms: [permission.room], saved: permission, executionPolicySupport: true, naturalContinuationSupport: true });
+  assert.match(second.get('now-title').textContent, /有一步要你同意权限/);
+  const approve = descendants(second.get('now-card')).find((node) => node.tagName === 'BUTTON' && node.textContent === '同意，按原计划做');
+  assert.ok(approve, 'a permission block offers an explicit choice');
+  approve.fire('click'); await settle();
+  assert.equal(second.get('message').value, '同意「核对文件修改」需要的权限，按原计划继续。');
+  assert.equal(second.posts().length, 0, 'a quick choice never sends by itself');
+  const timelineHidden = second.get('timeline').hidden;
+  await second.click('tab-discussion');
+  assert.equal(second.get('conversation').dataset.tab, 'discussion');
+  assert.equal(second.get('timeline').hidden, timelineHidden, 'views switch by layout only and leave reader state alone');
 });
 test('current task question refuses stale bindings and never infers a permission category from free text or ordinary checkpoints', async () => {
   for (const variant of ['binding', 'origin', 'checkpoint', 'cause', 'coordination']) {
