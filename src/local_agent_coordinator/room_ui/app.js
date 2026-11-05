@@ -495,7 +495,7 @@ function nowSummary(snapshot) {
   if (status === 'complete' || ['ready_for_user', 'accepted'].includes(outcome)) {
     const selfOnly = tasks.filter((task) => task.status === 'self_checked' || task.status === 'accepted' && task.review_kind === 'self_check').length;
     const reviewed = tasks.filter((task) => task.status === 'accepted' && task.review_kind !== 'self_check').length;
-    const parts = [tasks.length ? selfOnly ? t("{p0} 项里 {p1} 项互审通过，{p2} 项只自检。", { p0: tasks.length, p1: reviewed, p2: selfOnly })
+    const parts = [tasks.length ? selfOnly ? t("{p0} 项里 {p1} 项互审通过，{p2} 项仅自检。", { p0: tasks.length, p1: reviewed, p2: selfOnly })
       : t("{p0} 项都已互审通过。", { p0: reviewed }) : '', state.deliveryPending ? t("代码还有改动没交付，见“交付”。") : ''].filter(Boolean);
     const accepted = Number.isFinite(run?.accepted_at) || outcome === 'accepted';
     if (status === 'complete') return { tone: 'done', label: label(t("已完成")), title: accepted ? t("你已确认完成") : t("目标已完成"),
@@ -633,7 +633,7 @@ function renderTabs() {
 }
 const progressChipLabels = localizedLabels({
   open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '互审中', accepted: '互审通过',
-  self_checked: '只自检', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
+  self_checked: '仅自检', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
 });
 // Only the user's own stop really cancels unfinished tasks; any other stop carries them into the next attempt.
 const userCancelCodes = new Set(['cancel_requested', 'lifecycle_requested']);
