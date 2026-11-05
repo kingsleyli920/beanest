@@ -1,0 +1,21 @@
+name: Feature request · 功能建议
+description: Suggest a change or a new capability. · 提一个改动或新功能。
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem · 遇到的问题
+      description: What are you trying to do, and what gets in the way? · 你想做什么，现在卡在哪里？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal · 建议
+      description: What should Beanest do instead? · 你希望豆窝怎么做？
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope · 影响范围
+      description: New providers, or changes to scheduling, permissions, billing, or recovery, need discussion before a large PR. · 新增供应商，或改动调度、权限、计费、恢复规则的，请先讨论再提大 PR。

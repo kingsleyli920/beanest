@@ -1,15 +1,15 @@
 # 房间与多轮协作契约
 
-当前契约对应共享任务、同房间多轮目标、可选持续目标推进、用户验收及受限文件产物接口。一个 room 保留稳定成员身份和有序聊天历史；用户可显式邀请已接入伙伴加入现有共享任务或普通文字聊天，原成员保持。普通新用户目标建立 run，推进目标以 objective 关联多个阶段，记录实际调用，不要求逐阶段接受，默认不设置总轮数、调用数或时长上限；用户明确提供的受支持停止条件仍生效。普通续轮沿用各成员专用原生 session。已交付清单、文件版本、预算和验收记录保留。文本及静态文件模式关闭 Agent 原生工具；显式 `native_project` 另按统一权限启用本机 CLI 工具。宿主核对文件发布，不自动回写源目录。`python_sandbox` 的受限 Python runner 与原生本机执行是不同路径。实现契约不等同于真实长时间协作或完整产品验收；日常操作和验证边界见[操作说明](public-readme.md)；本契约不作为持续工作时长的验收证明。
+当前契约对应共享任务、同房间多轮目标、可选持续目标推进、用户验收及受限文件产物接口。一个 room 保留稳定成员身份和有序聊天历史；用户可显式邀请已接入伙伴加入现有共享任务或普通文字聊天，原成员保持。普通新用户目标建立 run，推进目标以 objective 关联多个阶段，记录实际调用，不要求逐阶段接受，默认不设置总轮数、调用数或时长上限；用户明确提供的受支持停止条件仍生效。普通续轮沿用各成员专用原生 session。已交付清单、文件版本、预算和验收记录保留。文本及静态文件模式关闭 Agent 原生工具；显式 `native_project` 另按统一权限启用本机 CLI 工具。宿主核对文件发布，不自动回写源目录。`python_sandbox` 的受限 Python runner 与原生本机执行是不同路径。日常操作和验证边界见 [README](../README.zh-CN.md)。
 
 ## 单源与分工
 
-- `room_store.py` / `room_service.py`：房间、稳定成员身份、全局有序事件、事务认领、有限自动路由与取消。直接复用 `adapters.invoke`，不依赖 Paradev。
+- `room_store.py` / `room_service.py`：房间、稳定成员身份、全局有序事件、事务认领、有限自动路由与取消。直接复用 `adapters.invoke`。
 - `team_store.py`：同一房间的 run 历史、用户验收、共享任务、版本化分工确认、自主认领、DAG依赖、具体求助及独立结果互审；任务交付与单次模型调用分别存储。`collaboration_view.py`根据实际任务、文件与执行记录生成交付展示，不采用模型自称“完成”作为验收。
 - `room_server.py`：复用既有 loopback HTTP 安全壳，提供房间 API；浏览器和桌面窗口使用同一服务。
 - `room_ui/`：统一群聊界面，展示真实成员/任务/状态与消息来源；没有手动“转交审核”阶段按钮。
 - `project_catalog.py` / `folder_workspace.py` / `folder_protocol.py`：项目metadata登记、默认文件夹模式的显式捕获、SHA blobs/不可变index与宿主按需查找/读取/搜索。`project_workspace.py`保留高级指定文件及新建文本/Python的完整JSON快照。源目录不写入，主机不导入生成文件。
-- `partner_manager.py`：Claude/Codex 独立伙伴配置、只读安装发现，以及用户配置的本机 JSON 连接器模板和显式接入检查。
+- `partner_manager.py`：Claude/Codex/Kimi 独立伙伴配置、只读安装发现，以及用户配置的本机 JSON 连接器模板和显式接入检查。
 - `runtime_settings.py`：每轮统一宿主权限及逐成员模型/effort的严格规范化和目录校验；不是原生整机工具的授权入口。
 - `execution_policy.py` / `objective_store.py`：显式推进策略规范化，以及目标总账、阶段、暂停、检查与决策的持久化；沿用现有调度器。
 - `artifact_export.py` / `svg_preview.py`：校验当前文件快照后生成不含私有元数据的 ZIP，以及白名单静态 SVG 预览。
@@ -40,8 +40,8 @@ Snapshot 的 `member_invitation` 提供 `supported/can_invite/reason/candidates`
 - `POST /api/rooms/<uuid>/cancel`，空对象 → room snapshot；取消后核对自身子进程，不把“停止派发”当退出。
 - `GET /api/projects` → `{projects:[{id,name,path,files,created_at,selection_kind?}]}`，不返回文件正文；`POST /api/projects`接受默认目录登记`{name,path,selection_kind:"folder"}`，其记录为`files:[]`；旧`{name,path,files}`继续登记指定文件。均仅用户配置入口可用，不启动模型；目录登记不遍历或读取正文。
 - `GET /api/partners` → `{partners,supported_adapters,connection_templates,connection_protocol,discovery,bean_styles,observed_at,scope:"coordinator_owned_only"}`，包含已保存 health 与本服务 monitor，不触发检查。
-- `POST /api/partners` 接受 `{id,name,adapter,avatar?,bean_style?,connection?}`；Claude/Codex 使用已验证适配器，`kimi` / `deepseek` / `local_json` 为待配置的本机 JSON 连接器模板，不表示厂商原生 CLI 已兼容。`bean_style` 仅为固定装饰形象，由服务目录提供。
-- `POST /api/partners/discover` 接受空对象，仅刷新 PATH / 固定位置安装观察，不执行 CLI、认证或模型，不重写配置或恢复手动停用者。
+- `POST /api/partners` 接受 `{id,name,adapter,avatar?,bean_style?,connection?}`；Claude/Codex/Kimi 使用原生适配器，`deepseek` / `local_json` 为待配置的本机 JSON 连接器模板，不表示厂商原生 CLI 已兼容。`bean_style` 仅为固定装饰形象，由服务目录提供。
+- `POST /api/partners/discover` 接受空对象，刷新 PATH / 固定位置安装观察。Claude/Codex 只看安装位置；Kimi 已安装时额外做一次不发提示词的登录状态握手。不调用模型，不重写配置或恢复手动停用者。
 - `POST /api/partners/<id>/connection` 接受 `{connection:{protocol:"beanest-json-v1",executable:"/absolute/executable",args:[],billing:"existing_subscription"|"local"}}`；用户须提供可信本机协议实现，不能用任意厂商 CLI 参数替代。未配置或未通过接入检查的模板不能参与；既有连接身份不能改写，冲突返回 `partner_identity_conflict`，非法连接返回 `invalid_partner_connection`。
 - `POST /api/partners/<id>/enabled` 接受 `{enabled:boolean}`，改变新房间名单；`POST /api/partners/<id>/check` 接受空对象，显式执行有界版本、认证或协议 ready 检查，不调用模型。检查后刷新可选状态。
 
@@ -96,7 +96,7 @@ Web用户入口均返回当前snapshot，使用稳定request_id记录参数指�
 
 `snapshot.objective`提供`id,original_goal,mode,execution_policy,status,deadline,budget,stage,next_step,can_answer,retired_partners,baseline,delivery`。下一步包含确切源绑定、范围、问题及can_start；can_start_objective和can_start_suggested_goal由服务结合清理、版本和生命周期计算，界面不能仅凭旧can_continue推断。
 
-额度接手只接受已知额度原因，且仅在原已选的兼容成员之间进行；别名共享同一本机额度，不能作为逃生入口。原调用必须确认清理，接手增加assignment_epoch，内部grant冻结确切写路径、原owner和SHA；模型及HTTP/MCP不能提交或扩大grant。旧epoch晚回、错SHA、额外路径整批拒绝。原历史owner保留，新写入才更新当前owner。已完成任务不重做，待修改任务不派回已退役成员；剩下一位时任务为self_checked，不能称为独立审核通过。全员不可用或身份/清理未知时停止并保留原因。
+额度接手只接受已知额度原因，且仅在原已选的兼容成员之间进行；同一登录的多个别名共用额度，换别名不能绕过限额。原调用必须确认清理，接手增加assignment_epoch，内部grant冻结确切写路径、原owner和SHA；模型及HTTP/MCP不能提交或扩大grant。旧epoch晚回、错SHA、额外路径整批拒绝。原历史owner保留，新写入才更新当前owner。已完成任务不重做，待修改任务不派回已退役成员；剩下一位时任务为self_checked，不能称为独立审核通过。自主目标开启额度接手时，全员额度用完会保留进度，每个房间最多每 5 分钟复查一次；拿到额度恢复的证据（伙伴状态明确为 available，或用量窗口还有剩余）才沿同一任务板自动继续，完全没有用量数据时最多每小时试一次；身份或清理状态未知时停下并保留现场。
 
 `objective.delivery`只汇总同目标各阶段已通过独立审核或自检的result_files，按路径保留最新确切SHA，并核对当前私有版本，提供缺失/变化清单。来源run、revision和digest保留；旧库存不当作新交付。明确接续旧目标的成果单列在baseline，不能算作本目标新写入。
 
@@ -110,11 +110,11 @@ Web用户入口均返回当前snapshot，使用稳定request_id记录参数指�
 
 每位伙伴保持独立、稳定的完整工作目录。宿主同步确切共享版本，保存尚未发布的本地改动，并按文件授权、当前 owner/epoch 和 SHA 发布实际变化；声明路径是授权上界，不要求为凑清单改动所有文件。未变路径需 `unchanged_paths` 理由；保留旧冲突版本需 `resolved_conflicts` 明确选择。二进制、删除、越权、权限位或未解决冲突等未能导入的变化保留在私有树并明确列出，不能算成交付。
 
-协议类中断仅在服务端 `current_run.can_recover_native` 允许时，通过 Web 用户 `POST /api/rooms/{room_id}/recover-native` 恢复。请求为 `{request_id,run_id,revision,digest,user_message?}`，不接收新权限、策略或目标；MCP 不可调用。可选补充正文与原绑定一起纳入幂等指纹，在同一恢复事务中写入用户消息，排队前供上下文读取；审计或事务失败不留下消息或新运行，客户端保留原请求与草稿，不恢复后另发。服务端核对实际进程清理、确切发布版本及私有目录 SHA，拒绝未发布修改、缺失或符号链接等未知现场。成功后原运行/unknown记录不变，同房间建立新运行及新会话，继承权限、模型和清单，当前有效策略不再执行旧人工上限；已交付结果接续审核，不重放旧调用。普通 retry 不得绕过该审计。此核对只覆盖已管理文件与已知进程，并不证明 Full Access 的所有外部副作用均不存在。 旧版本若将合法后台任务元数据误拒压成 `provider_failed`，仅可在用户显式恢复时追加辅助诊断审计：当前房间唯一收据须匹配原会话、实际工具计数及已知误拒标签，且不跟随符号链接、有界读取。成功另记 `native_recovery_attestation`，保留旧失败；辅助收据不是权限凭证，也不证明无外部副作用，仍不能绕过进程清理和已发布文件 SHA 审计。
+协议类中断仅在服务端 `current_run.can_recover_native` 允许时，通过 Web 用户 `POST /api/rooms/{room_id}/recover-native` 恢复。请求为 `{request_id,run_id,revision,digest,user_message?}`，不接收新权限、策略或目标；MCP 不可调用；自主目标中，若[停止策略](#停止策略)判定可以自动继续，宿主会代用户发起一次恢复。可选补充正文与原绑定一起纳入幂等指纹，在同一恢复事务中写入用户消息，排队前供上下文读取；审计或事务失败不留下消息或新运行，客户端保留原请求与草稿，不恢复后另发。服务端核对实际进程清理、确切发布版本及私有目录 SHA，拒绝未发布修改、缺失或符号链接等未知现场。成功后原运行/unknown记录不变，同房间建立新运行及新会话，继承权限、模型和清单，当前有效策略不再执行旧人工上限；已交付结果接续审核，不重放旧调用。普通 retry 不得绕过该审计。此核对只覆盖已管理文件与已知进程，并不证明 Full Access 的所有外部副作用均不存在。 旧版本曾把合法的后台任务元数据误判为 `provider_failed`，这类记录，仅可在用户显式恢复时追加辅助诊断审计：当前房间唯一收据须匹配原会话、实际工具计数及已知误拒标签，且不跟随符号链接、有界读取。成功另记 `native_recovery_attestation`，保留旧失败；辅助收据不是权限凭证，也不证明无外部副作用，仍不能绕过进程清理和已发布文件 SHA 审计。
 
-Kimi 的握手、配置、提示发送及上下文压缩失败分别保留白名单诊断；不保存供应商原始错误正文或请求标识。`session/prompt` 已发送时，即使没有工具调用，也不能当作尚未执行而自动重放。仅规划/协调阶段的确切会话压缩 403，且本次 owned wire 明确证明为订阅上下文限制时，可作为原生恢复候选；历史 `native_auth_unconfirmed` 不整体放行。恢复 POST 需核对原作业上下文、提示摘要、会话、版本、权限与全工作区/进程清理审计，再复用上述新运行、新会话交接。旧会话和失败记录保留，不删除历史、不升级套餐或换计费路径；未知错误、写入副作用、现场漂移或证据变化仍拒绝。
+Kimi 的握手、配置、提示发送及上下文压缩失败分别保留白名单诊断；不保存供应商原始错误正文或请求标识。`session/prompt` 已发送时，即使没有工具调用，也不能当作尚未执行而自动重放。仅规划/协调阶段的确切会话压缩 403，且本服务自己记录的原始通信明确证明为订阅上下文限制时，可作为原生恢复候选；历史 `native_auth_unconfirmed` 不整体放行。恢复 POST 需核对原作业上下文、提示摘要、会话、版本、权限与全工作区/进程清理审计，再复用上述新运行、新会话交接。旧会话和失败记录保留，不删除历史、不升级套餐或换计费路径；未知错误、写入副作用、现场漂移或证据变化仍拒绝。
 
-Kimi 仅在本次确切失败 turn 的官方类型明确为 `APIProviderQuotaExhaustedError` 时分类为 `subscription_limit_reached`；HTTP 429 本身不能证明订阅额度耗尽。失败 turn 即便 ACP 返回 end_turn、进程退出码为0，也不当作 completed。未执行工具的额度拒绝沿既有自动退役路径；已发生工具副作用则保留失败事实，经全工作区、身份、归属、版本与清理审计后，走既有 partial 工作的只读继任检查，再允许原授权范围内的剩余工作。自主模式且额度接手开启时，此流程由system在原目标内自动推进，不新增人工继续/确认门；已停止或取消则不自动恢复。接手方复用正常派发的可用性规则：blocked或selectable=false拒绝，unknown但selectable=true不额外拦截，也不冒称额度已确认。首次接手受阻后，仅在绑定或非来源伙伴的真实可派状态变化时重新核对，不以轮询时间制造重复尝试。用户补充在交接期间保留并排队；即便技术检查受阻，也可只保存说明而不派发、不解除写入门，不因单伙伴额度耗尽永久锁住聊天。不得重放失败调用、直接接受旧命令或丢弃未发布改动。历史误归 `native_turn_unconfirmed` 的记录保留；恢复时须另核本次 exact owned wire、作业提示与上述官方额度类型，普通429和不匹配现场不获得恢复权限。
+Kimi 仅在本次确切失败 turn 的官方类型明确为 `APIProviderQuotaExhaustedError` 时分类为 `subscription_limit_reached`；HTTP 429 本身不能证明订阅额度耗尽。失败 turn 即便 ACP 返回 end_turn、进程退出码为0，也不当作 completed。未执行工具的额度拒绝沿既有自动退役路径；已发生工具副作用则保留失败事实，经全工作区、身份、归属、版本与清理审计后，走既有 partial 工作的只读继任检查，再允许原授权范围内的剩余工作。自主模式且额度接手开启时，此流程由system在原目标内自动推进，不新增人工继续/确认门；已停止或取消则不自动恢复。接手方复用正常派发的可用性规则：blocked或selectable=false拒绝，unknown但selectable=true不额外拦截，也不冒称额度已确认。首次接手受阻后，仅在绑定或非来源伙伴的真实可派状态变化时重新核对，不以轮询时间制造重复尝试。用户补充在交接期间保留并排队；即便技术检查受阻，也可只保存说明而不派发、不解除写入门，不因单伙伴额度耗尽永久锁住聊天。不得重放失败调用、直接接受旧命令或丢弃未发布改动。历史误归 `native_turn_unconfirmed` 的记录保留；恢复时须另核本服务记录的本次原始通信、作业提示与上述官方额度类型，普通429和不匹配现场不获得恢复权限。
 
 Claude 的原生官方限额诊断由同一分类器处理：可信 `usage_limit_reached` 元数据，或 `result` 的 `subtype=success`、`is_error=true` 且全文匹配官方短限额通知，均分类为订阅限额；success 仅指传输封装，不代表调用成功。模型普通正文、工具输出、泛化非零退出均不能据此分类。工作阶段与总结/审核阶段复用伙伴退役及目标调度；所有子任务已验收时，仅换用可用的总结者，不重做任务。不足两位可用伙伴时沿既有 `self_check` 语义如实标明自检，不冒称独立互审。历史误归 `cli_nonzero_exit` 的总结调用，仅在确切 owned transcript、原提示与唯一原生回执、零工具、清理、完整工作区及版本审计通过后，恢复同一 run 的总结状态；旧失败记录保留，最终提交前重新核对现场。正常停止、取消、身份/版本漂移及真实授权边界仍优先。
 
@@ -131,13 +131,13 @@ Claude 的原生官方限额诊断由同一分类器处理：可信 `usage_limit
   "executions":[],
   "team":null,
   "current_run":null,"runs":[],"conversation_budget":null,
-  "budget":{"used":0,"limit":8,"deadline":0},
+  "budget":{"used":0,"limit":null,"deadline":null},
   "objective":null,
   "capabilities":{"text_only":true,"tools":false,"execution_policy":true}
 }
 ```
 
-成员由 AgentRegistry 登记，默认仅 Claude Code 和 Codex；PartnerManager 可登记最多32个已支持适配器或待配置连接器的独立会话配置，不会默认创建额外配置。配置ID标识会话身份，adapter标识实际CLI，provider标识供应商；多配置不能算作多种工具或独立额度。status.agents 仅提供新房间可用成员的 id/name/avatar/adapter/provider/capabilities/usage_source/usage_fields；每间创建时保存所选成员、名称与接入描述；后续注册或启停不会自动改动它。用户显式邀请只追加新成员，不修改原成员身份、历史 job 或已冻结 run snapshot。`provider` 来自服务选择的 adapter，`session_id` 来自实际 CLI 输出并核对续接身份，不能由模型正文伪造。时间为 Unix 秒。成员状态包含 queued / working / waiting_peer / needs_user / idle / failed / cancelled / interrupted，未知明确显示 unknown。房间状态为 running / completed / ready_for_user / needs_user / failed / cancelled / interrupted / budget_exhausted / unknown。completed只表示旧协议本轮队列结束；ready_for_user只表示共享子任务已交付并满足适用检查、待用户验收；独立审核与self_checked须分别显示，都不表示用户目标已验收；用户接受本轮另由 `current_run.accepted_at` 及 `collaboration.outcome.state:"accepted"` 表示，房间仍可继续下一轮。使用量是供应商提供的最新快照，带来源与范围；无数据为 null，不求和冒充总消耗。
+成员由 AgentRegistry 登记，内置 Claude Code、Codex 和 Kimi Code（Kimi 被发现后加入）；PartnerManager 可登记最多32个已支持适配器或待配置连接器的独立会话配置，不会默认创建额外配置。配置ID标识会话身份，adapter标识实际CLI，provider标识供应商；多配置不能算作多种工具或独立额度。status.agents 仅提供新房间可用成员的 id/name/avatar/adapter/provider/capabilities/usage_source/usage_fields；每间创建时保存所选成员、名称与接入描述；后续注册或启停不会自动改动它。用户显式邀请只追加新成员，不修改原成员身份、历史 job 或已冻结 run snapshot。`provider` 来自服务选择的 adapter，`session_id` 来自实际 CLI 输出并核对续接身份，不能由模型正文伪造。时间为 Unix 秒。成员状态包含 queued / working / waiting_peer / needs_user / idle / failed / cancelled / interrupted，未知明确显示 unknown。房间状态为 running / completed / ready_for_user / needs_user / failed / cancelled / interrupted / budget_exhausted / unknown。completed只表示旧协议本轮队列结束；ready_for_user只表示共享子任务已交付并满足适用检查、待用户验收；独立审核与self_checked须分别显示，都不表示用户目标已验收；用户接受本轮另由 `current_run.accepted_at` 及 `collaboration.outcome.state:"accepted"` 表示，房间仍可继续下一轮。使用量是供应商提供的最新快照，带来源与范围；无数据为 null，不求和冒充总消耗。
 
 事件使用数据库全局自增 seq，常见 kind：message、member_status、job_created、job_claimed、job_finished、room_status、warning、usage、artifact、team_command、run_started、run_accepted、format_correction_queued/finished、execution_queued/started/finished。team建立后的新增事件记录当前run_id，旧事件不补写；执行事件中的run_id是执行ID，不能替代execution.team_run_id。team_command只记录受控动作类型与task_id；可见模型message和共享投影用于聊天呈现，不把原始commands结构或用量播进聊天。每种只保存所需可见字段；不保存供应商隐藏推理、工具参数、凭据或原始诊断。执行程序的输出另存为脱敏、截断的不可信观察，不进入正常 message。重连读取 snapshot 恢复时间线，不重新推理。
 
@@ -165,7 +165,7 @@ Kimi 账号展示以本机受管登录的官方资料为准。真实邮箱优先
 
 `quota_gate.py`负责已知账号限额，独立于伙伴的启停/归档偏好。伙伴返回`availability:{state,selectable,reason,source,observed_at,identity_checked_at,resets_at,stale,scope,can_request_recheck}`；state为available/unknown/blocked。只有新鲜Codex/Claude共享额度窗口或确切原生限额报告可改变门控；认证成功不证明有额度。默认CLI登录的别名共享门控，未知额度保持可选，已知阻塞不得静默移除用户已选成员。原生调用已在途时不冒称已取消。
 
-Web可POST `/api/availability/refresh`空对象批量只读检查，每adapter一次并复用55秒缓存/并发合并；GET不启动CLI。页面可见时启动/回前台及每60秒请求，不依赖用量浮卡展开。后端没有独立的周期监测进程，页面隐藏、关闭及电脑睡眠期间不承诺持续更新；create/start_run及每个queued job在claim/扣预算前另查门控，调用明确报告限额后反馈状态。补充消息可先登记并排队，其实际派发仍受门控，不承诺messages请求同步返回409。创建或派发被阻时分别保留`agent_quota_exhausted`或`agent_quota_unconfirmed`原因，不自动换账号或新付费路径。
+Web可POST `/api/availability/refresh`空对象批量只读检查，每adapter一次并复用55秒缓存/并发合并；GET不启动CLI。页面可见时启动/回前台及每60秒请求，不依赖用量浮卡展开。页面上的额度显示靠前台刷新，页面隐藏、关闭及电脑睡眠期间不承诺持续更新；全员额度用完的房间由后端另外每 5 分钟复查一次；create/start_run及每个queued job在claim/扣预算前另查门控，调用明确报告限额后反馈状态。补充消息可先登记并排队，其实际派发仍受门控，不承诺messages请求同步返回409。创建或派发被阻时分别保留`agent_quota_exhausted`或`agent_quota_unconfirmed`原因，不自动换账号或新付费路径。
 
 已知限制在私有0600原子日志中保存本机加盐HMAC身份与安全元数据，不保存邮箱或原始认证响应。重启后无法确认当前身份时保持blocked/account_identity_unknown；确认换账号才解除旧身份绑定。到达已知重置时间仅降为unknown，不直接证明恢复。Claude实际订阅限额且没有可信恢复时间、同账号身份核查新鲜时，Web可POST `/api/partners/<id>/availability/recheck`空对象，需用户明确确认；仅降为unknown/user_recheck_requested，不启动模型、不改登录或启停偏好。旧限额时间observed_at与当前身份核查identity_checked_at分别保留，不能用新登录检查伪装新额度。MCP不能调用这两个管理入口。
 
@@ -179,7 +179,11 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 只有实际清单交付、适用审核及所需检查满足、无 queued/working 记录及真实在途 worker/执行时，才开放 `can_accept` / `can_continue`；自检不因此变成独立审核。`/accept` 记录 `accepted_at` 与 `run_accepted`，不调用模型，不代表整个聊天结束；旧普通续轮可直接用 `/runs` 提出修改，不要求先接受。objective阶段继续或回答改用专用入口，界面只在目标完成时提供最终确认。Agent 命令不能开下一轮或代用户接受，MCP 不提供验收工具。历史清单与验收不改写，文件仍保留不可变版本；下一轮重新规划，沿用冻结成员、普通原生 session 和既有文件 owner，不直接重跑 accepted 任务。既有共享房间升级绑定初始 run，不清空旧任务、身份或执行凭据。
 
-当前共享任务及持续目标不按总轮数、调用次数或运行时长停止。历史 `used`、`deadline`、有限策略和失败可查，当前活动视图及调度不再执行这些人工预算。`conversation_budget` 只汇总实际派发和运行数量，不表示 Token、费用或当前上限。生命周期、确切版本、实际清理、取消及无进展检查仍生效。同房间的受限 Python 隔离执行另有资源与失败回收约束，不能据此声称原生开发总目标有次数限制。
+当前共享任务及持续目标不按总轮数、调用次数或运行时长停止。历史 `used`、`deadline`、有限策略和失败可查，当前活动视图及调度不再执行这些人工预算。`conversation_budget` 只汇总实际派发和运行数量，不表示 Token、费用或当前上限。生命周期、确切版本、实际清理、取消及无进展检查仍生效。
+
+### 停止策略
+
+自主目标停下时，宿主按 `stop_policy.py` 决定是否等用户。只有两类停止码等用户：一是用户自己的停止、用户设的上限、目标本身提出的问题或无进展（`USER_STOPS`）；二是结果未知、需要保留现场的情况，例如清理、提交、会话身份或副作用无法确认（`KEEP_SCENE`）。全员额度用完（`all_partners_quota_exhausted`）走自己的等待路径：最多每 5 分钟复查，有额度恢复的证据才继续，没有任何用量数据时最多每小时试一次。其余停止码，包括以后新增的，都在约 15 秒后由宿主代用户点一次“继续”（`restart-objective` 或 `recover-native`）。宿主按“停止原因 + 任务板状态”算指纹，用户上次发言之后，同一指纹只自动继续一次；同样的停下再次出现且没有新进展，就留给用户。宿主自己因调用失败加上的任务阻塞（不是模型提出的问题）会原地重开。下文各处写的“停止”“等待用户”，在自主目标下都先按本策略处理。同房间的受限 Python 隔离执行另有资源与失败回收约束，不能据此声称原生开发总目标有次数限制。
 
 处于stopped/unknown/interrupted/cancelled终止阶段时，普通继续返回 `team_retry_required`，补充消息不解冻。用户可显式提交 `/runs` 且 `retry:true` 建立新尝试：先停止已跟踪工作并核清理，未确认返回 `team_cleanup_unconfirmed`；成功后使用新的原生 session，旧身份、失败、交付及调用预算保留，不能复用旧 session 伪装新尝试。执行缺 result 时，仅持久记录能证明已 queued 且从未 started 的预约可视为未启动；已启动、重启中断或来源不明且无 cleanup receipt 的记录都阻止新尝试。能力标记是展示提示，写入口仍重新核对全部门槛。
 
@@ -231,7 +235,7 @@ complete必须有具体result，文件任务还要有其声明路径的实际交
 
 ## 验收
 
-先用 fake adapter 验证有序来源、幂等、并行认领、双向请求/反馈、预算、身份变化、超时、取消与重启。再检查真实页面和桌面窗口，最后在新沙盒提交简单文本任务，看到两个真实 provider 与自动往返、可核对结果。未经另行验证，不派发实际业务项目或任意工具执行任务。
+先用 fake adapter 验证有序来源、幂等、并行认领、双向请求/反馈、身份变化、超时、取消与重启。再检查真实页面和桌面窗口，最后在新沙盒提交简单文本任务，确认两个真实 provider 能自动往返并给出可核对的结果。
 
 ## 扩展与本机 MCP
 
@@ -239,7 +243,7 @@ complete必须有具体result，文件任务还要有其声明路径的实际交
 
 stdio `room_mcp` 仅连接已有 `room_server`，不实例化第二个服务或数据库。私有0600发现文件 `connection.json` 形状为 `{url,token,instance_id}`，其中 token 只包含独立 MCP 凭据，绝不发布 Web token。客户端固定三字段，重启后旧连接不自动换实例；`/api/mcp/` 还校验 `X-LAC-Instance`。MCP 凭据只准该命名空间，Web 凭据也不准冒作 MCP；认证按实际 token 产生 principal，再检查路由一致性。创建、补充、显式续轮的来源固定为 `mcp`，不能自报 `user` 或某个 provider；来源是接入入口标记，不是外部客户端身份认证。这不防御已控制同用户进程或读取本机首页 bootstrap 的程序。
 
-MCP 共10项工具：`room_status`、`room_list`、`room_start`、`room_read`、`room_send`、`room_continue`、`room_export`、`room_cancel`、`project_list`、`partner_list`。后两项目录只读，不执行健康检查；没有登记、伙伴管理或用户验收工具。`room_start` 支持 `participants/mode/work_mode/project_id/collaboration`（后者为严格boolean，默认false）；`room_continue` 接受与HTTP同名的run_id/revision/digest/retry及可选work_mode，供显式新目标，不自动重试未知动作。`room_export` 只读下载当前精确文件版本。start/send/continue 的 request_id 必需且稳定；响应未知只报告 `remote_state_unknown`，不自动重发。MCP连接限本机控制面，不用于公网或不可信多用户。
+MCP 共14项工具：`room_status`、`room_list`、`room_start`、`room_read`、`room_events`、`room_text`、`room_job`、`room_run`、`room_send`、`room_continue`、`room_export`、`room_cancel`、`project_list`、`partner_list`。`room_events`、`room_text`、`room_job`、`room_run` 只读，分别读取聊天消息原文、当前状态引用的完整原文、单次历史作业和单次历史运行；`project_list`、`partner_list` 目录只读，不执行健康检查；没有登记、伙伴管理或用户验收工具。`room_start` 支持 `participants/mode/work_mode/project_id/collaboration`（后者为严格boolean，默认false）；`room_continue` 接受与HTTP同名的run_id/revision/digest/retry及可选work_mode，供显式新目标，不自动重试未知动作。`room_export` 只读下载当前精确文件版本。start/send/continue 的 request_id 必需且稳定；响应未知只报告 `remote_state_unknown`，不自动重发。MCP连接限本机控制面，不用于公网或不可信多用户。
 
 公共MCP客户端单次响应仍限2MiB，较大的room记录或ZIP需通过桌面/本地Web读取、下载；folder不扩大该限制，也不开放额外原生文件工具。
 
@@ -305,7 +309,7 @@ snapshot.project 包含 `source:{id,name,path,source_hash,files:[{path,sha256}]}
 
 `mode:"python_sandbox"` 沿用上述文件、owner、版本、模型权限和预算约束；只有 `status().sandbox_execution.available` 为 true 时才广告此模式。显式配置要求已运行的本机 Docker、Unix socket 和已缓存的官方 Python 固定 digest。只有独立 CLI 的 `prepare` 会下载镜像；服务不自动 pull、不启动虚拟机、不改全局配置。未准备好时文字和纯草案模式不受影响；新请求的房间元数据若已建立但 runner 不可用，返回 `execution_initialization_unconfirmed`，同 request_id 再读回原房间，不重新派发。
 
-旧协议互审队列收尾或共享任务已互审后，服务先持久reserve，再将确切revision的JSON快照通过stdin交给runner。旧协议每房间每版本最多一次、每间两次；共享协议按team run分别每版本一次、每轮两次，同一服务全局同时一个执行；生成程序每次最多15秒，准备和回收另行有界，仍受所属房间期限与模型调用预算约束（旧协议默认900秒/8次，共享任务7200秒/32次）。容器没有宿主目录/socket/凭据挂载，非root、cap-drop、no-new-privileges、禁网络、只读根文件系统、受限tmpfs，以及CPU/内存/PID/文件/输出限额。可信bootstrap完成初始化，再安装检查架构的不可撤销seccomp过滤器，禁止新进程、exec和网络syscall，最后才导入生成模块；安装失败停止执行。
+旧协议互审队列收尾或共享任务已互审后，服务先持久reserve，再将确切revision的JSON快照通过stdin交给runner。旧协议每房间每版本最多一次、每间两次；共享协议按team run分别每版本一次、每轮两次，同一服务全局同时一个执行；生成程序每次最多15秒，准备和回收另行有界。容器没有宿主目录/socket/凭据挂载，非root、cap-drop、no-new-privileges、禁网络、只读根文件系统、受限tmpfs，以及CPU/内存/PID/文件/输出限额。可信bootstrap完成初始化，再安装检查架构的不可撤销seccomp过滤器，禁止新进程、exec和网络syscall，最后才导入生成模块；安装失败停止执行。
 
 snapshot.executions 含 `id`（独立执行 ID）、`team_run_id`（所属团队轮，旧协议为null）、revision、snapshot_sha256、status、parent_id、feedback_job_id 与 result。历史执行不删除；UI只将当前team_run_id及精确revision/digest的成功记录用于本轮就绪判定。结果中的 exit_code 和 cleanup_confirmed 是主机观察；stdout / stderr 经脱敏和截断，`report_trust:"untrusted"`，不作为认证测试报告。旧协议执行结束后自动创建 `kind:"execution"` 的模型反馈，context.execution_observation 必须按 feedback_job_id 绑定原记录；共享任务的首个已知非0失败可走下述同轮一次修复；未知或不符合门槛时停止并保留原因，不进入旧反馈链。运行期间产生新版本时，旧结果标为 stale，不归到新版本或触发错配反馈；退出0或程序自报通过都不能证明目标已验收。
 

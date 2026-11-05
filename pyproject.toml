@@ -9,7 +9,7 @@ description = "Beanest: local agent group chats, shared tasks and reviewed file 
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = ["pathspec==1.1.1"]
 
 [project.urls]
