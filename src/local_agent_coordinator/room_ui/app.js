@@ -12,6 +12,7 @@ const interfaceSemicolon = () => englishInterface() ? '; ' : '；';
 const interfaceParen = (text) => englishInterface() ? ` (${text})` : `（${text}）`;
 const interfaceQuote = (text) => englishInterface() ? `“${text}”` : `「${text}」`;
 const interfaceStop = () => englishInterface() ? '. ' : '。';
+const interfaceLead = () => englishInterface() ? ': ' : '';
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="lac-token"]').content;
 let providers = [];
@@ -175,8 +176,8 @@ const errorLabels = localizedLabels({
   partner_disabled: '这个伙伴已停用。', partner_archived: '这个伙伴已归档。', partner_removed: '这个伙伴配置已移除。',
   partner_unavailable: '这个伙伴暂时不可用。', partner_lifecycle_pending: '正在处理这个伙伴的操作。',
   user_lifecycle_required: '归档、恢复与移除请在豆窝界面中操作。',
-  invalid_work_mode: '请选择“先聊方案”或“直接动手”，再发送任务。',
-  plan_read_only: '本轮选择了先聊方案，不能修改文件；方案完成后可选择“按方案开始”。',
+  invalid_work_mode: '请选择“方案”或“动手”，再发送任务。',
+  plan_read_only: '本轮选择了方案模式，不能修改文件；方案完成后可选择“按方案开始”。',
   permission_read_only: '本轮统一权限为只读，不能修改隔离副本。可在下一轮调整权限。',
   invalid_arguments: '这次输入不符合要求，请检查目标和接收者。',
   invalid_goal: '请填写目标。',
@@ -1203,8 +1204,10 @@ async function sendCodeMergeRequest() {
       || state.busy || state.managementBusy || state.pending || entry.repositorySaving
       || entry.data.workspace_id !== entry.workspaceId
       || (target !== 'all' && !snapshot.members.some((member) => member.id === target))) return;
-  const targets = Array.isArray(request.targets) ? request.targets.filter((item) => typeof item.repository_root === 'string' && typeof item.target_branch === 'string' && item.target_branch).map((item) => `${item.repository_root} → ${item.target_branch}`).join('；') : '';
-  const text = `请核对本任务所有伙伴已完成的相关成果，提交尚未提交的有效改动，核对实际默认主分支并合入，再推送到仓库已配置的 GitHub 远端，核对实际远端提交后报告结果。关联仓库：${(request.repository_roots || []).join('；')}。${targets ? `上次检查的主分支：${targets}（执行时核对实际状态）。` : ''}请保留其他改动与成果，逐项核对未跟踪文件，只提交本任务应纳入版本管理的内容，不要盲目 git add 全部文件，不要改写历史或强推，不要自行扩大权限；如无可用 GitHub 远端，请如实说明。`;
+  const targets = Array.isArray(request.targets) ? request.targets.filter((item) => typeof item.repository_root === 'string' && typeof item.target_branch === 'string' && item.target_branch).map((item) => `${item.repository_root} → ${item.target_branch}`).join(interfaceSemicolon()) : '';
+  // Sent as the user's own message, so it follows the interface language like anything else they send.
+  const text = t("请核对本任务所有伙伴已完成的相关成果，提交尚未提交的有效改动，核对实际默认主分支并合入，再推送到仓库已配置的 GitHub 远端，核对实际远端提交后报告结果。关联仓库：{p0}。{p1}请保留其他改动与成果，逐项核对未跟踪文件，只提交本任务应纳入版本管理的内容，不要一次 git add 全部文件，不要改写历史或强推，不要自行扩大权限；如无可用 GitHub 远端，请如实说明。",
+    { p0: (request.repository_roots || []).join(interfaceSemicolon()), p1: targets ? t("上次检查的主分支：{p0}（执行时核对实际状态）。", { p0: targets }) : '' });
   if (!checkUserText(text)) return;
   saveDraft();
   // A dedicated action is a normal durable user message, detached from the
@@ -2627,7 +2630,7 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
   const { room, editable, recorded, choices, workMode, newGoal, nativeRecovery, configuration, unsent } = context;
   const caption = configuration ? unsent ? t("待发送 · ") : configuration.pending ? t("后续工作生效 · ") : t("设置 · ") : room ? editable ? newGoal ? t("新目标 · ") : t("下一轮 · ") : t("本轮 · ") : '';
   $('runtime-settings-summary').textContent = configuration ? t("{p0}权限：{p1}", { p0: caption, p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) }) : nativeRecovery ? t("继续沿用本任务设置") : !editable && !recorded ? t("权限：未记录")
-    : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标") : t("下轮") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
+    : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
   for (const id of state.participantIds) {
     const group = state.partnerControls.get(id); if (!group) continue;
     const button = group.firstChild;
@@ -2668,7 +2671,7 @@ function renderRuntimeSettings() {
   renderRuntimeShortcuts();
   const permission = choices.permission;
   $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型与思考强度", { p0: displayName(state.runtimePartner) })
-    : t("{p0}任务权限", { p0: editable && room ? newGoal ? t("新目标") : t("下一轮") : '' });
+    : t("{p0}任务权限", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '' });
   $('runtime-settings-note').textContent = !editable ? workMode === 'plan' ? t("本轮设置已经固定，方案阶段强制只读。预设的动手权限不会在本轮生效。") : t("本轮设置已经固定，不会改变正在处理的任务。")
     : workMode === 'plan' ? t("方案阶段强制只读。下面预设开始动手后的权限；选择只读后，下一轮也不会自动提升权限。")
       : t("按所选权限处理任务；本机工具使用对应的原生权限模式。");
@@ -3620,7 +3623,8 @@ function lifecycleOperationText(operation) {
     const reasons = { team_cleanup_unconfirmed: t("执行清理尚未确认"), purge_files_incomplete: t("文件清理未完成"),
       purge_workspace_busy: t("工作副本仍在使用"), purge_source_in_use: t("仍有任务依赖这份记录"),
       purge_dependency_unconfirmed: t("关联资料尚未核对"), purge_reference_conflict: t("关联资料存在冲突"), storage_unavailable: t("本地存储暂不可用") };
-    return t("{p0}未完成：{p1}。记录仍保留。", { p0: operation.action === 'remove' ? t("删除") : t("整理"), p1: reasons[operation.error] || t("本地整理遇到问题") });
+    const reason = reasons[operation.error] || t("本地整理遇到问题");
+    return operation.action === 'remove' ? t("永久删除未完成：{p0}。记录仍保留。", { p0: reason }) : t("整理未完成：{p0}。记录仍保留。", { p0: reason });
   }
   return operation.action === 'remove' ? t("任务已永久删除。") : operation.action === 'archive' ? t("任务已归档。") : t("任务已恢复。");
 }
@@ -3762,14 +3766,23 @@ function validPartnerIntent(intent) {
   return ['enable', 'disable'].includes(intent.action) ? intent.suffix === 'enabled' && intent.body.enabled === (intent.action === 'enable')
     : intent.suffix === 'lifecycle' && ['archive', 'restore', 'remove'].includes(intent.action) && intent.body.action === intent.action;
 }
+// One whole sentence per action: an action verb dropped into a shared sentence read "Partner configuration Disable." in English.
+const partnerOperationSentences = {
+  enable: { failed: "启用未完成。{p0}", unknown: "正在核对启用结果，原请求已保留。", pending: "启用尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已启用。{p0}" },
+  disable: { failed: "停用未完成。{p0}", unknown: "正在核对停用结果，原请求已保留。", pending: "停用尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已停用。{p0}" },
+  archive: { failed: "归档未完成。{p0}", unknown: "正在核对归档结果，原请求已保留。", pending: "归档尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已归档。{p0}" },
+  restore: { failed: "恢复未完成。{p0}", unknown: "正在核对恢复结果，原请求已保留。", pending: "恢复尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴已恢复。{p0}" },
+  remove: { failed: "移除配置未完成。{p0}", unknown: "正在核对移除结果，原请求已保留。", pending: "移除尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴配置已移除。{p0}" },
+  other: { failed: "伙伴操作未完成。{p0}", unknown: "正在核对伙伴操作结果，原请求已保留。", pending: "伙伴操作尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴操作已完成。{p0}" },
+};
 function partnerOperationText(operation) {
-  const name = ({ enable: t("启用"), disable: t("停用"), archive: t("归档"), restore: t("恢复"), remove: t("移除配置") })[operation.action] || t("处理");
-  if (operation.status === 'failed') return t("{p0}未完成。{p1}", { p0: name, p1: errorLabels[operation.error] || executionMessage(operation.error) });
-  if (operation.status === 'unknown') return t("正在核对{p0}结果，原请求已保留。", { p0: name });
+  const sentences = partnerOperationSentences[operation.action] || partnerOperationSentences.other;
+  if (operation.status === 'failed') return t(sentences.failed, { p0: errorLabels[operation.error] || executionMessage(operation.error) });
+  if (operation.status === 'unknown') return t(sentences.unknown);
   const error = operation.error ? errorLabels[operation.error] || executionMessage(operation.error) : '';
-  if (operation.status !== 'completed') return t("{p0}尚未完成，正在保留改动并确认停止。{p1}", { p0: name, p1: error ? ` ${error}` : '' });
+  if (operation.status !== 'completed') return t(sentences.pending, { p0: error ? ` ${error}` : '' });
   const waiting = operation.targets?.some((target) => !['done', 'superseded'].includes(target.state));
-  return t("伙伴配置已{p0}。{p1}", { p0: name === t("移除配置") ? t("移除") : name, p1: waiting ? t("已有工作的改动已保留，接手情况见原聊天。") : t("已有聊天和成果保留。") });
+  return t(sentences.done, { p0: waiting ? t("已有工作的改动已保留，接手情况见原聊天。") : t("已有聊天和成果保留。") });
 }
 function acceptPartnerOperation(operation, expected = null, context = null) {
   if (!operation || !uuidPattern.test(operation.id) || !uuidPattern.test(operation.request_id) || !agentPattern.test(operation.provider)
@@ -4851,13 +4864,16 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'artifact_pending') return t("{p0} 的文件提案正在核对版本，尚未确认保存。", { p0: displayName(event.sender) });
   if (event.kind === 'artifact') return t("{p0} 关联文件版本 {p1}，未执行代码或测试。", { p0: displayName(event.sender), p1: event.revision });
   if (event.kind === 'warning') return executionMessage(event.code);
-  if (event.kind === 'job_claimed') return t("{p0} 开始处理{p1}", { p0: displayName(event.sender), p1: ['review', 'team_review'].includes(jobKind(event, jobs)) ? t("审核任务") : t("任务") });
+  if (event.kind === 'job_claimed') return ['review', 'team_review'].includes(jobKind(event, jobs))
+    ? t("{p0} 开始处理审核任务", { p0: displayName(event.sender) }) : t("{p0} 开始处理任务", { p0: displayName(event.sender) });
   if (event.kind === 'job_finished') return `${displayName(event.sender)}${interfaceColon()}${statusLabels[statusClass(event.status)]}${event.error ? `${interfaceStop()}${executionMessage(event.error)}` : ''}`;
   if (event.kind === 'usage') return t("{p0} 的用量快照已更新", { p0: displayName(event.sender) });
   if (event.kind === 'job_created') {
     const kind = jobKind(event, jobs);
     if (kind === 'feedback') return t("{p0} 的反馈已排队给 {p1}", { p0: displayName(event.sender), p1: displayName(event.recipient) });
-    if (peerRequest(event, jobs)) return t("{p0} 向 {p1} 发起{p2}", { p0: displayName(event.sender), p1: displayName(event.recipient), p2: kind === 'review' ? t("审核请求") : t("求助") });
+    if (peerRequest(event, jobs)) return kind === 'review'
+      ? t("{p0} 向 {p1} 发起审核请求", { p0: displayName(event.sender), p1: displayName(event.recipient) })
+      : t("{p0} 向 {p1} 发起求助", { p0: displayName(event.sender), p1: displayName(event.recipient) });
     return t("任务已登记，交给 {p0}", { p0: displayName(event.recipient) });
   }
   if (event.cancellation_confirmed === false) return t("停止尚未确认，请核对本次任务执行与会话身份。");
@@ -5242,7 +5258,7 @@ function objectiveBudgetText(objective) {
   return t("已开始 {p0} 次 · 排队 {p1} 次", { p0: count(budget?.used), p1: count(budget?.queued) });
 }
 async function submitNativeRecovery(snapshot, text = '') {
-  if (naturalContinuation(state.snapshot)) { await submitNaturalContinuation(text || "继续", snapshot); return; }
+  if (naturalContinuation(state.snapshot)) { await submitNaturalContinuation(text || t("继续"), snapshot); return; }
   if (!state.nativeProjectSupported || state.busy || state.managementBusy || state.pending || !state.connected
       || snapshot?.room.id !== state.selected || snapshot.room.mode !== 'native_project' || !activeEntry(state.snapshot?.room)
       || state.snapshot?.current_run?.can_recover_native !== true) return;
@@ -5269,7 +5285,7 @@ async function submitObjectiveReassessment(snapshot) {
 }
 async function submitObjectiveAction(kind, snapshot = state.snapshot, text = '') {
   if (naturalContinuation(state.snapshot) && ['restart', 'continue', 'answer', 'resume'].includes(kind)) {
-    await submitNaturalContinuation(text || "继续", snapshot); return;
+    await submitNaturalContinuation(text || t("继续"), snapshot); return;
   }
   if (!state.executionPolicySupported || state.busy || state.managementBusy || state.pending || !state.connected
       || !state.selected || !activeEntry(state.snapshot?.room) || snapshot?.room.id !== state.selected) return;
@@ -5728,7 +5744,7 @@ function renderCollaboration(snapshot) {
     add.addEventListener('click', () => useCompletionSuggestion(snapshot, suggestion)); actions.append(add);
   } else if (!completed && !currentQuotaHandoff(snapshot, quotaFailure) && natural && (terminalTeamState(snapshot) || ['stopped', 'interrupted', 'paused', 'awaiting_continue'].includes(objective?.status))) {
     const next = element('button', t("继续"), 'quiet-button primary-action'); next.type = 'button'; next.id = 'continue-current';
-    next.disabled = !natural.canSend; next.addEventListener('click', () => void submitNaturalContinuation("继续", snapshot));
+    next.disabled = !natural.canSend; next.addEventListener('click', () => void submitNaturalContinuation(t("继续"), snapshot));
     actions.append(next);
     if (!natural.canSend) actions.append(element('span', errorLabels[natural.reason] || executionMessage(natural.reason), 'detail-caption'));
   } else if (!completed && continuation === 'continue') {
@@ -6361,7 +6377,7 @@ function teamMemberTask(snapshot, member) {
   const job = jobs.find((entry) => entry.status === 'working') || jobs.find((entry) => entry.status === 'queued');
   if (job) {
     const waiting = job.status === 'queued';
-    const prefix = (waiting ? t("等待开始") : t("正在")) + interfaceWordSpace();
+    const prefix = (waiting ? t("等待开始") : t("正在")) + interfaceLead();
     if (['team_plan', 'team_coordinate', 'team_user'].includes(job.kind)) return prefix + teamStageLabels[job.kind];
     const bindings = {
       team_work: ['owner', waiting ? 'assigned' : 'working'],
@@ -6425,7 +6441,7 @@ function renderMemberPublicProgress(snapshot, member) {
   holder.hidden = !snapshot;
   if (!snapshot) return;
   if (!publicMessage) {
-    const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceWordSpace() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
+    const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceLead() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
     // The idle line repeats the member's task line, so the card hides it.
     holder.append(element('p', text, `public-progress-fallback${!tool && !active ? ' idle' : ''}`)); return;

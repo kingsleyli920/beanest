@@ -37,3 +37,24 @@ test('storage denial does not prevent system-language defaults or session switch
   assert.equal(runtime({language:'en-US',stored:'zh-CN'}).api.getLocale(),'zh-CN');
   assert.equal(runtime({language:'en-US',hash:'#room=existing'}).api.getLocale(),'zh-CN');
 });
+test('every English entry is still used by the source, so renamed copy cannot leave stale translations behind', () => {
+  // Catches dead keys like the nine left by the 交付文件 → 工作快照对照 rename (copy audit §1.9).
+  const {dictionary} = runtime();
+  const root = path.join(__dirname, '..');
+  const sources = [path.join(asset, 'app.js'), path.join(asset, 'markdown.js'), path.join(asset, 'index.html'),
+    ...fs.readdirSync(path.join(root, 'src/local_agent_coordinator')).filter(name => name.endsWith('.py')).map(name => path.join(root, 'src/local_agent_coordinator', name))]
+    .map(file => fs.readFileSync(file, 'utf8')).join('\n');
+  const literal = key => [JSON.stringify(key), `'${key}'`, JSON.stringify(key).slice(1, -1)].some(form => sources.includes(form));
+  const unused = Object.keys(dictionary).filter(key => !literal(key));
+  assert.deepEqual(unused, []);
+});
+test('English sentences built from parts keep their spaces and never splice a verb into another sentence', () => {
+  // Catches the audit's glued renders: "New goalTask permissions", "Partner configuration Disable.", "Claude started Task".
+  const {api} = runtime();
+  assert.equal(api.t('{p0}任务权限', { p0: api.t('新目标 · ') }), 'New goal · Task permissions');
+  assert.equal(api.t('伙伴已停用。{p0}', { p0: api.t('已有聊天和成果保留。') }).startsWith('Partner disabled. '), true);
+  assert.equal(api.t('{p0} 开始处理审核任务', { p0: 'Claude' }), 'Claude started a review');
+  assert.equal(api.t('{p0} 向 {p1} 发起求助', { p0: 'Claude', p1: 'Codex' }), 'Claude asked Codex for help');
+  assert.equal(api.t('正在{p0}', { p0: 'Read file' }), 'In progress: Read file');
+  assert.equal(api.t('本轮已交付') === api.t('阶段已交付'), false, 'a round and a stage read differently');
+});

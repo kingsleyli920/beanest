@@ -6009,7 +6009,7 @@ test('partner lifecycle accepts one profile intent during pending chat and repor
   assert.match(ui.get('partners-list').textContent, /停用尚未完成/); assert.doesNotMatch(ui.get('manager-notice').textContent, /已停用|已经停止/);
   assert.equal(partners[2].enabled, true); assert.equal(ui.posts().some((request) => request.path.includes('claude_other/')), false);
   operation = { ...operation, status: 'completed', stage: 'completed', error: null, targets: [{ room_id: roomId, state: 'waiting_receiver', reason: 'objective_paused' }] }; partners[0].enabled = false;
-  await ui.poll(); assert.match(ui.get('partners-list').textContent, /伙伴配置已停用.*已有工作的改动已保留/);
+  await ui.poll(); assert.match(ui.get('partners-list').textContent, /伙伴已停用.*已有工作的改动已保留/);
   messageResponse.resolve(saved); await settle();
 });
 
@@ -6046,7 +6046,7 @@ test('partner unknown receipts use the original profile request and only authori
     assert.equal(sent.length, outcome === 'missing' ? 2 : 1, outcome); if (sent.length === 2) assert.deepEqual(structuredClone(sent[0].body), structuredClone(sent[1].body));
     const lookup = ui.requests.find((request) => request.path.startsWith('/api/partners/lifecycle-operations/'));
     assert.equal(lookup.method, 'GET'); assert.ok(lookup.path.endsWith(sent[0].body.request_id));
-    if (['network', 'conflict'].includes(outcome)) assert.doesNotMatch(ui.get('manager-notice').textContent, /配置已归档/);
+    if (['network', 'conflict'].includes(outcome)) assert.doesNotMatch(ui.get('manager-notice').textContent, /伙伴已归档/);
     if (outcome === 'conflict') { await ui.poll(); assert.equal(ui.posts().filter((request) => request.path.endsWith('/lifecycle')).length, 1); }
   }
 });
@@ -6094,7 +6094,7 @@ test('held old partner journal cannot overwrite a newer intent, revive removed c
     assert.equal(cached.find((operation) => operation.request_id === oldOperation.request_id).status, 'completed');
     if (nextAction === 'enable') {
       const current = descendants(ui.get('partners-list')).find((node) => node.dataset.focusKey === 'enabled'); assert.equal(current.textContent, '停用'); assert.equal(current.disabled, false);
-      assert.match(ui.get('manager-notice').textContent, /配置已启用/); assert.doesNotMatch(ui.get('partners-list').textContent, /停用尚未完成/);
+      assert.match(ui.get('manager-notice').textContent, /伙伴已启用/); assert.doesNotMatch(ui.get('partners-list').textContent, /停用尚未完成/);
     } else {
       assert.equal(ui.get('partners-list').children.some((node) => node.dataset.partner === 'claude'), false);
       assert.match(ui.get('manager-notice').textContent, /配置已移除/);
@@ -9649,7 +9649,7 @@ test('English working status separates system fragments from raw task names and 
   const room = saved.room;
   const ui = await browser({language:'en',rooms:[room],saved});
   // English quotes a task name with “ ” instead of leaking 「」 (hard-coded punctuation audit).
-  assert.match(ui.get('partner-activity-claude').textContent,/In progress Develop “用户原文标题”/);
+  assert.match(ui.get('partner-activity-claude').textContent,/In progress: Develop “用户原文标题”/);
   assert.doesNotMatch(ui.get('partner-activity-claude').textContent,/[「」、：；（）]/);
   const labels = descendants(ui.get('rooms')).map(node=>node.getAttribute('aria-label')).filter(Boolean);
   assert.ok(labels.some(label=>label.includes(', Working')), JSON.stringify(labels));
