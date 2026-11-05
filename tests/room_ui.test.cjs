@@ -9182,7 +9182,7 @@ test('reply-mistake blocks read as automatic replanning, while only a permission
 test('stops the host continues by itself never read as a decision, and only user stops leave the click to the user', async () => {
   // Catches automatic stops (stop_policy) shown as waiting on the user, and user or keep-scene stops falsely promised to resume.
   const cases = [
-    ['all_partners_quota_exhausted', /等额度恢复/, /伙伴额度都用完了，恢复后自动继续/, /有伙伴额度恢复后会自动继续/],
+    ['all_partners_quota_exhausted', /等额度恢复/, /伙伴额度都用完了，恢复后自动继续/, /有伙伴额度恢复后豆窝会自己接着做，不用你操作/],
     ['service_restarted', /马上自动继续/, /豆窝服务重启过，马上自动接着做/, /几秒后自动继续，不用你操作/],
     ['cli_nonzero_exit', /马上自动继续/, /推进停了一下，马上自动接着做/, /几秒后自动继续/],
     ['objective_calls_exhausted', /已停止/, /推进已停止/, /不会自动重跑/],
@@ -9212,6 +9212,16 @@ test('stops the host continues by itself never read as a decision, and only user
   noFailover.objective.execution_policy = { ...noFailover.current_run.execution_policy, quota_failover: false };
   const noFailoverUi = await browser({ rooms: [noFailover.room], saved: noFailover, executionPolicySupport: true, continuousObjectiveSupport: true });
   assert.doesNotMatch(noFailoverUi.get('now-title').textContent, /恢复后自动继续/);
+  // With natural continuation the service's own action decides: a continuation it cannot send never resumes by itself.
+  for (const canSend of [true, false]) {
+    const natural = restartSnapshot(); natural.objective.stop_reason = 'service_shutdown';
+    natural.objective.execution_policy = { ...natural.current_run.execution_policy };
+    natural.continuation = { action: 'restart-objective', can_send: canSend, reason: canSend ? null : 'team_cleanup_unconfirmed',
+      binding: { run_id: natural.current_run.id, revision: natural.current_run.revision, digest: natural.current_run.digest } };
+    const naturalUi = await browser({ rooms: [natural.room], saved: natural, executionPolicySupport: true, continuousObjectiveSupport: true, naturalContinuationSupport: true });
+    assert.equal(/马上自动继续/.test(naturalUi.get('now-label').textContent), canSend, `natural continuation can_send=${canSend}`);
+    assert.doesNotMatch(naturalUi.get('now-card').textContent, /等你决定/);
+  }
   // The same automatic stop coming back after one automatic continue waits for the user.
   const repeated = restartSnapshot(); repeated.objective.stop_reason = 'service_restarted';
   repeated.objective.execution_policy = { ...repeated.current_run.execution_policy };

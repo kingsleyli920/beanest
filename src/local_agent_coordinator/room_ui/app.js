@@ -352,6 +352,13 @@ function taskBlockContinuesAutomatically(snapshot, blocked) {
   return autonomousObjective(snapshot) && blocked.length > 0 && !autoContinuedAlready(snapshot, 'task_block')
     && blocked.every((task) => task.block_cause === 'coordination_required' || task.block_cause == null && stopContinuesAutomatically(task.blocked_reason));
 }
+// room_service._auto_continue sends only these natural continuations, and only when they can be sent.
+const autoContinueActions = ['restart-objective', 'recover-native'];
+function autoContinueReady(snapshot) {
+  const natural = snapshot.continuation;
+  if (natural && typeof natural === 'object' && typeof natural.action === 'string') return autoContinueActions.includes(natural.action) && natural.can_send === true;
+  return autoContinueActions.some((id) => liveControl(id) && !document.getElementById(id).disabled);
+}
 function quotaWaitContinues(snapshot) {
   return autonomousObjective(snapshot) && objectivePolicy(snapshot)?.quota_failover === true;
 }
@@ -473,9 +480,8 @@ function nowSummary(snapshot) {
   if (['stopped', 'interrupted'].includes(status) && !hostResultInterruption(objective)) {
     const stoppedLabel = label(t("已停止"), room.updated_at);
     if (stopReason === 'all_partners_quota_exhausted' && quotaWaitContinues(snapshot)) return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
-      title: t("伙伴额度都用完了，恢复后自动继续"), text: [executionMessage(stopReason), done ? doneNote : ''].filter(Boolean).join(' ') };
-    const continueReady = ['restart-objective', 'recover-native'].some((id) => liveControl(id) && !document.getElementById(id).disabled);
-    if (stopContinuesAutomatically(stopReason) && autonomousObjective(snapshot) && continueReady) {
+      title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。")].join(' ') };
+    if (stopContinuesAutomatically(stopReason) && autonomousObjective(snapshot) && autoContinueReady(snapshot)) {
       const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
       return autoContinuedAlready(snapshot, stopReason)
         ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过一次，又停在同一处"),
@@ -495,7 +501,8 @@ function nowSummary(snapshot) {
       title: hostResultInterruption(objective) ? t("伙伴的结果还没确认，推进停在这里") : restarted ? t("豆窝服务重启过，推进停在这里")
         : reason === 'all_partners_quota_exhausted' ? t("伙伴额度都用完了，推进停在这里") : status === 'interrupted' ? t("推进中断了") : t("推进已停止"),
       text: hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot)
-        : [reason && !selfCorrectedCodes.has(reason) ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。"), autoNote].filter(Boolean).join(' ') };
+        // A restart title already says what happened; the shutdown message would read as still closing.
+        : [reason && !selfCorrectedCodes.has(reason) && !restarted ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。"), autoNote].filter(Boolean).join(' ') };
   }
   const working = $('work-indicator').hidden ? '' : $('work-indicator-text').textContent;
   if (['running', 'checkpoint'].includes(status) || working || ['running', 'queued'].includes(room.status) || outcome === 'in_progress') {
@@ -617,7 +624,8 @@ function renderProgressPane() {
   const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task.title === 'string');
   const objective = currentObjective(snapshot);
   const canAnswer = objective?.status === 'needs_user' && objective.can_answer === true && !$('message').disabled;
-  const summary = typeof snapshot.collaboration?.summary === 'string' ? snapshot.collaboration.summary.trim() : '';
+  const summary = typeof snapshot.collaboration?.summary === 'string'
+    ? platformDisplayText(snapshot.collaboration.summary, snapshot.collaboration.summary_i18n).trim() : '';
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
     snapshot.team?.phase, summary, snapshot.members.map((member) => [member.id, member.name, member.avatar])]);
   if (pane.dataset.fingerprint === fingerprint) return;
@@ -6343,7 +6351,8 @@ function renderMemberPublicProgress(snapshot, member) {
   if (!publicMessage) {
     const text = tool ? `${['started', 'running'].includes(tool.state) ? t("正在") + interfaceWordSpace() : tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
-    holder.append(element('p', text, 'public-progress-fallback')); return;
+    // The idle line repeats the member's task line, so the card hides it.
+    holder.append(element('p', text, `public-progress-fallback${!tool && !active ? ' idle' : ''}`)); return;
   }
   const details = element('details', '', 'public-progress-details'); details.open = expanded;
   const summary = element('summary');

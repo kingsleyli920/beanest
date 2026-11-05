@@ -1237,9 +1237,8 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 html[lang="en"] .header-actions, html[lang="en"] .composer-actions { flex-wrap: wrap; }
 html[lang="en"] .quiet-button { white-space: normal; }
 html[lang="en"] .brand-wordmark small { display: none; }
-html[lang="en"] .member-heading { display: grid; grid-template-columns: 41px minmax(0, 1fr); align-items: start; }
 html[lang="en"] .member-heading > div { min-width: 0; }
-html[lang="en"] .member-heading > .appearance-button { grid-column: 2; justify-self: start; margin-left: 0; }
+html[lang="en"] .member-heading > .appearance-button { grid-column: 2 / -1; justify-self: start; margin-left: 0; white-space: nowrap; }
 html[lang="en"] .member-heading .account-email { overflow-wrap: break-word; word-break: normal; }
 
 /* ---------- Room layout: task list | current task | partners ----------
@@ -1489,6 +1488,7 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .work-mode-picker button[aria-pressed="true"] { background: var(--surface); color: var(--ink); }
 /* Partner state and quota moved to the partner cards on the right. */
 .partner-activity, .composer-usage-bar { display: none !important; }
+.public-progress-fallback.idle { display: none; }
 
 /* Right: one card per partner with what it is doing and how much quota is left. */
 .members-panel { padding: 18px 16px 14px 14px; border-left: 1px solid var(--line); background: var(--bg); }
@@ -1585,4 +1585,10 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 @media (max-width: 640px) {
   .app-shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar { display: none; }
+}
+/* A narrow partner column gives the name the whole first row; the model and the appearance link stack below it. */
+@media (max-width: 1180px) {
+  .member-heading > div { grid-column: 2 / -1; }
+  .member-heading > .member-model { grid-column: 2 / -1; grid-row: 2; justify-self: start; max-width: 100%; }
+  .member-heading .appearance-button, html[lang="en"] .member-heading > .appearance-button { grid-column: 2 / -1; grid-row: 3; }
 }
