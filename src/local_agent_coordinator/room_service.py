@@ -442,6 +442,7 @@ class RoomService:
         self._quota_waits = {}
         self._quota_stop_audits = {}
         self._auto_continues = {}
+        self._late_cleanup_checks = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
         self._lifecycle_retry_after: dict[str, float] = {}
@@ -4403,6 +4404,52 @@ class RoomService:
         self._quota_handoff_tasks[room_id] = task
         task.add_done_callback(self._worker_done)
 
+    def _confirm_late_cleanup(self, room_id, snapshot):
+        """A call cancelled while the service shut down can record cleanup as
+        unconfirmed before its own receipt is written. That receipt, bound to
+        the call's session and written after the call was claimed, is the
+        adapter's proof that its processes are gone."""
+        if snapshot["room"]["mode"] != "native_project":
+            return
+        events = snapshot["events"]
+        confirmed = {event["job_id"] for event in events if event["kind"] == "job_cleanup" and event.get("cleanup_confirmed") is True}
+        unconfirmed = {event["job_id"] for event in events if event["kind"] == "job_cleanup" and event.get("cleanup_confirmed") is False}
+        claims = {event["job_id"]: event for event in events if event["kind"] == "job_claimed"}
+        directory = self.workspace.parent / "native-receipts" / room_id
+        for job in snapshot["jobs"]:
+            if (job["status"] not in {"unknown", "interrupted", "cancelled"} or job["id"] in confirmed
+                    or job["id"] not in unconfirmed or job["id"] not in claims):
+                continue
+            last = self._late_cleanup_checks.get(job["id"])
+            if last is not None and self.clock() - last < 60:
+                continue
+            self._late_cleanup_checks[job["id"]] = self.clock()
+            sessions = {event["session_id"] for event in events if event["kind"] == "native_session_cleanup_identity"
+                        and event.get("job_id") == job["id"] and event.get("confirmed") is True and event.get("session_id")}
+            claimed_at = claims[job["id"]]["created_at"]
+            # A later call by the same partner could reuse the session and write its own receipt.
+            if len(sessions) != 1 or any(event["kind"] == "job_claimed" and event.get("sender") == job["provider"]
+                                         and event["created_at"] > claimed_at for event in events):
+                continue
+            session = next(iter(sessions))
+            matches = []
+            try:
+                receipts = [path for path in directory.iterdir() if path.suffix == ".jsonl" and not path.is_symlink()
+                            and path.is_file() and path.stat().st_mtime >= claimed_at]
+            except OSError:
+                continue
+            for path in receipts:
+                try:
+                    with path.open("rb") as stream:
+                        line = stream.readline(4097)
+                    record = json.loads(line) if len(line) <= 4096 else None
+                except (OSError, ValueError):
+                    continue
+                if isinstance(record, dict) and record.get("type") == "kimi_native_turn" and record.get("session_id") == session:
+                    matches.append(record)
+            if len(matches) == 1 and matches[0].get("cleanup_confirmed") is True:
+                self.store.record_job_cleanup(job["id"], confirmed=True)
+
     def _settle_clean_stop(self, room_id):
         """A call whose failure stopped the room as unconfirmed, with no
         dedicated recovery, left its private tree unchanged: record it as an
@@ -4413,9 +4460,14 @@ class RoomService:
             return
         job = {"id": candidate["job_id"], "room_id": room_id, "provider": candidate["provider"],
                "team": {"job_phase": candidate["phase"], "task_id": candidate["task_id"]}}
-        if candidate["job_id"] not in self._quota_stop_audits:
-            self._quota_stop_audits[candidate["job_id"]] = self._tree_unchanged(job, candidate["own_paths"])
-        if not self._quota_stop_audits[candidate["job_id"]]:
+        audit = self._quota_stop_audits.setdefault(candidate["job_id"], {"at": self.clock(), "clean": None})
+        # The same pause as the automatic continue, so dedicated recoveries and
+        # cleanup receipts settle before the tree is judged.
+        if self.clock() - audit["at"] < _AUTO_CONTINUE_DELAY_SECONDS:
+            return
+        if audit["clean"] is None:
+            audit["clean"] = self._tree_unchanged(job, candidate["own_paths"])
+        if not audit["clean"]:
             return
         settled = self.store.settle_clean_stop(room_id, candidate["job_id"])
         if settled is None or settled["reason"] != "subscription_limit_reached":
@@ -4434,7 +4486,10 @@ class RoomService:
             return
         if objective.get("status") == "needs_user" and (objective.get("next_step") or {}).get("origin") == "task_block":
             code = "task_block"
-        elif (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted"}
+        # Quitting the app leaves the team cancelled; the stop code, not the
+        # phase, tells it apart from the user's own stop.
+        elif (objective.get("status") in {"stopped", "interrupted"}
+              and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
               and continues_automatically(team.get("stop_reason"))):
             code = team["stop_reason"]
         else:
@@ -6424,6 +6479,7 @@ class RoomService:
             snapshot = self.store.snapshot(room["id"])
             self._schedule_quota_handoff(room["id"])
             self._schedule_quota_wait(room["id"], snapshot)
+            self._confirm_late_cleanup(room["id"], snapshot)
             self._settle_clean_stop(room["id"])
             self._schedule_auto_continue(room["id"], self.store.snapshot(room["id"]))
             objective = snapshot.get("objective")

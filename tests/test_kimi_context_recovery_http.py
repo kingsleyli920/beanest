@@ -321,6 +321,10 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         for fault in ('binding', 'drift', 'effects', 'phase', 'wire_tail'):
             with self.subTest(fault=fault):
                 fixture = self.fixture()
+                # Only the context attestation is under test. The clean-tree
+                # fallback may legitimately restart such a room afresh, and the
+                # watchdog would otherwise race the explicit continue below.
+                fixture.service._settle_clean_stop = lambda room_id: None
                 stopped = fixture.stopped_context_run()
                 calls = len(fixture.calls)
                 if fault == 'binding':
