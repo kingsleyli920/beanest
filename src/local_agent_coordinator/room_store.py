@@ -1076,6 +1076,11 @@ class RoomStore:
             self._invalidate_outbox(db, room_id, preserve_invitations=True)
             self._event(db, room_id, "room_stop_requested", sender="system")
 
+    def note_quota_wait_resumed(self, room_id, source_run_id):
+        with self._connection(write=True) as db:
+            self._event(db, room_id, "quota_wait_resumed", sender="system", source_run_id=source_run_id,
+                        run_id=self._team.team(db, room_id)["current_run_id"])
+
     def _request(self, db, request_id, parameters):
         request_id = checked_text(request_id, 512)
         key = hashlib.sha256(request_id.encode()).hexdigest()

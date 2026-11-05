@@ -95,6 +95,9 @@ def _direct_updates(events):
             for index, event in enumerate(updates)]
 
 
+# A room whose partners all ran out of quota rechecks this often; a check
+# refreshes account usage but never calls a model while still exhausted.
+_QUOTA_WAIT_RECHECK_SECONDS = 300
 _DIRECTED_CONTEXT_INSTRUCTION = (
     "This is a shared group conversation, not a private channel. Messages retain recipient: all/both addresses the group, "
     "a member ID addresses that peer, and a missing legacy recipient is unspecified. Respond to your actual job and "
@@ -432,6 +435,7 @@ class RoomService:
         self._captures: dict[str, tuple[asyncio.Task, threading.Event]] = {}
         self._quota_handoffs = {}
         self._quota_handoff_tasks = {}
+        self._quota_waits = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
         self._lifecycle_retry_after: dict[str, float] = {}
@@ -4393,6 +4397,36 @@ class RoomService:
         self._quota_handoff_tasks[room_id] = task
         task.add_done_callback(self._worker_done)
 
+    def _schedule_quota_wait(self, room_id, snapshot):
+        """Every partner out of quota is a wait, not the end of the objective."""
+        objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
+        policy = objective.get("execution_policy") or {}
+        if (self._closed or snapshot["room"]["lifecycle_state"] != "active"
+                or team.get("phase") != "stopped" or team.get("stop_reason") != "all_partners_quota_exhausted"
+                or policy.get("mode") != "autonomous" or not policy.get("quota_failover")):
+            return
+        run_id = snapshot["current_run"]["id"]
+        previous = self._quota_waits.get(room_id)
+        if previous and previous["run_id"] == run_id and (not previous["task"].done()
+                or self.clock() - previous["checked_at"] < _QUOTA_WAIT_RECHECK_SECONDS):
+            return
+        task = asyncio.create_task(self._resume_after_quota_wait(room_id, run_id))
+        self._quota_waits[room_id] = {"run_id": run_id, "checked_at": self.clock(), "task": task}
+        task.add_done_callback(self._worker_done)
+
+    async def _resume_after_quota_wait(self, room_id, run_id):
+        """Continue the same board the way the user's 继续 would, once a partner is back."""
+        snapshot = self._snapshot(room_id)
+        continuation = self._natural_continuation(snapshot)
+        if snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]:
+            return
+        try:
+            await self._send_natural_action(snapshot, continuation["action"], None, "quota-wait-" + str(uuid4()),
+                                            continuation["binding"], None)
+        except RoomError:
+            return  # Still exhausted, or the room changed; a later recheck decides again.
+        self.store.note_quota_wait_resumed(room_id, run_id)
+
     async def _automatic_quota_handoff(self, room_id, status, binding):
         status["state"] = "in_progress"
         try:
@@ -6257,6 +6291,7 @@ class RoomService:
         for room in self.store.list_rooms()["rooms"]:
             snapshot = self.store.snapshot(room["id"])
             self._schedule_quota_handoff(room["id"])
+            self._schedule_quota_wait(room["id"], snapshot)
             objective = snapshot.get("objective")
             deadline = objective["deadline"] if objective else snapshot["budget"]["deadline"]
             if room["status"] == "running" and deadline_reached(deadline, self.clock()):
