@@ -37,7 +37,7 @@ QUOTA_TURN = textwrap.dedent('''
 class WorkQuotaFixture(OutcomeFixture):
     retained = b'Fictional retained implementation; never replay the original tool sequence.\n'
 
-    def __init__(self, *, legacy=True, quota=True, hold_inspection=False, fault=None, startup_unknown_provider=None, startup_receiver_cache=False, receiver_account_failure=False):
+    def __init__(self, *, legacy=True, quota=True, hold_inspection=False, fault=None, startup_unknown_provider=None, startup_receiver_cache=False, receiver_account_failure=False, peers_exhausted=False):
         super().__init__({'native_case': 'completed'}, bad_phase='never')
         self.release_peer.set()
         self.legacy, self.quota, self.fault = legacy, quota, fault
@@ -50,6 +50,7 @@ class WorkQuotaFixture(OutcomeFixture):
         self.startup_receiver_cache = startup_receiver_cache
         self.receiver_account_failure = receiver_account_failure
         self.receiver_identity_ready = not startup_receiver_cache
+        self.peers_exhausted, self.peers_out, self.kimi_used = peers_exhausted, False, None
         self.account_clock_offset = 0
         self.partners.clock = lambda: time.time() + self.account_clock_offset
         self.startup_unknown_active = False
@@ -69,6 +70,13 @@ class WorkQuotaFixture(OutcomeFixture):
         previous = adapters.account_status
 
         async def account(adapter, *args, **kwargs):
+            if adapter == 'kimi' and self.kimi_used is not None:
+                return {'state': 'ready', 'email': None, 'plan': 'fixture', 'auth_method': 'kimi_code',
+                        'source': 'fixture', 'scope': 'default_cli_login', 'reason': None, 'stale': False,
+                        'quota': {'state': 'available', 'source': 'kimi_usage', 'scope': 'provider_account', 'reason': None,
+                                  'stale': False, 'windows': [{'name': 'kimi:five_hour', 'scope': 'provider_account',
+                                  'used_percent': self.kimi_used, 'remaining_percent': 100 - self.kimi_used,
+                                  'resets_at': time.time() + 3600}]}}
             if adapter not in {'claude', 'codex'}:
                 return await previous(adapter, *args, **kwargs)
             if self.receiver_account_failure and self.startup_unknown_active:
@@ -83,7 +91,8 @@ class WorkQuotaFixture(OutcomeFixture):
             return {'state': 'ready', 'email': adapter + '@example.invalid', 'plan': 'fixture', 'auth_method': auth,
                     'source': 'fixture', 'scope': 'default_cli_login', 'reason': None, 'stale': False, 'quota': {'state': 'available', 'source': source,
                     'scope': 'provider_account', 'reason': None, 'stale': False, 'windows': [{'name': name, 'scope': 'provider_account',
-                    'used_percent': 20, 'remaining_percent': 80, 'resets_at': time.time() + 3600}]}}
+                    'used_percent': 100 if self.peers_out else 20, 'remaining_percent': 0 if self.peers_out else 80,
+                    'resets_at': time.time() + 3600}]}}
         self.stack.enter_context(patch.object(adapters, 'account_status', side_effect=account))
         for provider in ('claude', 'codex'):
             code, value = self.request('POST', f'/api/partners/{provider}/account/refresh', {})
@@ -129,6 +138,14 @@ class WorkQuotaFixture(OutcomeFixture):
                     assert self.partners.quota_gate.record_limit('claude', account, bound_identity=identity)
                     self.partners._account_cache.pop('claude', None)
                     self.account_clock_offset += 60
+                if self.peers_exhausted:
+                    self.peers_out = True
+                    if self.kimi_used is not None:
+                        self.kimi_used = 100
+                    self.account_clock_offset += 60
+                    for provider in ('claude', 'codex'):
+                        self.partners._account_cache.pop(provider, None)
+                        await self.partners.refresh_account(provider)
                 self.startup_unknown_active = True
                 if self.receiver_account_failure:
                     self.account_clock_offset += 60
@@ -302,6 +319,52 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         self.assertEqual(len(fixture.inspections), 1)
         failure_index = next(i for i, call in enumerate(fixture.calls) if call['job_id'] == fixture.failed_work['job_id'])
         self.assertFalse(any(call['agent'] == 'kimi' for call in fixture.calls[failure_index + 1:]))
+
+    def test_quota_source_takes_its_own_task_back_when_no_peer_has_quota(self):
+        # Catches: every partner out of quota after a mid-work quota failure
+        # showed "result unconfirmed, will not rerun" and never resumed, though
+        # the source's own quota came back.
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                self.assert_source_takes_task_back(legacy)
+
+    def assert_source_takes_task_back(self, legacy):
+        fixture = self.fixture(legacy=legacy, peers_exhausted=True)
+        fixture.kimi_used = 10  # Usage read before the call failed.
+        code, value = fixture.request('POST', '/api/partners/kimi/account/refresh', {})
+        self.assertEqual(code, 200, value.get('error'))
+        self.assertTrue(fixture.service._quota_returned(['kimi']))
+        fixture.create()
+        waiting = fixture.wait(lambda value: (value['current_run'].get('native_quota_handoff') or {}).get('state') == 'blocked')
+        self.assertEqual(waiting['current_run']['native_quota_handoff']['reason'], 'agent_quota_exhausted')
+        self.assertEqual(waiting['stop_kind'], 'quota_wait')
+        code, rooms = fixture.request('GET', '/api/rooms')
+        self.assertEqual(code, 200)
+        self.assertEqual(next(room for room in rooms['rooms'] if room['id'] == fixture.room_id)['stop_kind'], 'quota_wait')
+        calls = len(fixture.calls)
+        time.sleep(1)
+        self.assertEqual(len(fixture.calls), calls)
+        fixture.account_clock_offset += 60
+        code, value = fixture.request('POST', '/api/partners/kimi/account/refresh', {})
+        self.assertEqual(code, 200, value.get('error'))
+        time.sleep(1)
+        self.assertEqual(len(fixture.calls), calls, 'still exhausted: no new call')
+        fixture.kimi_used = 10
+        fixture.account_clock_offset += 60
+        code, value = fixture.request('POST', '/api/partners/kimi/account/refresh', {})
+        self.assertEqual(code, 200, value.get('error'))
+        fixture.wait(lambda value: value['objective']['status'] == 'complete')
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        failed_id = fixture.failed_work['job_id']
+        failure_index = next(i for i, call in enumerate(fixture.calls) if call['job_id'] == failed_id)
+        later = fixture.calls[failure_index + 1:]
+        self.assertTrue(later)
+        self.assertEqual({call['agent'] for call in later}, {'kimi'})
+        second = next(task for task in final['team']['tasks'] if task['id'] == 'T2')
+        self.assertEqual(second['owner'], 'kimi')
+        self.assertEqual((Path(fixture.failed_work['cwd']) / 'second.md').read_bytes(), fixture.retained)
+        self.assertEqual(sum(event['kind'] == 'native_recovery_started' for event in final['events']), 1)
 
     def test_chat_during_automatic_inspection_records_message_without_replaying_and_cancel_wins(self):
         fixture = self.fixture(legacy=False, hold_inspection=True)
