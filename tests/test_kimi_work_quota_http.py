@@ -139,6 +139,17 @@ class WorkQuotaFixture(OutcomeFixture):
                     self.partners._account_cache.pop('claude', None)
                     self.account_clock_offset += 60
                 if self.peers_exhausted:
+                    # As in the real room: an earlier call was cut off when the
+                    # app quit, and its cleanup was confirmed later from its receipt.
+                    store = self.service.store
+                    earlier = next(job for job in store.snapshot(self.room_id)['jobs']
+                                   if job['provider'] == 'kimi' and job['status'] == 'completed')
+                    with store._connection(write=True) as db:
+                        row = db.execute("SELECT metadata_json FROM native_executions WHERE job_id=?", (earlier['id'],)).fetchone()
+                        metadata = {**json.loads(row[0]), 'status': 'cancelled', 'cleanup_confirmed': None}
+                        db.execute("UPDATE native_executions SET metadata_json=? WHERE job_id=?", (json.dumps(metadata), earlier['id']))
+                    store.record_job_cleanup(earlier['id'], confirmed=False)
+                    store.record_job_cleanup(earlier['id'], confirmed=True)
                     self.peers_out = True
                     if self.kimi_used is not None:
                         self.kimi_used = 100
@@ -353,7 +364,9 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         fixture.account_clock_offset += 60
         code, value = fixture.request('POST', '/api/partners/kimi/account/refresh', {})
         self.assertEqual(code, 200, value.get('error'))
-        fixture.wait(lambda value: value['objective']['status'] == 'complete')
+        deadline = time.monotonic() + 60  # Kimi alone finishes the rest of the board and its checkpoint.
+        while fixture.read()['objective']['status'] != 'complete' and time.monotonic() < deadline:
+            time.sleep(.05)
         final = fixture.settled()
         self.assertEqual(final['objective']['status'], 'complete', final['team'])
         failed_id = fixture.failed_work['job_id']
