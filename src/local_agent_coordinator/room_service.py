@@ -3592,7 +3592,9 @@ class RoomService:
                 cleanup[event["job_id"]] = event.get("cleanup_confirmed") is True
         if any(not confirmed for confirmed in cleanup.values()):
             return "team_cleanup_unconfirmed"
-        if any(item.get("cleanup_confirmed") is not True for item in snapshot["native_executions"]):
+        if any(item.get("cleanup_confirmed") is not True
+               and not (item.get("cleanup_confirmed") is None and cleanup.get(item["job_id"]) is True)
+               for item in snapshot["native_executions"]):
             return "team_cleanup_unconfirmed"
         started = {event["run_id"] for event in snapshot["events"] if event["kind"] == "execution_started"}
         for execution in snapshot["executions"]:

@@ -3330,8 +3330,8 @@ class RoomStore:
                 clean[event["job_id"]] = event.get("cleanup_confirmed") is True
         if any(not clean.get(job_id) for job_id in claimed):
             return "native_recovery_cleanup_unconfirmed"
-        observations = [json.loads(row[0]) for row in db.execute("SELECT metadata_json FROM native_executions WHERE room_id=?", (room_id,))]
-        if not observations or any(item.get("cleanup_confirmed") is not True for item in observations):
+        observations = db.execute("SELECT job_id,metadata_json FROM native_executions WHERE room_id=?", (room_id,)).fetchall()
+        if not observations or not self._native_cleanups_confirmed(db, room_id):
             return "native_recovery_cleanup_unconfirmed"
         unknown = [row[0] for row in db.execute("SELECT provider FROM members WHERE room_id=? AND identity_uncertain=1 AND session_id IS NULL", (room_id,))
                    if not self._partner_history_settled(db, room_id, row[0])]
@@ -3349,6 +3349,21 @@ class RoomStore:
                 return "native_recovery_unavailable"
         return None
 
+    @staticmethod
+    def _native_cleanups_confirmed(db, room_id):
+        """Every native call's processes are known to be gone: by its own
+        observation, or, for a call cut off at shutdown before it reported
+        any, by the receipt that later confirmed its cleanup. An observation
+        that says cleanup failed is never overridden."""
+        latest = {}
+        for row in db.execute("SELECT value_json FROM events WHERE room_id=? "
+                              "AND json_extract(value_json,'$.kind')='job_cleanup' ORDER BY seq", (room_id,)):
+            event = json.loads(row[0])
+            latest[event["job_id"]] = event.get("cleanup_confirmed") is True
+        return all(confirmed is True or confirmed is None and latest.get(job_id) is True
+                   for job_id, confirmed in ((row[0], json.loads(row[1]).get("cleanup_confirmed")) for row in db.execute(
+                       "SELECT job_id,metadata_json FROM native_executions WHERE room_id=?", (room_id,))))
+
     def native_recovery_reason(self, room_id):
         with self._connection() as db:
             return self._native_recovery_reason(db, room_id)
@@ -3365,8 +3380,7 @@ class RoomStore:
         members = self.member_ids_in_transaction(db, room_id)
         if (self._team.pending(db, room_id) or room["stop_confirmed"] == 0
                 or not all(self._continuation_provider_clean(db, room_id, member) for member in members)
-                or any(json.loads(row[0]).get("cleanup_confirmed") is not True for row in db.execute(
-                    "SELECT metadata_json FROM native_executions WHERE room_id=?", (room_id,)))):
+                or not self._native_cleanups_confirmed(db, room_id)):
             return "team_cleanup_unconfirmed"
         policy = json.loads(objective["policy_json"])
         if policy["max_calls"] is not None and objective["used"] >= policy["max_calls"]:
