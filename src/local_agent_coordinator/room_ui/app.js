@@ -2236,7 +2236,13 @@ function trackAccountPanel(details, id) {
   syncAccountWatchTimer();
   if (details.open) void refreshWatchingAccounts();
 }
-function percentValue(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null; }
+// Shown to at most one decimal: a provider's 57.99999999999999 is 58, and a
+// value just above 0 or below 100 never reads as empty or full.
+function percentValue(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) return null;
+  const shown = Math.round(value * 10) / 10;
+  return shown === 0 && value > 0 ? 0.1 : shown === 100 && value < 100 ? 99.9 : shown;
+}
 // "5小时" / "5小时额度" as whole keys; stripping 窗口 from a translated label failed in English.
 function quotaWindowName(minutes, quota = false) {
   if (!Number.isFinite(minutes) || minutes <= 0) return '';
