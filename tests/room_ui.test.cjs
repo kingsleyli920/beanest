@@ -3627,6 +3627,19 @@ test('eight participants keep one quota row and bounded activity nodes without r
   assert.equal(ui.posts().length, 0);
 });
 
+test('a new task never sends to a partner that was left out after being the default recipient', async () => {
+  // Catches: the first partner became the recipient, was then left out (out
+  // of quota, unticked), and the new task was refused as invalid_target.
+  const ui = await browser({ agents: catalog.slice(0, 2), taskModes: ['text', 'python_artifacts'] });
+  ui.get('task-mode').value = 'python_artifacts'; ui.get('task-mode').fire('change'); await settle();
+  const claude = participantInput(ui, 'claude'); claude.checked = false; claude.fire('change'); await ui.poll();
+  ui.type('只让剩下的伙伴来做。');
+  await ui.submit();
+  assert.equal(ui.posts().length, 1);
+  assert.deepEqual(ui.posts()[0].body.participants, ['codex']);
+  assert.equal(ui.posts()[0].body.target, 'codex');
+});
+
 test('compact task options remain outside chat layout and preserve selections, blank-message guards and keyboard focus', async () => {
   const ui = await browser({ agents: catalog.slice(0, 2) });
   const form = ui.get('composer'); const dialog = ui.get('task-options-popover');
