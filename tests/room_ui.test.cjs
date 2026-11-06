@@ -3512,6 +3512,21 @@ test('a ready build lists only its exact two current file bindings and keeps inh
   assert.equal(ui.posts().length, 0);
 });
 
+test('quota percentages are shown to one decimal, never as floating-point noise', async () => {
+  // Catches: "42.00000000000001%" when remaining was derived from a provider's used_percent.
+  const account = claudeUsageAccount([
+    { name: 'claude:five_hour', label: 'Claude · 5小时窗口', scope: 'provider_account', kind: 'session', window_minutes: 300, used_percent: 57.99999999999999, resets_at: 3000 },
+    { name: 'claude:seven_day', label: 'Claude · 7天窗口', scope: 'provider_account', kind: 'weekly_all', window_minutes: 10080, used_percent: 99.98, remaining_percent: 0.02, resets_at: 9000 },
+  ]);
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, account: agent.id === 'claude' ? account : null }));
+  const ui = await browser({ partners });
+  const footer = ui.get('provider-account-claude');
+  assert.match(footer.textContent, /Claude · 5小时窗口.*已用 58%/);
+  assert.match(footer.textContent, /Claude · 7天窗口.*剩余 0.1%/, 'a little left is not shown as none');
+  assert.doesNotMatch(footer.textContent, /\d\.\d{2,}%/);
+  assert.deepEqual(descendants(footer).filter((node) => node.tagName === 'PROGRESS').map((node) => node.value), [58, 0.1]);
+});
+
 function claudeUsageAccount(windows) {
   return accountFixture({ source: 'claude_auth_status', auth_method: 'subscription', plan: 'ultra',
     quota: { state: 'available', scope: 'provider_account_and_model', source: 'claude_sdk_get_usage', checked_at: 1000, stale: false, reason: null, windows } });
