@@ -440,6 +440,7 @@ class RoomService:
         self._quota_handoffs = {}
         self._quota_handoff_tasks = {}
         self._quota_waits = {}
+        self._refusal_resets = {}
         self._quota_stop_audits = {}
         self._auto_continues = {}
         self._stop_kinds = {}
@@ -2206,7 +2207,7 @@ class RoomService:
         except PartnerError:
             return False
         return (failed_at is not None and type(checked) in (int, float) and checked > failed_at
-                and self._quota_returned([provider]))
+                and self._quota_returned([provider], {provider: failed_at}))
 
     def _partial_recovery_receiver(self, snapshot, *, blocked=None):
         receivers = self._partial_recovery_receivers(snapshot, blocked=blocked)
@@ -4666,21 +4667,48 @@ class RoomService:
                                       "evidence_free_at": (previous or {}).get("evidence_free_at")}
         task.add_done_callback(self._worker_done)
 
-    def _quota_returned(self, providers):
+    def _quota_returned(self, providers, refused_at=None):
         """Positive evidence that a partner can work again: a confirmed available
         state, or fresh usage windows with room left. Kimi is never blocked by
-        the account gate, so an unblocked state alone proves nothing."""
+        the account gate, so an unblocked state alone proves nothing.
+
+        refused_at maps a partner to when its provider refused for quota. A
+        provider may refuse while its usage still shows room, so after a refusal
+        only evidence read since, and a usage window reset since, count."""
+        refused_at = refused_at or {}
         for provider in providers:
             try:
                 profile = self.partner_manager.get(provider)
             except PartnerError:
                 continue
-            if profile["availability"]["state"] == "available":
+            since = refused_at.get(provider)
+            availability = profile["availability"]
+            if availability["state"] == "available" and (since is None or (availability.get("observed_at") or 0) > since):
                 return True
             quota = (profile.get("account") or {}).get("quota") or {}
             windows = [row for row in quota.get("windows") or [] if isinstance(row, dict)
                        and type(row.get("used_percent")) in (int, float)]
-            if quota.get("stale") is False and windows and all(row["used_percent"] < 100 for row in windows):
+            if quota.get("stale") is not False or not windows:
+                continue
+            room_left = all(row["used_percent"] < 100 for row in windows)
+            if since is None:
+                if room_left:
+                    return True
+                continue
+            if (quota.get("checked_at") or 0) <= since:
+                continue
+            key = (provider, since)
+            if not room_left:
+                # Usage read as full after the refusal: the next reading with room is a reset.
+                self._refusal_resets[key] = since
+                continue
+            if key not in self._refusal_resets:
+                # The refusal came while usage still showed room: wait for that window's reset,
+                # or without a known reset, as long as the hourly evidence-free retry.
+                resets = [row["resets_at"] for row in windows
+                          if type(row.get("resets_at")) in (int, float) and row["resets_at"] > since]
+                self._refusal_resets[key] = min(resets) if resets else since + 3600
+            if self.clock() >= self._refusal_resets[key]:
                 return True
         return False
 
@@ -4692,10 +4720,14 @@ class RoomService:
                 or (snapshot.get("objective") or {}).get("status") == "paused"):
             return
         if self.partner_manager is not None:
-            retired = list((snapshot.get("objective") or {}).get("retired_partners") or {})
+            retired_partners = (snapshot.get("objective") or {}).get("retired_partners") or {}
+            retired = list(retired_partners)
             if self.invoke is None:
                 await self.partner_manager.refresh_availability(retired)
-            if not self._quota_returned(retired):
+            refused_at = {provider: item.get("at") for provider, item in retired_partners.items()
+                          if item.get("reason") in {"subscription_limit_reached", "agent_quota_exhausted"}
+                          and type(item.get("at")) in (int, float)}
+            if not self._quota_returned(retired, refused_at):
                 wait = self._quota_waits.get(room_id) or {}
                 # Without any usage evidence, try at most hourly rather than never.
                 if wait.get("evidence_free_at") is not None and self.clock() - wait["evidence_free_at"] < 3600:

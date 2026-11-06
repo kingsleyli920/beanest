@@ -480,7 +480,7 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # The account gate leaves this partner "unknown", as it does Kimi; only usage says it is out.
         manager.get = lambda provider: {**real_get(provider),
             "availability": {"state": "unknown", "reason": "quota_unknown", "selectable": True},
-            "account": {**real_get(provider)["account"], "quota": {"stale": False, "windows": [dict(usage)]}}}
+            "account": {**real_get(provider)["account"], "quota": {"stale": False, "checked_at": self.now, "windows": [dict(usage)]}}}
         manager.refresh_availability = AsyncMock()
 
         original = self.handler
@@ -512,6 +512,50 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fake.calls), calls)
         usage["used_percent"] = 40
         self.now += 301
+        final = await tick()
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertEqual(sum(event["kind"] == "quota_wait_resumed" for event in final["events"]), 1)
+
+    async def test_a_refusal_while_usage_shows_room_waits_for_that_window_to_reset(self):
+        # Catches: Kimi refused for quota with 4% of its window shown left, and
+        # the quota wait took that reading as quota back: it restarted the room
+        # right away and every recheck after, each time refused again.
+        usage = {"used_percent": 96, "resets_at": None}
+        manager = PartnerManager(self.root / "partners", default_registry(), startup_discovery=False)
+        real_get = manager.get
+        manager.get = lambda provider: {**real_get(provider),
+            "availability": {"state": "unknown", "reason": "quota_unknown", "selectable": True},
+            "account": {**real_get(provider)["account"], "quota": {"stale": False, "checked_at": self.now, "windows": [dict(usage)]}}}
+        manager.refresh_availability = AsyncMock()
+        original = self.handler
+        def handler(agent, context):
+            if context["job"]["job_phase"] == "work" and self.now < reset:
+                return {"adapter_failure": "subscription_limit_reached"}
+            return original(agent, context)
+        reset = usage["resets_at"] = self.now + 3000
+        self.service.partner_manager = manager
+        created = await self.create()
+        self.fake.handler = handler
+        await self.settle()
+        room = created["room"]["id"]
+        stopped = await self.service.read_room(room)
+        self.assertEqual(stopped["team"]["stop_reason"], "all_partners_quota_exhausted")
+
+        async def tick():
+            await self.service.expire_tasks()
+            for wait in list(self.service._quota_waits.values()):
+                await wait["task"]
+            await self.settle()
+            return await self.service.read_room(room)
+
+        calls = len(self.fake.calls)
+        for _ in range(4):
+            self.now += 301
+            value = await tick()
+        self.assertEqual(len(self.fake.calls), calls, "a reading with room left is not quota back after a refusal")
+        self.assertEqual(value["current_run"]["id"], stopped["current_run"]["id"])
+        self.now = reset + 1
+        usage.update(used_percent=3, resets_at=self.now + 18000)
         final = await tick()
         self.assertEqual(final["objective"]["status"], "complete", final["team"])
         self.assertEqual(sum(event["kind"] == "quota_wait_resumed" for event in final["events"]), 1)
