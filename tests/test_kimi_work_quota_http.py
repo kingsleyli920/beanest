@@ -358,6 +358,7 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         fixture.account_clock_offset += 60
         code, value = fixture.request('POST', '/api/partners/kimi/account/refresh', {})
         self.assertEqual(code, 200, value.get('error'))
+        fixture.read()  # The page reads the room as it polls; usage read as full after the refusal.
         time.sleep(1)
         self.assertEqual(len(fixture.calls), calls, 'still exhausted: no new call')
         fixture.kimi_used = 10
