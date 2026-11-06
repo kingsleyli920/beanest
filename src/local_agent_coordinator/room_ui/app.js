@@ -5341,7 +5341,8 @@ async function submitObjectiveAction(kind, snapshot = state.snapshot, text = '')
     const binding = nextStepBinding(snapshot); if (!binding) return;
     body = { request_id: crypto.randomUUID(), ...binding };
   } else {
-    if (!objective || (kind === 'pause' ? !['running', 'checkpoint'].includes(objective.status) : kind !== 'resume' || objective.status !== 'paused' || objective.pause_requested === true)) return;
+    const holdsWait = ['auto', 'quota_wait'].includes(stopKind(snapshot, objective?.stop_reason));
+    if (!objective || (kind === 'pause' ? !['running', 'checkpoint'].includes(objective.status) && !holdsWait : kind !== 'resume' || objective.status !== 'paused' || objective.pause_requested === true)) return;
     body = { request_id: crypto.randomUUID(), objective_id: objective.id };
   }
   state.pending = capturePendingIntent({ kind, roomId: state.selected, body }); await submitPending();
@@ -7085,7 +7086,9 @@ function renderControls() {
   $('refresh').disabled = state.busy || state.refreshing;
   $('cancel-room').hidden = !roomNeedsStop(state.snapshot);
   $('cancel-room').disabled = !room || inactive || !state.connected || state.stopRequests.has(room.id);
-  $('pause-objective').hidden = !objective || inactive || !['running', 'checkpoint', 'paused'].includes(objective.status)
+  // A stop the host resumes by itself (a quota wait, an automatic continue) can be held too.
+  const resumesItself = ['auto', 'quota_wait'].includes(state.snapshot ? stopKind(state.snapshot, objective?.stop_reason) : null);
+  $('pause-objective').hidden = !objective || inactive || !(['running', 'checkpoint', 'paused'].includes(objective.status) || resumesItself)
     || !!natural && objective.status === 'paused' && objective.pause_requested !== true;
   $('pause-objective').textContent = objective?.status === 'paused' ? objective.pause_requested === true ? t("正在暂停…") : t("继续推进") : t("暂停推进");
   $('pause-objective').title = objective?.status === 'paused' ? t("沿原目标恢复，权限保持") : t("当前处理结束后暂停，不再派发下一项");

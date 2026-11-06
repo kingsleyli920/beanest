@@ -1445,7 +1445,8 @@ class RoomService:
         stopped the way _schedule_auto_continue or _schedule_quota_wait resumes."""
         objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
         policy = objective.get("execution_policy") or {}
-        if snapshot["room"]["lifecycle_state"] != "active" or policy.get("mode") != "autonomous":
+        if (snapshot["room"]["lifecycle_state"] != "active" or policy.get("mode") != "autonomous"
+                or objective.get("status") == "paused"):
             return None
         if objective.get("status") == "needs_user" and (objective.get("next_step") or {}).get("origin") == "task_block":
             blocked = [task for task in team.get("tasks") or [] if task.get("status") == "blocked"]
@@ -1689,7 +1690,10 @@ class RoomService:
                     if (current["reassess_objective_reason"] != "agent_quota_exhausted"
                             or not self._recovered_quota_members(snapshot)):
                         raise RoomError(current["reassess_objective_reason"])
-            if action in {"objective", "restart-objective", "directed-objective", "continue", "resume", "answer", "reassess-objective", "followup-objective"}:
+            # Resuming a paused wait only returns to the wait; it dispatches nothing.
+            resumes_wait = action == "resume" and self.store.paused_resume_status(room_id) in {"stopped", "interrupted", "needs_user"}
+            if action in {"objective", "restart-objective", "directed-objective", "continue", "resume", "answer", "reassess-objective", "followup-objective"} \
+                    and not resumes_wait:
                 policy = execution_policy or (snapshot.get("objective") or {}).get("execution_policy")
                 retired = {} if action in {"restart-objective", "followup-objective"} else (snapshot.get("objective") or {}).get("retired_partners", {})
                 dispatchable = set(self.store.dispatchable_member_ids(room_id))
@@ -1731,7 +1735,8 @@ class RoomService:
                                         policy=execution_policy, objective_id=objective_id, baseline=baseline, answer=text,
                                         user_message=user_message, request_identity=_request_identity,
                                         quota_recovered=self._recovered_quota_members(snapshot) if _request_identity is not None else [],
-                                        runtime_change=runtime_change, message_target=_message_target, scope_retry=scope_retry)
+                                        runtime_change=runtime_change, message_target=_message_target, scope_retry=scope_retry,
+                                        waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"})
             for member in quota_blocked:
                 self._retire_quota(room_id, member, "agent_quota_exhausted")
             self._wake(room_id)
@@ -4646,7 +4651,7 @@ class RoomService:
         """Every partner out of quota is a wait, not the end of the objective."""
         objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
         policy = objective.get("execution_policy") or {}
-        if (self._closed or snapshot["room"]["lifecycle_state"] != "active"
+        if (self._closed or snapshot["room"]["lifecycle_state"] != "active" or objective.get("status") == "paused"
                 or team.get("phase") != "stopped" or team.get("stop_reason") != "all_partners_quota_exhausted"
                 or policy.get("mode") != "autonomous" or not policy.get("quota_failover")):
             return
@@ -4683,7 +4688,8 @@ class RoomService:
         """Continue the same board the way the user's 继续 would, once a partner is back."""
         snapshot = self._snapshot(room_id)
         continuation = self._natural_continuation(snapshot)
-        if snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]:
+        if (snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]
+                or (snapshot.get("objective") or {}).get("status") == "paused"):
             return
         if self.partner_manager is not None:
             retired = list((snapshot.get("objective") or {}).get("retired_partners") or {})

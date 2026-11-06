@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached
 from .room_store import RoomError, checked_text
+from .stop_policy import continues_automatically, OWN_RECOVERY
 
 
 ACTIVE = frozenset({"running", "checkpoint", "awaiting_continue", "needs_user", "paused"})
@@ -172,6 +173,16 @@ class ObjectiveStore:
 
     def stop(self, db, room_id, reason, *, status="stopped"):
         objective = self.current(db, room_id)
+        if (objective is not None and objective["status"] == "paused"
+                and (continues_automatically(reason) or reason in OWN_RECOVERY)):
+            # The user's pause holds through a stop the host would resume by
+            # itself; resuming returns to that wait instead of skipping it.
+            checkpoint = json.loads(objective["checkpoint_json"] or "{}")
+            if checkpoint.get("resume_status") not in {"stopped", "interrupted"}:
+                checkpoint["resume_status"] = status
+                db.execute("UPDATE objectives SET checkpoint_json=?,stop_reason=? WHERE id=?",
+                           (json.dumps(checkpoint), reason, objective["id"]))
+            return
         if objective is not None and objective["status"] not in {"complete", "stopped", "interrupted"}:
             db.execute("UPDATE objectives SET status=?,stop_reason=?,pause_requested=0 WHERE id=?",
                        (status, reason, objective["id"]))
@@ -356,13 +367,16 @@ class ObjectiveStore:
                 if member not in retired and self.store._partner_dispatch_reason(db, member) is None
                 and not db.execute("SELECT identity_uncertain FROM members WHERE room_id=? AND provider=?", (room_id, member)).fetchone()[0]]
 
-    def set_pause(self, db, room_id, objective_id, paused, *, defer_resume=False):
+    def set_pause(self, db, room_id, objective_id, paused, *, defer_resume=False, waiting=False):
+        """waiting: the objective is stopped on something the host resumes by
+        itself (a quota wait, an automatic continue); pausing holds that too."""
         row = self.current(db, room_id)
         if row is None or row["id"] != objective_id:
             raise RoomError("objective_conflict")
         checkpoint = json.loads(row["checkpoint_json"]) if row["checkpoint_json"] else {}
         if paused:
-            if row["status"] not in {"running", "checkpoint", "awaiting_continue"}:
+            pausable = {"running", "checkpoint", "awaiting_continue"} | ({"stopped", "interrupted", "needs_user"} if waiting else set())
+            if row["status"] not in pausable:
                 raise RoomError("objective_not_running")
             checkpoint["resume_status"] = row["status"]
             db.execute("UPDATE objectives SET status='paused',checkpoint_json=? WHERE id=?",
@@ -389,6 +403,13 @@ class ObjectiveStore:
         else:
             db.execute("UPDATE objectives SET status=?,checkpoint_json=? WHERE id=?",
                        (state, json.dumps(checkpoint) if checkpoint else None, objective_id))
+
+    def resume_status(self, db, room_id):
+        """The state a paused objective returns to."""
+        row = self.current(db, room_id)
+        if row is None or row["status"] != "paused":
+            return None
+        return json.loads(row["checkpoint_json"] or "{}").get("resume_status", "running")
 
     def settle_pause(self, db, room_id):
         row = self.current(db, room_id)
