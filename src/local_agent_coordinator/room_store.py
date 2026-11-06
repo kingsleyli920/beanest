@@ -1090,6 +1090,8 @@ class RoomStore:
                 or team["phase"] != "unknown" or objective is None
                 or json.loads(objective["policy_json"]).get("mode") != "autonomous" or self._team.pending(db, room_id)):
             return None
+        if objective["status"] == "paused":
+            return None
         quota = team["stop_reason"] == "native_side_effects_unconfirmed"
         if quota and not json.loads(objective["policy_json"]).get("quota_failover"):
             return None
@@ -4389,6 +4391,10 @@ class RoomStore:
         if objective:
             db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (json.dumps(retired), objective["id"]))
 
+    def paused_resume_status(self, room_id):
+        with self._connection() as db:
+            return self._team.objectives.resume_status(db, room_id)
+
     def restore_active_quota_members(self, room_id, providers):
         with self._connection(write=True) as db:
             room = self._room(db, room_id)
@@ -4400,7 +4406,7 @@ class RoomStore:
 
     def objective_action(self, room_id, action, request_id, parameters, *, binding=None, policy=None, objective_id=None,
                          baseline=None, answer=None, user_message=None, request_identity=None, quota_recovered=(), runtime_change=None,
-                         message_target="all", scope_retry=None):
+                         message_target="all", scope_retry=None, waiting=False):
         """User actions and automatic stages share one transactional ledger.
 
         No client supplies a continuation goal; it comes only from the frozen
@@ -4424,7 +4430,8 @@ class RoomStore:
             if action in {"pause", "resume"}:
                 if action == "pause":
                     self._invalidate_outbox(db, room_id, excluding_key=key, preserve_invitations=True)
-                self._team.objectives.set_pause(db, room_id, objective_id, action == "pause", defer_resume=request_identity is not None)
+                self._team.objectives.set_pause(db, room_id, objective_id, action == "pause",
+                                                defer_resume=request_identity is not None, waiting=waiting)
             elif action == "directed-objective":
                 if (len(recipients) != 1 or message_target in {"all", "both"} or not user_message
                         or team["current_run_id"] != binding["run_id"]):

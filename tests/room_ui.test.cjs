@@ -9301,12 +9301,19 @@ test('the service stop_kind keeps the card, the room list and the task board tel
     assert.match(pane.textContent, /自动继续后接着做/, kind);
     assert.doesNotMatch(pane.textContent, /已取消|点“继续推进”/, kind);
     assert.equal(ui.get(partner(fixture(reason, kind))).textContent, '待继续', `${kind}: the partner card agrees`);
+    // Catches: a stop the host resumes by itself offered no pause, only stop.
+    assert.equal(ui.get('pause-objective').hidden, false, `${kind}: the wait can be paused`);
+    assert.match(ui.get('now-card').textContent, /暂停推进/, kind);
     assert.equal(ui.posts().length, 0);
   }
+  const holdSaved = fixture('all_partners_quota_exhausted', 'quota_wait'); const hold = await open(holdSaved);
+  hold.get('pause-objective').fire('click'); await settle();
+  assert.equal(hold.posts().at(-1)?.path, `/api/rooms/${roomId}/pause`);
   // The service's null wins over a code that looks automatic: the next step is the user's.
   const manualSaved = fixture('service_shutdown', null); const manual = await open(manualSaved);
   assert.notEqual(manual.get(partner(manualSaved)).textContent, '待继续');
   assert.doesNotMatch(manual.get('now-card').textContent, /自动继续|自动接着做/);
+  assert.equal(manual.get('pause-objective').hidden, true, 'a stop that waits for the user has nothing to pause');
   assert.match(manual.get('rooms').children[0].textContent, /目标已停止/);
   assert.match(manual.get('progress-pane').textContent, /点“继续推进”后会接着做/);
   // Only the user's own stop really cancels unfinished tasks.
