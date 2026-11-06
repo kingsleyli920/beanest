@@ -2973,8 +2973,11 @@ function syncParticipants(snapshot) {
   rememberAgents(participants);
   state.participantIds = participants.map((agent) => agent.id).filter((id) => agentPattern.test(id) && providers.includes(id));
   if (state.target === 'both') state.target = 'all';
-  if (!state.selected && state.target === 'all' && !state.targetExplicit) {
-    state.target = state.selected ? 'all' : state.participantIds[0] || 'all';
+  // A new task's recipient must be one of its partners: one left out since
+  // (out of quota, unticked) falls back like the default does.
+  if (!state.selected && (state.target === 'all' && !state.targetExplicit
+      || state.target !== 'all' && !state.participantIds.includes(state.target))) {
+    state.target = state.participantIds[0] || 'all';
   }
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), participants.map((agent) => [agent.id, agent.name, initials[agent.id], agent.adapter, agent.provider, beanStyle(agent.id, agent), state.partners.some((partner) => partner.id === agent.id)])]);
   if (fingerprint === state.memberFingerprint) return;
