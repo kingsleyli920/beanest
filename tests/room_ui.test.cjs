@@ -9362,7 +9362,7 @@ test('English accepts typed continue as the bare command, joins names with Engli
   assert.doesNotMatch(ui.get('frozen-participants').textContent, /、/);
 });
 test('waiting for quota reads the same on the board and every partner card, without rearranging or repeating the stop', async () => {
-  // Shape of the real 九烛 room after #19: tasks held by all_partners_quota_exhausted, partners retired for quota.
+  // Shape of a real room after #19: tasks held by all_partners_quota_exhausted, partners retired for quota.
   const saved = restartSnapshot(); saved.objective.stop_reason = 'all_partners_quota_exhausted';
   saved.stop_kind = 'quota_wait'; saved.room.objective_status = 'stopped'; saved.room.stop_kind = 'quota_wait';
   saved.team = { ...(saved.team || {}), phase: 'stopped', stop_reason: 'all_partners_quota_exhausted' };
