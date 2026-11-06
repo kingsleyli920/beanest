@@ -19,7 +19,7 @@ from .runtime_settings import normalized_settings, RuntimeSettingsError, read_on
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
-from .stop_policy import continues_automatically
+from .stop_policy import continues_automatically, OWN_RECOVERY
 from .native_outcome import NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, FORMAT_ERRORS, completed_execution
 NATIVE_PARTIAL_RECOVERY_ERRORS = NATIVE_RECOVERY_ERRORS | {"cli_nonzero_exit", "native_side_effects_unconfirmed"}
 # Outcomes that are themselves unknown; abandoning their calls could hide a
@@ -5538,7 +5538,16 @@ class RoomStore:
             excluding_key = hashlib.sha256(checked_text(excluding_request_id, 512).encode()).hexdigest() if excluding_request_id is not None else None
             self._invalidate_outbox(db, room["id"], excluding_key=excluding_key, preserve_invitations=True)
             db.execute("UPDATE rooms SET stop_requested=1 WHERE id=?", (room["id"],))
+            team = self._team.team(db, room["id"])
             self._team.stop(db, room["id"], code, status="cancelled")
+            # The user's own stop of a team already stopped on a reason the host
+            # would resume by itself (a quota wait, an automatic continue) now
+            # waits for the user. An unknown outcome keeps its own reason, and a
+            # fresh attempt keeps the old run's reason as its evidence.
+            if (code == "cancel_requested" and team is not None
+                    and (continues_automatically(team["stop_reason"]) or team["stop_reason"] in OWN_RECOVERY)):
+                db.execute("UPDATE teams SET stop_reason=? WHERE room_id=? AND stop_reason=?",
+                           (code, room["id"], team["stop_reason"]))
             db.execute("UPDATE jobs SET status='cancelled',error=? WHERE room_id=? AND status='queued'",
                        (code, room["id"]))
             db.execute("UPDATE executions SET status='cancelled' WHERE room_id=? AND status='queued'", (room["id"],))

@@ -358,6 +358,42 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call["agent"] == "claude" for call in self.fake.calls[calls:]))
         self.assertTrue(any(event["kind"] == "quota_wait_resumed" for event in final["events"]))
 
+    async def test_a_user_stop_during_a_quota_wait_is_not_undone_when_quota_returns(self):
+        # Catches: stopping a room that waited for quota kept the quota reason,
+        # so the list still said "waiting for quota" and the room restarted
+        # itself once a partner's quota came back.
+        original, exhausted = self.handler, {"claude", "codex"}
+        def handler(agent, context):
+            if agent in exhausted and context["job"]["job_phase"] == "work":
+                return {"adapter_failure": "subscription_limit_reached"}
+            return original(agent, context)
+        async def guard(members):
+            if any(member in exhausted for member in members):
+                raise RoomError("agent_quota_exhausted")
+        created = await self.create()
+        self.fake.handler = handler
+        await self.settle()
+        room = created["room"]["id"]
+        self.assertEqual((await self.service.read_room(room))["stop_kind"], "quota_wait")
+        await self.service.cancel_room(room)
+        stopped = await self.service.read_room(room)
+        self.assertEqual(stopped["team"]["stop_reason"], "cancel_requested")
+        self.assertIsNone(stopped["stop_kind"])
+        self.assertIsNone(next(item for item in (await self.service.list_rooms())["rooms"] if item["id"] == room)["stop_kind"])
+        self.service._guard_availability = guard
+        calls = len(self.fake.calls)
+        exhausted.clear()
+        for _ in range(3):
+            self.now += 600
+            await self.service.expire_tasks()
+            for wait in list(self.service._quota_waits.values()):
+                await wait["task"]
+            await self.settle()
+        later = await self.service.read_room(room)
+        self.assertEqual(len(self.fake.calls), calls)
+        self.assertEqual(later["current_run"]["id"], stopped["current_run"]["id"])
+        self.assertFalse(any(event["kind"] == "quota_wait_resumed" for event in later["events"]))
+
     async def tick(self, room):
         # One watchdog pass of the desktop service, then let what it started finish.
         await self.service.expire_tasks()
