@@ -190,8 +190,8 @@ class RoomInvitationHTTPTests(unittest.TestCase):
         binding = {"source_room_id": old_room, "source_run_id": self.service.store.snapshot(old_room)["current_run"]["id"],
                    "revision": previous["revision"], "digest": previous.get("snapshot_sha256")}
         snapshot = self.service.store.snapshot
-        def legacy_snapshot(identifier):
-            value = snapshot(identifier)
+        def legacy_snapshot(identifier, **options):
+            value = snapshot(identifier, **options)
             if identifier == room_id:
                 value["native_handoff"] = binding
             return value
