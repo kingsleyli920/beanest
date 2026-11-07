@@ -85,18 +85,29 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def create(self, request_id="execution-create", *, mode="python_sandbox"):
         return await self.service.create_room("A fictional new Python toy", "claude", request_id, mode=mode)
 
-    async def settle(self):
-        async def drain():
-            while True:
-                tasks = [task for task in (*self.service._workers.values(), *self.service._executions.values())
-                         if not task.done()]
-                if not tasks:
-                    return
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-                        raise result
-        await asyncio.wait_for(drain(), 3)
+    async def settle(self, *, stall=3, limit=30):
+        """Wait until every worker and execution task has finished.
+
+        Each task blocks the loop on SQLite and tree work, so a loaded CI
+        runner can need more than `stall` seconds in total while tasks keep
+        finishing. Fail when no task finishes for `stall` seconds (a stuck
+        scheduler) or after `limit` seconds in total.
+        """
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        while True:
+            tasks = [task for task in (*self.service._workers.values(), *self.service._executions.values())
+                     if not task.done()]
+            if not tasks:
+                return
+            remaining = limit - (loop.time() - start)
+            done, _ = await asyncio.wait(tasks, timeout=max(0, min(stall, remaining)), return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                raise TimeoutError(f"Scheduler did not settle: {len(tasks)} task(s) still running after "
+                                   f"{loop.time() - start:.1f}s in total (stall limit {stall}s, total limit {limit}s): {tasks}")
+            for task in done:
+                if not task.cancelled() and task.exception() is not None:
+                    raise task.exception()
 
     async def until(self, predicate):
         async def wait():

@@ -290,6 +290,27 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.working.wait(), 3)
         return created["room"]["id"]
 
+    async def attempted(self, request_id):
+        """Read an operation after its background attempt has ended.
+
+        The request returns after waiting 50 ms for that attempt. Cancelling
+        an owned call, recording its cleanup and freezing its tree can take
+        longer on a loaded runner, so the stored state may still be the first
+        `pending` record. The bound exceeds the attempt's own 14 s wait for a
+        cancelled worker. Nothing here restarts the attempt.
+        """
+        operation = self.service.store.partner_operation(request_id)
+        task = self.service._partner_tasks.get(operation["id"])
+        if task is not None:
+            done, _ = await asyncio.wait({task}, timeout=20)
+            self.assertTrue(done, "The partner operation attempt did not finish.")
+        return self.service.store.partner_operation(request_id)
+
+    def room_idle(self, room):
+        return not (room in self.service._captures
+                    or any(key == room and not worker.done() for (key, _), worker in self.service._workers.items())
+                    or (room in self.service._executions and not self.service._executions[room].done()))
+
     async def wait_for(self, predicate):
         for _ in range(600):
             self.service._resume_partner_operations()
@@ -313,7 +334,9 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         source = Path(state["project"])
         result = await self.service.set_partner_lifecycle("claude", "remove", request_id="remove-native-owner")
         await self.wait_for(lambda: self.service.store.partner_operation("remove-native-owner")["targets"][0]["state"] == "done")
-        await self.wait_for(lambda: self.service.store.snapshot(room)["objective"]["status"] == "complete")
+        # Completion is stored before the last worker returns; until it does
+        # the room is still busy and cannot take a follow-up.
+        await self.wait_for(lambda: self.service.store.snapshot(room)["objective"]["status"] == "complete" and self.room_idle(room))
         final = await self.service.read_room(room)
         self.assertEqual(self.service.store.partner_operation("remove-native-owner")["status"], "completed")
         self.assertFalse(any(profile["id"] == "claude" for profile in self.service.partner_manager.profiles()))
@@ -422,7 +445,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
     async def test_unconfirmed_owned_cleanup_keeps_configuration_pending_without_transfer(self):
         room = await self.prepare_interrupted_owner(cleanup=False)
         await self.service.set_partner_lifecycle("claude", "remove", request_id="cleanup-unknown")
-        operation = self.service.store.partner_operation("cleanup-unknown")
+        operation = await self.attempted("cleanup-unknown")
         self.assertEqual((operation["status"], operation["error"]), ("pending", "partner_cleanup_unconfirmed"))
         self.assertTrue(any(profile["id"] == "claude" for profile in self.service.partner_manager.profiles()))
         self.assertEqual(self.service._project(room).snapshot()["revision"], 1)
@@ -436,7 +459,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
                              if job["provider"] == "claude" and job["status"] == "working"} for room in (first, second)}
         self.assertTrue(all(owned_jobs.values()))
         await self.service.set_partner_enabled("claude", False, request_id="cancel-owner-in-two-rooms")
-        operation = self.service.store.partner_operation("cancel-owner-in-two-rooms")
+        operation = await self.attempted("cancel-owner-in-two-rooms")
         self.assertEqual((operation["status"], operation["error"]), ("pending", "partner_cleanup_unconfirmed"))
         self.assertEqual(len(operation["targets"]), 2)
         for room, source in zip((first, second), source_trees):
@@ -481,7 +504,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         before = self.service.store.snapshot(room)
         await self.service.objective_action(room, "pause", "pause-before-removal", objective_id=before["objective"]["id"])
         await self.service.set_partner_lifecycle("claude", "remove", request_id="paused-native-removal")
-        operation = self.service.store.partner_operation("paused-native-removal")
+        operation = await self.attempted("paused-native-removal")
         self.assertEqual(operation["status"], "completed")
         self.assertEqual(self.service.store.snapshot(room)["objective"]["status"], "paused")
         self.assertFalse(any(call["context"].get("partner_handoff_inspection") for call in self.transport_calls))
@@ -499,7 +522,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         source = Path(self.service.store.native_workspace(room, "claude")["project"])
         (source / "outside.txt").write_text("Unowned private bytes.\n")
         await self.service.set_partner_lifecycle("claude", "remove", request_id="unowned-private")
-        operation = self.service.store.partner_operation("unowned-private")
+        operation = await self.attempted("unowned-private")
         self.assertEqual((operation["status"], operation["error"]), ("completed", None))
         self.assertEqual((operation["targets"][0]["state"], operation["targets"][0]["reason"]), ("blocked", "native_changes_not_imported"))
         self.assertFalse(any(profile["id"] == "claude" for profile in self.service.partner_manager.profiles()))
@@ -513,7 +536,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         receiver = Path(state["project"])
         (receiver / "notes.md").write_text("Other private receiver work.\n")
         await self.service.set_partner_lifecycle("claude", "remove", request_id="receiver-dirty")
-        target = self.service.store.partner_operation("receiver-dirty")["targets"][0]
+        target = (await self.attempted("receiver-dirty"))["targets"][0]
         self.assertEqual((target["state"], target["reason"]), ("blocked", "native_recovery_unpublished_changes"))
         self.assertEqual(self.service.store.native_workspace(room, "codex")["project"], str(receiver))
         self.assertEqual((receiver / "notes.md").read_text(), "Other private receiver work.\n")
@@ -524,7 +547,8 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         room = await self.prepare_interrupted_owner()
         with patch.object(self.service, "_guard_objective_availability", side_effect=RoomError("all_partners_quota_exhausted")):
             await self.service.set_partner_enabled("claude", False, request_id="waiting-for-receiver-quota")
-        operation = self.service.store.partner_operation("waiting-for-receiver-quota")
+            # The refusal must still be in place while the attempt runs.
+            operation = await self.attempted("waiting-for-receiver-quota")
         self.assertEqual((operation["status"], operation["targets"][0]["state"], operation["targets"][0]["reason"]),
                          ("completed", "waiting_receiver", "no_available_partner"))
         self.assertEqual(self.service._project(room).snapshot()["revision"], 1)
@@ -546,10 +570,13 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.transport_calls), calls)
         self.service.store.retire_quota(room, "codex", "agent_quota_exhausted")
         await self.service.set_partner_enabled("codex", False, request_id="disable-retired")
+        self.assertEqual((await self.attempted("disable-retired"))["status"], "completed")
         await self.service._refresh_active_quota_members(room)
         self.assertIn("codex", self.service.store.snapshot(room)["objective"]["retired_partners"])
         await self.service.objective_action(room, "pause", "pause-quota-rejoin", objective_id=snapshot["objective"]["id"])
         await self.service.set_partner_enabled("codex", True, request_id="enable-without-resume")
+        # Only a profile that is enabled again could rejoin; check that first.
+        self.assertEqual((await self.attempted("enable-without-resume"))["status"], "completed")
         await self.service._refresh_active_quota_members(room)
         current = self.service.store.snapshot(room)
         self.assertEqual(current["objective"]["status"], "paused")
