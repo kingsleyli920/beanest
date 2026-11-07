@@ -172,6 +172,14 @@ class CodeRepositoryBindingHTTPTests(unittest.TestCase):
         saved_git.rename(fixture.delivery_repository / '.git')
         self.assertEqual(self.status(fixture)['delivery_repository']['state'], 'bound')
 
+        # Catches: after a macOS reboot the APFS st_dev of the same volume
+        # changed (16777231 -> 16777232) and the user's binding was lost.
+        binding = fixture.service.store.delivery_repository(fixture.room_id)
+        fixture.service.store.bind_delivery_repository(fixture.room_id, {
+            **binding, 'identity': {**binding['identity'], 'device': binding['identity']['device'] + 1}})
+        self.assertEqual(self.status(fixture)['delivery_repository']['state'], 'bound')
+        fixture.service.store.bind_delivery_repository(fixture.room_id, binding)
+
         # Replacing the Git directory at the same path must not inherit trust.
         (fixture.delivery_repository / '.git').rename(fixture.root / 'previous-selected-git')
         fixture.git(fixture.delivery_repository, 'init', '--initial-branch=main')

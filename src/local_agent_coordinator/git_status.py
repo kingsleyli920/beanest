@@ -380,6 +380,18 @@ def read_status(path, *, now=time.time, deadline=None):
     return result
 
 
+def same_repository(current, recorded):
+    """Compare a stored repository identity with a fresh one across restarts.
+
+    macOS assigns APFS st_dev at mount time, so the same volume can come back
+    with a different device number after a reboot. Paths plus the Git common
+    directory inode still tell a replaced repository apart.
+    """
+    keys = ("root", "common", "inode")
+    return (isinstance(current, dict) and isinstance(recorded, dict)
+            and all(key in current and current.get(key) == recorded.get(key) for key in keys))
+
+
 def repository_identity(path, *, deadline=None):
     """Identify an authorized Git directory without enumerating working files."""
     command, deadline = shutil.which("git"), _read_deadline(deadline)

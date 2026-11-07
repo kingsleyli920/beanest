@@ -595,7 +595,7 @@ class RoomService:
                 candidates.append(target)
             try:
                 identity = git_status.repository_identity(target["path"], deadline=deadline)
-                valid = identity == binding["identity"]
+                valid = git_status.same_repository(identity, binding["identity"])
                 failure_reason = "delivery_repository_changed"
             except git_status._GitError:
                 valid = False
