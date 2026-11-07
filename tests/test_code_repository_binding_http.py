@@ -158,9 +158,18 @@ class CodeRepositoryBindingHTTPTests(unittest.TestCase):
         self.assertEqual(pending['main']['state'], 'confirmed')
         self.assertEqual(self.business_digest(fixture), before)
 
+        # Catches: a new room of the same project starting without the
+        # repository the user chose before (the 九烛 room f477ad94), so
+        # neither delivery status nor outside work could be seen there.
         other, _ = fixture.service.store.create_room('Separate fictional room', 'claude', str(uuid4()),
             mode='native_project', project_id=fixture.project_id, participants=['claude', 'codex'])
-        self.assertEqual(self.status(fixture, room_id=other)['delivery_repository']['state'], 'unbound')
+        inherited = self.status(fixture, room_id=other)['delivery_repository']
+        self.assertEqual((inherited['state'], inherited['source'], inherited['workspace_id']),
+                         ('bound', 'project_history', actual))
+        self.assertIsNone(fixture.service.store.delivery_repository(other))
+        unrelated, _ = fixture.service.store.create_room('Unrelated fictional room', 'claude', str(uuid4()),
+            participants=['claude', 'codex'])
+        self.assertEqual(self.status(fixture, room_id=unrelated)['delivery_repository']['state'], 'unbound')
         self.assertEqual(len(fixture.native.calls), calls)
 
         # A temporarily unreadable repository is not proof it was replaced.

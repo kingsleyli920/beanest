@@ -1869,6 +1869,17 @@ class RoomStore:
                 self._event(db, room_id, "source_advanced_externally", sender="system", **change)
             return True
 
+    def inherited_delivery_repository(self, room_id):
+        """The user's latest delivery repository choice in another room of the
+        same registered project, for a new room that has not chosen its own."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT d.room_id, d.binding_json FROM room_delivery_repositories d JOIN rooms r ON r.id=d.room_id "
+                "WHERE d.room_id!=? AND r.project_id IS NOT NULL "
+                "AND r.project_id=(SELECT project_id FROM rooms WHERE id=?) "
+                "ORDER BY r.updated_at DESC, d.room_id LIMIT 1", (room_id, room_id)).fetchone()
+            return {**json.loads(row[1]), "inherited_from": row[0]} if row else None
+
     def bind_delivery_repository(self, room_id, binding):
         """Keep an explicit user-selected delivery target within this room."""
         encoded = json.dumps(binding, sort_keys=True, ensure_ascii=True, allow_nan=False)

@@ -150,6 +150,27 @@ class ExternalSourceChangesHTTPTests(unittest.TestCase):
         changes = self.service._external_source_changes(job, snapshot)
         self.assertEqual([commit["subject"] for commit in changes[-1]["commits"]], ["Done after the interrupted job"])
 
+    def test_a_new_room_of_a_non_git_project_watches_the_repository_chosen_before(self):
+        # Catches: 九烛 registers a trimmed non-Git copy; a new room had no
+        # binding of its own, so outside work was never observed there.
+        from local_agent_coordinator import git_status
+        self.configure()
+        copy = self.root / "trimmed-copy"
+        copy.mkdir()
+        (copy / "README.md").write_text("Fictional trimmed copy.\n")
+        code, value = self.request("POST", "/api/projects", {"name": "Trimmed copy", "path": str(copy),
+                                                             "selection_kind": "folder"})
+        self.assertEqual(code, 200, value)
+        project_id = value["project"]["id"]
+        rooms = [self.service.store.create_room(goal, "claude", goal, mode="native_project", project_id=project_id,
+                                                participants=["claude", "codex"])[0]
+                 for goal in ("Earlier fictional room", "Later fictional room")]
+        self.assertIsNone(self.service._source_repository(rooms[1], project_id))
+        identity = git_status.repository_identity(self.source)
+        self.service.store.bind_delivery_repository(rooms[0], {"workspace_id": "delivery:fixture",
+            "path": str(self.source), "label": "交付所在仓库 · native-source", "identity": identity})
+        self.assertEqual(self.service._source_repository(rooms[1], project_id), identity["root"])
+
     def test_a_missing_repository_never_blocks_the_job(self):
         # Catches: turning an observation failure into a stopped room.
         room_id = self.configure()

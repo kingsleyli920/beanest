@@ -542,13 +542,18 @@ class RoomService:
         """The real Git repository this room delivers to, if the host knows it."""
         deadline = time.monotonic() + 5
         binding = self.store.delivery_repository(room_id)
-        if binding is not None:
-            identity = git_status.repository_identity(binding["path"], deadline=deadline)
-            return identity["root"] if git_status.same_repository(identity, binding["identity"]) else None
-        project = next((item for item in self.catalog.list() if item["id"] == project_id), None)
-        if project is None or not project.get("path"):
-            return None
-        return git_status.repository_identity(project["path"], deadline=deadline)["root"]
+        if binding is None:
+            project = next((item for item in self.catalog.list() if item["id"] == project_id), None)
+            if project is not None and project.get("path"):
+                try:
+                    return git_status.repository_identity(project["path"], deadline=deadline)["root"]
+                except git_status._GitError:
+                    pass
+            binding = self.store.inherited_delivery_repository(room_id)
+            if binding is None:
+                return None
+        identity = git_status.repository_identity(binding["path"], deadline=deadline)
+        return identity["root"] if git_status.same_repository(identity, binding["identity"]) else None
 
     def _external_source_changes(self, job, snapshot):
         """Commits that reached the delivery repository while this room was idle.
@@ -674,6 +679,12 @@ class RoomService:
                 candidates.insert(0, project)
             except git_status._GitError:
                 pass
+        source = "user"
+        if binding is None and project_identity is None:
+            # A new room of the same registered project keeps delivering to
+            # the repository the user chose before; choosing again overrides.
+            binding = self.store.inherited_delivery_repository(room_id)
+            source = "project_history"
         if binding is not None:
             target = next((item for item in workspaces if item["id"] == binding["workspace_id"]), None)
             if target is None:
@@ -689,8 +700,8 @@ class RoomService:
             except git_status._GitError:
                 valid = False
                 failure_reason = "delivery_repository_unavailable"
-            state, reason, target_id, source = ("bound" if valid else "unknown",
-                None if valid else failure_reason, target["id"], "user")
+            state, reason, target_id = ("bound" if valid else "unknown",
+                None if valid else failure_reason, target["id"])
         elif project_identity is not None:
             state, reason, target_id, source = "bound", None, project["id"], "registered_project"
         else:
