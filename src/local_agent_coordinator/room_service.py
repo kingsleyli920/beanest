@@ -572,11 +572,12 @@ class RoomService:
             since = previous["head"] if previous and previous.get("root") == root else None
             if since is None:
                 # First observation of an existing room: start from the HEAD
-                # as of its last finished job, so work done while it sat
-                # stopped is not silently taken as the starting point.
+                # as of its last completed job, so work done while it sat
+                # stopped is not silently taken as the starting point. Failed
+                # or cancelled calls since then did not advance the board.
                 idle_since = max((event["created_at"] for event in snapshot["events"]
-                                  if event["kind"] == "job_finished" and event.get("job_id") != job["id"]),
-                                 default=None)
+                                  if event["kind"] == "job_finished" and event.get("status") == "completed"
+                                  and event.get("job_id") != job["id"]), default=None)
                 if idle_since is not None:
                     since = git_status.commit_at(root, idle_since, deadline=time.monotonic() + 5)
             observed = git_status.head_commits(root, since, limit=30, deadline=time.monotonic() + 5)
@@ -588,13 +589,20 @@ class RoomService:
             if previous is None or previous.get("head") != observed["head"] or previous.get("root") != root:
                 self.store.advance_source_observation(room_id, previous, observation)
             return recorded
-        claimed, finished = {}, {}
+        # A job's window runs from its claim to its last recorded event (an
+        # interrupted job ends with job_cleanup, not job_finished); only jobs
+        # still queued or working stay open until now.
+        claimed, last_seen = {}, {}
         for event in snapshot["events"]:
-            if event["kind"] == "job_claimed" and event.get("job_id"):
-                claimed.setdefault(event["job_id"], event["created_at"])
-            elif event["kind"] == "job_finished" and event.get("job_id"):
-                finished[event["job_id"]] = event["created_at"]
-        windows = [(start - 5, finished.get(job_id, now) + 5) for job_id, start in claimed.items()]
+            identifier = event.get("job_id")
+            if not identifier:
+                continue
+            if event["kind"] == "job_claimed":
+                claimed.setdefault(identifier, event["created_at"])
+            last_seen[identifier] = max(last_seen.get(identifier, 0), event["created_at"])
+        active = {item["id"] for item in snapshot["jobs"] if item.get("status") in {"queued", "working"}}
+        windows = [(start - 5, (now if job_id in active else last_seen[job_id]) + 5)
+                   for job_id, start in claimed.items()]
         outside = [commit for commit in observed["commits"]
                    if not any(start <= commit["committed_at"] <= end for start, end in windows)]
         if observed["complete"] and not outside:

@@ -133,6 +133,23 @@ class ExternalSourceChangesHTTPTests(unittest.TestCase):
         self.assertEqual([commit["subject"] for commit in calls[0]["context"]["external_source_changes"][0]["commits"]],
                          ["Done elsewhere while stopped"])
 
+    def test_an_interrupted_job_without_job_finished_does_not_hide_later_outside_work(self):
+        # Catches: a job interrupted at shutdown (claim + job_cleanup, no
+        # job_finished) keeping its window open forever and swallowing every
+        # later outside commit, as in the real 1a10086d room.
+        room_id = self.configure()
+        self.wait(room_id, lambda value: value["current_run"]["can_reassess_objective"])
+        snapshot = self.service.store.snapshot(room_id)
+        start = time.time() + 30
+        snapshot["events"] += [
+            {"seq": 10**9, "kind": "job_claimed", "job_id": "interrupted-job", "created_at": start},
+            {"seq": 10**9 + 1, "kind": "job_cleanup", "job_id": "interrupted-job", "created_at": start + 2}]
+        self.commit("main.py", "VALUE = 5\n", "Done after the interrupted job", when=start + 90)
+        self.service.clock = lambda: start + 120
+        job = {"room_id": room_id, "id": "probe-job", "team": {"run_id": snapshot["current_run"]["id"]}}
+        changes = self.service._external_source_changes(job, snapshot)
+        self.assertEqual([commit["subject"] for commit in changes[-1]["commits"]], ["Done after the interrupted job"])
+
     def test_a_missing_repository_never_blocks_the_job(self):
         # Catches: turning an observation failure into a stopped room.
         room_id = self.configure()
