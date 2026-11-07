@@ -215,6 +215,27 @@ def _claude_metadata_valid(event):
     return None
 
 
+_CLAUDE_STREAM_SYSTEM_SUBTYPES = frozenset({'init', 'permission_denied', 'compact_boundary', 'status',
+                                            'task_started', 'task_progress', 'task_notification'})
+
+
+def _claude_future_system_notice(event):
+    """A new Claude Code system subtype is a notice, not execution or a result.
+
+    Claude Code adds system notices between releases (``notification`` in
+    2.1.319, ``ui_invalidate`` in 2.1.316). Tool execution only arrives as
+    assistant tool_use / user tool_result blocks and the turn's outcome only as
+    ``result``, so an unrecognized notice cannot carry authority. Rejecting it
+    discarded completed turns and stopped every room after each CLI update.
+    Known subtypes keep their strict shape checks.
+    """
+    subtype = event.get('subtype')
+    return (event.get('type') == 'system' and isinstance(subtype, str)
+            and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', subtype) is not None
+            and subtype not in _CLAUDE_STREAM_SYSTEM_SUBTYPES
+            and _claude_metadata_valid(event) is None)
+
+
 def _claude_permission_denied_valid(event):
     """Official top-level advisory only; it never completes a tool call."""
     required = {'type', 'subtype', 'tool_name', 'tool_use_id', 'message', 'uuid', 'session_id'}
@@ -433,6 +454,9 @@ def _receipt_event(agent, raw, *, format_tool_ids=None):
             return {'type': kind, 'usage': adapters._usage(event.get('usage')),
                     **({'code': 'codex_stream_diagnostic'} if kind == 'error' else {})}
         return None
+    if _claude_future_system_notice(event):
+        # Labels only: a future notice's body may quote prompts or paths.
+        return {'type': 'native_protocol_notice', 'event_type': 'system', 'event_subtype': event['subtype']}
     if kind == 'system' and event.get('subtype') == 'permission_denied':
         if _claude_permission_denied_valid(event):
             # Human-readable denial text may contain paths or private context.
@@ -639,6 +663,10 @@ def claude_quota_recovery_proof(cwd, session_id, *, claimed_at, finished_at, val
                 or len(raw) > 16384 or len(raw) != initial.st_size):
             return None
         rows = [adapters._strict_json(line) for line in raw.splitlines()]
+        # A label-only future notice is neither a tool nor a second terminal.
+        rows = [row for row in rows if not (isinstance(row, dict) and row.get('channel') == 'stdout'
+                and isinstance(row.get('data'), dict) and row['data'].get('type') == 'native_protocol_notice'
+                and 'diagnostics' not in row)]
         if len(rows) != 2 or any(not isinstance(row, dict) or row.get('channel') != 'stdout' for row in rows):
             continue
         init, end = (row.get('data', {}) for row in rows)
@@ -1056,8 +1084,13 @@ class _Stream:
             elif event.get('subtype') not in {'compact_boundary', 'status', 'task_started',
                                                'task_progress', 'task_notification'}:
                 valid = _claude_metadata_valid(event)
-                if valid is None:
+                if valid is None and not _claude_future_system_notice(event):
                     self.failure = 'native_protocol_unknown'
+                elif valid is None:
+                    # Recorded as a label-only notice in the receipt. A
+                    # session_id still has to match this owned session.
+                    if 'session_id' in event:
+                        self.identity(event['session_id'])
                 elif not valid:
                     self.failure = 'native_protocol_invalid'
                 elif 'session_id' in event:

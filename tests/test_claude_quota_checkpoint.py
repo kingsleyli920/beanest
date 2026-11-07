@@ -76,6 +76,20 @@ class ClaudeQuotaProofTests(unittest.TestCase):
             with patch.object(Path, 'home', return_value=home):
                 write(rows)
                 self.assertEqual(prove()['reason'], 'provider_quota_exhausted')
+                # Catches: a label-only Claude Code notice row (2.1.319
+                # "notification") making the two-row receipt unprovable.
+                notice = {'channel': 'stdout', 'data': {'type': 'native_protocol_notice', 'event_type': 'system',
+                                                        'event_subtype': 'notification'}}
+                entry.write_text(''.join(json.dumps(row)+'\n' for row in [receipt[0], notice, receipt[1]]))
+                os.utime(entry, (1.3, 1.3))
+                self.assertEqual(prove()['reason'], 'provider_quota_exhausted')
+                # A "notice" carrying format diagnostics is not label-only.
+                forged = {**notice, 'diagnostics': [{'type': 'native_format_terminal'}]}
+                entry.write_text(''.join(json.dumps(row)+'\n' for row in [receipt[0], forged, receipt[1]]))
+                os.utime(entry, (1.3, 1.3))
+                self.assertIsNone(prove())
+                entry.write_text(''.join(json.dumps(row)+'\n' for row in receipt))
+                os.utime(entry, (1.3, 1.3))
                 for tail in ({'type': 'unknown', 'sessionId': SID}, rows[0],
                              {'type': 'last-prompt', 'sessionId': SID, 'leafUuid': SID, 'lastPrompt': 'wrong leaf'},
                              {'type': 'mode', 'sessionId': SID, 'mode': 'normal'}):
