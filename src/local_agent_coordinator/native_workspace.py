@@ -106,6 +106,42 @@ def _file_digest(path):
     return sha
 
 
+def signature_paths(manifest, extra_names=()):
+    """The absolute paths tree_signature() lstat()s for one private tree: its
+    root, Git's untracked-file inputs, every baseline file, the named extra
+    files, and every folder holding any of them. Unvalidated: only stat()ed."""
+    root = str(manifest["project"])
+    names = {"", ".git/index", ".git/HEAD", ".git/info/exclude"}
+    listed = [entry.get("path") for entry in manifest.get("files", []) if isinstance(entry, dict)]
+    for name in listed + list(extra_names):
+        if not isinstance(name, str) or not name:
+            continue
+        names.add(name)
+        parts = name.split("/")
+        names.update("/".join(parts[:index]) for index in range(1, len(parts)))
+    return tuple(os.path.join(root, name) if name else root for name in sorted(names))
+
+
+def tree_signature(paths):
+    """A cheap stand-in for "this private tree has not moved", for display
+    caches only. It changes on an in-place edit, a mode change, an entry added
+    to or removed from a known folder, and staging; it can miss a new file
+    inside a folder holding no listed path. It uses the same identity, size,
+    mtime and ctime that _file_digest trusts. It never replaces
+    collect_changes: anything that imports, carries or permits work re-reads
+    the tree."""
+    digest = hashlib.sha256()
+    for path in paths:
+        try:
+            info = os.lstat(path)
+            row = (f"{path}\0{info.st_dev}\0{info.st_ino}\0{info.st_mode}\0{info.st_size}"
+                   f"\0{info.st_mtime_ns}\0{info.st_ctime_ns}\n")
+        except OSError as error:
+            row = f"{path}\0!{error.errno}\n"
+        digest.update(row.encode("utf-8", "surrogateescape"))
+    return digest.hexdigest()
+
+
 def _cancelled(callback):
     if callback is not None and callback():
         raise NativeWorkspaceError("native_preparation_cancelled")

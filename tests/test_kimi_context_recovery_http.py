@@ -277,6 +277,9 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual(code, 200, listed)
         self.assertEqual(audits, [])
         room = next(item for item in listed['rooms'] if item['id'] == fixture.room_id)
+        # The detail poll may reuse a recent audit while nothing moved; drop it
+        # so this read shows the audit belongs to the room read, not the list.
+        fixture.service._recovery_displays.clear()
         detail = fixture.read()
         self.assertEqual(len(audits), 1)
         self.assertEqual((room['outcome_state'], room['objective_status'], room['work_activity']),

@@ -19,6 +19,9 @@ class PollIndexTests(unittest.TestCase):
                 ("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind') "
                  "IN ('job_claimed','job_cleanup') ORDER BY seq", ("room",)),
                 ("SELECT value_json FROM events WHERE json_extract(value_json,'$.job_id')=?", ("job",)),
+                # The room list's timeline-free snapshot reads only inspection events.
+                ("SELECT json_extract(value_json,'$.job_id') FROM events WHERE room_id=? "
+                 "AND json_extract(value_json,'$.kind')='partner_handoff_inspection'", ("room",)),
             ]
             with store._connection() as db:
                 for sql, parameters in queries:
