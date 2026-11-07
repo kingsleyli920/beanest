@@ -1829,6 +1829,12 @@ class RoomStore:
             row = db.execute("SELECT state_json FROM native_workspaces WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def native_workspace_rows(self, room_id):
+        """Each private tree's stored state as raw text, for change detection."""
+        with self._connection() as db:
+            return db.execute("SELECT provider,state_json FROM native_workspaces WHERE room_id=? ORDER BY provider",
+                              (room_id,)).fetchall()
+
     def delivery_repository(self, room_id):
         with self._connection() as db:
             self._room(db, room_id)
@@ -5649,7 +5655,9 @@ class RoomStore:
                     "completed_jobs": counts.get('completed', 0),
                     "failed_jobs": counts.get('failed', 0) + counts.get('unknown', 0)}
 
-    def snapshot(self, room_id):
+    def snapshot(self, room_id, *, events=True):
+        """events=False leaves out the timeline, the bulk of a long room's
+        snapshot, for readers such as the room list that never look at it."""
         with self._connection() as db:
             row = self._room(db, room_id)
             room = {key: row[key] for key in ("id", "goal", "status", "created_at", "updated_at", "mode", "project_id", "work_mode", "lifecycle_state")}
@@ -5674,11 +5682,17 @@ class RoomStore:
                                 "usage": json.loads(member["usage_json"]) if member["usage_json"] else None,
                                 "identity_uncertain": bool(member["identity_uncertain"]),
                                 **self._partner_configuration(db, row["id"], member["provider"])})
-            events = [{"seq": event["seq"], **json.loads(event["value_json"])} for event in
-                      db.execute("SELECT * FROM events WHERE room_id=? ORDER BY seq", (row["id"],))]
             jobs = [dict(job) for job in db.execute("SELECT id,provider,kind,status,text,parent_id,error FROM jobs "
                                                    "WHERE room_id=? ORDER BY rowid", (row["id"],))]
-            partner_inspections = {event["job_id"] for event in events if event["kind"] == "partner_handoff_inspection"}
+            timeline = None
+            if events:
+                timeline = [{"seq": event["seq"], **json.loads(event["value_json"])} for event in
+                            db.execute("SELECT * FROM events WHERE room_id=? ORDER BY seq", (row["id"],))]
+                partner_inspections = {event["job_id"] for event in timeline if event["kind"] == "partner_handoff_inspection"}
+            else:
+                partner_inspections = {item[0] for item in db.execute(
+                    "SELECT json_extract(value_json,'$.job_id') FROM events WHERE room_id=? "
+                    "AND json_extract(value_json,'$.kind')='partner_handoff_inspection'", (row["id"],))}
             for job in jobs:
                 job["partner_handoff_inspection"] = job["id"] in partner_inspections
             executions = [{key: execution[key] for key in (
@@ -5696,7 +5710,7 @@ class RoomStore:
                 native_workspaces.append({"provider": item["provider"], "state": "blocked" if state.get("blocked") else "ready",
                     "conflicts": [{"path": conflict["path"], "reason": "native_merge_conflict"} for conflict in state.get("conflicts", [])],
                     "blocked": state.get("blocked", [])})
-            return {"room": room, "runtime_configuration": self._runtime_configuration(db, row), "members": members, "events": events, "jobs": jobs,
+            result = {"room": room, "runtime_configuration": self._runtime_configuration(db, row), "members": members, "events": timeline, "jobs": jobs,
                     "current_run": current, "runs": runs,
                     "conversation_budget": {"used":sum(run["budget"]["used"] for run in runs), "run_count":len(runs),
                                             "run_limit":None, "max_calls":None} if runs else None,
@@ -5712,3 +5726,6 @@ class RoomStore:
                                               "SELECT * FROM native_executions WHERE room_id=? ORDER BY rowid", (row["id"],))],
                     "capabilities": {"text_only": row["mode"] != "native_project", "tools": row["mode"] == "native_project", "execution_policy": True, "continuous_objective": True, "native_project": True},
                     "cancellation_confirmed": bool(row["stop_confirmed"]) if row["stop_confirmed"] is not None else None}
+            if timeline is None:
+                del result["events"]  # A reader that needs events fails loudly, not with an empty timeline.
+            return result

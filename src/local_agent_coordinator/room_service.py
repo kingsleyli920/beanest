@@ -102,6 +102,10 @@ _QUOTA_WAIT_RECHECK_SECONDS = 300
 # A recoverable stop is continued after this pause, so cleanup receipts and
 # the dedicated quota recoveries settle first.
 _AUTO_CONTINUE_DELAY_SECONDS = 15
+# A poll read reuses the last private-tree recovery audit behind
+# can_recover_native while nothing it reads has visibly moved, for at most this
+# long. recover-native, automatic or not, always audits afresh before acting.
+_RECOVERY_DISPLAY_SECONDS = 30
 _DIRECTED_CONTEXT_INSTRUCTION = (
     "This is a shared group conversation, not a private channel. Messages retain recipient: all/both addresses the group, "
     "a member ID addresses that peer, and a missing legacy recipient is unspecified. Respond to your actual job and "
@@ -173,6 +177,24 @@ def _byte_excerpt(text: str, maximum: int) -> dict:
     visible = text.encode("utf-8")[:maximum].decode("utf-8", errors="ignore")
     return {"text": visible, "truncated": visible != text,
             "omitted_characters": len(text) - len(visible)}
+
+
+def _field_strings(value, keys):
+    """Every string stored under one of keys anywhere in nested records, also
+    inside a list or a dict of lists there (write_paths, paths by provider)."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in keys:
+                for entry in (item.values() if isinstance(item, dict) else [item]):
+                    if isinstance(entry, str):
+                        yield entry
+                    elif isinstance(entry, list):
+                        yield from (name for name in entry if isinstance(name, str))
+            else:
+                yield from _field_strings(item, keys)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _field_strings(item, keys)
 
 
 def _project_digest(snapshot: dict) -> str:
@@ -444,6 +466,8 @@ class RoomService:
         self._quota_stop_audits = {}
         self._auto_continues = {}
         self._stop_kinds = {}
+        self._recovery_displays = {}
+        self._signature_paths = {}
         self._late_cleanup_checks = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
@@ -1214,8 +1238,10 @@ class RoomService:
                                                       allow_new_text_files=mode == "text_artifacts")
         return self._projects[room_id]
 
-    def _snapshot(self, room_id, *, list_view=False):
-        snapshot = self.store.snapshot(room_id)
+    def _snapshot(self, room_id, *, list_view=False, poll=False):
+        """poll=True only for display reads: can_recover_native may then come
+        from _recovery_display's cached audit. Every action keeps poll=False."""
+        snapshot = self.store.snapshot(room_id, events=not list_view)
         snapshot["member_invitation"] = self._member_invitation(snapshot)
         if snapshot["room"]["mode"] in PROJECT_MODES:
             try:
@@ -1332,16 +1358,16 @@ class RoomService:
                                      if snapshot["room"]["mode"] == "native_project" else {})
             help_repair = recovery_requirements.get("help_repair")
             if recovery_reason is None and help_repair:
-                try:
-                    self._audit_native_help_repair(snapshot, help_repair)
-                except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError) as error:
-                    recovery_reason = error.code
+                _, recovery_reason = self._recovery_display(
+                    snapshot, recovery_requirements, "help_repair",
+                    lambda: self._audit_native_help_repair(snapshot, help_repair), reuse=poll)
             recovery_partial_works, recovery_attestation = None, None
             if recovery_reason is None and recovery_requirements.get("eligible") and not help_repair:
-                try:
-                    _, recovery_attestation, _, recovery_partial_works = self._audit_native_recovery(snapshot)
-                except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError) as error:
-                    recovery_reason = error.code
+                audited, recovery_reason = self._recovery_display(
+                    snapshot, recovery_requirements, "recovery",
+                    lambda: self._audit_native_recovery(snapshot), reuse=poll)
+                if audited is not None:
+                    _, recovery_attestation, _, recovery_partial_works = audited
             partial = (self.store.native_partial_recovery_candidate(room_id)
                        if snapshot["room"]["mode"] == "native_project" else None)
             nonwork = self.store.native_nonwork_recovery_candidate(room_id) if snapshot["room"]["mode"] == "native_project" else None
@@ -2271,6 +2297,88 @@ class RoomService:
         if current is None or current["project"] != prepared["project"]:
             import shutil
             shutil.rmtree(Path(prepared["project"]).parent)
+
+    def _recovery_display(self, snapshot, requirements, kind, audit, *, reuse):
+        """Run a recovery audit for display, or on a poll reuse the last poll's
+        outcome. Returns (audit result, None) or (None, refusal code).
+
+        Only polls read or write the cache, and a poll reuses an outcome only
+        while the key and the expiry both hold. Changes the key cannot see (a
+        new file inside an unlisted folder, evidence stored where the key does
+        not look) show within the expiry. Under Full Access another process may edit a private tree at
+        any time, so this only decides what the button shows: recover-native
+        and every other action call _snapshot without poll and audit afresh."""
+        room_id = snapshot["room"]["id"]
+        key = self._recovery_display_key(snapshot, requirements, kind) if reuse else None
+        now = self.clock()
+        cached = self._recovery_displays.get(room_id)
+        if (reuse and cached is not None and cached[0] == key
+                and cached[1] <= now < cached[1] + _RECOVERY_DISPLAY_SECONDS):
+            return cached[2]
+        try:
+            outcome = (audit(), None)
+        except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError) as error:
+            outcome = (None, error.code)
+        if reuse:
+            self._recovery_displays[room_id] = (key, now, outcome)
+        return outcome
+
+    def _recovery_display_key(self, snapshot, requirements, kind):
+        """What a recovery audit reads, taken before it runs: the room's
+        records (requirements, members, jobs, calls, run binding, latest event),
+        the shared head, each private tree's stored state and stat signature,
+        and the stat signature of the evidence files recoveries check (this
+        room's native receipts, and each known session's Kimi wire and Claude
+        transcript). A change during the audit then misses the next poll's key."""
+        from .kimi_acp import ACPError, session_wire
+        room_id = snapshot["room"]["id"]
+        run, project, team = snapshot["current_run"], snapshot.get("project") or {}, snapshot.get("team") or {}
+        records = [requirements, snapshot["native_executions"], snapshot["members"]]
+        named = sorted({name for name in _field_strings(requirements, {"write_paths", "paths"}) if name})
+        sessions = sorted({name for name in _field_strings(records, {"session_id"}) if name})
+        receipts = self.workspace.parent / "native-receipts" / room_id
+        evidence = [str(receipts), *sorted(_field_strings(records, {"receipt_path"}))]
+        try:
+            evidence += sorted(entry.path for entry in os.scandir(receipts))
+        except OSError:
+            pass
+        trees = []
+        for provider, raw in self.store.native_workspace_rows(room_id):
+            stored = hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()
+            paths = self._signature_paths.get((room_id, provider, stored))
+            if paths is None:
+                state = json.loads(raw)
+                archive = state.get("partial_archive") or {}
+                own = [*(archive.get("paths") or []), *(state.get("retained_paths") or []),
+                       *(state.get("carried_paths") or [])]
+                paths = native_workspace.signature_paths(state, own)
+                if len(self._signature_paths) >= 64:
+                    self._signature_paths.clear()
+                self._signature_paths[(room_id, provider, stored)] = paths
+                root = str(state["project"])
+            else:
+                root = paths[0]
+            extra = [os.path.join(root, name) for name in named]
+            trees.append([provider, stored, native_workspace.tree_signature(paths + tuple(extra))])
+            for session in sessions:
+                evidence.append(str(Path.home() / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", root)
+                                    / (session + ".jsonl")))
+                try:
+                    evidence.append(str(session_wire(root, session)))
+                except ACPError:  # Not a Kimi session ID: no wire to watch.
+                    pass
+        records = {"kind": kind, "requirements": requirements, "calls": snapshot["native_executions"],
+                   "members": [[member[key] for key in ("id", "status", "session_id", "identity_uncertain")]
+                               for member in snapshot["members"]],
+                   "jobs": [[job["id"], job["status"], job["error"]] for job in snapshot["jobs"]],
+                   "last_seq": snapshot["events"][-1]["seq"] if snapshot["events"] else None,
+                   "room": [snapshot["room"][key] for key in ("status", "updated_at", "lifecycle_state")],
+                   "run": [run["id"], run.get("status"), run.get("revision"), run.get("digest")],
+                   "team": [team.get("phase"), team.get("stop_reason")],
+                   "objective": [(snapshot.get("objective") or {}).get(key) for key in ("id", "status", "stop_reason")],
+                   "project": [project.get("available"), project.get("revision"), project.get("snapshot_sha256")],
+                   "trees": trees, "evidence": native_workspace.tree_signature(evidence)}
+        return hashlib.sha256(json.dumps(records, sort_keys=True, default=str).encode()).hexdigest()
 
     def _audit_native_recovery(self, snapshot, receivers=None, *, fresh_quota=False):
         requirements = self.store.native_recovery_requirements(snapshot["room"]["id"])
@@ -3479,7 +3587,8 @@ class RoomService:
             room["lifecycle_operation"] = operations[-1] if operations else None
             if operations and operations[-1]["action"] == "remove" and operations[-1]["status"] != "completed":
                 room.update(lifecycle_can_change=operations[-1]["status"] != "pending", lifecycle_blocked_reason=None)
-                room["work_activity"] = self._room_work_activity(self.store.snapshot(room["id"]), self.store.job_roles(room["id"]))
+                room["work_activity"] = self._room_work_activity(self.store.snapshot(room["id"], events=False),
+                                                                 self.store.job_roles(room["id"]))
                 continue
             reason = self._room_lifecycle_reason(room["id"])
             room.update(lifecycle_can_change=reason is None, lifecycle_blocked_reason=reason)
@@ -3493,17 +3602,17 @@ class RoomService:
                     room["objective_id"] = snapshot["objective"]["id"]
                     room["objective_goal"] = snapshot["objective"]["original_goal"]
             room["work_activity"] = (snapshot["room"]["work_activity"] if snapshot else
-                self._room_work_activity(self.store.snapshot(room["id"]), self.store.job_roles(room["id"])))
+                self._room_work_activity(self.store.snapshot(room["id"], events=False), self.store.job_roles(room["id"])))
         result["lifecycle_operations"] = self.store.lifecycle_operations()
         return room_projection.compact_rooms(result) if compact else result
 
     async def read_room(self, room_id):
         self._available()
-        return self._snapshot(room_id)
+        return self._snapshot(room_id, poll=True)
 
     async def read_room_state(self, room_id):
         self._available()
-        snapshot = self._snapshot(room_id)
+        snapshot = self._snapshot(room_id, poll=True)
         result = room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission)
         if room_projection.wire_bytes(result) > room_projection.STATE_MAX_BYTES:
             raise RoomError("room_state_too_large")
@@ -3523,7 +3632,7 @@ class RoomService:
         return result
 
     async def read_room_job(self, room_id, job_id):
-        snapshot = self._snapshot(room_id)
+        snapshot = self._snapshot(room_id, poll=True)
         if not any(job["id"] == job_id for job in snapshot["jobs"]):
             raise RoomError("text_reference_not_found")
         projected = room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission, job_ids={job_id})
