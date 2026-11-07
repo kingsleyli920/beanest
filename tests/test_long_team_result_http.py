@@ -85,16 +85,31 @@ class LongTeamResultHTTPTests(unittest.TestCase):
         self.assertEqual(code, 200, created)
         return created
 
-    def settled(self, room_id):
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
+    def settled(self, room_id, *, stall=5, limit=60):
+        """Wait until no job is queued or working and no worker is alive.
+
+        A room with two dozen synthetic calls can need more than `stall`
+        seconds in total on a loaded CI runner while it changes state every
+        fraction of a second. Fail when nothing changes for `stall` seconds (a
+        stuck room) or after `limit` seconds in total (a room that never ends).
+        """
+        start = changed = time.monotonic()
+        seen = None
+        while True:
             code, value = self.request("GET", "/api/rooms/" + room_id)
             self.assertEqual(code, 200, value)
             if (not any(job["status"] in {"queued", "working"} for job in value["jobs"])
                     and not any(room == room_id and not worker.done() for (room, _), worker in list(self.service._workers.items()))):
                 return value
+            now = time.monotonic()
+            progress = (value["events"][-1]["seq"] if value["events"] else None,
+                        [(job["id"], job["status"]) for job in value["jobs"]])
+            if progress != seen:
+                seen, changed = progress, now
+            if now - changed > stall or now - start > limit:
+                self.fail(f"Synthetic native room did not settle: unchanged for {now - changed:.1f}s, "
+                          f"{now - start:.1f}s in total; jobs {[(job['provider'], job['status'], job['error']) for job in value['jobs']]}")
             time.sleep(0.005)
-        self.fail("Synthetic native room did not settle")
 
     def test_long_result_is_reviewed_persisted_and_lazy_read_without_truncation(self):
         created = self.create()

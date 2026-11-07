@@ -170,7 +170,6 @@ class AutoContinueHTTPTests(unittest.TestCase):
 
         interrupt(earlier)
         self.assertFalse(confirmed(earlier), "A reused session's receipts cannot be told apart by session alone.")
-        interrupt(last)
         session = next(event['session_id'] for event in service.store.snapshot(room)['events']
                        if event['kind'] == 'native_session_cleanup_identity' and event['job_id'] == last['id'])
         receipts = [path for path in (service.workspace.parent / 'native-receipts' / room).iterdir()
@@ -180,7 +179,12 @@ class AutoContinueHTTPTests(unittest.TestCase):
             if event['kind'] == 'job_claimed' and event['job_id'] == last['id'])]
         self.assertEqual(len(own), 1)
         original = own[0].read_text()
+        # Remove the proof before the call is marked interrupted: the server's
+        # own watchdog runs the same check every 2 s and would otherwise
+        # confirm cleanup from the intact receipt in between.
         own[0].write_text(original.replace('"cleanup_confirmed": true', '"cleanup_confirmed": false', 1))
+        self.assertNotEqual(own[0].read_text(), original)
+        interrupt(last)
         self.assertFalse(confirmed(last), "A receipt without cleanup proof keeps the scene.")
         own[0].write_text(original)
         self.assertTrue(confirmed(last))
