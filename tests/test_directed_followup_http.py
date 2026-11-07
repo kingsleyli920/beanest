@@ -145,7 +145,8 @@ print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': sid}}), fl
 Path({str(started)!r}).write_text(context['job']['id'])
 while not Path({str(release)!r}).exists():
     time.sleep(.01)
-print(json.dumps({{'type': 'system', 'subtype': 'synthetic_future_notice',
+# A new system subtype is a tolerated notice; an unknown top-level type is not.
+print(json.dumps({{'type': 'synthetic_future_event', 'subtype': 'synthetic_future_notice',
     'session_id': sid, 'uuid': {str(uuid4())!r}}}), flush=True)
 ''', encoding="utf-8")
         executable.chmod(0o700)
