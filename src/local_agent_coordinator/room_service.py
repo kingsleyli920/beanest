@@ -62,6 +62,15 @@ _BLOCK_PROTOCOL = (
 )
 
 
+EXTERNAL_SOURCE_INSTRUCTION = (
+    " context.external_source_changes lists commits that reached the delivery repository while no job of this room "
+    "was running: the user or another agent did that work outside this room, so the task board, earlier results and "
+    "your session memory may be out of date. Before continuing, inspect the repository's current state. If your task, "
+    "or the result you are reviewing, is already done or superseded there, say so with the commit as evidence and "
+    "finish it instead of redoing it; build new work and judge reviews against the current code. Do not undo or "
+    "rewrite those commits unless the goal requires it. ")
+
+
 def _visible(text: str) -> str:
     return _SECRET.sub("[redacted]", text)
 
@@ -528,6 +537,78 @@ class RoomService:
             delivery_repository=delivery_repository, remote_cache=self._github_main_checks)
         return {**result, "workspace_id": selected["id"], "workspaces": workspaces, "delivery_summary": summary,
                 "delivery_repository": delivery_repository}
+
+    def _source_repository(self, room_id, project_id):
+        """The real Git repository this room delivers to, if the host knows it."""
+        deadline = time.monotonic() + 5
+        binding = self.store.delivery_repository(room_id)
+        if binding is not None:
+            identity = git_status.repository_identity(binding["path"], deadline=deadline)
+            return identity["root"] if git_status.same_repository(identity, binding["identity"]) else None
+        project = next((item for item in self.catalog.list() if item["id"] == project_id), None)
+        if project is None or not project.get("path"):
+            return None
+        return git_status.repository_identity(project["path"], deadline=deadline)["root"]
+
+    def _external_source_changes(self, job, snapshot):
+        """Commits that reached the delivery repository while this room was idle.
+
+        Work done outside the room (the user, another agent or room) otherwise
+        stays invisible: partners resume a stale board and redo or review
+        superseded work. Commits made while one of this room's jobs was running
+        are attributed to the room. Observation never blocks a job.
+        """
+        room_id = job["room_id"]
+        run_id = job["team"]["run_id"]
+        recorded = [{key: event.get(key) for key in ("seq", "repository", "from_head", "to_head", "commits",
+                                                     "external_count", "complete", "observed_at")}
+                    for event in snapshot["events"]
+                    if event["kind"] == "source_advanced_externally" and event.get("run_id") == run_id][-3:]
+        try:
+            root = self._source_repository(room_id, snapshot["room"].get("project_id"))
+            if root is None:
+                return recorded
+            previous = self.store.source_observation(room_id)
+            since = previous["head"] if previous and previous.get("root") == root else None
+            if since is None:
+                # First observation of an existing room: start from the HEAD
+                # as of its last finished job, so work done while it sat
+                # stopped is not silently taken as the starting point.
+                idle_since = max((event["created_at"] for event in snapshot["events"]
+                                  if event["kind"] == "job_finished" and event.get("job_id") != job["id"]),
+                                 default=None)
+                if idle_since is not None:
+                    since = git_status.commit_at(root, idle_since, deadline=time.monotonic() + 5)
+            observed = git_status.head_commits(root, since, limit=30, deadline=time.monotonic() + 5)
+        except (git_status._GitError, ProjectCatalogError, OSError, ValueError, KeyError, TypeError):
+            return recorded
+        now = self.clock()
+        observation = {"root": root, "head": observed["head"], "observed_at": now}
+        if since is None or since == observed["head"]:
+            if previous is None or previous.get("head") != observed["head"] or previous.get("root") != root:
+                self.store.advance_source_observation(room_id, previous, observation)
+            return recorded
+        claimed, finished = {}, {}
+        for event in snapshot["events"]:
+            if event["kind"] == "job_claimed" and event.get("job_id"):
+                claimed.setdefault(event["job_id"], event["created_at"])
+            elif event["kind"] == "job_finished" and event.get("job_id"):
+                finished[event["job_id"]] = event["created_at"]
+        windows = [(start - 5, finished.get(job_id, now) + 5) for job_id, start in claimed.items()]
+        outside = [commit for commit in observed["commits"]
+                   if not any(start <= commit["committed_at"] <= end for start, end in windows)]
+        if observed["complete"] and not outside:
+            self.store.advance_source_observation(room_id, previous, observation)
+            return recorded
+        change = {"repository": Path(root).name, "from_head": since, "to_head": observed["head"],
+                  "commits": [{"sha": commit["sha"], "committed_at": commit["committed_at"],
+                               "subject": _visible(commit["subject"])} for commit in outside],
+                  "external_count": len(outside), "complete": observed["complete"], "observed_at": now,
+                  "run_id": run_id, "job_id": job["id"]}
+        if self.store.advance_source_observation(room_id, previous, observation, change):
+            recorded.append({key: change[key] for key in ("repository", "from_head", "to_head", "commits",
+                                                         "external_count", "complete", "observed_at")})
+        return recorded[-3:]
 
     def _code_status_context(self, room_id):
         snapshot = self.store.snapshot(room_id)
@@ -5177,6 +5258,11 @@ class RoomService:
             context["previous_deliveries"] = [item for item in context["previous_deliveries"]
                                               if item["run_id"] != source_plan["run_id"]]
         project_instruction = "This is text collaboration. Deliver concrete work in complete.result; no file access or execution."
+        if job["mode"] == "native_project":
+            if "external_source_changes" not in job:
+                job["external_source_changes"] = self._external_source_changes(job, snapshot)
+            if job["external_source_changes"]:
+                context["external_source_changes"] = job["external_source_changes"]
         if job["mode"] in {"project_folder", "native_project"}:
             context.update(self._folder_context(job, task=task))
             project_instruction = FOLDER_INSTRUCTION
@@ -5424,6 +5510,8 @@ class RoomService:
                 project_instruction += (" Unified host permission is READ ONLY for every member. Only propose text tasks with "
                                         "empty write_paths; do not submit files/edits or request execution. Describe proposed "
                                         "changes for the user instead. This permission applies even in build work mode.")
+        if context.get("external_source_changes"):
+            protocol += EXTERNAL_SOURCE_INSTRUCTION
         prefix = protocol + project_instruction + "\nCONTEXT DATA:\n"
         prompt = prefix + json.dumps(_prompt_context(context), ensure_ascii=False)
         if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:

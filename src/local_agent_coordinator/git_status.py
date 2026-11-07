@@ -380,6 +380,61 @@ def read_status(path, *, now=time.time, deadline=None):
     return result
 
 
+def head_commits(path, since=None, *, limit=30, deadline=None):
+    """Read HEAD and the commits since an earlier HEAD.
+
+    Returns {"head", "commits": [{"sha","committed_at","subject"}] newest first, "complete"}.
+    "complete" is False when the list was truncated or the earlier HEAD is no
+    longer an ancestor (rewritten history, switched branch).
+    """
+    command, deadline = shutil.which("git"), _read_deadline(deadline)
+    if command is None:
+        raise _GitError("git_unavailable")
+    directory = Path(path)
+    try:
+        head = _run(command, directory, ["rev-parse", "--verify", "HEAD^{commit}"], deadline).decode("ascii").strip()
+    except (UnicodeError, ValueError):
+        raise _GitError("git_invalid_output") from None
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+        raise _GitError("git_invalid_output")
+    if since is None or since == head:
+        return {"head": head, "commits": [], "complete": True}
+    if not isinstance(since, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", since):
+        raise _GitError("git_invalid_output")
+    try:
+        _run(command, directory, ["merge-base", "--is-ancestor", since, head], deadline)
+        ancestor = True
+    except _GitError as error:
+        if error.code != "git_failed":
+            raise
+        # Exit 1 (not an ancestor) or an unknown old object.
+        return {"head": head, "commits": [], "complete": False}
+    raw = _run(command, directory, ["log", "--no-color", f"--max-count={limit + 1}",
+                                    "--format=%H%x1f%ct%x1f%s%x1e", f"{since}..{head}", "--"], deadline)
+    commits = []
+    for record in raw.decode("utf-8", "replace").split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        fields = record.split("\x1f")
+        if len(fields) != 3 or not fields[1].isdigit():
+            raise _GitError("git_invalid_output")
+        commits.append({"sha": fields[0], "committed_at": int(fields[1]), "subject": fields[2][:200]})
+    return {"head": head, "commits": commits[:limit], "complete": len(commits) <= limit}
+
+
+def commit_at(path, timestamp, *, deadline=None):
+    """The first-parent HEAD commit as of a past moment, or None."""
+    command, deadline = shutil.which("git"), _read_deadline(deadline)
+    if command is None:
+        raise _GitError("git_unavailable")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
+        raise _GitError("git_invalid_output")
+    value = _run(command, Path(path), ["rev-list", "-1", "--first-parent", f"--before=@{int(timestamp)}",
+                                       "HEAD", "--"], deadline).decode("ascii", "replace").strip()
+    return value if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) else None
+
+
 def same_repository(current, recorded):
     """Compare a stored repository identity with a fresh one across restarts.
 

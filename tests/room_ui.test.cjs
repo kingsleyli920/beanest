@@ -5102,6 +5102,27 @@ test('retired partner cards describe a real takeover plainly and omit an unrecor
   assert.match(withoutTakeover.get('partner-activity-claude').textContent, /此前额度受限.*本轮安排保持/); assert.doesNotMatch(withoutTakeover.get('partner-activity-claude').textContent, /Codex 正在接着做/);
 });
 
+test('work that reached the repository from outside the room is shown in the chat in both languages', async () => {
+  // Catches: the host detecting outside commits but the user seeing nothing,
+  // or "1 commits" / untranslated Chinese in the English interface.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.events = [
+    { seq: 1, kind: 'source_advanced_externally', sender: 'system', repository: 'ranger-world-time', external_count: 27, complete: true, commits: [], created_at: 1000 },
+    { seq: 2, kind: 'source_advanced_externally', sender: 'system', repository: 'ranger-world-time', external_count: 1, complete: true, commits: [], created_at: 1001 },
+    { seq: 3, kind: 'source_advanced_externally', sender: 'system', repository: 'ranger-world-time', external_count: 0, complete: false, commits: [], created_at: 1002 }];
+  saved.jobs = [];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  const chat = ui.get('events').textContent;
+  assert.match(chat, /房间外有 27 个新提交进入 ranger-world-time，伙伴会先按最新代码核对任务/);
+  assert.match(chat, /ranger-world-time 的提交历史在房间外变了/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  const text = english.get('events').textContent;
+  assert.match(text, /27 new commits reached ranger-world-time from outside this room/);
+  assert.match(text, /1 new commit reached ranger-world-time from outside this room/);
+  assert.match(text, /The commit history of ranger-world-time changed outside this room/);
+  assert.doesNotMatch(text, /[一-龥]{4,}/);
+});
+
 test('a mismatched lifecycle receipt never deletes another task or claims the request succeeded', async () => {
   const saved = snapshot({ status: 'running' });
   const ui = await browser({ rooms: [saved.room], saved, roomLifecycleSupport: true, route(request) {
