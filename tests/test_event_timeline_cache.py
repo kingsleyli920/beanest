@@ -44,10 +44,26 @@ class EventTimelineCacheTests(unittest.TestCase):
         # tail is planted directly.)
         self.note("first")
         self.store.snapshot(self.room)
-        seqs, events = self.store._timelines[self.room]
+        seqs, events, rewrites = self.store._timelines[self.room]
         newer = {"seq": seqs[-1] + 1000, "kind": "warning", "text": "not yet in this view"}
-        self.store._timelines[self.room] = (seqs + [newer["seq"]], events + [newer])
+        self.store._timelines[self.room] = (seqs + [newer["seq"]], events + [newer], rewrites)
         self.assertEqual(self.texts(self.store.snapshot(self.room)), ["first"])
+
+    def test_a_rewrite_of_stored_events_outside_the_service_is_picked_up(self):
+        # Catches: a migration, manual repair or forged-history test editing
+        # or deleting stored events while the cache kept serving the old ones.
+        self.note("before")
+        self.note("kept")
+        self.store.snapshot(self.room)
+        with self.store._connection(write=True) as db:
+            seq = db.execute("SELECT MIN(seq) FROM events WHERE room_id=? AND value_json LIKE '%before%'",
+                             (self.room,)).fetchone()[0]
+            db.execute("UPDATE events SET value_json=? WHERE seq=?",
+                       (json.dumps({"kind": "warning", "sender": "system", "text": "rewritten"}), seq))
+        self.assertEqual(self.texts(self.store.snapshot(self.room)), ["rewritten", "kept"])
+        with self.store._connection(write=True) as db:
+            db.execute("DELETE FROM events WHERE seq=?", (seq,))
+        self.assertEqual(self.texts(self.store.snapshot(self.room)), ["kept"])
 
     def test_changing_a_returned_event_does_not_change_the_next_snapshot(self):
         # Catches: a caller editing an event in place and corrupting every later read.

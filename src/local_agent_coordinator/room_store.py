@@ -241,6 +241,19 @@ class RoomStore:
                         room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
                         binding_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS event_rewrites (
+                        room_id TEXT PRIMARY KEY, count INTEGER NOT NULL
+                    );
+                    CREATE TRIGGER IF NOT EXISTS events_updated AFTER UPDATE ON events BEGIN
+                        INSERT INTO event_rewrites VALUES (old.room_id, 1)
+                            ON CONFLICT(room_id) DO UPDATE SET count=count+1;
+                        INSERT INTO event_rewrites VALUES (new.room_id, 1)
+                            ON CONFLICT(room_id) DO UPDATE SET count=count+1;
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS events_deleted AFTER DELETE ON events BEGIN
+                        INSERT INTO event_rewrites VALUES (old.room_id, 1)
+                            ON CONFLICT(room_id) DO UPDATE SET count=count+1;
+                    END;
                     CREATE TABLE IF NOT EXISTS room_source_observations (
                         room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
                         observation_json TEXT NOT NULL
@@ -5709,11 +5722,17 @@ class RoomStore:
         """This transaction's events for a room, decoding only rows newer than
         the cached ones. Each caller gets its own list of shallow copies."""
         through = db.execute("SELECT MAX(seq) FROM events WHERE room_id=?", (room_id,)).fetchone()[0] or 0
+        # The service only appends events. A rewrite by anything else (a
+        # migration, a manual repair, a test forging history) bumps this
+        # trigger-maintained count and drops the room's cached timeline.
+        rewrites = (db.execute("SELECT count FROM event_rewrites WHERE room_id=?", (room_id,)).fetchone() or (0,))[0]
         with self._timelines_lock:
             cached = self._timelines.get(room_id)
+            if cached is not None and cached[2] != rewrites:
+                cached = None
             if cached is not None:
                 self._timelines.move_to_end(room_id)
-        seqs, events = cached if cached is not None else ([], [])
+        seqs, events = cached[:2] if cached is not None else ([], [])
         last = seqs[-1] if seqs else 0
         if through > last:
             fresh = [{"seq": item["seq"], **json.loads(item["value_json"])} for item in db.execute(
@@ -5722,8 +5741,8 @@ class RoomStore:
             seqs, events = seqs + [item["seq"] for item in fresh], events + fresh
             with self._timelines_lock:
                 current = self._timelines.get(room_id)
-                if current is None or (current[0][-1] if current[0] else 0) < through:
-                    self._timelines[room_id] = (seqs, events)
+                if current is None or current[2] != rewrites or (current[0][-1] if current[0] else 0) < through:
+                    self._timelines[room_id] = (seqs, events, rewrites)
                     self._timelines.move_to_end(room_id)
                     while (len(self._timelines) > 1 and sum(len(item[0]) for item in self._timelines.values())
                            > self._TIMELINE_EVENTS):
