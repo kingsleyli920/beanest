@@ -238,7 +238,7 @@ def _command_shape_diagnostic(commands):
         for index, command in enumerate(commands)]}
 
 
-def _native_command(candidate, index, allowed_kinds, transport_fields):
+def _native_command(candidate, index, allowed_kinds, transport_fields, nonempty_fields=frozenset()):
     """Accept canonical or flat commands without dropping non-null fields."""
     issue = {"index": index}
     if not isinstance(candidate, dict):
@@ -250,7 +250,9 @@ def _native_command(candidate, index, allowed_kinds, transport_fields):
         return None, issue
     required = _COMMAND_FIELDS[kind]
     optional = {"repair_paths"} if kind == "request_help" else {"cause"} if kind == "block" else set()
-    missing = sorted(required - optional - set(candidate))
+    missing = sorted((required - optional - set(candidate))
+                     | {key for key in nonempty_fields & required
+                        if key in candidate and (not isinstance(candidate[key], str) or not candidate[key])})
     unused = sorted(key for key in set(candidate) & (transport_fields - required) if candidate[key] is not None)
     unknown = len(set(candidate) - transport_fields)
     if missing or unused or unknown:
@@ -260,7 +262,7 @@ def _native_command(candidate, index, allowed_kinds, transport_fields):
 
 
 def _response(text: str, provider: str, members: tuple[str, ...] = (), *, project=False, team=False, folder=False, native=False,
-              native_phase=None, can_propose=True) -> dict:
+              native_phase=None, can_propose=True, stable_native=False) -> dict:
     if len(text.encode("utf-8")) > (128 if project else 32) * 1024:
         raise RoomError("invalid_agent_response")
     try:
@@ -300,19 +302,26 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
         # Native strict schemas use one closed command shape with nulls for
         # unused fields. Keep custom adapters' concise canonical commands too;
         # only the exact transport envelope may be unwrapped, never extra keys.
+        nonempty_fields = frozenset()
         if native:
-            from .room_response_schema import command_shape
+            from .room_response_schema import PHASE_NONEMPTY_TEXT, command_shape, stable_command_shape
+            has_peers = any(member != provider for member in members)
             try:
                 allowed_kinds, transport_fields = command_shape(team_phase=native_phase, can_propose=can_propose,
-                    has_peers=any(member != provider for member in members), native=True)
+                    has_peers=has_peers, native=True)
             except ValueError:
                 raise RoomError("invalid_team_commands") from None
+            if stable_native:
+                # The schema no longer carries phase rules. Allowed kinds stay
+                # the job's own; only the shape of unused null fields widens.
+                _, transport_fields = stable_command_shape(has_peers=has_peers)
+                nonempty_fields = PHASE_NONEMPTY_TEXT.get(native_phase, nonempty_fields)
         else:
             allowed_kinds, transport_fields = set(_COMMAND_FIELDS), set().union(*_COMMAND_FIELDS.values())
         commands, command_issues = [], []
         for index, candidate in enumerate(value["commands"]):
             if native:
-                command, issue = _native_command(candidate, index, allowed_kinds, transport_fields)
+                command, issue = _native_command(candidate, index, allowed_kinds, transport_fields, nonempty_fields)
                 if issue:
                     command_issues.append(issue)
                 else:
@@ -2821,9 +2830,11 @@ class RoomService:
     @staticmethod
     def _native_receipt_schema_matches(actual, context, provider, phase, *, can_propose=False):
         from .room_response_schema import response_schema
-        expected = response_schema(project=True, native=True, collaboration=True,
-            member_ids=tuple(member["id"] for member in context["members"]), provider=provider,
-            team_phase=phase, can_propose=can_propose)
+        common = dict(project=True, native=True, collaboration=True,
+                      member_ids=tuple(member["id"] for member in context["members"]), provider=provider)
+        # A receipt may predate the stable schema, so both remain genuine.
+        expected = (response_schema(**common, team_phase=phase, can_propose=can_propose),
+                    response_schema(**common, stable=True))
         def normalized(value, *, property_map=False):
             if isinstance(value, dict):
                 # Enum order and description annotations do not change schema
@@ -2833,7 +2844,7 @@ class RoomService:
                         for key, item in value.items()
                         if property_map or key != "description" or not isinstance(item, str)}
             return [normalized(item) for item in value] if isinstance(value, list) else value
-        return normalized(actual) == normalized(expected)
+        return normalized(actual) in [normalized(schema) for schema in expected]
 
     def _audit_native_fenced_recovery(self, snapshot, candidate):
         """Attest an exact legacy formatting rejection, never execute its commands."""
@@ -5847,7 +5858,7 @@ class RoomService:
             "Put implementation/check evidence in complete.result; put review findings in review.reason, never result or summary. "
             "A review command is exactly {type,task_id,verdict,reason}; a block fills type/task_id/reason/cause and nulls other allowed fields. "
             "checkpoint uses summary; checkpoint_review uses reason and proposal_digest. "
-            "Follow only this phase's supplied JSON schema; do not add fields from other phases. Null unused fields within that shape. "
+            + self._native_schema_instruction(job) +
             "WORK MODE plan/permission read_only is for inspection and discussion, not implementation; propose text tasks with empty paths. "
             "Non-modifying native commands are permitted where supported by the provider's actual read-only/plan mode. "
             "A provider's plan mode is not a claim of an OS-level sandbox. Do not implement project changes in that mode. "
@@ -5858,6 +5869,26 @@ class RoomService:
     def _native_permission(job):
         return native_permission(job.get("work_mode"), job.get("runtime_settings"),
                                  inspection=bool(job.get("native_partial_inspection") or job.get("partner_handoff_inspection")))
+
+    def _uses_stable_native_schema(self, job):
+        from .room_response_schema import stable_native_schema
+        spec = self.registry.get(job["provider"])
+        return job.get("mode") == "native_project" and spec is not None and stable_native_schema(spec.adapter)
+
+    def _native_schema_instruction(self, job):
+        if not self._uses_stable_native_schema(job):
+            return ("Follow only this phase's supplied JSON schema; do not add fields from other phases. "
+                    "Null unused fields within that shape. ")
+        from .room_response_schema import PHASE_NONEMPTY_TEXT, command_shape
+        phase, provider = job["team"]["job_phase"], job["provider"]
+        kinds, _ = command_shape(team_phase=phase, native=True, can_propose=provider == job["team"]["plan_author"],
+                                 has_peers=any(member != provider for member in self.store.member_ids(job["room_id"])))
+        allowed = ("The only command types allowed now are " + ", ".join(kinds) + ". " if kinds
+                   else "No commands are allowed now, so commands must be []. ")
+        required = "".join(field + " must be a non-empty string. " for field in sorted(PHASE_NONEMPTY_TEXT.get(phase, ())))
+        return ("The supplied JSON schema is one fixed shape shared by every phase, so it lists command types and "
+                "fields this phase cannot use. This job_phase is " + phase + ". " + allowed + required +
+                "The host rejects any other command type. Set every field the chosen command does not use to null. ")
 
     def _native_submission_correction(self, job):
         return next(({**event["observation"], "purpose": event.get("purpose", "metadata_only")}
@@ -6292,8 +6323,8 @@ class RoomService:
                     invoked = True
                     cleanup_confirmed = False
                 if native:
-                    from .room_response_schema import response_schema
-                    schema = response_schema(project=True, native=True, collaboration=True,
+                    from .room_response_schema import native_room_response_schema
+                    schema = native_room_response_schema(spec.adapter,
                         member_ids=self.store.member_ids(room_id), provider=provider,
                         team_phase=job["team"]["job_phase"], can_propose=provider == job["team"]["plan_author"])
                     receipt_dir = self.workspace.parent / "native-receipts" / room_id
@@ -6572,7 +6603,8 @@ class RoomService:
                                project=job.get("mode") in PROJECT_MODES, team=bool(job.get("team")),
                                folder=job.get("mode") == "project_folder", native=native,
                                native_phase=(job.get("team") or {}).get("job_phase"),
-                               can_propose=job["provider"] == (job.get("team") or {}).get("plan_author"))
+                               can_propose=job["provider"] == (job.get("team") or {}).get("plan_author"),
+                               stable_native=self._uses_stable_native_schema(job))
             # Enforce the user's chosen boundary before even expanding an edit
             # or dispatching an inspection; provider prose is not authorization.
             if read_only(job.get("work_mode"), job.get("runtime_settings")) and (parsed.get("files") or parsed.get("edits")):
