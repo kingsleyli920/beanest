@@ -1,5 +1,6 @@
 """The decoded room timeline cache stays exact while polls stop re-decoding."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -30,7 +31,9 @@ class EventTimelineCacheTests(unittest.TestCase):
             self.note(f"old {index}")
         self.assertEqual(len(self.texts(self.store.snapshot(self.room))), 50)
         self.note("new")
-        with patch("local_agent_coordinator.room_store.json.loads", wraps=json.loads) as decode:
+        # The verification mode re-decodes everything on purpose; count without it.
+        with patch.dict(os.environ, {"BEANEST_VERIFY_EVENT_CACHE": "0"}), \
+                patch("local_agent_coordinator.room_store.json.loads", wraps=json.loads) as decode:
             snapshot = self.store.snapshot(self.room)
         self.assertEqual(self.texts(snapshot)[-1], "new")
         self.assertEqual(len(self.texts(snapshot)), 51)
