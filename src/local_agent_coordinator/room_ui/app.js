@@ -6609,8 +6609,23 @@ function renderMemberPublicProgress(snapshot, member) {
   details.append(jump); holder.append(details);
 }
 
+function renderCacheMissNote(snapshot) {
+  const note = $('cache-miss-note'); const miss = snapshot?.latest_native_cache_miss;
+  const written = miss?.cache_creation_input_tokens;
+  const show = Number.isSafeInteger(written) && written > 0;
+  note.hidden = !show;
+  if (!show) { note.replaceChildren(); delete note.dataset.fingerprint; return; }
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), miss.provider, miss.seq, written, miss.created_at]);
+  if (note.dataset.fingerprint === fingerprint) return;
+  note.dataset.fingerprint = fingerprint;
+  const amount = englishInterface() ? `${Math.round(written / 1000)}K` : `${Math.round(written / 10000)} 万`;
+  note.replaceChildren(element('span', t("{p0} 这次调用没用上缓存，多写了约 {p1} token", { p0: displayName(miss.provider), p1: amount })),
+    element('time', timeLabel(miss.created_at, true), 'cache-miss-time'));
+}
+
 function renderMembers(snapshot) {
   syncParticipants(snapshot);
+  renderCacheMissNote(snapshot);
   const loading = !!state.selected && !snapshot;
   const objective = currentObjective(snapshot);
   for (const provider of state.participantIds) {

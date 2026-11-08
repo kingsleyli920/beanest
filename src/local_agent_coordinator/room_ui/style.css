@@ -1498,6 +1498,9 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 /* Right: one card per partner with what it is doing and how much quota is left. */
 .members-panel { padding: 18px 16px 14px 14px; border-left: 1px solid var(--line); background: var(--bg); }
 .members-heading { margin: 0 2px 10px; }
+.cache-miss-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0 2px 10px; padding: 8px 10px; border: 1px solid var(--ask-line); border-radius: 10px; background: var(--ask-bg); color: var(--ask); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.cache-miss-note[hidden] { display: none; }
+.cache-miss-time { font-size: 11px; font-variant-numeric: tabular-nums; opacity: .8; }
 .members-heading h2 { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .02em; }
 .member-card { display: flex; flex-direction: column; gap: 7px; margin-bottom: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
 .member-card:has(.member-status.working) { border-color: var(--go-line); box-shadow: var(--shadow); }
