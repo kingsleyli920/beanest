@@ -413,6 +413,21 @@ def purge_native_sessions(runtime_root, workspace_root, room_id, targets, *, cod
                                         or plans[('claude', entry.get('sessionId'))]['missing'] for entry in entries)):
                                     raise _Pending('session_project_shared_or_unregistered')
                                 continue
+                            if name == 'memory':
+                                # Claude Code 2.1.3xx creates an empty auto-memory
+                                # folder in every project; the official purge
+                                # removes it with the project. Notes inside it
+                                # are not ours to grant.
+                                info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                                if not stat.S_ISDIR(info.st_mode):
+                                    raise _Pending('session_project_contents_unconfirmed')
+                                memory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                                try:
+                                    if os.listdir(memory):
+                                        raise _Pending('session_project_contents_unconfirmed')
+                                finally:
+                                    os.close(memory)
+                                continue
                             if not name.endswith('.jsonl'):
                                 if re.fullmatch(r'[0-9a-f-]{36}', name):
                                     child = ('claude', name)

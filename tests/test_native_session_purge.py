@@ -253,6 +253,32 @@ class NativeSessionPurgeTests(unittest.TestCase):
                 self.assertTrue(path.exists())
                 unknown.rmdir() if kind == 'directory' else unknown.unlink()
 
+    def test_claude_empty_auto_memory_folder_does_not_block_the_official_purge(self):
+        # Catches: Claude Code 2.1.3xx creating an empty memory/ in every
+        # project left room removal pending forever (九烛 room f477ad94).
+        sid, path = self.claude_file()
+        memory = path.parent / 'memory'
+        for kind in ('notes', 'file', 'symlink'):
+            with self.subTest(kind=kind):
+                if kind == 'notes':
+                    memory.mkdir(); (memory / 'MEMORY.md').write_text('Notes we did not write.\n')
+                elif kind == 'file':
+                    memory.write_text('not a folder')
+                else:
+                    (self.root / 'elsewhere').mkdir(exist_ok=True); memory.symlink_to(self.root / 'elsewhere')
+                result = self.purge([self.target('claude', sid)])
+                self.assertFalse(result['cleanup_confirmed'], result)
+                self.assertEqual(result['pending'][0]['reason'], 'session_project_contents_unconfirmed')
+                self.assertEqual(self.calls, [])
+                if kind == 'notes':
+                    (memory / 'MEMORY.md').unlink(); memory.rmdir()
+                else:
+                    memory.unlink()
+        memory.mkdir()
+        result = self.purge([self.target('claude', sid)])
+        self.assertTrue(result['cleanup_confirmed'], result)
+        self.assertEqual([call[0][1:3] for call in self.calls], [['purge', '--yes']])
+
     def test_claude_index_must_be_a_bounded_unshared_regular_file(self):
         sid, path = self.claude_file()
         index = path.parent / 'sessions-index.json'
