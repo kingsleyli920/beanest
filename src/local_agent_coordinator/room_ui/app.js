@@ -2641,7 +2641,7 @@ function runtimeShortcutModelLabel(model, models) {
 }
 function renderRuntimeShortcuts(context = runtimeContext()) {
   const { room, editable, recorded, choices, workMode, newGoal, nativeRecovery, configuration, unsent } = context;
-  const caption = configuration ? unsent ? t("待发送 · ") : configuration.pending ? t("后续工作生效 · ") : t("设置 · ") : room ? editable ? newGoal ? t("新目标 · ") : t("下一轮 · ") : t("本轮 · ") : '';
+  const caption = configuration ? unsent ? t("发消息后生效 · ") : configuration.pending ? t("后续工作生效 · ") : t("设置 · ") : room ? editable ? newGoal ? t("新目标 · ") : t("下一轮 · ") : t("本轮 · ") : '';
   $('runtime-settings-summary').textContent = configuration ? t("{p0}权限：{p1}", { p0: caption, p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) }) : nativeRecovery ? t("继续沿用本任务设置") : !editable && !recorded ? t("权限：未记录")
     : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
   for (const id of state.participantIds) {
@@ -2675,7 +2675,7 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
   }
   $('composer-usage-bar').dataset.nextRun = String(!!room && editable);
   $('composer-usage-bar').setAttribute('aria-label', t("{p0}伙伴模型与额度", { p0: caption }));
-  $('runtime-shortcuts-caption').textContent = configuration ? unsent ? t("待发送") : configuration.pending ? t("后续工作生效") : t("设置") : room ? editable ? newGoal ? t("新目标") : t("下一轮") : t("本轮") : '';
+  $('runtime-shortcuts-caption').textContent = configuration ? unsent ? t("发消息后生效") : configuration.pending ? t("后续工作生效") : t("设置") : room ? editable ? newGoal ? t("新目标") : t("下一轮") : t("本轮") : '';
   $('runtime-shortcuts-caption').hidden = !room;
 }
 function renderRuntimeSettings() {
@@ -2697,7 +2697,7 @@ function renderRuntimeSettings() {
   if (configuration) {
     $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型与思考强度", { p0: displayName(state.runtimePartner) }) : t("后续工作权限");
     $('runtime-settings-note').textContent = !configuration.can_edit ? t("当前不能修改设置。已有设置保持。")
-      : unsent ? t("随下一条消息提交，正在运行的调用不变。")
+      : unsent ? t("还没生效：发一条消息才会提交，只发“继续”也可以。正在运行的调用不受影响，这一轮结束后切换。")
         : configuration.pending ? t("已保存，后续工作开始生效。正在运行的调用不变。")
           : t("修改后随下一条消息提交，正在运行的调用不变。");
     if (configuration.can_edit && state.runtimePartner) $('runtime-settings-note').textContent = configuration.pending && !unsent

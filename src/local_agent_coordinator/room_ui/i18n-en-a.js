@@ -609,7 +609,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "默认推荐（{p0}）": "Recommended default ({p0})",
   "默认推荐": "Recommended default",
   "{p0}（默认）": "{p0} (default)",
-  "待发送 · ": "Pending send · ",
+  "发消息后生效 · ": "Applies with your next message · ",
   "后续工作生效 · ": "Applies to future work · ",
   "设置 · ": "Settings · ",
   "新目标 · ": "New goal · ",
