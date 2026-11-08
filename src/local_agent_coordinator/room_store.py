@@ -1,6 +1,8 @@
 """Private room records and atomic work claims; no provider calls live here."""
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections import OrderedDict
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -11,6 +13,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import threading
 import time
 from uuid import UUID, uuid4
 
@@ -108,6 +111,10 @@ class RoomStore:
             raise RoomError("invalid_configuration")
         self._lock = None
         self._closed = False
+        # Decoded timelines by room. Events are append-only and writers are
+        # serialized, so each poll only decodes rows newer than the cache.
+        self._timelines = OrderedDict()
+        self._timelines_lock = threading.Lock()
         if not Path(path).is_absolute():
             raise RoomError("invalid_state_path")
         if type(max_calls) is not int or not 1 <= max_calls <= 8:
@@ -5694,6 +5701,42 @@ class RoomStore:
                     "completed_jobs": counts.get('completed', 0),
                     "failed_jobs": counts.get('failed', 0) + counts.get('unknown', 0)}
 
+    # The background watchdog visits every room every few seconds, so a cap
+    # by room count thrashes; cap the decoded events kept (~1.5 KB each).
+    _TIMELINE_EVENTS = 60_000
+
+    def _timeline(self, db, room_id):
+        """This transaction's events for a room, decoding only rows newer than
+        the cached ones. Each caller gets its own list of shallow copies."""
+        through = db.execute("SELECT MAX(seq) FROM events WHERE room_id=?", (room_id,)).fetchone()[0] or 0
+        with self._timelines_lock:
+            cached = self._timelines.get(room_id)
+            if cached is not None:
+                self._timelines.move_to_end(room_id)
+        seqs, events = cached if cached is not None else ([], [])
+        last = seqs[-1] if seqs else 0
+        if through > last:
+            fresh = [{"seq": item["seq"], **json.loads(item["value_json"])} for item in db.execute(
+                "SELECT seq,value_json FROM events WHERE room_id=? AND seq>? AND seq<=? ORDER BY seq",
+                (room_id, last, through))]
+            seqs, events = seqs + [item["seq"] for item in fresh], events + fresh
+            with self._timelines_lock:
+                current = self._timelines.get(room_id)
+                if current is None or (current[0][-1] if current[0] else 0) < through:
+                    self._timelines[room_id] = (seqs, events)
+                    self._timelines.move_to_end(room_id)
+                    while (len(self._timelines) > 1 and sum(len(item[0]) for item in self._timelines.values())
+                           > self._TIMELINE_EVENTS):
+                        self._timelines.popitem(last=False)
+        visible = events[:bisect_right(seqs, through)]
+        if os.environ.get("BEANEST_VERIFY_EVENT_CACHE") == "1":
+            # Test-only guard: a caller that mutated a cached event in place.
+            decoded = [{"seq": item["seq"], **json.loads(item["value_json"])} for item in db.execute(
+                "SELECT seq,value_json FROM events WHERE room_id=? AND seq<=? ORDER BY seq", (room_id, through))]
+            if decoded != visible:
+                raise AssertionError("cached room events differ from the stored events")
+        return [dict(event) for event in visible]
+
     def snapshot(self, room_id, *, events=True):
         """events=False leaves out the timeline, the bulk of a long room's
         snapshot, for readers such as the room list that never look at it."""
@@ -5725,8 +5768,7 @@ class RoomStore:
                                                    "WHERE room_id=? ORDER BY rowid", (row["id"],))]
             timeline = None
             if events:
-                timeline = [{"seq": event["seq"], **json.loads(event["value_json"])} for event in
-                            db.execute("SELECT * FROM events WHERE room_id=? ORDER BY seq", (row["id"],))]
+                timeline = self._timeline(db, row["id"])
                 partner_inspections = {event["job_id"] for event in timeline if event["kind"] == "partner_handoff_inspection"}
             else:
                 partner_inspections = {item[0] for item in db.execute(

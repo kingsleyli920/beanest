@@ -6849,11 +6849,19 @@ class RoomService:
         self._resume_partner_operations()
         for room in self.store.list_rooms()["rooms"]:
             snapshot = self.store.snapshot(room["id"])
-            self._schedule_quota_handoff(room["id"])
-            self._schedule_quota_wait(room["id"], snapshot)
+            # Archived and removed rooms never hand over, wait for quota or
+            # continue by themselves; those steps return early for them, but
+            # only after reading the room again. Late cleanup still applies.
+            active = snapshot["room"]["lifecycle_state"] == "active"
+            if active:
+                self._schedule_quota_handoff(room["id"])
+                self._schedule_quota_wait(room["id"], snapshot)
             self._confirm_late_cleanup(room["id"], snapshot)
             self._settle_clean_stop(room["id"])
-            self._schedule_auto_continue(room["id"], self.store.snapshot(room["id"]))
+            if active:
+                self._schedule_auto_continue(room["id"], self.store.snapshot(room["id"]))
+            else:
+                self._auto_continues.pop(room["id"], None)
             objective = snapshot.get("objective")
             deadline = objective["deadline"] if objective else snapshot["budget"]["deadline"]
             if room["status"] == "running" and deadline_reached(deadline, self.clock()):
