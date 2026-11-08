@@ -486,6 +486,29 @@ test('usage stays in member details; real peer requests and MCP identity remain 
   assert.equal(ui.get('member-cards').children.length, 3, 'MCP is a source, not another agent member');
 });
 
+test('a cache miss shows one short note for the latest occurrence and stays out of the chat', async () => {
+  // Catches: the note missing, listing every miss, leaking into the chat, or showing the wrong unit.
+  const miss = (seq, written) => ({ seq, kind: 'native_cache_miss', sender: 'claude', provider: 'claude', job_id: jobId, run_id: null,
+    phase: 'task', cache_creation_input_tokens: written, seconds_since_previous_call: 35, created_at: 1800000000 });
+  const saved = snapshot({ events: [miss(1, 700000), miss(2, 785000)] });
+  saved.latest_native_cache_miss = miss(2, 785000);
+  const ui = await browser({ rooms: [saved.room], saved });
+  const note = ui.get('cache-miss-note');
+  assert.equal(note.hidden, false);
+  assert.match(note.textContent, /Claude Code 这次调用没用上缓存，多写了约 79 万 token/);
+  assert.equal(note.children.filter((child) => child.tagName === 'SPAN').length, 1, 'only the latest miss is listed');
+  assert.doesNotMatch(ui.get('events').textContent, /缓存/);
+
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.match(english.get('cache-miss-note').textContent, /Claude Code missed the cache on this call and wrote about 785K extra tokens/);
+
+  const clean = snapshot({ events: [] });
+  clean.latest_native_cache_miss = null;
+  const none = await browser({ rooms: [clean.room], saved: clean });
+  assert.equal(none.get('cache-miss-note').hidden, true);
+  assert.equal(none.get('cache-miss-note').textContent, '');
+});
+
 test('subscription limit is shown as a system exception and monitoring reason, not chat diagnostics', async () => {
   const saved = snapshot({ events: [
     message(1, 'claude', '正常的虚构答复'),

@@ -33,6 +33,10 @@ TASK_MODES = ("text", *PROJECT_MODES)
 WORK_MODES = ("plan", "build")
 LIFECYCLE_ACTIONS = {"archive": "archived", "restore": "active", "remove": "removed"}
 MAX_INSPECTION_CONTEXT_BYTES = 48 * 1024
+# A resumed Claude call counts as a cache miss when it read nothing, rewrote at
+# least this much, and followed the session's previous call within the window.
+NATIVE_CACHE_MISS_MIN_WRITE_TOKENS = 200_000
+NATIVE_CACHE_MISS_WINDOW_SECONDS = 300
 
 
 class RoomError(RuntimeError):
@@ -474,6 +478,40 @@ class RoomStore:
         db.execute("INSERT INTO events(room_id,value_json) VALUES (?,?)",
                    (room_id, json.dumps(event, ensure_ascii=True, allow_nan=False)))
         db.execute("UPDATE rooms SET updated_at=? WHERE id=?", (self.clock(), room_id))
+
+    def _record_native_cache_miss(self, db, job, session_id, usage, team_context):
+        """Note a resumed Claude call that rewrote its whole context with nothing read.
+
+        Metadata only. It never stops, retries or reschedules anything, and a gap
+        past the cache lifetime is a natural expiry rather than an anomaly.
+        """
+        values = usage.get("values")
+        if not session_id or not isinstance(values, dict) or values.get("cache_read_input_tokens") != 0:
+            return
+        written = values.get("cache_creation_input_tokens")
+        if type(written) is not int or written < NATIVE_CACHE_MISS_MIN_WRITE_TOKENS:
+            return
+        room_id, provider = job["room_id"], job["provider"]
+        adapter = db.execute("SELECT adapter FROM members WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()
+        if adapter is None or adapter[0] != "claude":
+            return
+        claim = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='job_claimed' "
+                           "AND json_extract(value_json,'$.job_id')=? ORDER BY seq DESC LIMIT 1", (room_id, job["id"])).fetchone()
+        if claim is None or json.loads(claim[0]).get("session_id") != session_id:
+            return
+        previous = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='usage' "
+                              "AND json_extract(value_json,'$.sender')=? AND json_extract(value_json,'$.session_id')=? "
+                              "AND json_extract(value_json,'$.job_id')!=? ORDER BY seq DESC LIMIT 1",
+                              (room_id, provider, session_id, job["id"])).fetchone()
+        if previous is None:
+            return
+        gap = self.clock() - json.loads(previous[0])["created_at"]
+        if not 0 <= gap < NATIVE_CACHE_MISS_WINDOW_SECONDS:
+            return
+        self._event(db, room_id, "native_cache_miss", sender=provider, provider=provider, job_id=job["id"],
+                    run_id=team_context["run_id"] if team_context else None,
+                    phase=team_context["job_phase"] if team_context else job["kind"],
+                    cache_creation_input_tokens=written, seconds_since_previous_call=round(gap, 3))
 
     def _partner_dispatch_reason(self, db, provider):
         operation = db.execute("SELECT action,status FROM partner_lifecycle_operations WHERE provider=? "
@@ -5341,7 +5379,14 @@ class RoomStore:
             self._event(db, room_id, "job_finished", sender=provider, job_id=job_id,
                         status=status, error=error)
             if usage:
-                self._event(db, room_id, "usage", sender=provider, job_id=job_id, usage=usage)
+                confirmed_session = session_id if session_id and error != "session_identity_changed" else None
+                self._event(db, room_id, "usage", sender=provider, job_id=job_id, usage=usage,
+                            **({"session_id": confirmed_session} if confirmed_session else {}))
+                try:
+                    self._record_native_cache_miss(db, job, confirmed_session, usage, team_context)
+                except Exception:
+                    # Diagnostic only: its own failure must never touch the job or usage.
+                    pass
             if native_question is not None and error == "native_permission_required" and not uncertain:
                 question = checked_message(native_question)
                 self._event(db, room_id, "message", sender=provider, recipient="all", job_id=job_id,

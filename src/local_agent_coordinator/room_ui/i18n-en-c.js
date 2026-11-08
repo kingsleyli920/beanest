@@ -877,4 +877,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "这位伙伴已换了登录方式，原会话留在之前的登录里，不能用新账号接着跑。改回原登录方式，或开新任务。": "This partner's sign-in was switched. Its session stays with the previous sign-in and can't continue under the new account. Switch back, or start a new task.",
   "这个登录方式不受支持，请刷新后再试。": "This sign-in option isn't supported. Refresh and try again.",
   "这位伙伴正在执行任务，结束后才能切换登录方式。": "This partner is running a task. You can switch sign-in once it finishes.",
+  "{p0} 这次调用没用上缓存，多写了约 {p1} token": "{p0} missed the cache on this call and wrote about {p1} extra tokens",
 });
