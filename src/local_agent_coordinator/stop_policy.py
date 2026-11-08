@@ -13,6 +13,8 @@ USER_STOPS = frozenset({
     "budget_exhausted", "deadline_exceeded", "objective_calls_exhausted",
     "objective_deadline_exceeded", "objective_stage_limit", "objective_no_progress",
     "objective_decision_required", "objective_scope_confirmation", "objective_checkpoint_disagreed",
+    # The partner switched login source; its session stays in the other home.
+    "partner_account_home_changed",
 })
 
 # The outcome itself is unknown or private work cannot be reconciled safely;

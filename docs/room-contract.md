@@ -163,11 +163,17 @@ UI新任务默认build；没有关联项目且未显式选择其它成果类型�
 
 账号读取是独立的Web管理操作：POST `/api/partners/<id>/account/refresh`，正文仅`{}`。GET仅返回内存缓存；同一默认CLI账号的配置共享有界刷新与节流，携来源、时间、过期和失败原因。原始账号响应、令牌和凭据不入运行数据库或日志；只保留显示所需的安全字段。MCP拒绝生命周期管理和账号刷新，并剔除账号资料。此功能不授予登录、切账号、消费额度重置或发邮件的权限。
 
+伙伴的登录方式：Claude/Codex/Kimi 原生伙伴默认用本机登录，同一工具的所有伙伴共用。Web 可 POST `/api/partners/<id>/account-source`，正文严格为`{"source":"profile_home"}`或`{"source":"local"}`，把这一位伙伴切到“豆窝独立登录”或改回本机登录。独立登录的目录固定为`<runtime>/partners/homes/<profile_id>/`，由豆窝建立、权限0700；`profiles.json`只记`account_source:"profile_home"`，不存路径，旧档案没有该字段即为本机登录，不需要迁移。改回本机登录时目录及其中的登录保留，之后可再切回。该伙伴在任何房间有任务执行中时拒绝切换，返回`409 partner_account_source_busy`。MCP 列表剔除`account_source`，也不能调用此入口。
+伙伴列表的`account_source`为`{kind:"local"|"profile_home",home,variable,login_command}`。`login_command`形如`CLAUDE_CONFIG_DIR='<dir>' '<豆窝实际选用的 claude>' auth login`（Codex 为`CODEX_HOME=… codex login`，Kimi 为`KIMI_CODE_HOME=… kimi login`），路径一律用单引号转义。豆窝只展示这条命令，由用户自己在终端运行；不会替用户执行任何 login 命令，也不读取凭据。
+绑定独立目录的伙伴，其所有子进程只额外注入对应的一个变量（`CLAUDE_CONFIG_DIR`、`CODEX_HOME`或`KIMI_CODE_HOME`）：派发与续接、认证检查、账号与额度查询、模型目录查询、房间删除时的会话清理都在内。用户 shell 里自带的这三个变量仍被剥掉，不会透传；没有绑定的伙伴与以前完全一样。独立登录时不做多安装副本的登录择优，直接用已选定的那个二进制，避免一个未登录的目录改掉其他伙伴使用的安装。
+账号缓存、刷新节流与`quota_gate`都按账号范围分组：本机登录仍是`claude`/`codex`，独立登录为`<adapter>:<profile_id>`，两者的额度阻塞互不影响；`account.scope`与`availability.scope`对应为`default_cli_login`或`profile_cli_home`。派发前照常刷新账号并按该范围核对已知限额，换登录不会绕过身份核对。
+建在独立登录目录里的原生会话，会在新表`native_session_homes`记下所在目录；没有记录的就是本机登录（含全部旧会话），原`native_session_history`表结构不变。读取 Kimi wire、Kimi 受管配置、Claude 会话记录和恢复证据时都到这个目录下找；删除房间时按目录分组，各自在原目录里执行官方清理。已有会话的成员如果此后换了登录方式，派发前就以`partner_account_home_changed`停下、不调用模型，也不会把会话拿到另一个账号下续接；用户可以改回原登录方式继续，或开新任务。删除伙伴档案时保留其独立目录，因为历史房间的会话清理还要用到。
+
 Kimi 账号展示以本机受管登录的官方资料为准。真实邮箱优先；缺邮箱时可展示官方昵称与已规范化的脱敏手机号，明确标注类型。原手机号不进入公开投影，官方账号标识仅用于本次前后身份一致性核对；会员名称直接采用官方字段，不从域名、昵称或手机号推断档位。
 
 `quota_gate.py`负责已知账号限额，独立于伙伴的启停/归档偏好。伙伴返回`availability:{state,selectable,reason,source,observed_at,identity_checked_at,resets_at,stale,scope,can_request_recheck}`；state为available/unknown/blocked。只有新鲜Codex/Claude共享额度窗口或确切原生限额报告可改变门控；认证成功不证明有额度。默认CLI登录的别名共享门控，未知额度保持可选，已知阻塞不得静默移除用户已选成员。原生调用已在途时不冒称已取消。
 
-Web可POST `/api/availability/refresh`空对象批量只读检查，每adapter一次并复用55秒缓存/并发合并；GET不启动CLI。页面可见时启动/回前台及每60秒请求，不依赖用量浮卡展开。页面上的额度显示靠前台刷新，页面隐藏、关闭及电脑睡眠期间不承诺持续更新；全员额度用完的房间由后端另外每 5 分钟复查一次；create/start_run及每个queued job在claim/扣预算前另查门控，调用明确报告限额后反馈状态。补充消息可先登记并排队，其实际派发仍受门控，不承诺messages请求同步返回409。创建或派发被阻时分别保留`agent_quota_exhausted`或`agent_quota_unconfirmed`原因，不自动换账号或新付费路径。
+Web可POST `/api/availability/refresh`空对象批量只读检查，每个账号范围（本机登录按adapter，独立登录按伙伴）一次并复用55秒缓存/并发合并；GET不启动CLI。页面可见时启动/回前台及每60秒请求，不依赖用量浮卡展开。页面上的额度显示靠前台刷新，页面隐藏、关闭及电脑睡眠期间不承诺持续更新；全员额度用完的房间由后端另外每 5 分钟复查一次；create/start_run及每个queued job在claim/扣预算前另查门控，调用明确报告限额后反馈状态。补充消息可先登记并排队，其实际派发仍受门控，不承诺messages请求同步返回409。创建或派发被阻时分别保留`agent_quota_exhausted`或`agent_quota_unconfirmed`原因，不自动换账号或新付费路径。
 
 已知限制在私有0600原子日志中保存本机加盐HMAC身份与安全元数据，不保存邮箱或原始认证响应。重启后无法确认当前身份时保持blocked/account_identity_unknown；确认换账号才解除旧身份绑定。到达已知重置时间仅降为unknown，不直接证明恢复。Claude实际订阅限额且没有可信恢复时间、同账号身份核查新鲜时，Web可POST `/api/partners/<id>/availability/recheck`空对象，需用户明确确认；仅降为unknown/user_recheck_requested，不启动模型、不改登录或启停偏好。旧限额时间observed_at与当前身份核查identity_checked_at分别保留，不能用新登录检查伪装新额度。MCP不能调用这两个管理入口。
 

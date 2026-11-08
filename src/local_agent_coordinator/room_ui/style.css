@@ -834,6 +834,8 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 .quota-window progress::-webkit-progress-value { border-radius: 9px; background: var(--muted); }
 .quota-window progress::-moz-progress-bar { border-radius: 9px; background: var(--muted); }
 .quota-unavailable, .account-scope-note { margin: 10px 0; color: var(--muted); font-size: 10px; line-height: 1.75; }
+.account-login-hint { margin: 10px 0 6px; color: var(--ink2); font-size: 10px; line-height: 1.75; }
+.account-login-command { display: block; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--sunken); color: var(--ink); font-family: ui-monospace, Menlo, monospace; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; user-select: all; }
 
 .account-auto-refresh { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--muted); font-size: 10px; }
 .account-auto-refresh input { margin: 0; accent-color: var(--muted); }

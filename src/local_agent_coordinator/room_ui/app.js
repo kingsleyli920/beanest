@@ -74,6 +74,7 @@ const executionLabels = localizedLabels({
   invalid_execution_policy: '任务设置与当前服务不兼容，请更新本地服务后继续。',
   session_identity_unknown: '会话身份尚未确认，不会自动续接或重新派发。',
   session_identity_changed: '返回的会话身份发生变化，已停止自动续接。',
+  partner_account_home_changed: '这位伙伴已换了登录方式，原会话留在之前的登录里，不能用新账号接着跑。改回原登录方式，或开新任务。',
   invalid_agent_response: '伙伴回复不符合协作协议，本轮需要核对。',
   invalid_agent_action: '伙伴提出了无法接受的协作动作，本轮需要核对。',
   invalid_adapter_response: '未取得可确认的供应商响应。',
@@ -158,6 +159,9 @@ const errorLabels = localizedLabels({
   availability_recheck_unavailable: '当前不能重新允许使用，请刷新账号与额度状态后再确认。',
   user_account_required: '这项账号操作需要你在豆窝界面明确确认。',
   account_adapter_unsupported: '这个接入方式暂不支持账号与额度查询。',
+  invalid_account_source: '这个登录方式不受支持，请刷新后再试。',
+  partner_account_source_busy: '这位伙伴正在执行任务，结束后才能切换登录方式。',
+  partner_account_home_changed: '这位伙伴已换了登录方式，原会话留在之前的登录里，不能用新账号接着跑。改回原登录方式，或开新任务。',
   invalid_project_lifecycle: '这个项目管理操作不符合要求，请刷新后再试。',
   invalid_partner_lifecycle: '这个伙伴管理操作不符合要求，请刷新后再试。',
   invalid_room_lifecycle: '这个任务管理操作不符合要求，请刷新后再试。',
@@ -299,6 +303,7 @@ const state = {
   lifecycleViews: { projects: 'active', partners: 'active', rooms: 'active' }, lifecycleConfirm: null, roomLifecycleSupported: false, roomNativeSessionCleanupSupported: false, messageReceiptsSupported: false, projectDeletionSupported: false, partnerLifecycleSupported: false, partnerOperations: new Map(), partnerIntentEpoch: 0, partnerRequestGeneration: 0, partnerAppliedGeneration: 0, partnerOperationSequence: 0, partnerResponseContexts: new WeakMap(), partnerOperationChecks: new Set(), messageReceiptChecks: new Set(), projectDeletions: new Map(), lifecycleOperations: new Map(), lifecyclePolling: false, roomControlRequests: new Map(), stopRequests: new Set(), sidelinedRequests: new Map(), deletedRooms: new Set(),
   availabilityTimer: null, availabilityRefreshing: false, availabilityLastStarted: null, availabilityError: '', availabilityRecheck: null,
   accountRefreshId: null, accountTimer: null, accountPanels: new Map(), accountAuto: new Map(), accountRefreshTimes: new Map(), accountRefreshErrors: new Map(),
+  accountSourceBusy: null, accountSourceErrors: new Map(),
   manager: null, managerReturnFocus: null, managementBusy: false, projectListFingerprint: '', partnerListFingerprint: '',
   hostOutboxSupported: false, hostOutboxScope: null, hostOutboxPolling: false, hostOutboxRows: new Map(), hostOutboxRequests: new Map(), hostOutboxRetirements: new Map(), hostOutboxRetiring: new Set(), hostAutomaticAttempts: new Set(),
   actionError: null, busy: false, busyRequest: null, refreshing: false, pending: null, epoch: 0, authScope: null, scopeChanged: false,
@@ -337,7 +342,8 @@ const selfCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 
 // board state; a stop that comes back without progress is the user's.
 const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt', 'budget_exhausted', 'deadline_exceeded',
   'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit', 'objective_no_progress',
-  'objective_decision_required', 'objective_scope_confirmation', 'objective_checkpoint_disagreed']);
+  'objective_decision_required', 'objective_scope_confirmation', 'objective_checkpoint_disagreed',
+  'partner_account_home_changed']);
 const keepSceneCodes = new Set(['project_commit_unconfirmed', 'native_cleanup_unconfirmed', 'team_cleanup_unconfirmed',
   'native_recovery_cleanup_unconfirmed', 'session_identity_changed', 'session_identity_unknown',
   'native_recovery_unpublished_changes', 'native_side_effects_unconfirmed', 'execution_unknown']);
@@ -2263,7 +2269,7 @@ function updateAccountFooter(details, id) {
     : windows.length ? t("{p0} 个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
   details.firstChild.lastChild.textContent = status;
   const body = details.lastChild;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
   if (body.dataset.fingerprint === fingerprint) return;
   body.dataset.fingerprint = fingerprint;
   body.replaceChildren();
@@ -2279,6 +2285,8 @@ function updateAccountFooter(details, id) {
   fact(t("最近检查"), Number.isFinite(account?.checked_at) ? `${timeLabel(account.checked_at, true)}${account.stale ? t(" · 旧快照") : ''}` : t("尚未检查"));
   const sourceLabels = { kimi_managed_oauth: t("Kimi Code 本机会员登录"), codex_app_server: t("Codex 原生账号查询"), claude_auth_status: t("Claude Code 登录状态"), unsupported: t("当前接入方式未支持") };
   fact(t("账号来源"), sourceLabels[account?.source] || t("尚未获取"));
+  const loginSource = accountLoginSource(partner);
+  if (loginSource) fact(t("登录方式"), loginSource.kind === 'profile_home' ? t("豆窝独立登录") : t("本机登录"));
   if (compact) {
     body.append(element('p', `${account?.stale ? t("上次确认") : t("当前登录")}${interfaceColon()}${accountLoginText(account)}`, 'compact-account-identity'),
       element('p', `${accountFieldText(account, 'plan')} · ${Number.isFinite(account?.checked_at) ? `${timeLabel(account.checked_at, true)}${account.stale ? t(" · 旧快照") : ''}` : t("尚未查询")}`, 'detail-caption'));
@@ -2335,9 +2343,12 @@ function updateAccountFooter(details, id) {
   if (usageLink) { usageLink.dataset.usageLink = id; body.append(usageLink, element('p', quota.usage_url, 'native-login-url')); }
   const shared = Array.isArray(account?.shared_profile_ids) ? account.shared_profile_ids.filter((value) => value !== id && agentPattern.test(value)) : [];
   const tool = ({ claude: 'Claude Code', codex: 'Codex', kimi: 'Kimi Code' })[partner?.adapter] || t("对应工具");
-  body.append(element('p', shared.length ? t("与{p0}共用本机 {p1} 登录。改名或新建会话不会切换账号。", { p0: interfaceList(shared.map(displayName)), p1: tool })
+  const ownHome = loginSource?.kind === 'profile_home';
+  body.append(element('p', ownHome ? t("使用豆窝为它单独保存的 {p0} 登录，不影响本机登录和其他伙伴。", { p0: tool })
+    : shared.length ? t("与{p0}共用本机 {p1} 登录。改名或新建会话不会切换账号。", { p0: interfaceList(shared.map(displayName)), p1: tool })
     : account?.scope === 'default_cli_login' || ['claude', 'codex', 'kimi'].includes(partner?.adapter)
       ? t("使用本机 {p0} 的当前登录。改名或新建会话不会切换账号。", { p0: tool }) : t("当前接入方式未提供独立账号信息。"), 'account-scope-note'));
+  if (ownHome && !accountSignedIn(account) && typeof loginSource.login_command === 'string') body.append(...accountLoginCommand(loginSource.login_command));
   const refresh = element('button', state.accountRefreshId === id ? t("正在查询…") : t("刷新账号与额度"), 'quiet-button'); refresh.type = 'button'; refresh.dataset.focusKey = 'account-refresh';
   refresh.disabled = !canRefreshAccount(partner, account) || !!state.accountRefreshId || state.managementBusy || state.busy || !!state.pending;
   refresh.addEventListener('click', () => void refreshProviderAccount(id));
@@ -2352,13 +2363,66 @@ function updateAccountFooter(details, id) {
   });
   auto.append(checkbox, element('span', t("展开时每分钟更新")));
   body.append(refresh, auto);
+  if (loginSource) body.append(...accountSourceControls(id, partner, loginSource));
   if (!compact) body.append(element('p', availabilityWatchSupported()
     ? t("只查询登录与额度，不启动模型。面板收起后停止单独刷新；前台仍每分钟检查可用状态，页面隐藏后暂停。")
     : t("只查询登录与额度，不启动模型。面板收起或页面隐藏后停止自动查询。"), 'detail-caption'));
 }
 function accountRefreshKey(id) {
   const partner = state.partners.find((entry) => entry.id === id);
-  return ['claude', 'codex'].includes(partner?.adapter) ? `${partner.adapter}:default_cli_login` : id;
+  // A profile with its own login is its own account; aliases share the local one.
+  return ['claude', 'codex'].includes(partner?.adapter) && accountLoginSource(partner)?.kind !== 'profile_home' ? `${partner.adapter}:default_cli_login` : id;
+}
+function accountLoginSource(partner) {
+  const source = partner?.account_source;
+  return source && typeof source === 'object' && ['local', 'profile_home'].includes(source.kind) ? source : null;
+}
+function accountSignedIn(account) {
+  // An aged snapshot of a confirmed login still means signed in; only an unchecked or unconfirmed login needs the command.
+  return !!account && !['not_checked', 'unavailable'].includes(account.state) && typeof account.auth_method === 'string' && !!account.auth_method;
+}
+function partnerWorking(partner) {
+  return partner?.monitor?.status === 'working' || (Array.isArray(partner?.monitor?.current_tasks) && partner.monitor.current_tasks.some((task) => task?.status === 'working'));
+}
+// Beanest never signs in for the user: it shows the exact command to run in a terminal.
+function accountLoginCommand(command) {
+  const code = element('code', command, 'account-login-command');
+  const copy = element('button', t("复制登录命令"), 'quiet-button account-login-copy'); copy.type = 'button'; copy.dataset.focusKey = 'account-login-copy';
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(command); managerNotice(t("登录命令已复制。在终端运行并完成登录后，回到这里点“刷新账号与额度”。")); }
+    catch { managerNotice(t("没能自动复制，请手动选中命令复制。"), true); }
+  });
+  return [element('p', t("这个独立登录还没有确认账号。在终端运行下面的命令登录，豆窝不会替你登录："), 'account-login-hint'), code, copy];
+}
+function accountSourceControls(id, partner, source) {
+  const ownHome = source.kind === 'profile_home';
+  const button = element('button', state.accountSourceBusy === id ? t("正在切换…") : ownHome ? t("改回本机登录") : t("改用独立登录"), 'quiet-button account-source-switch');
+  button.type = 'button'; button.dataset.focusKey = 'account-source'; button.dataset.accountSource = id;
+  const working = partnerWorking(partner);
+  button.disabled = working || !activeEntry(partner) || !!state.accountSourceBusy || !!state.accountRefreshId || state.managementBusy || state.busy || !!state.pending;
+  button.addEventListener('click', () => void setAccountSource(id, ownHome ? 'local' : 'profile_home'));
+  const nodes = [button];
+  if (working) nodes.push(element('p', t("{p0}正在执行任务，结束后才能切换登录方式。", { p0: displayName(id) }), 'quota-unavailable'));
+  else nodes.push(element('p', ownHome ? t("改回后使用本机登录；独立登录目录和其中的登录会保留，之后可以再切回。")
+    : t("独立登录只给这位伙伴用，不影响本机登录和其他伙伴。已有任务的会话不会带到新登录里。"), 'detail-caption'));
+  if (state.accountSourceErrors.has(id)) nodes.push(element('p', state.accountSourceErrors.get(id), 'quota-unavailable'));
+  return nodes;
+}
+async function setAccountSource(id, source) {
+  if (state.accountSourceBusy || state.accountRefreshId || state.managementBusy || state.busy || state.pending) return;
+  state.accountSourceBusy = id; state.accountSourceErrors.delete(id);
+  renderMembers(state.snapshot); renderGlobalPartners();
+  try {
+    acceptPartners(await api(workspaceApi.partner(id, 'account-source'), 'POST', { source }));
+    state.accountRefreshTimes.delete(accountRefreshKey(id));
+    managerNotice(source === 'profile_home' ? t("已改用独立登录。登录后点“刷新账号与额度”查看账号。") : t("已改回本机登录。"));
+  } catch (error) {
+    state.accountSourceErrors.set(id, error.message);
+    await api(workspaceApi.partners).then(acceptPartners).catch(() => {});
+  } finally {
+    state.accountSourceBusy = null;
+    renderMembers(state.snapshot); renderGlobalPartners();
+  }
 }
 function visibleAccountPanels() {
   const visible = [];

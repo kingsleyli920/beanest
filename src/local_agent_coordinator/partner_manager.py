@@ -50,6 +50,21 @@ _REASONS = {None, "not_checked", "cli_missing", "cli_check_failed", "auth_unconf
             "connector_not_ready"}
 ACCOUNT_STALE_SECONDS = 90
 ACCOUNT_REFRESH_COALESCE_SECONDS = 55
+# A profile's own login lives in a Beanest-created CLI home instead of the
+# shared local login. Only the marker is stored; the path is derived from the
+# profile id under this manager's private root.
+PROFILE_HOME = "profile_home"
+ACCOUNT_SOURCES = {"local", PROFILE_HOME}
+LOGIN_ARGUMENTS = {"claude": ("auth", "login"), "codex": ("login",), "kimi": ("login",)}
+
+
+def _quoted(value):
+    """POSIX single quotes, so a copied command keeps spaces and quotes literal."""
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def _scope(item):
+    return item["adapter"] + ":" + item["id"] if item.get("account_source") == PROFILE_HOME else item["adapter"]
 
 
 def connection_templates() -> list[dict]:
@@ -89,11 +104,11 @@ def _unknown_health() -> dict:
             "reason": "not_checked", "cost": None, "subscription_remaining": None}
 
 
-def _unknown_account(adapter):
+def _unknown_account(adapter, scope="default_cli_login"):
     supported = adapter in TRUSTED_ADAPTERS
     source = {"claude": "claude_auth_status", "codex": "codex_app_server", "kimi": "kimi_managed_oauth"}.get(adapter, "unsupported")
     return {"state": "not_checked" if supported else "unavailable", "email": None, "plan": None,
-            "auth_method": None, "source": source, "scope": "default_cli_login",
+            "auth_method": None, "source": source, "scope": scope,
             "checked_at": None, "stale": True, "reason": "not_checked" if supported else "account_adapter_unsupported",
             "shared_profile_ids": [],
             "quota": {"state": "not_checked" if supported else "unavailable", "windows": [],
@@ -289,7 +304,7 @@ class PartnerManager:
                 os.close(descriptor)
         if isinstance(data, dict) and isinstance(data.get("profiles"), list):
             for item in data["profiles"]:
-                if (isinstance(item, dict) and set(item) - {"bean_style", "lifecycle_state", "connection"}
+                if (isinstance(item, dict) and set(item) - {"bean_style", "lifecycle_state", "connection", "account_source"}
                         == _PROFILE_KEYS - {"bean_style", "lifecycle_state"}):
                     # Upgrade in memory only: read-only inspection must not
                     # rewrite configuration. The next explicit save includes it.
@@ -318,12 +333,16 @@ class PartnerManager:
                 raise ValueError
             seen = set()
             for item in data["profiles"]:
-                if (not isinstance(item, dict) or set(item) not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"})
+                if (not isinstance(item, dict)
+                        or set(item) not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"})
                         or not safe_agent_id(item["id"]) or item["id"] in seen
                         or not isinstance(item["bean_style"], str) or item["bean_style"] not in BEAN_STYLE_IDS
                         or not isinstance(item["lifecycle_state"], str)
                         or item["lifecycle_state"] not in {"active", "archived", "removed"}
                         or type(item["enabled"]) is not bool or type(item["builtin"]) is not bool):
+                    raise ValueError
+                if "account_source" in item and (item["account_source"] != PROFILE_HOME
+                                                 or item["adapter"] not in TRUSTED_ADAPTERS or _connector(item)):
                     raise ValueError
                 seen.add(item["id"])
                 base = self.base_registry.get(item["id"])
@@ -424,8 +443,10 @@ class PartnerManager:
                       selectable=(available and installation["state"] == "found" and health["state"] == "ready")
                       if connector else (available and (not self._startup_discovery
                                                               or installation["state"] == "found")))
-        result["account"] = (_unknown_account("configured_cli") if connector else self._account_snapshot(item["adapter"], data))
-        result["availability"] = self.quota_gate.snapshot(item["adapter"], result["account"])
+        result["account"] = (_unknown_account("configured_cli") if connector else self._account_snapshot(item, data))
+        result["availability"] = self.quota_gate.snapshot(_scope(item), result["account"])
+        if not connector and item["adapter"] in TRUSTED_ADAPTERS:
+            result["account_source"] = self._account_source(item)
         result["configuration_selectable"] = result["selectable"]
         result["selectable"] = result["selectable"] and result["availability"]["selectable"]
         if connector:
@@ -433,9 +454,89 @@ class PartnerManager:
         # Return independent values; callers cannot edit the persisted structure.
         return json.loads(json.dumps(result))
 
-    def _account_snapshot(self, adapter, data):
-        account = json.loads(json.dumps(self._account_cache.get(adapter, _unknown_account(adapter))))
-        account["shared_profile_ids"] = ([item["id"] for item in data["profiles"] if item["adapter"] == adapter]
+    def home_path(self, partner_id) -> Path:
+        if not safe_agent_id(partner_id):
+            raise PartnerError("invalid_partner_profile")
+        return self.root / "homes" / partner_id
+
+    def _account_source(self, item):
+        if item.get("account_source") != PROFILE_HOME:
+            return {"kind": "local", "home": None, "variable": None, "login_command": None}
+        adapter, home = item["adapter"], self.home_path(item["id"])
+        # Name the installation Beanest actually uses; nothing is executed here.
+        selection = adapters.cli_selection(adapter)
+        installed = adapters.cli_installations(adapter)
+        binary = selection["path"] if selection["path"] in installed else installed[0] if installed else adapter
+        variable = adapters.ACCOUNT_HOME_VARIABLES[adapter]
+        command = " ".join([variable + "=" + _quoted(home), _quoted(binary), *LOGIN_ARGUMENTS[adapter]])
+        return {"kind": PROFILE_HOME, "home": str(home), "variable": variable, "login_command": command}
+
+    def _ensure_home(self, partner_id):
+        """Create the profile's CLI home as a private, real directory."""
+        homes, home = self.root / "homes", self.home_path(partner_id)
+        try:
+            for path in (homes, home):
+                if path.is_symlink():
+                    raise PartnerError("unsafe_partner_storage")
+                path.mkdir(mode=0o700, exist_ok=True)
+                if path.is_symlink() or not path.is_dir():
+                    raise PartnerError("unsafe_partner_storage")
+                path.chmod(0o700)
+        except OSError:
+            raise PartnerError("unsafe_partner_storage") from None
+        return home
+
+    def _item(self, partner_id):
+        with self._locked():
+            data = self._load()
+        item = next((item for item in data["profiles"] if item["id"] == partner_id), None)
+        if item is None:
+            raise PartnerError("unknown_partner")
+        return item
+
+    def account_home(self, partner_id) -> Path | None:
+        """The CLI home a profile's children must use; None is the local login."""
+        item = self._item(partner_id)
+        return self.home_path(partner_id) if item.get("account_source") == PROFILE_HOME else None
+
+    def account_scope(self, partner_id) -> str:
+        return _scope(self._item(partner_id))
+
+    def account_scopes(self) -> dict:
+        with self._locked():
+            return {item["id"]: _scope(item) for item in self._load()["profiles"]}
+
+    def set_account_source(self, partner_id, source) -> dict:
+        """Switch between the shared local login and the profile's own home.
+
+        The home is kept when switching back, so its login and any sessions it
+        holds stay available. Callers must refuse while the profile is working.
+        """
+        if not isinstance(source, str) or source not in ACCOUNT_SOURCES:
+            raise PartnerError("invalid_account_source")
+        with self._locked():
+            data = self._load()
+            for item in data["profiles"]:
+                if item["id"] == partner_id:
+                    if item["adapter"] not in TRUSTED_ADAPTERS or _connector(item):
+                        raise PartnerError("account_adapter_unsupported")
+                    if source == PROFILE_HOME:
+                        self._ensure_home(partner_id)
+                    if (item.get("account_source") == PROFILE_HOME) != (source == PROFILE_HOME):
+                        if source == PROFILE_HOME:
+                            item["account_source"] = PROFILE_HOME
+                        else:
+                            item.pop("account_source", None)
+                        self._save(data)
+                    return self._describe(item, data)
+        raise PartnerError("unknown_partner")
+
+    def _account_snapshot(self, item, data):
+        adapter, scope = item["adapter"], _scope(item)
+        kind = "profile_cli_home" if scope != adapter else "default_cli_login"
+        account = json.loads(json.dumps(self._account_cache.get(scope, _unknown_account(adapter, kind))))
+        account["shared_profile_ids"] = ([other["id"] for other in data["profiles"]
+                                          if other["adapter"] == adapter and _scope(other) == scope]
                                          if adapter in TRUSTED_ADAPTERS else [])
         if account["checked_at"] is None and account["quota"]["checked_at"] is None:
             return account
@@ -457,19 +558,23 @@ class PartnerManager:
         adapter = profile["adapter"]
         if adapter not in TRUSTED_ADAPTERS or profile["connection_state"] != "builtin":
             raise PartnerError("account_adapter_unsupported")
-        async with self._account_locks.setdefault(adapter, asyncio.Lock()), self._checks:
+        scope, home = self.account_scope(partner_id), self.account_home(partner_id)
+        async with self._account_locks.setdefault(scope, asyncio.Lock()), self._checks:
             checked_at = self.clock()
             if type(checked_at) not in (int, float) or not math.isfinite(checked_at) or checked_at < 0:
                 raise PartnerError("invalid_check_clock")
-            previous_attempt = self._account_attempts.get(adapter)
+            previous_attempt = self._account_attempts.get(scope)
             if not force and previous_attempt is not None and 0 <= checked_at - previous_attempt <= ACCOUNT_REFRESH_COALESCE_SECONDS:
                 return self.get(partner_id)
-            previous = self._account_cache.get(adapter)
+            previous = self._account_cache.get(scope)
             try:
                 from .kimi_usage import DEFAULT_TIMEOUT as kimi_timeout
                 from .kimi_usage import SOURCE as kimi_usage_source
-                observed = await adapters.account_status(adapter, self.root, timeout=kimi_timeout if adapter == "kimi" else 10)
+                with adapters.account_home(adapter, home):
+                    observed = await adapters.account_status(adapter, self.root, timeout=kimi_timeout if adapter == "kimi" else 10)
                 account = {key: observed[key] for key in ("state", "email", "plan", "auth_method", "source", "scope", "reason")}
+                if home is not None:
+                    account["scope"] = "profile_cli_home"
                 quota = {key: observed["quota"][key] for key in ("state", "windows", "source", "scope", "reason")}
                 if adapter == "kimi":
                     reasons = observed.get("field_reasons", {})
@@ -497,8 +602,8 @@ class PartnerManager:
                         and quota["state"] == "error" and quota["reason"] != "account_changed"):
                     quota = {**previous["quota"], "stale": True, "reason": quota["reason"]}
                 account["quota"] = quota
-                self._account_cache[adapter] = account
-                self.quota_gate.observe_account(adapter, account)
+                self._account_cache[scope] = account
+                self.quota_gate.observe_account(scope, account)
                 # A fresh managed usage read confirms the same login fact as
                 # setup/login checks, without requiring another CLI process.
                 if (adapter == "kimi" and account["state"] == "ready"
@@ -511,42 +616,45 @@ class PartnerManager:
                             and math.isfinite(row[key]) and 0 <= row[key] <= 100
                             for key in ("used_percent", "remaining_percent"))
                             and math.isclose(row["used_percent"] + row["remaining_percent"], 100)
-                            for row in quota["windows"])):
+                            for row in quota["windows"])) and home is None:
                     self._login_ready("kimi")
             except asyncio.CancelledError:
                 if previous:
-                    self._account_cache[adapter] = {**previous, "stale": True, "reason": "account_refresh_cancelled",
+                    self._account_cache[scope] = {**previous, "stale": True, "reason": "account_refresh_cancelled",
                                                    "quota": {**previous["quota"], "stale": True,
                                                              "reason": "account_refresh_cancelled"}}
                 raise
             except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
                 reason = ("account_check_timeout" if isinstance(error, asyncio.TimeoutError) else
                           error.code if isinstance(error, adapters.AccountTelemetryError) else "account_check_failed")
-                cached = json.loads(json.dumps(previous or _unknown_account(adapter)))
+                cached = json.loads(json.dumps(previous or _unknown_account(
+                    adapter, "default_cli_login" if home is None else "profile_cli_home")))
                 cached.update(state="error", stale=True, reason=reason)
                 cached["quota"].update(stale=True, reason=reason)
-                self._account_cache[adapter] = cached
+                self._account_cache[scope] = cached
             finally:
-                self._account_attempts[adapter] = checked_at
+                self._account_attempts[scope] = checked_at
             return self.get(partner_id)
 
     async def refresh_availability(self, partner_ids=None):
-        """Bounded explicit refresh, once per native default-login adapter."""
+        """Bounded explicit refresh, once per account scope (shared login or profile home)."""
         selected = set(partner_ids) if partner_ids is not None else None
         chosen = {}
+        with self._locked():
+            scopes = {item["id"]: _scope(item) for item in self._load()["profiles"]}
         for profile in self.profiles():
             spec = self.base_registry.get(profile["adapter"]) or native_spec(profile["adapter"])
             included = (profile["lifecycle_state"] == "active" and profile["enabled"]
                         if selected is None else profile["id"] in selected)
             if (included
                     and not _connector(profile) and spec is not None and spec.native_account_status):
-                chosen.setdefault(profile["adapter"], profile["id"])
+                chosen.setdefault(scopes.get(profile["id"], profile["adapter"]), profile["id"])
         await asyncio.gather(*(self.refresh_account(identifier) for identifier in chosen.values()))
         return self.profiles()
 
     async def record_subscription_limit(self, partner_id, bound_identity):
         profile = await self.refresh_account(partner_id, force=True)
-        self.quota_gate.record_limit(profile["adapter"], profile["account"], bound_identity=bound_identity)
+        self.quota_gate.record_limit(self.account_scope(partner_id), profile["account"], bound_identity=bound_identity)
 
     def account_identity(self, partner_id):
         return self.quota_gate.identity(self.get(partner_id)["account"])
@@ -554,7 +662,7 @@ class PartnerManager:
     def request_availability_recheck(self, partner_id):
         profile = self.get(partner_id)
         try:
-            return self.quota_gate.request_recheck(profile["adapter"], profile["account"])
+            return self.quota_gate.request_recheck(self.account_scope(partner_id), profile["account"])
         except ValueError:
             raise PartnerError("availability_recheck_unavailable") from None
 
@@ -713,9 +821,11 @@ class PartnerManager:
                 preference = "ignored_builtin_ids" if self.base_registry.get(partner_id) else "retired_profile_ids"
                 data[preference] = sorted(set(data[preference]) | {partner_id})
                 self._save(data)
-                if not any(item["adapter"] == removed["adapter"] for item in remaining):
-                    self._account_cache.pop(removed["adapter"], None)
-                    self._account_attempts.pop(removed["adapter"], None)
+                # A removed profile keeps its CLI home: historical sessions in
+                # it still need official cleanup when their rooms are removed.
+                if not any(_scope(item) == _scope(removed) for item in remaining):
+                    self._account_cache.pop(_scope(removed), None)
+                    self._account_attempts.pop(_scope(removed), None)
         # Adapter-wide observations remain only for surviving aliases. Never
         # alter the CLI login or the shared quota identity when removing a row.
         self._check_locks.pop(partner_id, None)
@@ -745,81 +855,87 @@ class PartnerManager:
         adapter = profile["adapter"]
         if adapter not in TRUSTED_ADAPTERS.keys() | CONNECTOR_ADAPTERS:
             raise PartnerError("unsupported_partner_adapter")
+        home = None if _connector(profile) else self.account_home(partner_id)
         lock = self._check_locks.setdefault(partner_id, asyncio.Lock())
-        async with lock, self._checks:
-            health = _unknown_health()
-            checked_at = self.clock()
-            if type(checked_at) not in (float, int) or not math.isfinite(checked_at) or checked_at < 0:
-                raise PartnerError("invalid_check_clock")
-            health["checked_at"] = checked_at
-            try:
-                if _connector(profile):
-                    connection = profile.get("connection")
-                    if connection is None:
-                        health.update(state="unavailable", reason="connection_not_configured")
-                    else:
-                        adapters.find_json_cli(connection)
-                        health["cli_available"] = True
-                        observation = await adapters.check_json_cli(connection, self.root)
-                        local = observation["billing"] == "local"
-                        health.update(state="ready" if observation["ready"] else "unavailable",
-                                      reason=None if observation["ready"] else "connector_not_ready",
-                                      version=observation["version"],
-                                      auth={"method": "local" if local else "configured_cli",
-                                            "subscription_confirmed": None})
-                    return self._save_check(partner_id, health)
-                if adapter == "kimi":
-                    adapters.find_kimi()
-                    await adapters.select_cli("kimi", self.root)
-                    observation = await adapters.kimi_status(self.root)
-                    health.update(state="ready" if observation["ready"] else "unavailable", cli_available=True,
-                                  version=observation["version"], reason=None if observation["ready"] else "auth_unconfirmed",
-                                  auth={"method": "kimi-code" if observation["ready"] else "unconfirmed",
-                                        "subscription_confirmed": observation["ready"]})
-                    self._setup_observations[adapter] = "ready" if observation["ready"] else "login_required"
-                    return self._save_check(partner_id, health)
-                await adapters.select_cli(adapter, self.root)
-                executable = native_adapter(adapter).resolve()
-                health["cli_available"] = True
-                version_command = ([executable, "--version"] if adapter == "codex" else
-                                   [executable, "--safe-mode", "--restricted", "--version"])
-                lines, code = await adapters._run(version_command, "", self.root, 10, include_stderr=True)
-                raw = b"\n".join(lines)
-                version = _VERSION.search(raw.decode("utf-8", errors="replace")) if len(raw) <= 65536 else None
-                if code or version is None:
-                    health["state"] = "unknown"
-                    health["reason"] = "cli_check_failed"
+        with adapters.account_home(adapter, home):
+            async with lock, self._checks:
+                return await self._check(partner_id, profile, adapter, home)
+
+    async def _check(self, partner_id, profile, adapter, home):
+        health = _unknown_health()
+        checked_at = self.clock()
+        if type(checked_at) not in (float, int) or not math.isfinite(checked_at) or checked_at < 0:
+            raise PartnerError("invalid_check_clock")
+        health["checked_at"] = checked_at
+        try:
+            if _connector(profile):
+                connection = profile.get("connection")
+                if connection is None:
+                    health.update(state="unavailable", reason="connection_not_configured")
                 else:
-                    health["version"] = version.group(0)
-                    command = ([executable, "login", "status"] if adapter == "codex" else
-                               [executable, "--safe-mode", "--restricted", "auth", "status", "--json"])
-                    lines, code = await adapters._run(command, "", self.root, 10, include_stderr=True)
-                    raw = b"\n".join(lines)
-                    if len(raw) > 65536:
-                        raise RuntimeError
-                    auth = adapters._authentication(adapter, code, raw.decode("utf-8", errors="replace"))
-                    confirmed = auth.get("subscription_confirmed") is True
-                    method = auth.get("authMethod")
-                    health["auth"] = {"method": method if method in {"chatgpt", "claude.ai"} else "unconfirmed",
-                                      "subscription_confirmed": confirmed}
-                    health["state"] = "ready" if confirmed else "unavailable"
-                    health["reason"] = None if confirmed else "auth_unconfirmed"
-            except (FileNotFoundError, RuntimeError) as error:
-                # find_codex uses RuntimeError for absence. Process/output failures
-                # remain unknown whenever an executable was already found.
-                missing = health["cli_available"] is None
-                health.update(state="unavailable" if missing else "unknown",
-                              reason="cli_missing" if missing else (
-                                  "protocol_invalid" if str(error) == "connector_protocol_invalid" else "check_failed"))
-                if missing:
-                    health["cli_available"] = False
-            except asyncio.TimeoutError:
-                health.update(state="unknown", reason="check_timeout")
-            except OSError:
-                health.update(state="unknown", reason="check_failed")
-            # CancelledError deliberately propagates after adapters._run finishes
-            # process-group cleanup. It never overwrites a previous health check.
-            return self._save_check(partner_id, health)
+                    adapters.find_json_cli(connection)
+                    health["cli_available"] = True
+                    observation = await adapters.check_json_cli(connection, self.root)
+                    local = observation["billing"] == "local"
+                    health.update(state="ready" if observation["ready"] else "unavailable",
+                                  reason=None if observation["ready"] else "connector_not_ready",
+                                  version=observation["version"],
+                                  auth={"method": "local" if local else "configured_cli",
+                                        "subscription_confirmed": None})
+                return self._save_check(partner_id, health)
+            if adapter == "kimi":
+                adapters.find_kimi()
+                await adapters.select_cli("kimi", self.root)
+                observation = await adapters.kimi_status(self.root)
+                health.update(state="ready" if observation["ready"] else "unavailable", cli_available=True,
+                              version=observation["version"], reason=None if observation["ready"] else "auth_unconfirmed",
+                              auth={"method": "kimi-code" if observation["ready"] else "unconfirmed",
+                                    "subscription_confirmed": observation["ready"]})
+                if home is None:
+                    self._setup_observations[adapter] = "ready" if observation["ready"] else "login_required"
+                return self._save_check(partner_id, health)
+            await adapters.select_cli(adapter, self.root)
+            executable = native_adapter(adapter).resolve()
+            health["cli_available"] = True
+            version_command = ([executable, "--version"] if adapter == "codex" else
+                               [executable, "--safe-mode", "--restricted", "--version"])
+            lines, code = await adapters._run(version_command, "", self.root, 10, include_stderr=True)
+            raw = b"\n".join(lines)
+            version = _VERSION.search(raw.decode("utf-8", errors="replace")) if len(raw) <= 65536 else None
+            if code or version is None:
+                health["state"] = "unknown"
+                health["reason"] = "cli_check_failed"
+            else:
+                health["version"] = version.group(0)
+                command = ([executable, "login", "status"] if adapter == "codex" else
+                           [executable, "--safe-mode", "--restricted", "auth", "status", "--json"])
+                lines, code = await adapters._run(command, "", self.root, 10, include_stderr=True)
+                raw = b"\n".join(lines)
+                if len(raw) > 65536:
+                    raise RuntimeError
+                auth = adapters._authentication(adapter, code, raw.decode("utf-8", errors="replace"))
+                confirmed = auth.get("subscription_confirmed") is True
+                method = auth.get("authMethod")
+                health["auth"] = {"method": method if method in {"chatgpt", "claude.ai"} else "unconfirmed",
+                                  "subscription_confirmed": confirmed}
+                health["state"] = "ready" if confirmed else "unavailable"
+                health["reason"] = None if confirmed else "auth_unconfirmed"
+        except (FileNotFoundError, RuntimeError) as error:
+            # find_codex uses RuntimeError for absence. Process/output failures
+            # remain unknown whenever an executable was already found.
+            missing = health["cli_available"] is None
+            health.update(state="unavailable" if missing else "unknown",
+                          reason="cli_missing" if missing else (
+                              "protocol_invalid" if str(error) == "connector_protocol_invalid" else "check_failed"))
+            if missing:
+                health["cli_available"] = False
+        except asyncio.TimeoutError:
+            health.update(state="unknown", reason="check_timeout")
+        except OSError:
+            health.update(state="unknown", reason="check_failed")
+        # CancelledError deliberately propagates after adapters._run finishes
+        # process-group cleanup. It never overwrites a previous health check.
+        return self._save_check(partner_id, health)
 
     def _save_check(self, partner_id, health):
         with self._locked():

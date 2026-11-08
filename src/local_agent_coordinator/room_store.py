@@ -102,6 +102,9 @@ class RoomStore:
         self.agents = dict(LEGACY_NAMES if agents is None else agents)
         self.agent_adapters = dict(agent_adapters or {})
         self.agent_bean_styles = dict(agent_bean_styles or {})
+        # The CLI home a profile currently uses (None: the shared local login).
+        # Recorded with each session so later reads and cleanup find it there.
+        self.account_home_for = lambda provider: None
         if any(not isinstance(style, str) or style not in BEAN_STYLE_IDS
                for style in self.agent_bean_styles.values()):
             raise RoomError("invalid_configuration")
@@ -325,6 +328,10 @@ class RoomStore:
                 from .team_store import TeamStore
                 self._team = TeamStore(self)
                 self._team.initialize(db)
+                # Only sessions created in a profile's own CLI home are listed;
+                # no row means the shared local login (all older sessions).
+                db.execute("CREATE TABLE IF NOT EXISTS native_session_homes (room_id TEXT NOT NULL, provider TEXT NOT NULL, "
+                           "session_id TEXT NOT NULL, account_home TEXT NOT NULL, PRIMARY KEY(room_id,provider,session_id))")
                 if "team_run_id" not in {column[1] for column in db.execute("PRAGMA table_info(executions)")}:
                     db.execute("BEGIN IMMEDIATE")
                     try:
@@ -1381,11 +1388,35 @@ class RoomStore:
         with self._connection() as db:
             room = self._room(db, room_id)
             result = []
-            for row in db.execute("SELECT provider,adapter,session_id FROM native_session_history WHERE room_id=?", (room_id,)):
+            for row in db.execute("SELECT h.provider,h.adapter,h.session_id,s.account_home FROM native_session_history h "
+                                  "LEFT JOIN native_session_homes s ON s.room_id=h.room_id AND s.provider=h.provider "
+                                  "AND s.session_id=h.session_id WHERE h.room_id=?", (room_id,)):
                 shared = [other[0] for other in db.execute("SELECT DISTINCT room_id FROM native_session_history "
                     "WHERE adapter=? AND session_id=? AND room_id!=?", (row["adapter"], row["session_id"], room_id))]
                 result.append({**dict(row), "created_after": room["created_at"], "shared_room_ids": shared})
             return result
+
+    def _record_session_home(self, db, room_id, provider, session_id):
+        home = self.account_home_for(provider)
+        if home is not None:
+            db.execute("INSERT OR IGNORE INTO native_session_homes(room_id,provider,session_id,account_home) VALUES (?,?,?,?)",
+                       (room_id, provider, session_id, str(home)))
+
+    def native_session_account_home(self, room_id, provider, session_id):
+        """The home a member's session was created in; None is the local login."""
+        with self._connection() as db:
+            row = db.execute("SELECT account_home FROM native_session_homes WHERE room_id=? AND provider=? AND session_id=?",
+                             (room_id, provider, session_id)).fetchone()
+        return row[0] if row is not None else None
+
+    def native_session_homes(self, room_id):
+        with self._connection() as db:
+            return {row[0]: row[1] for row in db.execute(
+                "SELECT session_id,account_home FROM native_session_homes WHERE room_id=?", (room_id,))}
+
+    def provider_working(self, provider):
+        with self._connection() as db:
+            return db.execute("SELECT 1 FROM jobs WHERE provider=? AND status='working' LIMIT 1", (provider,)).fetchone() is not None
 
     def retain_native_session_identity(self, job_id, session_id, *, source):
         """Retain cleanup provenance, never authorize session reuse or success."""
@@ -1412,6 +1443,7 @@ class RoomStore:
                                         (job["room_id"], job["provider"], job["adapter"], session_id)).fetchone() is not None
                 db.execute("INSERT OR IGNORE INTO native_session_history(room_id,provider,adapter,session_id) VALUES (?,?,?,?)",
                            (job["room_id"], job["provider"], job["adapter"], session_id))
+                self._record_session_home(db, job["room_id"], job["provider"], session_id)
             self._event(db, job["room_id"], "native_session_cleanup_identity", job_id=job_id, provider=job["provider"],
                         confirmed=confirmed, session_id=session_id if confirmed else None, source=source,
                         first_registration=confirmed and not registered)
@@ -1491,7 +1523,7 @@ class RoomStore:
         for table in ("project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
             db.execute("DELETE FROM " + table + " WHERE room_id=?", (room_id,))
         db.execute("DELETE FROM objective_progress WHERE objective_id IN (SELECT id FROM objectives WHERE room_id=?)", (room_id,))
-        for table in ("native_workspaces", "native_handoffs", "native_handoff_exports", "native_session_history", "requests",
+        for table in ("native_workspaces", "native_handoffs", "native_handoff_exports", "native_session_history", "native_session_homes", "requests",
                       "events", "jobs", "members", "team_runs", "objectives", "teams", "rooms"):
             db.execute("DELETE FROM " + table + " WHERE " + ("id" if table == "rooms" else "room_id") + "=?", (room_id,))
 
@@ -5269,6 +5301,7 @@ class RoomStore:
                     adapter = db.execute("SELECT adapter FROM members WHERE room_id=? AND provider=?",(room_id,provider)).fetchone()[0]
                     db.execute("INSERT OR IGNORE INTO native_session_history(room_id,provider,adapter,session_id) VALUES (?,?,?,?)",
                                (room_id,provider,adapter,session_id))
+                    self._record_session_home(db, room_id, provider, session_id)
             public_duplicate = bool(message and db.execute(
                 "SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.job_id')=? "
                 "AND json_extract(value_json,'$.native_progress')=1 AND json_extract(value_json,'$.text')=? LIMIT 1",

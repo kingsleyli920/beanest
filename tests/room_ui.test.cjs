@@ -9878,3 +9878,69 @@ test('policy field captions span the full field instead of wrapping into the 80p
   assert.match(css, /\.policy-field \{[^}]*grid-template-columns: 80px minmax\(0, 1fr\)/);
   assert.match(css, /\.policy-field > \.detail-caption \{[^}]*grid-column: 1 \/ -1/);
 });
+
+test('account popover names the login source, shows a copyable login command for an unsigned profile home, and switches back', async () => {
+  // Catches: a profile silently sharing the local login, a missing or altered login command,
+  // Beanest posting anything that would sign in, and a switch allowed while the partner works.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  const command = "CLAUDE_CONFIG_DIR='/runtime/partners/homes/claude' '/opt/homebrew/bin/claude' auth login";
+  const team = accountFixture({ email: 'team@example.com', plan: 'max', auth_method: 'claude.ai', source: 'claude_auth_status', shared_profile_ids: ['claude'] });
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true,
+    account_source: { kind: 'local', home: null, variable: null, login_command: null },
+    account: agent.id === 'claude' ? team : accountFixture() }));
+  const directory = () => ({ partners, supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }] });
+  const ui = await browser({ rooms: [saved.room], saved, partners, route(request) {
+    if (request.path.startsWith('/api/partners/claude/account-source')) {
+      partners[0].account_source = request.body.source === 'profile_home'
+        ? { kind: 'profile_home', home: '/runtime/partners/homes/claude', variable: 'CLAUDE_CONFIG_DIR', login_command: command }
+        : { kind: 'local', home: null, variable: null, login_command: null };
+      partners[0].account = request.body.source === 'profile_home'
+        ? accountFixture({ state: 'not_checked', email: null, plan: null, auth_method: null, source: 'claude_auth_status', scope: 'profile_cli_home',
+          checked_at: null, stale: true, shared_profile_ids: ['claude'], quota: { state: 'not_checked', windows: [], stale: true } }) : team;
+      return directory();
+    }
+    if (request.path.startsWith('/api/partners/claude/account/refresh')) {
+      partners[0].account = accountFixture({ email: 'personal@example.com', plan: 'pro', auth_method: 'claude.ai', source: 'claude_auth_status',
+        scope: 'profile_cli_home', shared_profile_ids: ['claude'] });
+      return directory();
+    }
+  } });
+  const footer = () => ui.get('provider-account-claude');
+  const switchButton = () => descendants(footer()).find((node) => node.tagName === 'BUTTON' && node.dataset.focusKey === 'account-source');
+  assert.match(footer().textContent, /登录方式本机登录/);
+  assert.match(footer().textContent, /使用本机 Claude Code 的当前登录/);
+  assert.equal(switchButton().textContent, '改用独立登录');
+  assert.equal(descendants(footer()).some((node) => node.tagName === 'CODE'), false, 'the local login shows no login command');
+
+  switchButton().fire('click'); await settle();
+  assert.deepEqual(ui.posts().map((request) => [request.path.split('?')[0], request.body]), [['/api/partners/claude/account-source', { source: 'profile_home' }]]);
+  assert.match(footer().textContent, /登录方式豆窝独立登录/);
+  assert.match(footer().textContent, /使用豆窝为它单独保存的 Claude Code 登录，不影响本机登录和其他伙伴/);
+  assert.match(footer().textContent, /豆窝不会替你登录/);
+  const code = descendants(footer()).find((node) => node.tagName === 'CODE');
+  assert.equal(code.textContent, command, 'the command is shown exactly as the service quoted it');
+  const copy = descendants(footer()).find((node) => node.tagName === 'BUTTON' && node.dataset.focusKey === 'account-login-copy');
+  copy.fire('click'); await settle();
+  assert.match(ui.get('manager-notice').textContent, /手动选中命令复制/, 'without clipboard access the user is told to copy by hand');
+  assert.match(ui.get('provider-account-codex').textContent, /使用本机 Codex 的当前登录/, 'other partners keep the local login');
+
+  accountRefreshButton(footer()).fire('click'); await settle();
+  assert.match(footer().textContent, /personal@example.com/);
+  assert.equal(descendants(footer()).some((node) => node.tagName === 'CODE'), false, 'a signed-in profile home hides the login command');
+  assert.equal(switchButton().textContent, '改回本机登录');
+
+  partners[0].monitor = { status: 'working', current_tasks: [{ room_id: roomId, job_id: jobId, status: 'working' }] };
+  await ui.click('open-partners');
+  assert.equal(switchButton().disabled, true);
+  assert.match(footer().textContent, /Claude Code正在执行任务，结束后才能切换登录方式/);
+
+  partners[0].monitor = { status: 'idle', current_tasks: [] };
+  await ui.click('open-partners');
+  assert.equal(switchButton().disabled, false);
+  switchButton().fire('click'); await settle();
+  assert.deepEqual(ui.posts().at(-1).body, { source: 'local' });
+  assert.match(footer().textContent, /登录方式本机登录/);
+  assert.equal(switchButton().textContent, '改用独立登录');
+  assert.ok(ui.posts().every((request) => /\/api\/partners\/claude\/(account-source|account\/refresh)/.test(request.path)),
+    'no login, room or model request is ever sent');
+});

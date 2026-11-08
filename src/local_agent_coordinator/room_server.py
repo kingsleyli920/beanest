@@ -29,7 +29,7 @@ from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance)")
+PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
 AVAILABILITY_RECHECK_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/availability/recheck")
 ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/account/refresh")
@@ -79,6 +79,7 @@ ERROR_STATUS = {
     "invalid_partner_profile": 400, "unsupported_partner_adapter": 400,
     "partner_identity_conflict": 409, "partner_limit_reached": 409,
     "invalid_partner_enabled": 400, "unknown_partner": 404,
+    "invalid_account_source": 400, "partner_account_source_busy": 409, "partner_account_home_changed": 409,
     "invalid_check_clock": 503, "partner_management_unavailable": 409,
     "invalid_partner_connection": 400, "invalid_project_revision": 400,
     "project_export_unavailable": 409, "project_export_corrupt": 409, "svg_preview_unavailable":409,
@@ -577,7 +578,7 @@ class _RoomHandler(_Handler):
             if path == "/api/partners":
                 partners = await service.list_partners()
                 if mcp:
-                    partners = {**partners,"partners":[{key:value for key,value in item.items() if key not in {"connection", "account"}}
+                    partners = {**partners,"partners":[{key:value for key,value in item.items() if key not in {"connection", "account", "account_source"}}
                                                        for item in partners["partners"]]}
                 return partners
             match = ROOM_ROUTE.fullmatch(path)
@@ -623,6 +624,8 @@ class _RoomHandler(_Handler):
                 return await service.configure_partner(partner[1],body["connection"])
             if partner[2] == "check" and not body:
                 return await service.check_partner(partner[1])
+            if partner[2] == "account-source" and set(body) == {"source"} and isinstance(body["source"], str):
+                return await service.set_partner_account_source(partner[1], body["source"])
             if (partner[2] == "enabled" and set(body) in ({"enabled"}, {"enabled", "request_id"}) and type(body["enabled"]) is bool
                     and ("request_id" not in body or self._text(body["request_id"], 512))):
                 return await service.set_partner_enabled(partner[1], body["enabled"], **({"request_id":body["request_id"]} if "request_id" in body else {}))
