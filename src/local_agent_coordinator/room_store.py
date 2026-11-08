@@ -234,6 +234,10 @@ class RoomStore:
                         room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
                         binding_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS room_source_observations (
+                        room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
+                        observation_json TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS room_media_attachments (
                         room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
                         id TEXT NOT NULL, metadata_json TEXT NOT NULL,
@@ -1840,6 +1844,41 @@ class RoomStore:
             self._room(db, room_id)
             row = db.execute("SELECT binding_json FROM room_delivery_repositories WHERE room_id=?", (room_id,)).fetchone()
             return json.loads(row[0]) if row else None
+
+    def source_observation(self, room_id):
+        """The delivery repository HEAD this room last handed to a partner."""
+        with self._connection() as db:
+            row = db.execute("SELECT observation_json FROM room_source_observations WHERE room_id=?",
+                             (room_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def advance_source_observation(self, room_id, expected, observation, change=None):
+        """Compare-and-set the observed HEAD; record an outside change once."""
+        encoded = json.dumps(observation, sort_keys=True, ensure_ascii=True, allow_nan=False)
+        with self._connection(write=True) as db:
+            row = db.execute("SELECT observation_json FROM room_source_observations WHERE room_id=?",
+                             (room_id,)).fetchone()
+            current = json.loads(row[0]) if row else None
+            if (current or {}).get("head") != (expected or {}).get("head") or (
+                    current or {}).get("root") != (expected or {}).get("root"):
+                return False
+            db.execute("INSERT INTO room_source_observations VALUES (?,?) "
+                       "ON CONFLICT(room_id) DO UPDATE SET observation_json=excluded.observation_json",
+                       (room_id, encoded))
+            if change is not None:
+                self._event(db, room_id, "source_advanced_externally", sender="system", **change)
+            return True
+
+    def inherited_delivery_repository(self, room_id):
+        """The user's latest delivery repository choice in another room of the
+        same registered project, for a new room that has not chosen its own."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT d.room_id, d.binding_json FROM room_delivery_repositories d JOIN rooms r ON r.id=d.room_id "
+                "WHERE d.room_id!=? AND r.project_id IS NOT NULL "
+                "AND r.project_id=(SELECT project_id FROM rooms WHERE id=?) "
+                "ORDER BY r.updated_at DESC, d.room_id LIMIT 1", (room_id, room_id)).fetchone()
+            return {**json.loads(row[1]), "inherited_from": row[0]} if row else None
 
     def bind_delivery_repository(self, room_id, binding):
         """Keep an explicit user-selected delivery target within this room."""

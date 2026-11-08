@@ -4876,6 +4876,14 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'team_help_requested') return t("{p0} 向 {p1} 请求协助", { p0: displayName(event.sender), p1: displayName(event.recipient) });
   if (event.kind === 'team_help_finished') return t("{p0} 已回复协助请求", { p0: displayName(event.sender) });
   if (event.kind === 'task_taken_over') return t("{p0} 已接过 {p1} 的子任务，继续处理。", { p0: displayName(event.owner), p1: displayName(event.previous_owner) });
+  if (event.kind === 'source_advanced_externally') {
+    const repository = typeof event.repository === 'string' && event.repository ? event.repository : t("交付仓库");
+    const count = Number.isSafeInteger(event.external_count) && event.external_count > 0 ? event.external_count : 0;
+    if (!count) return t("{p0} 的提交历史在房间外变了，伙伴会先按最新代码核对任务，已完成的不重做。", { p0: repository });
+    return event.complete === false
+      ? t("房间外至少有 {p0} 个新提交进入 {p1}，伙伴会先按最新代码核对任务，已完成的不重做。", { p0: count, p1: repository })
+      : t("房间外有 {p0} 个新提交进入 {p1}，伙伴会先按最新代码核对任务，已完成的不重做。", { p0: count, p1: repository });
+  }
   if (event.kind === 'team_stopped') return typeof event.reason === 'string' && event.reason ? event.reason : t("团队协作已停止，原因与下一步见下方交付卡。");
   if (event.kind === 'execution_queued') return t("文件版本 {p0} 的隔离测试已排队", { p0: event.revision });
   if (event.kind === 'execution_started') return t("正在隔离运行文件版本 {p0}", { p0: event.revision });
@@ -4948,7 +4956,7 @@ function eventNode(event, jobs, sourceMembers = null) {
       || ['run_started', 'run_accepted'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
-      || event.kind === 'task_taken_over'
+      || event.kind === 'task_taken_over' || event.kind === 'source_advanced_externally'
       || executionNeedsAttention
       || typeof event.cancellation_confirmed === 'boolean'
       || (event.kind === 'job_created' && jobKind(event, jobs) === 'feedback');

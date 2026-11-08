@@ -516,8 +516,56 @@ for index in range(3):
         stream.identity(SESSION)
         await stream.consume(json.dumps({**notice, 'session_id': str(uuid.uuid4())}).encode())
         self.assertEqual(stream.failure, 'native_session_identity_mismatch')
+        # A later, unrelated notice does not clear an identity failure.
         await stream.consume(json.dumps({'type': 'system', 'subtype': 'ui_log', 'text': 'unknown'}).encode())
-        self.assertEqual(stream.failure, 'native_protocol_unknown')
+        self.assertEqual(stream.failure, 'native_session_identity_mismatch')
+
+    async def test_future_system_notice_mid_turn_keeps_the_completed_result(self):
+        # Catches: Claude Code 2.1.319's {"type":"system","subtype":"notification"}
+        # arriving after StructuredOutput was rejected as native_protocol_unknown,
+        # discarding a finished review and stopping the room.
+        notice = {'type': 'system', 'subtype': 'notification', 'session_id': SESSION,
+                  'uuid': str(uuid.uuid4()), 'text': 'DO_NOT_STORE_NOTICE_BODY', 'key': 'DO_NOT_STORE_KEY'}
+        events = [
+            {'type': 'system', 'subtype': 'init', 'session_id': SESSION},
+            {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'a',
+                'name': 'Bash', 'input': {'command': 'synthetic command'}}]}},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result',
+                'tool_use_id': 'a', 'content': 'synthetic result', 'is_error': False}]}},
+            notice,
+            {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'structured_output': FINAL}]
+        with self.make_stub(events, agent='claude'):
+            result = await native.invoke_native('claude', 'hello', self.root,
+                response_schema=SCHEMA, receipt_dir=self.root / 'private')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(json.loads(result['text']), FINAL)
+        self.assertEqual((result['native_execution']['tool_calls'],
+                          result['native_execution']['tool_results']), (1, 1))
+        receipt = Path(result['native_execution']['receipt_path']).read_text()
+        self.assertNotIn('DO_NOT_STORE', receipt)
+        self.assertIn({'type': 'native_protocol_notice', 'event_type': 'system', 'event_subtype': 'notification'},
+                      [json.loads(line)['data'] for line in receipt.splitlines()])
+
+    async def test_future_system_notice_is_narrow(self):
+        # Catches: tolerating notices so broadly that a forged identity, an
+        # unsafe label, a malformed KNOWN subtype or a new top-level type passes.
+        stream = native._Stream('claude', False, None)
+        stream.identity(SESSION)
+        await stream.consume(json.dumps({'type': 'system', 'subtype': 'notification',
+                                         'session_id': str(uuid.uuid4())}).encode())
+        self.assertEqual(stream.failure, 'native_session_identity_mismatch')
+        for event, failure in [
+                ({'type': 'system', 'subtype': 'bad label', 'session_id': SESSION}, 'native_protocol_unknown'),
+                ({'type': 'system', 'session_id': SESSION}, 'native_protocol_unknown'),
+                ({'type': 'system', 'subtype': 'ui_invalidate', 'event': 'Bash', 'uuid': str(uuid.uuid4()),
+                  'session_id': SESSION}, 'native_protocol_invalid'),
+                ({'type': 'future_metadata', 'subtype': 'notification'}, 'native_protocol_unknown')]:
+            with self.subTest(event=event):
+                stream = native._Stream('claude', False, None)
+                stream.identity(SESSION)
+                await stream.consume(json.dumps(event).encode())
+                self.assertEqual(stream.failure, failure)
+                self.assertEqual((stream.calls, stream.results), (0, 0))
 
     async def test_background_membership_is_metadata_and_does_not_invent_tool_results(self):
         task = {'task_id': 'background-1', 'run_id': 'run-1', 'task_type': 'local_bash',
@@ -697,7 +745,8 @@ for index in range(3):
             {'type': 'future_metadata', 'subtype': 'future_startup_notice',
              'output': ['DO_NOT_STORE_AUTH'], 'prompt': 'DO_NOT_STORE_PROMPT',
              'thinking': 'DO_NOT_STORE_THINKING'},
-            {'type': 'system', 'subtype': 'future_subtype', 'content': 'DO_NOT_STORE_BODY'},
+            # A future system subtype is a tolerated notice; an unsafe label is not.
+            {'type': 'system', 'subtype': 'future subtype', 'content': 'DO_NOT_STORE_BODY'},
         ]:
             with self.subTest(event_type=event['type']), self.make_stub([event], agent='claude', after='time.sleep(60)'):
                 result = await asyncio.wait_for(native.invoke_native('claude', 'hello', self.root,
@@ -707,7 +756,8 @@ for index in range(3):
             text = Path(result['native_execution']['receipt_path']).read_text()
             self.assertNotIn('DO_NOT_STORE', text)
             self.assertEqual([json.loads(line)['data'] for line in text.splitlines()],
-                [{'type': 'native_protocol_diagnostic', 'event_type': event['type'], 'event_subtype': event['subtype']}])
+                [{'type': 'native_protocol_diagnostic', 'event_type': event['type'],
+                  **({'event_subtype': event['subtype']} if ' ' not in event['subtype'] else {})}])
         self.assertEqual(native._protocol_diagnostic(json.dumps({'type': {'auth': 'secret'},
             'subtype': 'DO NOT STORE CONTENT'}).encode()), {'type': 'native_protocol_diagnostic'})
 

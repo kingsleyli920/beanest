@@ -854,4 +854,8 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "等待开始开发{p0}": "Waiting to build {p0}",
   "正在处理团队任务，具体分工待核对": "Working on a team task; the assignment needs checking",
   "等待开始处理团队任务，具体分工待核对": "Waiting to start a team task; the assignment needs checking",
+  "交付仓库": "the delivery repository",
+  "{p0} 的提交历史在房间外变了，伙伴会先按最新代码核对任务，已完成的不重做。": "The commit history of {p0} changed outside this room. Partners will check their tasks against the latest code first and won't redo finished work.",
+  "房间外至少有 {p0} 个新提交进入 {p1}，伙伴会先按最新代码核对任务，已完成的不重做。": "At least {p0} new {p0:commit|commits} reached {p1} from outside this room. Partners will check their tasks against the latest code first and won't redo finished work.",
+  "房间外有 {p0} 个新提交进入 {p1}，伙伴会先按最新代码核对任务，已完成的不重做。": "{p0} new {p0:commit|commits} reached {p1} from outside this room. Partners will check their tasks against the latest code first and won't redo finished work.",
 });
