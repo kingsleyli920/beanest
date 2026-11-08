@@ -22,6 +22,31 @@ _PHASE_COMMANDS = {
     "checkpoint": {"checkpoint"},
     "checkpoint_review": {"checkpoint_review"},
 }
+# Per-phase schemas require these as non-empty strings. A stable schema leaves
+# them nullable, so the service enforces the same rule from the job's phase.
+PHASE_NONEMPTY_TEXT = {
+    "review": frozenset({"reason"}),
+    "checkpoint_review": frozenset({"reason"}),
+    "checkpoint": frozenset({"summary"}),
+}
+
+
+def stable_native_schema(adapter):
+    """Whether this adapter's resumed sessions need one byte-identical schema.
+
+    Claude puts --json-schema ahead of the cached prompt, so a schema that
+    changes with the team phase rewrites the whole session cache on resume.
+    """
+    return adapter == "claude"
+
+
+def stable_command_shape(*, has_peers=True):
+    """Every command a room member could ever send, independent of phase.
+
+    Only the roster narrows it, and the roster already bounds the schema.
+    """
+    kinds = [kind for kind in _COMMAND_FIELDS if has_peers or kind != "request_help"]
+    return kinds, set().union(*(_COMMAND_FIELDS[kind] for kind in kinds))
 
 
 def command_shape(*, team_phase=None, can_propose=True, has_peers=True, native=False):
@@ -36,6 +61,16 @@ def command_shape(*, team_phase=None, can_propose=True, has_peers=True, native=F
     return kinds, fields
 
 
+def native_room_response_schema(adapter, *, member_ids, provider, team_phase, can_propose):
+    """The schema one native team call sends, chosen by its real adapter."""
+    common = dict(project=True, native=True, collaboration=True, member_ids=member_ids, provider=provider)
+    if not stable_native_schema(adapter):
+        return response_schema(**common, team_phase=team_phase, can_propose=can_propose)
+    if type(team_phase) is not str or team_phase not in _TEAM_PHASES or type(can_propose) is not bool:
+        raise ValueError("invalid_response_schema_context")
+    return response_schema(**common, stable=True)
+
+
 def _object(properties: dict) -> dict:
     return {
         "type": "object",
@@ -47,17 +82,21 @@ def _object(properties: dict) -> dict:
 
 def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str,
                     collaboration: bool = False, team_phase: str | None = None,
-                    can_propose: bool = True, folder: bool = False, native: bool = False) -> dict:
+                    can_propose: bool = True, folder: bool = False, native: bool = False,
+                    stable: bool = False) -> dict:
     """Return an independent schema for one room member's JSON response.
 
     The bounded roster must include the responding member. A single-member
     room permits no actions, without emitting an invalid empty enum. Team callers
     may restrict the response to the recorded job phase; omitting it permits all
     existing team command types. Storage still validates task permissions.
+    A stable native schema depends only on the roster: the service applies the
+    job's phase rules to the response instead.
     """
     if (type(project) is not bool or type(collaboration) is not bool or type(can_propose) is not bool
             or type(folder) is not bool or (folder and not project)
             or type(native) is not bool or native and (not project or not collaboration)
+            or type(stable) is not bool or stable and (not native or team_phase is not None)
             or (team_phase is not None and (type(team_phase) is not str or team_phase not in _TEAM_PHASES))
             or type(member_ids) is not tuple
             or not 1 <= len(member_ids) <= 8
@@ -83,7 +122,8 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
         "state": {"type": "string", "enum": ["done", "working", "needs_user"]},
     }
     if collaboration:
-        kinds, fields = command_shape(team_phase=team_phase, can_propose=can_propose, has_peers=bool(peers), native=native)
+        kinds, fields = (stable_command_shape(has_peers=bool(peers)) if stable else
+                         command_shape(team_phase=team_phase, can_propose=can_propose, has_peers=bool(peers), native=native))
         command_properties = {"type": {"type": "string", "enum": kinds}}
         command_properties.update({field: {"type": ["string", "null"]}
                                    for field in sorted(fields - {"type"})})
@@ -95,6 +135,10 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
             "Choose an allowed operation. All fields used by that operation must be non-null; "
             "propose requires id such as T1. Optional request_help repair_paths may be null "
             "for ordinary assistance; otherwise only unused fields are null.")
+        if stable:
+            command_properties["type"]["description"] += (
+                " This schema is shared by every phase: the host accepts only the operations "
+                "the prompt names for the current job_phase.")
         for field in {"dependencies", "write_paths", "repair_paths"} & fields:
             command_properties[field] = {"type": ["array", "null"], "items": {"type": "string"}}
         if "repair_paths" in fields:
@@ -128,10 +172,8 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
                                        "summary": "Checkpoint summary only; do not use for review findings."}.items():
                 if field in fields:
                     command_properties[field]["description"] = description
-            if team_phase in {"review", "checkpoint_review"}:
-                command_properties["reason"].update(type="string", minLength=1)
-            if team_phase == "checkpoint":
-                command_properties["summary"].update(type="string", minLength=1)
+            for field in PHASE_NONEMPTY_TEXT.get(team_phase, ()):
+                command_properties[field].update(type="string", minLength=1)
         if native:
             for field in fields - {"type"}:
                 users = [kind for kind in kinds if field in _COMMAND_FIELDS[kind]]
