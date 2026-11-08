@@ -18,12 +18,12 @@ import tempfile
 
 
 STALE_SECONDS = 90
-_ADAPTERS = {"codex", "claude"}
+_ADAPTERS = {"codex", "claude", "kimi"}
 
 
 # A gate key is the account scope: the bare adapter for the shared local CLI
 # login, or adapter:profile for a profile's own Beanest-created CLI home.
-_SCOPE = re.compile(r"(codex|claude)(?::[a-z][a-z0-9_-]{0,31})?")
+_SCOPE = re.compile(r"(codex|claude|kimi)(?::[a-z][a-z0-9_-]{0,31})?")
 
 
 def _scoped(keys):
@@ -64,7 +64,8 @@ class QuotaGate:
                 if (not isinstance(row, dict) or set(row) != {"identity", "reason", "source", "observed_at", "resets_at"}
                         or not isinstance(row["identity"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["identity"])
                         or row["reason"] not in {"quota_exhausted", "subscription_limit_reached"}
-                        or row["source"] not in {"codex_shared_pool", "claude_shared_pool", "claude_cli_limit", "codex_cli_limit"}
+                        or row["source"] not in {"codex_shared_pool", "claude_shared_pool", "kimi_shared_pool",
+                                                 "claude_cli_limit", "codex_cli_limit", "kimi_cli_limit"}
                         or not _timestamp(row["observed_at"])
                         or row["resets_at"] is not None and not _timestamp(row["resets_at"])):
                     raise ValueError("quota_state_corrupt")
@@ -103,14 +104,23 @@ class QuotaGate:
             except FileNotFoundError:
                 pass
 
+    def fingerprint(self, text):
+        # The private per-install salt prevents an exported fingerprint from
+        # being a plain, globally comparable hash. Never export this file.
+        return hmac.new(bytes.fromhex(self.salt), text.encode(), hashlib.sha256).hexdigest()
+
     def identity(self, account):
-        if (not isinstance(account, dict) or account.get("auth_method") not in {"chatgpt", "claude.ai"}
+        if not isinstance(account, dict):
+            return None
+        if account.get("auth_method") == "kimi-code":
+            # Kimi logins may have no email; the account refresh keeps only a
+            # salted fingerprint of the provider's opaque user id.
+            key = account.get("account_key")
+            return key if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key) else None
+        if (account.get("auth_method") not in {"chatgpt", "claude.ai"}
                 or not isinstance(account.get("email"), str) or not account["email"]):
             return None
-        # The private per-install salt prevents an exported fingerprint from
-        # being a plain, globally comparable email hash. Never export this file.
-        text = account["auth_method"] + ":" + account["email"].strip().casefold()
-        return hmac.new(bytes.fromhex(self.salt), text.encode(), hashlib.sha256).hexdigest()
+        return self.fingerprint(account["auth_method"] + ":" + account["email"].strip().casefold())
 
     def _shared_windows(self, scope, account):
         adapter = scope_adapter(scope)
@@ -118,6 +128,11 @@ class QuotaGate:
         source, names = {
             "codex": ("codex_app_server_account_rate_limits", {"codex:primary", "codex:secondary"}),
             "claude": ("claude_sdk_get_usage", {"claude:five_hour", "claude:seven_day"}),
+            # Only Kimi's billing-cycle meters can lift a monthly refusal. The
+            # installed CLI reports just the 5-hour window, which says nothing
+            # about the month, so a recorded refusal stays until a monthly
+            # meter shows room or the user asks for a recheck.
+            "kimi": ("kimi_code_web_oauth_usage", {"kimi:summary", "kimi:monthTotal", "kimi:monthCode"}),
         }.get(adapter, (None, set()))
         if (quota.get("state") != "available" or quota.get("stale") is not False
                 or quota.get("source") != source or source is None):
@@ -197,9 +212,7 @@ class QuotaGate:
                 "scope": "default_cli_login" if scope == adapter else "profile_cli_home",
                 "can_request_recheck": False}
         if adapter not in _ADAPTERS:
-            # Kimi exposes read-only usage, but not the stable account identity
-            # needed to persist or clear an account-bound dispatch block.
-            return base if adapter == "kimi" else {**base, "reason": "adapter_unsupported"}
+            return {**base, "reason": "adapter_unsupported"}
         identity, block = self.identity(account), self.blocks.get(scope)
         if block and identity == block["identity"]:
             expired = block["resets_at"] is not None and block["resets_at"] <= self.clock()
@@ -207,7 +220,7 @@ class QuotaGate:
                     "state": "unknown" if expired else "blocked", "selectable": expired,
                     "reason": "quota_reset_due" if expired else block["reason"],
                     "stale": base["stale"] or self.clock() - block["observed_at"] > STALE_SECONDS,
-                    "can_request_recheck": (adapter == "claude" and not expired and account.get("stale") is False
+                    "can_request_recheck": (adapter in {"claude", "kimi"} and not expired and account.get("stale") is False
                                             and block["reason"] == "subscription_limit_reached")}
         if block and identity is None:
             # A failed identity read after restart cannot bypass a previously

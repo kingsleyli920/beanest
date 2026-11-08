@@ -589,6 +589,9 @@ class PartnerManager:
                             account["display_identity"]["masked_phone"] = phone
                         if isinstance(nickname, str) and nickname.strip() and len(nickname) <= 100 and nickname.isprintable():
                             account["display_identity"]["nickname"] = nickname.strip()
+                    key = observed.get("account_key")
+                    account["account_key"] = (self.quota_gate.fingerprint("kimi-code:" + key)
+                                              if isinstance(key, str) and key and len(key) <= 256 else None)
                     quota.update(_kimi_usage_metadata())
                     if isinstance(observed["quota"].get("diagnostics"), dict):
                         quota["diagnostics"] = {key: observed["quota"]["diagnostics"].get(key)

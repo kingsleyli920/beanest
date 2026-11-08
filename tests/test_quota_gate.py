@@ -356,3 +356,69 @@ class QuotaHTTPTests(unittest.TestCase):
         self.service.request_availability_recheck.assert_awaited_once_with("claude")
         self.assertEqual(self.request("POST", "/api/mcp/partners/claude/availability/recheck", {},
             headers={"X-LAC-Instance": self.server.instance_id})[0], 403)
+
+
+def kimi_account(key="kimi-user-1", *, five_hour_used=0, month_used=None):
+    windows = [{"name": "kimi:limit5h", "used_percent": five_hour_used, "remaining_percent": 100 - five_hour_used,
+                "window_minutes": 300, "resets_at": 2000}]
+    if month_used is not None:
+        windows.append({"name": "kimi:monthTotal", "used_percent": month_used, "remaining_percent": 100 - month_used,
+                        "window_minutes": None, "resets_at": 5000})
+    return {"state": "ready", "email": None, "plan": "Moderato", "auth_method": "kimi-code", "source": "kimi_managed_oauth",
+            "scope": "default_cli_login", "reason": None, "account_key": key,
+            "field_reasons": {"email": "provider_not_provided", "plan": None}, "display_identity": {},
+            "quota": {"state": "available", "windows": windows, "source": "kimi_code_web_oauth_usage",
+                      "scope": "provider_account", "reason": None}}
+
+
+class KimiMonthlyLimitTests(unittest.IsolatedAsyncioTestCase):
+    """Kimi refuses with a billing-cycle limit its CLI usage never reports.
+
+    Catches: Kimi showing "5-hour 100% remaining" and staying selectable for new
+    tasks after the provider refused the month, and the raw provider user id
+    reaching the partner snapshot.
+    """
+    asyncSetUp = QuotaGateTests.asyncSetUp
+    asyncTearDown = QuotaGateTests.asyncTearDown
+    observe = QuotaGateTests.observe
+
+    async def test_monthly_refusal_blocks_kimi_until_a_monthly_meter_or_recheck(self):
+        self.manager.add(id="kimi", name="Kimi Code", adapter="kimi")
+        first = await self.observe(kimi_account(), "kimi")
+        self.assertEqual(first["availability"]["state"], "unknown")
+        self.assertNotIn("kimi-user-1", json.dumps(first), "only a salted fingerprint may leave the refresh")
+        identity = self.manager.account_identity("kimi")
+        self.assertRegex(identity, r"\A[0-9a-f]{64}\Z")
+
+        with patch.object(adapters, "account_status", new=AsyncMock(return_value=kimi_account())):
+            await self.manager.record_subscription_limit("kimi", identity)
+        self.assertEqual(self.manager.get("kimi")["availability"]["state"], "blocked")
+        self.assertFalse(self.manager.get("kimi")["selectable"])
+
+        # A full 5-hour window is no evidence about the month.
+        after = (await self.observe(kimi_account(five_hour_used=0), "kimi"))["availability"]
+        self.assertEqual((after["state"], after["reason"]), ("blocked", "subscription_limit_reached"))
+        self.assertEqual(json.loads((self.root / "partners" / "quota-gates.json").read_text())["blocks"]["kimi"]["source"], "kimi_cli_limit")
+
+        # Restart keeps it, and the user can ask for a recheck once the login is fresh.
+        self.manager = PartnerManager(self.manager.root, self.base, clock=lambda: self.now)
+        fresh = (await self.observe(kimi_account(), "kimi"))["availability"]
+        self.assertEqual(fresh["state"], "blocked")
+        self.assertTrue(fresh["can_request_recheck"])
+        self.manager.request_availability_recheck("kimi")
+        self.assertTrue(self.manager.get("kimi")["selectable"])
+
+        # A monthly meter with room lifts a recorded refusal.
+        with patch.object(adapters, "account_status", new=AsyncMock(return_value=kimi_account())):
+            await self.manager.record_subscription_limit("kimi", self.manager.account_identity("kimi"))
+        self.assertEqual(self.manager.get("kimi")["availability"]["state"], "blocked")
+        self.assertEqual((await self.observe(kimi_account(month_used=40), "kimi"))["availability"]["state"], "available")
+
+    async def test_another_kimi_login_is_not_blocked_by_the_exhausted_one(self):
+        self.manager.add(id="kimi", name="Kimi Code", adapter="kimi")
+        await self.observe(kimi_account(), "kimi")
+        with patch.object(adapters, "account_status", new=AsyncMock(return_value=kimi_account())):
+            await self.manager.record_subscription_limit("kimi", self.manager.account_identity("kimi"))
+        other = (await self.observe(kimi_account("kimi-user-2"), "kimi"))["availability"]
+        self.assertEqual(other["state"], "unknown")
+        self.assertTrue(other["selectable"])
