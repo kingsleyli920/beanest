@@ -5805,7 +5805,9 @@ test('natural runtime edits stay local until one atomic message and show desired
   await openRuntimeSettings(ui); assert.equal(ui.get('runtime-permission').disabled, false); selectRuntime(ui, 'runtime-permission', 'read_only');
   await ui.click('runtime-settings-close'); await ui.click('work-mode-plan');
   await ui.click('runtime-settings'); selectRuntime(ui, 'runtime-model-claude', 'opus'); selectRuntime(ui, 'runtime-effort-claude', 'high'); await ui.click('runtime-settings-close');
-  assert.equal(ui.posts().length, 0); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '待发送');
+  assert.equal(ui.posts().length, 0); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '发消息后生效');
+  // Catches a user changing permissions mid-run without being told a message is needed to apply them.
+  await openRuntimeSettings(ui); assert.match(ui.get('runtime-settings-note').textContent, /^还没生效：发一条消息才会提交/); await ui.click('runtime-settings-close');
   ui.type('按新设置接着做'); await ui.submit(); const body = ui.posts()[0].body;
   assert.equal(body.work_mode, 'plan'); assert.equal(body.runtime_settings.permission, 'read_only'); assert.equal(body.runtime_settings.members.claude.model, 'opus'); assert.equal(body.runtime_settings.members.claude.effort, 'high');
   assert.deepEqual(saved.room.runtime_settings, actual); assert.deepEqual(saved.current_run.runtime_settings, actual);
@@ -5827,7 +5829,7 @@ test('natural runtime settings preserve drafts on rejection and never unlock an 
     await openRuntimeSettings(ui);
     if (!enabled) { assert.equal(ui.get('runtime-permission').disabled, true); assert.equal(ui.get('work-mode-plan').disabled, true); continue; }
     selectRuntime(ui, 'runtime-permission', 'read_only'); await ui.click('runtime-settings-close'); ui.type('保留正文和设置'); await ui.submit(); await ui.poll();
-    assert.equal(ui.get('message').value, '保留正文和设置'); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '待发送'); await openRuntimeSettings(ui); assert.equal(ui.get('runtime-permission').value, 'read_only'); assert.match(ui.get('action-error').textContent, /这个模型不在工具返回的可选列表/);
+    assert.equal(ui.get('message').value, '保留正文和设置'); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '发消息后生效'); await openRuntimeSettings(ui); assert.equal(ui.get('runtime-permission').value, 'read_only'); assert.match(ui.get('action-error').textContent, /这个模型不在工具返回的可选列表/);
   }
   saved.runtime_configuration.can_edit = false;
   const disabled = await browser({ rooms: [saved.room], saved, naturalRuntimeSupport: true, executionPolicySupport: true, naturalContinuationSupport: true, route(request) { if (request.path === '/api/runtime-options') return options; } });
@@ -5907,7 +5909,7 @@ test('an authoritative unreceived settings message rejected on redelivery keeps 
   } });
   await openRuntimeSettings(ui); selectRuntime(ui, 'runtime-permission', 'read_only'); await ui.click('runtime-settings-close'); ui.type('保留被明确拒绝的设置草稿'); await ui.submit();
   const bodies = ui.posts().filter((request) => request.path.endsWith('/messages')).map((request) => request.body); assert.equal(bodies.length, 2); assert.deepEqual(structuredClone(bodies[0]), structuredClone(bodies[1]));
-  assert.equal(ui.get('pending-request').hidden, true); assert.equal(ui.get('message').value, '保留被明确拒绝的设置草稿'); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '待发送'); assert.match(ui.get('action-error').textContent, /这个模型不在工具返回的可选列表/);
+  assert.equal(ui.get('pending-request').hidden, true); assert.equal(ui.get('message').value, '保留被明确拒绝的设置草稿'); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '发消息后生效'); assert.match(ui.get('action-error').textContent, /这个模型不在工具返回的可选列表/);
   await ui.poll(); await ui.poll(); assert.equal(ui.posts().filter((request) => request.path.endsWith('/messages')).length, 2);
   await openRuntimeSettings(ui); assert.equal(ui.get('runtime-permission').disabled, false); assert.equal(ui.get('runtime-permission').value, 'read_only');
 });
@@ -5928,7 +5930,7 @@ test('late detached 200 or 409 cannot clear a newer same-chat model, mode and me
     ui.type('新正文不能被旧回包清掉'); await openRuntimeSettings(ui); selectRuntime(ui, 'runtime-model-claude', 'opus'); await ui.click('runtime-settings-close'); await ui.click('work-mode-plan');
     originalResponse.resolve(status === 200 ? saved : { error: 'runtime_model_unsupported' }); await settle(); await ui.poll();
     assert.equal(ui.get('message').value, '新正文不能被旧回包清掉'); assert.equal(ui.get('work-mode-plan').getAttribute('aria-pressed'), 'true');
-    await openRuntimeSettings(ui); assert.equal(ui.get('runtime-model-claude').value, 'opus'); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '待发送');
+    await openRuntimeSettings(ui); assert.equal(ui.get('runtime-model-claude').value, 'opus'); assert.equal(ui.get('runtime-shortcuts-caption').textContent, '发消息后生效');
     assert.deepEqual(structuredClone(ui.posts().find((request) => request.path.endsWith('/messages')).body), original);
   }
 });
