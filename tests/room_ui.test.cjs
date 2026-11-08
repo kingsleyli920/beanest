@@ -9867,3 +9867,12 @@ test('current stage delivery starts collapsed and preserves deliberate expansion
   assert.equal(ui.document.querySelector('.delivery-content').open,false);
   assert.equal(ui.get('message').value,'保留未发送草稿'); assert.equal(ui.posts().length,0);
 });
+
+test('policy field captions span the full field instead of wrapping into the 80px label column', () => {
+  // Catches the composer "processing mode" note collapsing to two or three words per line.
+  const html = fs.readFileSync(path.join(assetRoot, 'index.html'), 'utf8');
+  assert.match(html, /<label id="project-workflow-control" class="policy-field"[^>]*>[\s\S]*?<span class="detail-caption">/);
+  const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8');
+  assert.match(css, /\.policy-field \{[^}]*grid-template-columns: 80px minmax\(0, 1fr\)/);
+  assert.match(css, /\.policy-field > \.detail-caption \{[^}]*grid-column: 1 \/ -1/);
+});
