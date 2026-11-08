@@ -18,7 +18,20 @@ import tempfile
 
 
 STALE_SECONDS = 90
-_ADAPTERS = {"codex", "claude"}
+_ADAPTERS = {"codex", "claude", "kimi"}
+
+
+# A gate key is the account scope: the bare adapter for the shared local CLI
+# login, or adapter:profile for a profile's own Beanest-created CLI home.
+_SCOPE = re.compile(r"(codex|claude|kimi)(?::[a-z][a-z0-9_-]{0,31})?")
+
+
+def _scoped(keys):
+    return all(isinstance(key, str) and _SCOPE.fullmatch(key) for key in keys)
+
+
+def scope_adapter(scope):
+    return scope.split(":", 1)[0] if isinstance(scope, str) else scope
 
 
 def _timestamp(value):
@@ -45,19 +58,20 @@ class QuotaGate:
                 data = json.load(stream)
             if (not isinstance(data, dict) or set(data) not in ({"version", "salt", "blocks"}, {"version", "salt", "blocks", "rechecks"}) or data["version"] != 1
                     or not isinstance(data["salt"], str) or not re.fullmatch(r"[0-9a-f]{64}", data["salt"])
-                    or not isinstance(data["blocks"], dict) or set(data["blocks"]) - _ADAPTERS):
+                    or not isinstance(data["blocks"], dict) or not _scoped(data["blocks"])):
                 raise ValueError("quota_state_corrupt")
             for row in data["blocks"].values():
                 if (not isinstance(row, dict) or set(row) != {"identity", "reason", "source", "observed_at", "resets_at"}
                         or not isinstance(row["identity"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["identity"])
                         or row["reason"] not in {"quota_exhausted", "subscription_limit_reached"}
-                        or row["source"] not in {"codex_shared_pool", "claude_shared_pool", "claude_cli_limit", "codex_cli_limit"}
+                        or row["source"] not in {"codex_shared_pool", "claude_shared_pool", "kimi_shared_pool",
+                                                 "claude_cli_limit", "codex_cli_limit", "kimi_cli_limit"}
                         or not _timestamp(row["observed_at"])
                         or row["resets_at"] is not None and not _timestamp(row["resets_at"])):
                     raise ValueError("quota_state_corrupt")
             self.salt, self.blocks = data["salt"], data["blocks"]
             rechecks = data.get("rechecks", {})
-            if not isinstance(rechecks, dict) or set(rechecks) - _ADAPTERS:
+            if not isinstance(rechecks, dict) or not _scoped(rechecks):
                 raise ValueError("quota_state_corrupt")
             for row in rechecks.values():
                 if (not isinstance(row, dict) or set(row) != {"identity", "observed_at"}
@@ -90,20 +104,35 @@ class QuotaGate:
             except FileNotFoundError:
                 pass
 
-    def identity(self, account):
-        if (not isinstance(account, dict) or account.get("auth_method") not in {"chatgpt", "claude.ai"}
-                or not isinstance(account.get("email"), str) or not account["email"]):
-            return None
+    def fingerprint(self, text):
         # The private per-install salt prevents an exported fingerprint from
-        # being a plain, globally comparable email hash. Never export this file.
-        text = account["auth_method"] + ":" + account["email"].strip().casefold()
+        # being a plain, globally comparable hash. Never export this file.
         return hmac.new(bytes.fromhex(self.salt), text.encode(), hashlib.sha256).hexdigest()
 
-    def _shared_windows(self, adapter, account):
+    def identity(self, account):
+        if not isinstance(account, dict):
+            return None
+        if account.get("auth_method") == "kimi-code":
+            # Kimi logins may have no email; the account refresh keeps only a
+            # salted fingerprint of the provider's opaque user id.
+            key = account.get("account_key")
+            return key if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key) else None
+        if (account.get("auth_method") not in {"chatgpt", "claude.ai"}
+                or not isinstance(account.get("email"), str) or not account["email"]):
+            return None
+        return self.fingerprint(account["auth_method"] + ":" + account["email"].strip().casefold())
+
+    def _shared_windows(self, scope, account):
+        adapter = scope_adapter(scope)
         quota = account.get("quota", {})
         source, names = {
             "codex": ("codex_app_server_account_rate_limits", {"codex:primary", "codex:secondary"}),
             "claude": ("claude_sdk_get_usage", {"claude:five_hour", "claude:seven_day"}),
+            # Only Kimi's billing-cycle meters can lift a monthly refusal. The
+            # installed CLI reports just the 5-hour window, which says nothing
+            # about the month, so a recorded refusal stays until a monthly
+            # meter shows room or the user asks for a recheck.
+            "kimi": ("kimi_code_web_oauth_usage", {"kimi:summary", "kimi:monthTotal", "kimi:monthCode"}),
         }.get(adapter, (None, set()))
         if (quota.get("state") != "available" or quota.get("stale") is not False
                 or quota.get("source") != source or source is None):
@@ -117,8 +146,8 @@ class QuotaGate:
                 and type(row.get("used_percent")) in (int, float) and 0 <= row["used_percent"] <= 100
                 and (row.get("resets_at") is None or _timestamp(row["resets_at"]) and row["resets_at"] > now)]
 
-    def observe_account(self, adapter, account):
-        identity = self.identity(account)
+    def observe_account(self, scope, account):
+        adapter, identity = scope, self.identity(account)
         if identity is None or account.get("stale") is not False:
             return
         previous = self.blocks.get(adapter)
@@ -129,7 +158,7 @@ class QuotaGate:
             resets = [row["resets_at"] for row in exhausted if row["resets_at"] is not None]
             # All exhausted shared windows must reset, so retain the latest.
             self.blocks[adapter] = {"identity": identity, "reason": "quota_exhausted",
-                "source": adapter + "_shared_pool", "observed_at": self.clock(),
+                "source": scope_adapter(adapter) + "_shared_pool", "observed_at": self.clock(),
                 "resets_at": max(resets) if len(resets) == len(exhausted) else None}
             self._save()
         elif changed or windows:
@@ -142,9 +171,9 @@ class QuotaGate:
             self.rechecks.pop(adapter, None)
             self._save()
 
-    def record_limit(self, adapter, account, *, bound_identity):
-        identity = self.identity(account)
-        if adapter not in _ADAPTERS or identity is None or identity != bound_identity or account.get("stale") is not False:
+    def record_limit(self, scope, account, *, bound_identity):
+        adapter, identity = scope, self.identity(account)
+        if scope_adapter(adapter) not in _ADAPTERS or not _scoped([adapter]) or identity is None or identity != bound_identity or account.get("stale") is not False:
             self.unbound[adapter] = self.clock()
             return False
         quota = account.get("quota", {})
@@ -152,7 +181,7 @@ class QuotaGate:
         if any(row["used_percent"] >= 100 for row in shared):
             self.observe_account(adapter, account)
             return True
-        if (adapter == "claude" and shared and all(row["used_percent"] < 100 for row in shared)
+        if (scope_adapter(adapter) == "claude" and shared and all(row["used_percent"] < 100 for row in shared)
                 and any(isinstance(row, dict) and row.get("scope") == "model"
                         and type(row.get("used_percent")) in (int, float) and row["used_percent"] == 100
                         for row in quota.get("windows", []))):
@@ -161,37 +190,37 @@ class QuotaGate:
             # other model sharing the same login.
             return False
         self.blocks[adapter] = {"identity": identity, "reason": "subscription_limit_reached",
-            "source": adapter + "_cli_limit", "observed_at": self.clock(), "resets_at": None}
+            "source": scope_adapter(adapter) + "_cli_limit", "observed_at": self.clock(), "resets_at": None}
         self.rechecks.pop(adapter, None)
         self._save()
         return True
 
-    def request_recheck(self, adapter, account):
-        if not self.snapshot(adapter, account)["can_request_recheck"]:
+    def request_recheck(self, scope, account):
+        if not self.snapshot(scope, account)["can_request_recheck"]:
             raise ValueError("availability_recheck_unavailable")
-        self.blocks.pop(adapter)
-        self.rechecks[adapter] = {"identity": self.identity(account), "observed_at": self.clock()}
+        self.blocks.pop(scope)
+        self.rechecks[scope] = {"identity": self.identity(account), "observed_at": self.clock()}
         self._save()
-        return {"kind": "quota_recheck_requested", "adapter": adapter, "observed_at": self.clock()}
+        return {"kind": "quota_recheck_requested", "adapter": scope_adapter(scope), "observed_at": self.clock()}
 
-    def snapshot(self, adapter, account):
+    def snapshot(self, scope, account):
+        adapter = scope_adapter(scope)
         base = {"state": "unknown", "selectable": True, "reason": "quota_unknown",
                 "source": account.get("source"), "observed_at": account.get("checked_at"),
                 "identity_checked_at": account.get("checked_at"),
-                "resets_at": None, "stale": account.get("stale", True), "scope": "default_cli_login",
+                "resets_at": None, "stale": account.get("stale", True),
+                "scope": "default_cli_login" if scope == adapter else "profile_cli_home",
                 "can_request_recheck": False}
         if adapter not in _ADAPTERS:
-            # Kimi exposes read-only usage, but not the stable account identity
-            # needed to persist or clear an account-bound dispatch block.
-            return base if adapter == "kimi" else {**base, "reason": "adapter_unsupported"}
-        identity, block = self.identity(account), self.blocks.get(adapter)
+            return {**base, "reason": "adapter_unsupported"}
+        identity, block = self.identity(account), self.blocks.get(scope)
         if block and identity == block["identity"]:
             expired = block["resets_at"] is not None and block["resets_at"] <= self.clock()
             return {**base, **{key: block[key] for key in ("reason", "source", "observed_at", "resets_at")},
                     "state": "unknown" if expired else "blocked", "selectable": expired,
                     "reason": "quota_reset_due" if expired else block["reason"],
                     "stale": base["stale"] or self.clock() - block["observed_at"] > STALE_SECONDS,
-                    "can_request_recheck": (adapter == "claude" and not expired and account.get("stale") is False
+                    "can_request_recheck": (adapter in {"claude", "kimi"} and not expired and account.get("stale") is False
                                             and block["reason"] == "subscription_limit_reached")}
         if block and identity is None:
             # A failed identity read after restart cannot bypass a previously
@@ -199,15 +228,15 @@ class QuotaGate:
             # that the still-unknown current login is the exhausted account.
             return {**base, "state": "blocked", "selectable": False, "reason": "account_identity_unknown",
                     "source": block["source"], "observed_at": block["observed_at"], "resets_at": block["resets_at"]}
-        if adapter in self.unbound:
+        if scope in self.unbound:
             return {**base, "reason": "account_identity_unknown"}
-        windows = self._shared_windows(adapter, account)
+        windows = self._shared_windows(scope, account)
         if identity and windows and all(row["used_percent"] < 100 for row in windows):
             return {**base, "state": "available", "reason": None, "source": adapter + "_shared_pool",
                     "observed_at": account["quota"].get("checked_at"), "stale": False}
-        if identity and self.rechecks.get(adapter, {}).get("identity") == identity:
+        if identity and self.rechecks.get(scope, {}).get("identity") == identity:
             return {**base, "reason": "user_recheck_requested", "source": "user_recheck_requested",
-                    "observed_at": self.rechecks[adapter]["observed_at"]}
+                    "observed_at": self.rechecks[scope]["observed_at"]}
         if account.get("state") == "error":
             return {**base, "reason": "account_check_failed"}
         return base

@@ -549,7 +549,7 @@ def _receipt_event(agent, raw, *, format_tool_ids=None):
     return None
 
 
-def claude_quota_recovery_proof(cwd, session_id, *, claimed_at, finished_at, validate_prompt, receipt_dir):
+def claude_quota_recovery_proof(cwd, session_id, *, claimed_at, finished_at, validate_prompt, receipt_dir, home=None):
     """Bind a legacy terminal-only refusal to official owned-session metadata.
 
     A result string alone is insufficient historical evidence. Require this
@@ -559,7 +559,7 @@ def claude_quota_recovery_proof(cwd, session_id, *, claimed_at, finished_at, val
     from datetime import datetime
     import stat
     session_id = str(uuid.UUID(session_id))
-    path = Path.home() / '.claude' / 'projects' / re.sub(r'[^a-zA-Z0-9]', '-', str(cwd)) / (session_id + '.jsonl')
+    path = adapters.native_home('claude', home) / 'projects' / re.sub(r'[^a-zA-Z0-9]', '-', str(cwd)) / (session_id + '.jsonl')
     if any(part.is_symlink() for part in (path, *path.parents)):
         return None
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:

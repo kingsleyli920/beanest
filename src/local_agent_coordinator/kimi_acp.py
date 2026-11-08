@@ -49,7 +49,7 @@ def managed_configuration(path=None):
     the official managed provider without a model-level credential override.
     """
     unavailable = {"state": "unavailable", "reason": "auth_unconfirmed", "models": [], "default_model": None}
-    path = Path(path) if path is not None else Path.home() / ".kimi-code/config.toml"
+    path = Path(path) if path is not None else adapters.native_home("kimi") / "config.toml"
     try:
         with path.open("rb") as stream:
             raw = stream.read(_MAX_CONFIG_BYTES + 1)
@@ -235,7 +235,8 @@ async def status(cwd, *, timeout=15):
     return {"ready": True, "version": version}
 
 
-def session_wire(cwd, session_id):
+def session_wire(cwd, session_id, *, home=None):
+    """The wire of one session under the profile's Kimi home (bound or explicit)."""
     if not isinstance(session_id, str) or _SESSION.fullmatch(session_id) is None:
         raise ACPError("native_session_identity_mismatch")
     normalized = str(cwd).replace("\\", "/").rstrip("/")
@@ -244,7 +245,7 @@ def session_wire(cwd, session_id):
     if slug in {"", ".", ".."}:
         slug = "workspace"
     key = "wd_" + slug + "_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-    return Path.home() / ".kimi-code/sessions" / key / session_id / "agents/main/wire.jsonl"
+    return adapters.native_home("kimi", home) / "sessions" / key / session_id / "agents/main/wire.jsonl"
 
 
 def wire_offset(path):
@@ -775,7 +776,19 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
 
 
 async def delete_owned_session(target, *, timeout=15):
-    """Official deletion of one recorded room-owned session, without a prompt."""
+    """Official deletion of one recorded room-owned session, without a prompt.
+
+    The session lives in the home it was created in; a frozen target names a
+    Beanest profile home, otherwise it is the local Kimi login.
+    """
+    home = target.get("account_home")
+    if home is not None and (not isinstance(home, str) or not Path(home).is_absolute()):
+        return "pending"
+    with adapters.account_home("kimi", home):
+        return await _delete_owned_session(target, timeout=timeout)
+
+
+async def _delete_owned_session(target, *, timeout=15):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     session_id = target.get("session_id")
     if target.get("shared_room_ids") != [] or _SESSION.fullmatch(session_id or "") is None:

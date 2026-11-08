@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import hashlib
 import http.client
 import json
 import math
@@ -395,6 +396,11 @@ async def account_status(cwd, *, timeout=DEFAULT_TIMEOUT):
     return {"state": ("ready" if quota["state"] == "available" else "partial") if authenticated else "unavailable", "email": profile["email"] if profile else None, "plan": profile["plan"] if profile else None,
             "field_reasons": field_reasons, "display_identity": profile["display_identity"] if profile else {},
             "auth_method": "kimi-code" if authenticated else None, "source": "kimi_managed_oauth",
+            # A digest of the opaque provider id, only so the caller can bind a
+            # quota block to this login; the raw id never leaves this parser and
+            # the caller salts the digest again before keeping it.
+            "account_key": hashlib.sha256(("kimi-code:" + profile["identity"]).encode()).hexdigest()
+                           if profile and authenticated else None,
             "scope": "default_cli_login", "reason": reason, "quota": {**quota,
                 "diagnostics": {"phase": "complete" if quota["state"] == "available" else phase,
                     "elapsed_seconds": round(time.monotonic() - started, 3), "reason": quota["reason"]}}}

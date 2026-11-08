@@ -444,6 +444,7 @@ class RoomService:
                                agents={item["id"]: item["name"] for item in self.registry.describe()},
                                agent_adapters={item["id"]: item.get("adapter", "") for item in self.registry.describe()},
                                agent_bean_styles={item["id"]: item["bean_style"] for item in self.registry.describe()})
+        self.store.account_home_for = self._partner_home
         self.user_outbox_scope = self.store.user_outbox_scope(hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest())
         self._outbox_submissions = set()
         try:
@@ -827,13 +828,14 @@ class RoomService:
         """Memory only. Merely rendering a form must never launch a CLI."""
         self._available()
         partners = {}
+        scopes = self.partner_manager.account_scopes() if self.partner_manager is not None else {}
         for spec in self.registry.describe():
             registered = self.registry.get(spec["id"])
             supported = registered.supports_runtime_settings and spec["adapter"] in NATIVE_IDS
             partners[spec["id"]] = {"state": "not_checked" if supported else "unavailable",
                 "supported": supported, "models": [], "checked_at": None,
                 "reason": None if supported else "runtime_settings_unsupported",
-                **(self._runtime_catalogs.get(spec["adapter"], {}) if supported else {})}
+                **(self._runtime_catalogs.get(scopes.get(spec["id"], spec["adapter"]), {}) if supported else {})}
         return {"permissions": [dict(item) for item in PERMISSIONS], "partners": partners,
                 "scope": "coordinator_owned_only"}
 
@@ -844,14 +846,16 @@ class RoomService:
             raise RoomError("unknown_partner")
         if not spec.supports_runtime_settings or spec.adapter not in NATIVE_IDS:
             raise RoomError("runtime_settings_unsupported")
-        async with self._runtime_catalog_locks.setdefault(spec.adapter, asyncio.Lock()):
-            cached = self._runtime_catalogs.get(spec.adapter)
+        scope = self.partner_manager.account_scope(partner_id) if self.partner_manager is not None else spec.adapter
+        async with self._runtime_catalog_locks.setdefault(scope, asyncio.Lock()):
+            cached = self._runtime_catalogs.get(scope)
             if cached is None or self.clock() - cached["checked_at"] >= 55:
                 try:
-                    metadata = await adapters.runtime_options(spec.adapter, self.workspace)
-                    self._runtime_catalogs[spec.adapter] = {**metadata, "state": "ready", "checked_at": self.clock()}
+                    with adapters.account_home(spec.adapter, self._partner_home(partner_id)):
+                        metadata = await adapters.runtime_options(spec.adapter, self.workspace)
+                    self._runtime_catalogs[scope] = {**metadata, "state": "ready", "checked_at": self.clock()}
                 except (adapters.AccountTelemetryError, OSError, RuntimeError, asyncio.TimeoutError):
-                    self._runtime_catalogs[spec.adapter] = {"state": "unavailable", "models": [],
+                    self._runtime_catalogs[scope] = {"state": "unavailable", "models": [],
                         "checked_at": self.clock(), "reason": "runtime_options_unavailable"}
         return await self.runtime_options()
 
@@ -1259,6 +1263,47 @@ class RoomService:
             raise RoomError("partner_management_unavailable")
         await self.partner_manager.check(partner_id)
         self._sync_partners()
+        return await self.list_partners()
+
+    def _partner_home(self, provider):
+        """The CLI home a profile currently uses; None is the shared local login."""
+        if self.partner_manager is None:
+            return None
+        try:
+            return self.partner_manager.account_home(provider)
+        except PartnerError:
+            return None
+
+    def _session_home(self, room_id, provider, session_id):
+        home = self.store.native_session_account_home(room_id, provider, session_id)
+        return Path(home) if home is not None else None
+
+    def _session_home_argument(self, room_id, provider, session_id):
+        home = self._session_home(room_id, provider, session_id)
+        return {"home": home} if home is not None else {}
+
+    @staticmethod
+    async def _with_account_home(adapter, home, operation):
+        # Every child of this call, including auth checks and resumed sessions,
+        # inherits the profile's home; nothing else changes the environment.
+        with adapters.account_home(adapter, home):
+            return await operation
+
+    async def set_partner_account_source(self, partner_id, source):
+        """Switch a profile between the local login and its own CLI home.
+
+        Refused while the profile is working anywhere: a running call keeps the
+        home it started with. Existing rooms still pass the account gate before
+        every dispatch, and a session created in the other home is not resumed.
+        """
+        self._available()
+        if self.partner_manager is None:
+            raise RoomError("partner_management_unavailable")
+        if self.store.provider_working(partner_id) or any(
+                key[1] == partner_id and not task.done() for key, task in self._workers.items()):
+            raise RoomError("partner_account_source_busy")
+        self.partner_manager.set_account_source(partner_id, source)
+        self._runtime_catalogs.pop(self.partner_manager.account_scope(partner_id), None)
         return await self.list_partners()
 
     async def set_partner_appearance(self, partner_id, bean_style):
@@ -2443,6 +2488,7 @@ class RoomService:
         except OSError:
             pass
         trees = []
+        session_homes = self.store.native_session_homes(room_id) if sessions else {}
         for provider, raw in self.store.native_workspace_rows(room_id):
             stored = hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()
             paths = self._signature_paths.get((room_id, provider, stored))
@@ -2461,10 +2507,11 @@ class RoomService:
             extra = [os.path.join(root, name) for name in named]
             trees.append([provider, stored, native_workspace.tree_signature(paths + tuple(extra))])
             for session in sessions:
-                evidence.append(str(Path.home() / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", root)
+                home = session_homes.get(session)
+                evidence.append(str(adapters.native_home("claude", home) / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", root)
                                     / (session + ".jsonl")))
                 try:
-                    evidence.append(str(session_wire(root, session)))
+                    evidence.append(str(session_wire(root, session, **({"home": home} if home else {}))))
                 except ACPError:  # Not a Kimi session ID: no wire to watch.
                     pass
         records = {"kind": kind, "requirements": requirements, "calls": snapshot["native_executions"],
@@ -2617,7 +2664,8 @@ class RoomService:
         try:
             receipt = native_adapters.claude_quota_recovery_proof(state["project"], candidate["session_id"],
                 claimed_at=candidate["claimed_at"], finished_at=candidate["finished_at"], validate_prompt=matches,
-                receipt_dir=self.workspace.parent / "native-receipts" / snapshot["room"]["id"])
+                receipt_dir=self.workspace.parent / "native-receipts" / snapshot["room"]["id"],
+                **self._session_home_argument(snapshot["room"]["id"], candidate["provider"], candidate["session_id"]))
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
             receipt = None
         if receipt is None:
@@ -2693,11 +2741,12 @@ class RoomService:
             prove = quota_failure_recovery_proof if quota else context_limit_recovery_proof
             arguments = dict(claimed_at=candidate["claimed_at"], finished_at=candidate["finished_at"],
                              model=candidate["model"], validate_prompt=matches)
-            receipt = prove(Path(state["project"]), candidate["session_id"], **arguments)
-            if receipt is None and not quota:
-                # The same exact compaction may instead prove a typed quota refusal.
-                receipt = compaction_quota_recovery_proof(Path(state["project"]), candidate["session_id"], **arguments)
-                kind = "native_compaction_quota"
+            with adapters.account_home("kimi", self._session_home(snapshot["room"]["id"], candidate["provider"], candidate["session_id"])):
+                receipt = prove(Path(state["project"]), candidate["session_id"], **arguments)
+                if receipt is None and not quota:
+                    # The same exact compaction may instead prove a typed quota refusal.
+                    receipt = compaction_quota_recovery_proof(Path(state["project"]), candidate["session_id"], **arguments)
+                    kind = "native_compaction_quota"
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
             receipt = None
         if receipt is None:
@@ -2713,7 +2762,8 @@ class RoomService:
         state = self.store.native_workspace(snapshot["room"]["id"], source["provider"])
         if state is None:
             raise RoomError("native_recovery_workspace_unavailable")
-        path = session_wire(Path(state["project"]), source["session_id"])
+        path = session_wire(Path(state["project"]), source["session_id"],
+                            **self._session_home_argument(snapshot["room"]["id"], source["provider"], source["session_id"]))
         try:
             if any(part.is_symlink() for part in (path, *path.parents)):
                 raise ValueError
@@ -2800,7 +2850,8 @@ class RoomService:
                     [{"path": file["path"], "sha256": file["sha256"]} for file in state["files"]
                      if file["path"] in candidate["write_paths"]], key=lambda item: item["path"])):
             raise RoomError("native_recovery_binding_changed")
-        path = session_wire(Path(state["project"]), candidate["session_id"])
+        path = session_wire(Path(state["project"]), candidate["session_id"],
+                            **self._session_home_argument(snapshot["room"]["id"], candidate["provider"], candidate["session_id"]))
         try:
             if any(part.is_symlink() for part in (path, *path.parents)):
                 raise ValueError
@@ -2932,7 +2983,8 @@ class RoomService:
                 or project.index_sha256(current["revision"]) != binding["index_sha256"]):
             raise RoomError("native_recovery_binding_changed")
         state = self.store.native_workspace(snapshot["room"]["id"], candidate["provider"])
-        path = session_wire(Path(state["project"]), candidate["session_id"])
+        path = session_wire(Path(state["project"]), candidate["session_id"],
+                            **self._session_home_argument(snapshot["room"]["id"], candidate["provider"], candidate["session_id"]))
         try:
             if any(part.is_symlink() for part in (path, *path.parents)):
                 raise ValueError
@@ -2988,7 +3040,8 @@ class RoomService:
         state = self.store.native_workspace(snapshot["room"]["id"], candidate["provider"])
         if (state is None or state["revision"] != binding["revision"] or state["index_sha256"] != binding["index_sha256"]):
             raise RoomError("native_recovery_binding_changed")
-        path = session_wire(Path(state["project"]), candidate["session_id"])
+        path = session_wire(Path(state["project"]), candidate["session_id"],
+                            **self._session_home_argument(snapshot["room"]["id"], candidate["provider"], candidate["session_id"]))
         try:
             if any(part.is_symlink() for part in (path, *path.parents)):
                 raise ValueError
@@ -3884,11 +3937,23 @@ class RoomService:
                 except RuntimeError:
                     commands[adapter] = None
         operation = self.store.lifecycle_operation(operation_id=identifier)
-        # Agent invocations use the same default homes: their sanitized child
-        # environment does not inherit provider-home overrides or API routing.
-        result = await self._lifecycle_thread(purge_native_sessions, self.workspace.parent, self.workspace,
-            operation["room_id"], [target for target in targets if target["adapter"] != "kimi"], codex_home=Path.home() / ".codex", claude_home=Path.home() / ".claude",
-            codex_cli=commands.get("codex"), claude_cli=commands.get("claude"))
+        # Each session is purged in the home it was created in: the default
+        # homes for the shared local login (the sanitized child environment
+        # never inherits the user's own overrides), or the profile's own home.
+        result = {"provider_managed_deleted": [], "already_missing": [], "pending": []}
+        native = [target for target in targets if target["adapter"] != "kimi"]
+        for home in dict.fromkeys(target.get("account_home") for target in native):
+            group = [target for target in native if target.get("account_home") == home]
+            if home is not None and (not isinstance(home, str) or not Path(home).is_absolute()):
+                result["pending"] += [{"adapter": target["adapter"], "session_id": target["session_id"],
+                                       "reason": "session_home_unconfirmed"} for target in group]
+                continue
+            homes = ({"codex_home": Path.home() / ".codex", "claude_home": Path.home() / ".claude"} if home is None
+                     else {"codex_home": Path(home), "claude_home": Path(home)})
+            part = await self._lifecycle_thread(purge_native_sessions, self.workspace.parent, self.workspace,
+                operation["room_id"], group, **homes, codex_cli=commands.get("codex"), claude_cli=commands.get("claude"))
+            for key in result:
+                result[key] += part[key]
         from .kimi_acp import delete_owned_session
         for target in targets:
             if target["adapter"] == "kimi":
@@ -6167,6 +6232,7 @@ class RoomService:
                     self._wake(room_id)
                 return
             bound_identity = self.partner_manager.account_identity(provider) if self.partner_manager is not None else None
+            home = self._partner_home(provider)
             job = self.store.claim(room_id, provider)
             if job is None:
                 self._maybe_execute(room_id)
@@ -6190,6 +6256,10 @@ class RoomService:
                 spec = self.registry.get(provider)
                 if spec is None or (job.get("adapter") and job["adapter"] != spec.adapter):
                     raise RoomError("agent_unavailable")
+                if job["session_id"] and self._session_home(room_id, provider, job["session_id"]) != home:
+                    # The session lives in the other login's home. Resuming it
+                    # under this account would fail or cross accounts.
+                    raise RoomError("partner_account_home_changed")
                 settings = job.get("runtime_settings")
                 choice = settings["members"][provider] if settings else None
                 runtime_kwargs = ({"runtime_settings": choice} if choice and choice.get("model") is not None else {})
@@ -6247,6 +6317,7 @@ class RoomService:
                                                        timeout=timeout, response_schema=schema, **runtime_kwargs)
                 else:
                     operation = spec.invoke(prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
+                operation = self._with_account_home(spec.adapter, home, operation)
                 # Native transport owns its deadline and process-group cleanup.
                 # A second equal wait_for can erase its cancellation receipt.
                 invoked = True

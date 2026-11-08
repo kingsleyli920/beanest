@@ -6,6 +6,8 @@ launch the CLIs and no provider API credentials are inherited.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import contextvars
 from datetime import datetime
 import json
 import math
@@ -154,6 +156,10 @@ async def _probe_installation(agent, path, cwd, timeout):
 
 def _selection_applies(agent):
     """Arbitrate only between discovered copies; a substituted executable stays authoritative."""
+    if _ACCOUNT_HOME.get() is not None:
+        # Selection confirms the local login. A profile home that is not yet
+        # signed in must not deselect the binary every other profile uses.
+        return False
     installed = cli_installations(agent)
     try:
         current = globals()['find_' + agent]()
@@ -204,13 +210,57 @@ _NETWORK_ENVIRONMENT = frozenset({
 })
 
 
+# A partner profile may own a Beanest-created CLI home instead of the shared
+# local login. Only that explicit binding selects a home: the user's own shell
+# CLAUDE_CONFIG_DIR/CODEX_HOME/KIMI_CODE_HOME are still stripped below.
+ACCOUNT_HOME_VARIABLES = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'kimi': 'KIMI_CODE_HOME'}
+_DEFAULT_HOME_NAMES = {'claude': '.claude', 'codex': '.codex', 'kimi': '.kimi-code'}
+_ACCOUNT_HOME = contextvars.ContextVar('beanest_account_home', default=None)
+
+
+@contextmanager
+def account_home(agent, home):
+    """Bind one profile's CLI home for every child started in this context.
+
+    ``None`` keeps the local login. Tasks created inside inherit the binding,
+    so a whole invocation, check or cleanup sees one consistent home.
+    """
+    if home is None:
+        value = None
+    else:
+        if agent not in ACCOUNT_HOME_VARIABLES or not Path(home).is_absolute():
+            raise ValueError('account home must be an absolute path for a supported CLI')
+        value = (agent, str(Path(home)))
+    token = _ACCOUNT_HOME.set(value)
+    try:
+        yield
+    finally:
+        _ACCOUNT_HOME.reset(token)
+
+
+def bound_account_home(agent) -> Path | None:
+    value = _ACCOUNT_HOME.get()
+    return Path(value[1]) if value is not None and value[0] == agent else None
+
+
+def native_home(agent, home=None) -> Path:
+    """Where this CLI keeps login, sessions and config for the bound profile."""
+    if home is not None:
+        return Path(home)
+    return bound_account_home(agent) or Path.home() / _DEFAULT_HOME_NAMES[agent]
+
+
 def _environment() -> dict[str, str]:
     # Keep OS essentials, not arbitrary agent/provider overrides. In particular,
     # ANTHROPIC_API_KEY, OPENAI_API_KEY, OAuth-token overrides, provider routing
     # such as *_BASE_URL and cloud credentials never reach the child.
     allowed = {'HOME', 'PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL',
                'USER', 'LOGNAME', 'SHELL', 'SYSTEMROOT'} | _NETWORK_ENVIRONMENT
-    return {k: v for k, v in os.environ.items() if k in allowed}
+    environment = {k: v for k, v in os.environ.items() if k in allowed}
+    bound = _ACCOUNT_HOME.get()
+    if bound is not None:
+        environment[ACCOUNT_HOME_VARIABLES[bound[0]]] = bound[1]
+    return environment
 
 
 def _status(command: list[str]) -> tuple[int, str]:
