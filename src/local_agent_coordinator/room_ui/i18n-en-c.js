@@ -909,4 +909,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "当前工具已运行 {p0}": "Current tool running for {p0}",
   "这一步已做 {p0}": "This step has taken {p0}",
   "上次发言 {p0}前": "Last spoke {p0} ago",
+  "额度已用完，本目标不再安排它。": "Out of quota. It gets no more work in this objective. ",
 });

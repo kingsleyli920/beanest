@@ -4486,6 +4486,33 @@ test('native progress safeguards and unsupported participants display concrete r
   assert.equal(ui.posts().length, 0);
 });
 
+test('a pause waiting on the current step keeps the room in progress, and a partner out of quota never claims to be pausing', async () => {
+  // Catches a room still working being filed under stopped, a retired partner shown as pausing, and quota exhaustion worded as a result to verify.
+  const saved = objectiveSnapshot({ status: 'paused' }); saved.objective.pause_requested = true; saved.members[1].status = 'idle';
+  saved.room.objective_status = 'paused'; saved.room.objective_pause_requested = true;
+  saved.room.work_activity = { state: 'working' };
+  saved.objective.retired_partners = { codex: { reason: 'agent_quota_exhausted', at: 1100, cleanup_confirmed: true } };
+  saved.jobs = [{ id: jobId, provider: 'claude', status: 'working', kind: 'team_work', run_id: saved.current_run.id }];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.equal(ui.get('status-codex').textContent, '本轮暂不参与');
+  assert.match(ui.get('collaboration-outcome').textContent, /额度已用完，本目标不再安排它/);
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /本轮结果需要核对/);
+  assert.equal(ui.get('rooms').firstChild.dataset.group, 'go');
+  saved.objective.pause_requested = false; saved.room.objective_pause_requested = false; saved.room.work_activity = null; saved.jobs = []; await ui.poll();
+  assert.equal(ui.get('rooms').firstChild.dataset.group, 'stop');
+  assert.equal(ui.posts().length, 0);
+});
+
+test('an old cache miss retires after an hour', async () => {
+  // Catches a one-off miss staying on screen long after later calls read the cache normally.
+  const now = Date.now() / 1000;
+  const miss = (age) => ({ seq: 2, kind: 'native_cache_miss', sender: 'claude', provider: 'claude', job_id: jobId, run_id: null, phase: 'task', cache_creation_input_tokens: 704077, seconds_since_previous_call: 35, created_at: now - age });
+  const fresh = snapshot({ events: [] }); fresh.latest_native_cache_miss = miss(3500);
+  assert.equal((await browser({ rooms: [fresh.room], saved: fresh })).get('cache-miss-note').hidden, false);
+  const old = snapshot({ events: [] }); old.latest_native_cache_miss = miss(3700);
+  assert.equal((await browser({ rooms: [old.room], saved: old })).get('cache-miss-note').hidden, true);
+});
+
 test('the sidebar distinguishes a cleaned-up quota retirement from a decision or uncertain state while the objective continues', async () => {
   const saved = objectiveSnapshot({ status: 'running' }); saved.members[1].status = 'needs_user';
   saved.objective.retired_partners = { codex: { reason: 'agent_quota_exhausted', at: 1100, cleanup_confirmed: true } };
