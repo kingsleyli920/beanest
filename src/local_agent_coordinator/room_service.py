@@ -483,6 +483,8 @@ class RoomService:
                                agent_adapters={item["id"]: item.get("adapter", "") for item in self.registry.describe()},
                                agent_bean_styles={item["id"]: item["bean_style"] for item in self.registry.describe()})
         self.store.account_home_for = self._partner_home
+        if self.partner_manager is not None:
+            self.store.account_workloads = self._account_workloads
         self.user_outbox_scope = self.store.user_outbox_scope(hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest())
         self._outbox_submissions = set()
         try:
@@ -1342,6 +1344,20 @@ class RoomService:
             raise RoomError("partner_account_source_busy")
         self.partner_manager.set_account_source(partner_id, source)
         self._runtime_catalogs.pop(self.partner_manager.account_scope(partner_id), None)
+        return await self.list_partners()
+
+    def _account_workloads(self):
+        """Unreadable settings must not stop scheduling; every partner is then an ordinary account."""
+        try:
+            return self.partner_manager.workload_profiles()
+        except PartnerError:
+            return {}
+
+    async def set_partner_workload(self, partner_id, level):
+        self._available()
+        if self.partner_manager is None:
+            raise RoomError("partner_management_unavailable")
+        self.partner_manager.set_workload(partner_id, level)
         return await self.list_partners()
 
     async def set_partner_appearance(self, partner_id, bean_style):

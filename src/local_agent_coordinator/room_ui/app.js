@@ -771,6 +771,15 @@ function memberQuotaWindows(id) {
       return { window, remaining: remaining !== null ? remaining : used !== null ? 100 - used : null, stale: quota.stale === true };
     }).filter((entry) => entry.remaining !== null).slice(0, 3);
 }
+function renderMemberWorkload(id, workload) {
+  const holder = document.getElementById(`member-workload-${id}`);
+  if (!holder) return;
+  const account = workload?.accounts?.find((row) => row.members.includes(id));
+  const text = !Number.isInteger(account?.actual_percent) ? ''
+    : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
+      : t("本轮工作量 {p0}%", { p0: account.actual_percent });
+  if (holder.textContent !== text) holder.textContent = text;
+}
 function renderMemberQuota(id) {
   const holder = document.getElementById(`member-quota-${id}`);
   if (!holder) return;
@@ -2042,7 +2051,8 @@ function memberCard(id, descriptor = {}) {
   details.append(element('summary', t("任务会话与 Token")), session,
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
   const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
-  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, usageSummary, details, accountFooter(id));
+  const workload = element('p', '', 'member-workload'); workload.id = `member-workload-${id}`;
+  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, workload, usageSummary, details, accountFooter(id));
   return card;
 }
 
@@ -2428,9 +2438,37 @@ function updateAccountFooter(details, id) {
   auto.append(checkbox, element('span', t("展开时每分钟更新")));
   body.append(refresh, auto);
   if (loginSource) body.append(...accountSourceControls(id, partner, loginSource));
+  if (partner) body.append(workloadControl(id, partner));
   if (!compact) body.append(element('p', availabilityWatchSupported()
     ? t("只查询登录与额度，不启动模型。面板收起后停止单独刷新；前台仍每分钟检查可用状态，页面隐藏后暂停。")
     : t("只查询登录与额度，不启动模型。面板收起或页面隐藏后停止自动查询。"), 'detail-caption'));
+}
+// How much this account takes on; the setting belongs to the account, so aliases change together.
+function workloadControl(id, partner) {
+  const row = element('label', '', 'account-workload');
+  const select = element('select'); select.dataset.focusKey = 'account-workload';
+  select.disabled = state.workloadSavingId === id || state.managementBusy;
+  for (const [value, label] of [['low', t("少")], ['normal', t("中")], ['high', t("多")]]) {
+    const option = element('option', label); option.value = value; select.append(option);
+  }
+  select.value = partner.workload_level || 'normal';
+  select.setAttribute('aria-label', t("{p0}所用账号的工作量", { p0: displayName(id) }));
+  select.addEventListener('change', () => void saveWorkload(id, select.value));
+  row.append(element('span', t("工作量")), select);
+  const holder = element('div', '', 'account-workload-setting');
+  holder.append(row, element('p', t("额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。现在先用于分配审查。"), 'detail-caption'));
+  return holder;
+}
+async function saveWorkload(id, level) {
+  state.workloadSavingId = id;
+  try {
+    acceptPartners(await api(workspaceApi.partner(id, 'workload'), 'POST', { level }));
+  } catch (error) {
+    showNotice(error.message || t("工作量未确认保存，请重试。"), 'error');
+    renderMembers(state.snapshot); renderGlobalPartners();
+  } finally {
+    state.workloadSavingId = null;
+  }
 }
 function accountRefreshKey(id) {
   const partner = state.partners.find((entry) => entry.id === id);
@@ -6798,6 +6836,7 @@ function renderMembers(snapshot) {
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
     renderMemberQuota(provider);
+    renderMemberWorkload(provider, snapshot?.workload);
     $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}${interfaceColon()}${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
     const usage = member?.usage;
     $(`usage-summary-${provider}`).textContent = usage == null ? t("任务用量快照不可用") : t("已收到任务用量快照");

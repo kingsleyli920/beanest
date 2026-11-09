@@ -3640,6 +3640,36 @@ test('quota fallback describes the current integration and promises continued us
   }
 });
 
+test('each account shows its part of the round and its workload level can be changed', async () => {
+  // Catches: the percentages missing or attached to the wrong partner, a setting that never reaches the server, or English copy absent.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.workload = { configured: true, accounts: [
+    { scope: 'claude', members: ['claude'], share: 3, level: 'high', points: 600, calls: 2, target_percent: 75, actual_percent: 60 },
+    { scope: 'codex', members: ['codex'], share: 1, level: 'low', points: 400, calls: 2, target_percent: 25, actual_percent: 40 },
+  ] };
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, workload_level: 'high', account: claudeUsageAccount([]) },
+    { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'low' }];
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
+    route(request) { if (request.path === '/api/partners/claude/workload') return { partners, supported_adapters: [] }; } });
+  assert.equal(ui.get('member-workload-claude').textContent, '本轮工作量 60% · 设定 75%');
+  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 40% · 设定 25%');
+  const select = descendants(ui.get('provider-account-claude')).find((node) => node.dataset?.focusKey === 'account-workload');
+  assert.equal(select.value, 'high');
+  select.value = 'low'; select.fire('change'); await settle();
+  assert.deepEqual(ui.posts().filter((post) => post.path.endsWith('/workload')).map((post) => [post.path, post.body]),
+    [['/api/partners/claude/workload', { level: 'low' }]]);
+
+  saved.workload.configured = false;
+  const plain = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(plain.get('member-workload-claude').textContent, '本轮工作量 60%');
+  saved.workload = null;
+  const none = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(none.get('member-workload-claude').textContent, '');
+  saved.workload = { configured: true, accounts: [{ scope: 'claude', members: ['claude'], share: 3, level: 'high', points: 600, calls: 2, target_percent: 75, actual_percent: 60 }] };
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(english.get('member-workload-claude').textContent, 'This round 60% of the work · set to 75%');
+});
+
 test('composer keeps editable text and send controls outside the independently scrollable setup area', async () => {
   const ui = await browser(); const context = ui.get('composer-context');
   assert.equal(descendants(context).includes(ui.get('message')), false);

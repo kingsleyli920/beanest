@@ -31,6 +31,7 @@ _COMMAND_FIELDS = {
 }
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 from .native_outcome import FORMAT_ERRORS, REPLY_MISTAKES
+from . import workload
 from .round_handoff import ROTATION_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS, context_tokens, normalized_handoff
 from .stop_policy import host_block_recoverable
 
@@ -86,6 +87,11 @@ class TeamStore:
             CREATE TABLE IF NOT EXISTS native_session_history (
                 room_id TEXT NOT NULL, provider TEXT NOT NULL, adapter TEXT NOT NULL,
                 session_id TEXT NOT NULL, PRIMARY KEY(room_id,provider,session_id)
+            );
+            CREATE TABLE IF NOT EXISTS partner_load (
+                room_id TEXT NOT NULL, run_id TEXT NOT NULL, provider TEXT NOT NULL,
+                points REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (room_id, run_id, provider)
             );
             CREATE TABLE IF NOT EXISTS team_members (
                 room_id TEXT NOT NULL REFERENCES teams(room_id), provider TEXT NOT NULL,
@@ -1834,6 +1840,37 @@ class TeamStore:
                           proposal_digest=json.loads(objective["checkpoint_json"])["proposal_digest"],
                           handoff=handoff, context_tokens=context_tokens(usage))
 
+    def record_load(self, db, job, context, usage, before):
+        """Add one finished call to its round's ledger; failed calls cost quota too."""
+        previous = json.loads(before["usage_json"]) if before["usage_json"] else None
+        points = workload.usage_points(before["adapter"], usage, previous=previous, resumed=bool(before["session_id"]))
+        db.execute("INSERT INTO partner_load(room_id,run_id,provider,points,calls,reported) VALUES (?,?,?,?,1,?) "
+                   "ON CONFLICT(room_id,run_id,provider) DO UPDATE SET points=points+excluded.points,"
+                   "calls=calls+1,reported=reported+excluded.reported",
+                   (job["room_id"], context["run_id"], job["provider"], points or 0.0, int(points is not None)))
+
+    def _loads(self, db, room_id, run_id):
+        return {row["provider"]: dict(row) for row in db.execute(
+            "SELECT provider,points,calls,reported FROM partner_load WHERE room_id=? AND run_id=?", (room_id, run_id))}
+
+    def _workload_profile(self):
+        profiles = self.store.account_workloads()
+        return lambda member: profiles.get(member, (member, workload.DEFAULT_LEVEL))
+
+    def _fair_order(self, db, room_id, candidates):
+        members = self.objectives.available_members(db, room_id)
+        if len(candidates) < 2 or not set(candidates) <= set(members):
+            return list(candidates)
+        return workload.fair_order(candidates, members, self._loads(db, room_id, self.team(db, room_id)["current_run_id"]),
+                                   self._workload_profile())
+
+    def workload_summary(self, db, room_id):
+        team = self.team(db, room_id)
+        members = self.objectives.available_members(db, room_id) if team is not None and team["current_run_id"] else []
+        if len(members) < 2:
+            return None
+        return workload.summary(members, self._loads(db, room_id, team["current_run_id"]), self._workload_profile())
+
     def _record_task_handoff(self, db, job, context, commands, usage):
         """Keep the record a large Claude session left at the end of a task.
 
@@ -2255,7 +2292,7 @@ class TeamStore:
             if not choices:
                 self.objectives.finish_checkpoint(db, room_id)
                 return True
-            reviewer = choices[0]
+            reviewer = self._fair_order(db, room_id, choices)[0]
             checkpoint["reviewer"] = reviewer
             db.execute("UPDATE objectives SET checkpoint_json=? WHERE id=?", (json.dumps(checkpoint), objective["id"]))
             db.execute("UPDATE teams SET phase='checkpoint_review' WHERE room_id=?", (room_id,))
@@ -2318,7 +2355,7 @@ class TeamStore:
                 self_check = not choices and task["owner"] in members and objective is not None
                 if self_check:
                     choices = [task["owner"]]
-                for provider in choices:
+                for provider in self._fair_order(db, room_id, choices):
                     db.execute("UPDATE shared_tasks SET review_kind=? WHERE room_id=? AND run_id=? AND id=?",
                                ("self_check" if self_check else "independent_review", room_id, team["current_run_id"], task["id"]))
                     task = self.task(db, room_id, task["id"])

@@ -21,7 +21,7 @@ import tempfile
 import time
 from typing import Callable
 
-from . import adapters
+from . import adapters, workload
 from .agent_registry import (AgentRegistry, AgentSpec, BEAN_STYLE_IDS,
                              TOKEN_FIELDS, default_bean_style, safe_agent_id, native_spec)
 from .quota_gate import QuotaGate
@@ -334,7 +334,8 @@ class PartnerManager:
             seen = set()
             for item in data["profiles"]:
                 if (not isinstance(item, dict)
-                        or set(item) not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"})
+                        or set(item) - {"workload_level"} not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"})
+                        or item.get("workload_level", workload.DEFAULT_LEVEL) not in workload.LEVELS
                         or not safe_agent_id(item["id"]) or item["id"] in seen
                         or not isinstance(item["bean_style"], str) or item["bean_style"] not in BEAN_STYLE_IDS
                         or not isinstance(item["lifecycle_state"], str)
@@ -445,6 +446,7 @@ class PartnerManager:
                                                               or installation["state"] == "found")))
         result["account"] = (_unknown_account("configured_cli") if connector else self._account_snapshot(item, data))
         result["availability"] = self.quota_gate.snapshot(_scope(item), result["account"])
+        result["workload_level"] = item.get("workload_level", workload.DEFAULT_LEVEL)
         if not connector and item["adapter"] in TRUSTED_ADAPTERS:
             result["account_source"] = self._account_source(item)
         result["configuration_selectable"] = result["selectable"]
@@ -762,6 +764,27 @@ class PartnerManager:
                     self._save(data)
                     return self._describe(item, data)
         raise PartnerError("unknown_partner")
+
+    def set_workload(self, partner_id: str, level: str) -> dict:
+        """Set how much an account takes on, for every partner using that account."""
+        if not isinstance(level, str) or level not in workload.LEVELS:
+            raise PartnerError("invalid_workload_level")
+        with self._locked():
+            data = self._load()
+            target = next((item for item in data["profiles"] if item["id"] == partner_id), None)
+            if target is None:
+                raise PartnerError("unknown_partner")
+            for item in data["profiles"]:
+                if _scope(item) == _scope(target):
+                    item["workload_level"] = level
+            self._save(data)
+            return self._describe(target, data)
+
+    def workload_profiles(self) -> dict:
+        """Each partner's account and how much that account should take on."""
+        with self._locked():
+            data = self._load()
+        return {item["id"]: (_scope(item), item.get("workload_level", workload.DEFAULT_LEVEL)) for item in data["profiles"]}
 
     def set_appearance(self, partner_id: str, bean_style: str) -> dict:
         """Change only presentation, preserving the existing partner identity."""

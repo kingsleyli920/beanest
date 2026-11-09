@@ -914,5 +914,13 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "刚刚": "just now",
   "{p0} 分钟前": "{p0} {p0:minute|minutes} ago",
   "（可能已过期）": " (may be out of date)",
+  "工作量": "Workload",
+  "额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。现在先用于分配审查。": "Choose More for an account with a high limit and Less for a low one. Partners on the same account change together. For now this decides who reviews.",
+  "少": "Less",
+  "多": "More",
+  "{p0}所用账号的工作量": "Workload for the account {p0} uses",
+  "工作量未确认保存，请重试。": "The workload setting was not confirmed. Please try again.",
+  "本轮工作量 {p0}%": "This round {p0}% of the work",
+  "本轮工作量 {p0}% · 设定 {p1}%": "This round {p0}% of the work · set to {p1}%",
   "额度已用完，本目标不再安排它。": "Out of quota. It gets no more work in this objective. ",
 });

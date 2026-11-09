@@ -29,7 +29,7 @@ from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source)")
+PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
 AVAILABILITY_RECHECK_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/availability/recheck")
 ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/account/refresh")
@@ -620,6 +620,8 @@ class _RoomHandler(_Handler):
         if not mcp and partner:
             if partner[2] == "appearance" and set(body) == {"bean_style"} and isinstance(body["bean_style"], str):
                 return await service.set_partner_appearance(partner[1], body["bean_style"])
+            if partner[2] == "workload" and set(body) == {"level"} and isinstance(body["level"], str):
+                return await service.set_partner_workload(partner[1], body["level"])
             if partner[2] == "connection" and set(body) == {"connection"} and isinstance(body["connection"],dict):
                 return await service.configure_partner(partner[1],body["connection"])
             if partner[2] == "check" and not body:
