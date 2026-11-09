@@ -72,6 +72,17 @@ test('every literal the interface translates has English copy, from the page and
   const missing = [...new Set(keys)].filter(key => /[一-龥]/.test(key) && !Object.hasOwn(dictionary, key));
   assert.deepEqual(missing, []);
 });
+test('progress line copy keeps its own keys beside the shorter minute labels', () => {
+  // Catches the new age label colliding with the "{p0}分钟" (window length) or "{p0} 分钟" (duration) entries.
+  const {api} = runtime();
+  assert.equal(api.t('进度：{p0} · {p1}', { p0: '96/182 done', p1: 'just now' }), 'Progress: 96/182 done · just now');
+  assert.equal(api.t('{p0} 分钟前', { p0: 1 }), '1 minute ago');
+  assert.equal(api.t('{p0} 分钟前', { p0: 2 }), '2 minutes ago');
+  assert.equal(api.t('刚刚'), 'just now');
+  assert.equal(api.t('（可能已过期）'), ' (may be out of date)');
+  assert.equal(api.t('{p0}分钟', { p0: 5 }), '5-minute');
+  assert.equal(api.t('{p0} 分钟', { p0: 5 }), '5 min');
+});
 test('English counts agree in number: one call, two calls', () => {
   // Catches "1 calls", "Updated 1 seconds ago" and "1 tasks were" (copy audit §2.2).
   const {api, dictionary} = runtime();

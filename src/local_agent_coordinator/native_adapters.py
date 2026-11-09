@@ -22,7 +22,7 @@ import tempfile
 import time
 import uuid
 
-from . import adapters
+from . import adapters, job_progress
 
 _PERMISSIONS = {'plan', 'read_only', 'workspace_write', 'full_access'}
 _CODEX_TOOLS = {'command_execution', 'file_change', 'mcp_tool_call', 'web_search',
@@ -1230,7 +1230,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                         timeout: float | None = None, *, permission='read_only',
                         response_schema: dict | None = None, runtime_settings: dict | None = None,
                         on_activity=None, receipt_dir: Path | None = None,
-                        progress_fingerprint=None) -> dict:
+                        progress_fingerprint=None, progress_file: Path | None = None) -> dict:
     """Run one cancellable native turn; no implicit time or turn-count budget.
 
     Cancellation raises CancelledError *after* owned cleanup. Other failures
@@ -1248,7 +1248,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
         return await invoke_kimi(prompt, cwd, session_id, timeout, permission=permission,
                                  response_schema=response_schema, runtime_settings=runtime_settings,
                                  on_activity=on_activity, receipt_dir=receipt_dir,
-                                 progress_fingerprint=progress_fingerprint)
+                                 progress_fingerprint=progress_fingerprint, progress_file=progress_file)
 
     def not_started(error, cleanup_confirmed):
         error.native_execution = {'agent': agent, 'permission': permission,
@@ -1323,6 +1323,8 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
         environment = adapters._environment()
         if agent == 'claude':
             environment.update(_CLAUDE_BASH_ENV)
+        if progress_file is not None:
+            environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=_MAX_LINE + 1)

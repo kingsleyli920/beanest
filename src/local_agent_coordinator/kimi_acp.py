@@ -18,7 +18,7 @@ import time
 import tomllib
 from uuid import uuid4
 
-from . import adapters
+from . import adapters, job_progress
 
 
 _SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -190,9 +190,12 @@ class ACPConnection:
         await asyncio.gather(self.reader, self.stderr, return_exceptions=True)
 
 
-async def start(cwd, *, on_update=None, permission="plan"):
+async def start(cwd, *, on_update=None, permission="plan", progress_file=None):
+    environment = adapters._environment()
+    if progress_file is not None:
+        environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
     process = await asyncio.create_subprocess_exec(
-        adapters.find_kimi(), "acp", cwd=cwd, env=adapters._environment(),
+        adapters.find_kimi(), "acp", cwd=cwd, env=environment,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=adapters.MAX_OUTPUT + 1)
     connection = ACPConnection(process, on_update=on_update, permission=permission)
@@ -613,7 +616,7 @@ class TurnUpdates:
 
 async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permission="plan",
                         response_schema=None, runtime_settings=None, on_activity=None,
-                        receipt_dir=None, progress_fingerprint=None):
+                        receipt_dir=None, progress_fingerprint=None, progress_file=None):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     from .message_capacity import MAX_PROMPT_BYTES
     if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
@@ -654,7 +657,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     path, before, prompt_sent, diagnostic = None, None, False, None
     async def turn():
         nonlocal process, connection, session_id, proof, path, before, prompt_sent
-        process, connection = await start(cwd, on_update=updates, permission=permission)
+        process, connection = await start(cwd, on_update=updates, permission=permission, progress_file=progress_file)
         _remember(process.pid, owned, await asyncio.to_thread(_processes))
         initialized = await initialize(connection)
         if session_id is None:

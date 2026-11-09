@@ -15,7 +15,7 @@ from uuid import uuid4
 from urllib.parse import unquote, urlsplit
 
 from . import adapters
-from . import native_adapters, native_workspace
+from . import job_progress, native_adapters, native_workspace
 from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
@@ -62,6 +62,7 @@ _BLOCK_PROTOCOL = (
 )
 
 
+PROGRESS_POLL_SECONDS = 15
 ROUND_HANDOFF_INSTRUCTION = (
     " context.round_handoff is the record the previous round left, and this session starts without that round's "
     "memory. It is information only: check it against the repository's current state before relying on any of it. "
@@ -70,7 +71,13 @@ ROUND_HANDOFF_INSTRUCTION = (
 NATIVE_PROGRESS_INSTRUCTION = (
     " The user watches this work live and cannot see your tool calls. Before your next tool call, write one short "
     "plain sentence saying what you are doing now and why, whenever you turn to a different problem and at least "
-    "every 15 minutes of work. Reply in the user's language; say what you found, not the commands you ran. ")
+    "every 15 minutes of work. Reply in the user's language; say what you found, not the commands you ran. "
+    "While a single command blocks you, you cannot speak, so any command expected to run for more than a few minutes "
+    "(in any project, of any kind) should report through $BEANEST_PROGRESS_FILE: connect it yourself and append one "
+    "short line such as \"96/182 done, 0 failed\" to that file. No project change is needed; you can reuse the output "
+    "the command already prints, for example with a pipe or tee and a filter, keeping the command's own exit status. "
+    "Write how far it has got, not the command. If the variable is not set, skip this; a failed write must never fail "
+    "the command. ")
 EXTERNAL_SOURCE_INSTRUCTION = (
     " context.external_source_changes lists commits that reached the delivery repository while no job of this room "
     "was running: the user or another agent did that work outside this room, so the task board, earlier results and "
@@ -6109,6 +6116,37 @@ class RoomService:
             return await asyncio.to_thread(fingerprint)
         return observe
 
+    async def _with_progress_channel(self, job, invoke):
+        """Run one native call with its display-only progress file watched.
+
+        Nothing here may change the call's outcome. In particular the cleanup
+        awaits nothing, so a second cancellation cannot replace the transport's
+        CancelledError and lose its cleanup receipt.
+        """
+        try:
+            path = job_progress.create_progress_file(self.workspace.parent / "native-progress")
+        except (OSError, ValueError):
+            return await invoke({})
+        watcher = asyncio.create_task(self._watch_progress_file(job, path))
+        try:
+            return await invoke({"progress_file": path})
+        finally:
+            watcher.cancel()
+            job_progress.remove_progress_file(path)
+
+    async def _watch_progress_file(self, job, path):
+        throttle = job_progress.ProgressThrottle()
+        while True:
+            await asyncio.sleep(PROGRESS_POLL_SECONDS)
+            try:
+                text = await asyncio.to_thread(job_progress.read_progress_line, path, redact=_visible)
+                now = self.clock()
+                if throttle.due(text, now) and self.store.record_native_progress_status(job["id"], text):
+                    throttle.mark(text, now)
+            except Exception:
+                # Display only: a failed read or write waits for the next tick.
+                continue
+
     def _record_native_event(self, job, event):
         if event.get("type") == "native_progress":
             if not isinstance(event.get("text"), str):
@@ -6355,10 +6393,12 @@ class RoomService:
                         team_phase=job["team"]["job_phase"], can_propose=provider == job["team"]["plan_author"])
                     receipt_dir = self.workspace.parent / "native-receipts" / room_id
                     permission = self._native_permission(job)
-                    operation = self.native_invoke(spec.adapter, prompt, cwd, session_id=job["session_id"], timeout=timeout,
+                    operation = self._with_progress_channel(job, lambda progress_kwargs: self.native_invoke(
+                        spec.adapter, prompt, cwd, session_id=job["session_id"], timeout=timeout,
                         permission=permission, response_schema=schema,
                         on_activity=lambda event, bound_job=job: self._record_native_event(bound_job, event),
-                        receipt_dir=receipt_dir, progress_fingerprint=self._native_progress_fingerprint(job, cwd), **runtime_kwargs)
+                        receipt_dir=receipt_dir, progress_fingerprint=self._native_progress_fingerprint(job, cwd),
+                        **progress_kwargs, **runtime_kwargs))
                 elif self.invoke is not None:
                     operation = self.invoke(provider, prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
                 elif spec.invoke_structured is not None:

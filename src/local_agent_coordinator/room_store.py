@@ -17,6 +17,7 @@ import threading
 import time
 from uuid import UUID, uuid4
 
+from . import job_progress
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
@@ -4000,6 +4001,21 @@ class RoomStore:
                         description=event.get("description"), exit_code=event.get("exit_code"),
                         operation=operation, executable=executable,
                         heartbeat=event.get("heartbeat"), elapsed_time_seconds=event.get("elapsed_time_seconds"))
+
+    def record_native_progress_status(self, job_id, text):
+        """Store display-only text a command wrote to its progress file.
+
+        Untrusted and separate from tool activity and public commentary: only
+        the job's progress line reads it, and nothing is scheduled from it.
+        """
+        if not isinstance(text, str) or not 1 <= len(text) <= job_progress.MAX_CHARACTERS:
+            return False
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None or job["status"] != "working":
+                return False
+            self._event(db, job["room_id"], "native_progress_status", sender=job["provider"], job_id=job_id, text=text)
+            return True
 
     def record_native_progress(self, job_id, event):
         """Persist public commentary, never a command or a direct user update."""

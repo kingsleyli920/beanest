@@ -6644,6 +6644,14 @@ function partnerLiveness(job, tool, publicMessage) {
   if (publicMessage && now - publicMessage.created_at >= 300) parts.push(t("上次发言 {p0}前", { p0: livenessMinutes(now - publicMessage.created_at) }));
   return { warning: false, text: parts.join(' · ') };
 }
+const progressStatusStaleSeconds = 600;
+// Shows what a long command wrote to its progress file. Untrusted display text: never a tool event, a message or proof of success.
+function progressStatusLine(job, status) {
+  if (job?.status !== 'working' || typeof status?.text !== 'string' || !status.text || !Number.isFinite(status.created_at)) return null;
+  const age = Math.max(0, Date.now() / 1000 - status.created_at);
+  const line = t("进度：{p0} · {p1}", { p0: status.text, p1: age < 60 ? t("刚刚") : t("{p0} 分钟前", { p0: Math.floor(age / 60) }) });
+  return age >= progressStatusStaleSeconds ? line + t("（可能已过期）") : line;
+}
 function renderMemberPublicProgress(snapshot, member) {
   const holder = $(`public-progress-${member.id}`);
   const events = activityRunEvents(snapshot);
@@ -6660,13 +6668,16 @@ function renderMemberPublicProgress(snapshot, member) {
     && event.sender === member.id && event.job_id === active.id && ['started', 'running', 'completed', 'failed'].includes(event.state)));
   const scope = `${snapshot?.room.id || ''}:${active?.id || 'history'}`;
   const liveness = partnerLiveness(active, tool, publicMessage);
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [scope, publicMessage, tool, liveness]]);
+  const progressStatus = active && progressStatusLine(active, active.latest_progress_status || [...events].reverse().find((event) => event.kind === 'native_progress_status'
+    && event.sender === member.id && event.job_id === active.id));
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [scope, publicMessage, tool, liveness, progressStatus]]);
   if (holder.dataset.fingerprint === fingerprint) return;
   const expanded = holder.dataset.scope === scope && holder.firstChild?.open === true;
   holder.dataset.fingerprint = fingerprint; holder.dataset.scope = scope; holder.replaceChildren();
   holder.hidden = !snapshot;
   if (!snapshot) return;
   if (liveness) { const line = element('p', liveness.text, `partner-liveness${liveness.warning ? ' warning' : ''}`); line.id = `partner-liveness-${member.id}`; holder.append(line); }
+  if (progressStatus) { const line = element('p', progressStatus, 'partner-progress-status'); line.id = `partner-progress-status-${member.id}`; holder.append(line); }
   if (!publicMessage) {
     const text = tool ? `${['started', 'running'].includes(tool.state) ? nativeActionSentence(tool, true) : `${tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)}`} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
