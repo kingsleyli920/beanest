@@ -4352,6 +4352,23 @@ test('native handoff uses authority gates and retains uncertain raw requests acr
   assert.equal(reloaded.get('pending-request').hidden, true);
 });
 
+test('a working partner card says how recently it was active, and warns only after ten silent minutes', async () => {
+  // Catches the card going back to a bare "running command", a heartbeat being reported as a fresh message, and a false stuck warning.
+  const now = Date.now() / 1000;
+  const saved = activeActivitySnapshot(); saved.room.mode = 'native_project';
+  saved.jobs[0].claimed_at = now - 5800;
+  saved.events.push({ seq: 100, kind: 'message', sender: 'claude', job_id: saved.jobs[0].id, run_id: saved.current_run.id, native_progress: true, text: '先读委托池的规则。', created_at: now - 4580 });
+  saved.events.push({ seq: 101, kind: 'native_tool_activity', sender: 'claude', job_id: saved.jobs[0].id, run_id: saved.current_run.id, state: 'running', tool_kind: 'Bash', heartbeat: true, elapsed_time_seconds: 725, created_at: now - 20 });
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(ui.get('partner-liveness-claude').textContent, '刚刚有活动 · 当前工具已运行 12 分钟 · 这一步已做 1 小时 36 分钟 · 上次发言 1 小时 16 分钟前');
+  assert.doesNotMatch(ui.get('partner-liveness-claude').className, /warning/);
+  saved.events.at(-1).created_at = now - 740; saved.events.at(-2).created_at = now - 4580; await ui.poll();
+  assert.equal(ui.get('partner-liveness-claude').textContent, '已 12 分钟没有新记录，可能卡住了');
+  assert.match(ui.get('partner-liveness-claude').className, /warning/);
+  saved.jobs[0].status = 'completed'; await ui.poll();
+  assert.throws(() => ui.get('partner-liveness-claude'), /missing/);
+});
+
 test('native tool activity is bound to the active provider job and never masquerades as tests passing or leaks raw command receipts into chat', async () => {
   const saved = activeActivitySnapshot(); saved.room.mode = 'native_project';
   saved.events.push({ seq: 100, kind: 'native_tool_activity', sender: 'claude', job_id: saved.jobs[0].id, run_id: saved.current_run.id, state: 'started', description: '正在使用工具',
