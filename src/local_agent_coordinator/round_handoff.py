@@ -9,6 +9,9 @@ from __future__ import annotations
 # Below this the resumed context is still cheap enough that keeping the model's
 # own memory is worth more than swapping it for a short written record.
 ROTATION_MIN_CONTEXT_TOKENS = 200_000
+# Between tasks of one round the session still holds decisions the board does
+# not, so it takes a larger context before a written record is the better deal.
+TASK_ROTATION_MIN_CONTEXT_TOKENS = 400_000
 
 GOAL_MAX_CHARACTERS = 1000
 ITEM_MAX_CHARACTERS = 500
@@ -28,8 +31,9 @@ def handoff_schema() -> dict:
                             "items": {"type": "string", "minLength": 1, "maxLength": characters}}
     return {"type": ["object", "null"], "properties": properties, "required": list(properties),
             "additionalProperties": False,
-            "description": ("Used only by a checkpoint command; null for every other command. Short record of this "
-                            "round for a later fresh session: facts and locations, not the story of how you worked.")}
+            "description": ("Used by a checkpoint command, and by a complete or review command when "
+                            "context.handoff_requested is true; null otherwise. Short record for a later fresh "
+                            "session: facts and locations, not the story of how you worked.")}
 
 
 def _text(value, limit):

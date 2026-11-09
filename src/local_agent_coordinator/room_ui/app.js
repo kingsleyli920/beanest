@@ -4988,6 +4988,7 @@ function progressText(event, jobs, archive = false) {
   if (!archive && event.kind === 'run_started') return Number.isSafeInteger(event.number) && event.number === 1 && !event.retry ? t("开始工作") : t("已继续");
   if (event.kind === 'run_started') return t("{p0}协作已开始{p1}", { p0: Number.isSafeInteger(event.number) ? t("第 {p0} 轮", { p0: event.number }) : t("新一轮"), p1: event.retry ? t("，使用新的专用会话") : event.session_rotated ? t("，保留此前交付，这一轮换了新会话") : t("，保留此前交付和会话") });
   if (event.kind === 'round_handoff_recorded') return t("{p0} 写好了本轮交接", { p0: displayName(event.sender) });
+  if (event.kind === 'task_handoff_recorded') return t("{p0} 写好了任务交接", { p0: displayName(event.sender) });
   if (event.kind === 'partner_session_rotated') return t("{p0} 换了新会话，只带这份交接", { p0: displayName(event.provider) });
   if (event.kind === 'native_readonly_discussion') return t("{p0} 正在只读讨论，已有改动保持。", { p0: displayName(event.sender) });
   if (event.kind === 'run_accepted') return t("你已接受本轮交付；这项记录不会启动模型。");
@@ -5048,7 +5049,7 @@ function progressNode(event, jobs, archive = false) {
   if (archive && event.job_id) line.append(element('span', String(event.job_id).slice(0, 8), 'progress-task'));
   line.append(element('time', timeLabel(event.created_at), 'event-time'));
   item.append(line);
-  if (event.kind === 'round_handoff_recorded') { const details = handoffDetails(event.handoff); if (details) item.append(details); }
+  if (event.kind === 'round_handoff_recorded' || event.kind === 'task_handoff_recorded') { const details = handoffDetails(event.handoff); if (details) item.append(details); }
   return item;
 }
 
@@ -5099,7 +5100,7 @@ function eventNode(event, jobs, sourceMembers = null) {
     const executionNeedsAttention = event.kind === 'execution_finished' && (event.cleanup_confirmed !== true
       || event.status !== 'completed' || !!event.error || Number.isInteger(event.exit_code) && event.exit_code !== 0);
     const show = event.kind === 'warning'
-      || ['run_started', 'run_accepted', 'round_handoff_recorded', 'partner_session_rotated'].includes(event.kind)
+      || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
       || event.kind === 'task_taken_over' || event.kind === 'source_advanced_externally'
