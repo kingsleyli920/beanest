@@ -1,6 +1,6 @@
 {
   "name": "local-agent-coordinator-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "豆窝 · Beanest 本机 AI 伙伴协作工作台",
   "main": "main.js",

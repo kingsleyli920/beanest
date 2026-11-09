@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-agent-coordinator"
-version = "0.2.0"
+version = "0.3.0"
 description = "Beanest: local agent group chats, shared tasks and reviewed file deliveries"
 readme = "README.md"
 license = "MIT"

@@ -58,6 +58,8 @@ npm --prefix desktop ci
 npm --prefix desktop run build:release
 ```
 
+Once the app is open, you don't need Claude Code, Codex or Kimi Code installed already: the first screen can run each provider's official install script in one click, and you then sign in with your own account.
+
 This needs [uv](https://docs.astral.sh/uv/) and network access at build time, and currently targets macOS on Apple Silicon. The app and a zip land in `runtime/desktop-release/`. The app carries its own Python and backend and keeps user data in `~/Library/Application Support/io.github.kingsleyli920.beanest`. Users still install and sign in to their agent CLIs. The build is ad-hoc signed and not notarized, so macOS asks people to allow it in System Settings the first time.
 
 ## Using Beanest

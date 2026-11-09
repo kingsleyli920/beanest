@@ -901,7 +901,7 @@ async def _codex_account_rpc(command, cwd, *, timeout=10, models=False):
 
     async def exchange():
         await rpc(0, 'initialize', {'clientInfo': {'name': 'beanest_account_status',
-            'title': 'Beanest account status', 'version': '0.2.0'},
+            'title': 'Beanest account status', 'version': '0.3.0'},
             'capabilities': {'experimentalApi': False}})
         await send({'method': 'initialized', 'params': {}})
         if models:
