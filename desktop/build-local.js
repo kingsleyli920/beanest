@@ -18,11 +18,11 @@ function plistParser() {
   return createRequire(require.resolve('@electron/packager'))('plist');
 }
 
-async function verifyLocalBundle(outputPath) {
+async function verifyLocalBundle(outputPath, bundleId = BUNDLE_ID) {
   const plist = plistParser();
   const contents = path.join(outputPath, `${APP_NAME}.app`, 'Contents');
   const metadata = plist.parse(await fs.readFile(path.join(contents, 'Info.plist'), 'utf8'));
-  if (metadata.CFBundleExecutable !== APP_NAME || metadata.CFBundleIdentifier !== BUNDLE_ID) {
+  if (metadata.CFBundleExecutable !== APP_NAME || metadata.CFBundleIdentifier !== bundleId) {
     throw new Error('local_bundle_identity_changed');
   }
   if (metadata.CFBundleName !== APP_NAME || metadata.CFBundleDisplayName !== APP_NAME) {
@@ -54,7 +54,7 @@ async function verifyLocalBundle(outputPath) {
       throw new Error('local_bundle_helper_missing');
     }
     if (helperMetadata.CFBundleExecutable !== helperName
-        || helperMetadata.CFBundleIdentifier !== `${BUNDLE_ID}.helper`
+        || helperMetadata.CFBundleIdentifier !== `${bundleId}.helper`
         || !helperExecutable.isFile() || !(helperExecutable.mode & 0o111)) {
       throw new Error('local_bundle_helper_mismatch');
     }
@@ -76,6 +76,20 @@ function localPackagerOptions({ stage, build, root, metadata, electronVersion })
   };
 }
 
+const SHELL_FILES = ['main.js', 'lifecycle.js', 'menu.js', 'locale.js', 'project-picker.js', 'power-guard.js',
+  'chat-location.js', 'external-pages.js', 'preload.js', 'shell-path.js', 'server-launch.js'];
+
+async function stageShell(stage) {
+  const config = require('./package.json');
+  await fs.mkdir(stage, { recursive: true, mode: 0o700 });
+  for (const name of SHELL_FILES) await fs.copyFile(path.join(__dirname, name), path.join(stage, name));
+  await fs.writeFile(path.join(stage, 'package.json'), JSON.stringify({
+    name: 'local-agent-coordinator-desktop', productName: APP_NAME,
+    version: config.version, main: 'main.js', private: true, license: 'MIT',
+  }));
+  return config;
+}
+
 async function main() {
   if (process.platform !== 'darwin') throw new Error('This local desktop bundle currently supports macOS.');
   const { packager } = await import('@electron/packager');
@@ -85,15 +99,7 @@ async function main() {
   const build = process.env.BEANEST_BUILD_DIR
     ? path.resolve(process.env.BEANEST_BUILD_DIR) : path.join(root, 'runtime', 'desktop-build');
   const stage = path.join(build, 'source');
-  const config = require('./package.json');
-  await fs.mkdir(stage, { recursive: true, mode: 0o700 });
-  for (const name of ['main.js', 'lifecycle.js', 'menu.js', 'locale.js', 'project-picker.js', 'power-guard.js', 'chat-location.js', 'external-pages.js', 'preload.js', 'shell-path.js']) {
-    await fs.copyFile(path.join(__dirname, name), path.join(stage, name));
-  }
-  await fs.writeFile(path.join(stage, 'package.json'), JSON.stringify({
-    name: 'local-agent-coordinator-desktop', productName: APP_NAME,
-    version: config.version, main: 'main.js', private: true, license: 'MIT',
-  }));
+  const config = await stageShell(stage);
   const metadata = path.join(build, 'coordinator.json');
   await fs.writeFile(metadata, JSON.stringify({ projectRoot: root }), { mode: 0o600 });
   const outputs = await packager(localPackagerOptions({ stage, build, root, metadata,
@@ -108,4 +114,4 @@ if (require.main === module) main().catch(() => {
   process.exitCode = 1;
 });
 
-module.exports = { verifyLocalBundle, localPackagerOptions, APP_NAME, BUNDLE_ID };
+module.exports = { verifyLocalBundle, localPackagerOptions, stageShell, SHELL_FILES, APP_NAME, BUNDLE_ID };

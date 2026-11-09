@@ -49,6 +49,17 @@ For a local browser instead:
 
 Open the loopback URL printed in the terminal. If port 8769 is taken, add `--port` with a free port. The desktop and browser modes use separate runtime directories by default. Keep the service local; this project does not provide a public, multi-user hosting mode.
 
+### Build a standalone macOS app
+
+The app above needs this checkout and its Python environment. To build one you can hand to someone who has neither Python nor Node.js:
+
+```bash
+npm --prefix desktop ci
+npm --prefix desktop run build:release
+```
+
+This needs [uv](https://docs.astral.sh/uv/) and network access at build time, and currently targets macOS on Apple Silicon. The app and a zip land in `runtime/desktop-release/`. The app carries its own Python and backend and keeps user data in `~/Library/Application Support/io.github.kingsleyli920.beanest`. Users still install and sign in to their agent CLIs. The build is ad-hoc signed and not notarized, so macOS asks people to allow it in System Settings the first time.
+
 ## Using Beanest
 
 1. Choose your agents and optionally add a project folder.

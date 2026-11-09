@@ -29,7 +29,7 @@ needs_build=false
 if [[ ! -f "$app_archive" || ! -f "$build_stamp" ]]; then
   needs_build=true
 fi
-for source_file in "$desktop_dir/main.js" "$desktop_dir/lifecycle.js" "$desktop_dir/menu.js" "$desktop_dir/locale.js" "$desktop_dir/project-picker.js" "$desktop_dir/power-guard.js" "$desktop_dir/external-pages.js" "$desktop_dir/chat-location.js" "$desktop_dir/shell-path.js" "$desktop_dir/preload.js" "$desktop_dir/build-local.js" "$desktop_dir/assets/beanest.icns" "$desktop_dir/package.json" "$desktop_dir/package-lock.json" "$project_dir/LICENSE" "$project_dir/THIRD_PARTY_NOTICES.md"; do
+for source_file in "$desktop_dir/main.js" "$desktop_dir/lifecycle.js" "$desktop_dir/menu.js" "$desktop_dir/locale.js" "$desktop_dir/project-picker.js" "$desktop_dir/power-guard.js" "$desktop_dir/external-pages.js" "$desktop_dir/chat-location.js" "$desktop_dir/server-launch.js" "$desktop_dir/shell-path.js" "$desktop_dir/preload.js" "$desktop_dir/build-local.js" "$desktop_dir/assets/beanest.icns" "$desktop_dir/package.json" "$desktop_dir/package-lock.json" "$project_dir/LICENSE" "$project_dir/THIRD_PARTY_NOTICES.md"; do
   if [[ "$source_file" -nt "$build_stamp" ]]; then
     needs_build=true
   fi

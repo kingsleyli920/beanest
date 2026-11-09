@@ -32,7 +32,7 @@ FIXED = (
     "desktop/menu.js", "desktop/menu.test.js", "desktop/power-guard.js", "desktop/power-guard.test.js",
     "desktop/project-picker.js", "desktop/project-picker.test.js", "desktop/preload.js", "desktop/build-local.test.js",
     "desktop/chat-location.js", "desktop/chat-location.test.js", "desktop/external-pages.js", "desktop/external-pages.test.js",
-    "desktop/locale.js", "desktop/locale.test.js", "desktop/build-icon.swift", "desktop/assets/beanest.svg", "desktop/assets/beanest.png", "desktop/assets/beanest.icns",
+    "desktop/locale.js", "desktop/locale.test.js", "desktop/server-launch.js", "desktop/server-launch.test.js", "desktop/build-release.js", "desktop/build-release.test.js", "desktop/build-icon.swift", "desktop/assets/beanest.svg", "desktop/assets/beanest.png", "desktop/assets/beanest.icns",
     "desktop/package.json", "desktop/package-lock.json", "scripts/start-coordinator.command", "scripts/prepare-source.py",
     "docs/extensions.md", "docs/projects.md", "docs/room-contract.md", "docs/public-readme.md",
     "docs/assets/beanest-en.jpg", "docs/assets/beanest-zh-CN.jpg",
