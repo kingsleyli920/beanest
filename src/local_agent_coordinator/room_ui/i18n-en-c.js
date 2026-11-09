@@ -880,6 +880,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "{p0} 这次调用没用上缓存，多写了约 {p1} token": "{p0} missed the cache on this call and wrote about {p1} extra tokens",
   "，保留此前交付，这一轮换了新会话": ", keeping earlier deliveries; this round uses a new session",
   "{p0} 写好了本轮交接": "{p0} wrote this round's handoff",
+  "{p0} 写好了任务交接": "{p0} wrote a handoff for the next task",
   "{p0} 换了新会话，只带这份交接": "{p0} moved to a new session and carries only this handoff",
   "查看交接内容": "View handoff",
   "已定决定": "Settled decisions",

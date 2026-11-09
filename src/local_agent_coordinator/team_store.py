@@ -31,7 +31,7 @@ _COMMAND_FIELDS = {
 }
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 from .native_outcome import FORMAT_ERRORS, REPLY_MISTAKES
-from .round_handoff import ROTATION_MIN_CONTEXT_TOKENS, context_tokens, normalized_handoff
+from .round_handoff import ROTATION_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS, context_tokens, normalized_handoff
 from .stop_policy import host_block_recoverable
 
 
@@ -1494,6 +1494,7 @@ class TeamStore:
             kind = command["type"]
             fields = _COMMAND_FIELDS[kind]
             if (set(command) != fields
+                    and not (kind in {"complete", "review"} and set(command) == fields | {"handoff"})
                     and not (kind == "block" and set(command) == fields - {"cause"})
                     and not (kind == "request_help" and set(command) == fields - {"repair_paths"})):
                 raise RoomError("invalid_team_commands")
@@ -1691,6 +1692,7 @@ class TeamStore:
             self.objectives.finish_checkpoint(db, room_id, reviewer=provider,
                                               verdict=commands[0]["verdict"], reason=commands[0]["reason"])
             return
+        self._record_task_handoff(db, job, context, commands, usage)
         proposed = [command for command in commands if command["type"] == "propose"]
         replan_parents = self._replan_parents(db, room_id) if proposed else []
         if proposed:
@@ -1831,6 +1833,68 @@ class TeamStore:
                           run_id=context["run_id"], objective_id=objective["id"],
                           proposal_digest=json.loads(objective["checkpoint_json"])["proposal_digest"],
                           handoff=handoff, context_tokens=context_tokens(usage))
+
+    def _record_task_handoff(self, db, job, context, commands, usage):
+        """Keep the record a large Claude session left at the end of a task.
+
+        Asking is only a hint, so the size is judged again here on what the
+        call really sent. A rejected review leaves the task open and records nothing.
+        """
+        room_id, provider = job["room_id"], job["provider"]
+        values = [command["handoff"] for command in commands if command.get("handoff") is not None
+                  and (command["type"] == "complete" or command.get("verdict") == "accept")]
+        tokens = context_tokens(usage)
+        if (not values or self.store._room(db, room_id)["mode"] != "native_project"
+                or tokens is None or tokens < TASK_ROTATION_MIN_CONTEXT_TOKENS):
+            return
+        handoff = normalized_handoff(values[-1])
+        if handoff is None:
+            self.store._event(db, room_id, "round_handoff_invalid", sender="system", provider=provider,
+                              job_id=job["id"], run_id=context["run_id"])
+            return
+        self.store._event(db, room_id, "task_handoff_recorded", sender=provider, provider=provider, job_id=job["id"],
+                          run_id=context["run_id"], task_id=context["task_id"], handoff=handoff, context_tokens=tokens)
+
+    def task_handoff_wanted(self, db, job, room, member):
+        """Whether this call should leave a record: its session is already large."""
+        context = self.job_context(db, job["id"])
+        if (context is None or context["job_phase"] not in {"work", "review"} or room["mode"] != "native_project"
+                or member["adapter"] != "claude" or not member["session_id"]):
+            return False
+        row = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='usage' "
+                         "AND json_extract(value_json,'$.sender')=? ORDER BY seq DESC LIMIT 1", (job["room_id"], job["provider"])).fetchone()
+        tokens = context_tokens(json.loads(row["value_json"]).get("usage")) if row else None
+        return tokens is not None and tokens >= TASK_ROTATION_MIN_CONTEXT_TOKENS
+
+    def rotate_between_tasks(self, db, job):
+        """Start this work call on a fresh session when the last task left a record.
+
+        Only the start of a different task qualifies: rework needs the memory
+        of the attempt it corrects, and a review or checkpoint judges work the
+        session itself remembers. Any doubt keeps the session.
+        """
+        room_id, provider = job["room_id"], job["provider"]
+        context = self.job_context(db, job["id"])
+        if context is None or context["job_phase"] != "work" or self.store._room(db, room_id)["mode"] != "native_project":
+            return False
+        row = db.execute("SELECT seq,value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_handoff_recorded' "
+                         "AND json_extract(value_json,'$.provider')=? ORDER BY seq DESC LIMIT 1", (room_id, provider)).fetchone()
+        recorded = json.loads(row["value_json"]) if row else None
+        if recorded is None or recorded["run_id"] != context["run_id"] or recorded["task_id"] == context["task_id"]:
+            return False
+        if db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? AND json_extract(value_json,'$.kind')='partner_session_rotated' "
+                      "AND json_extract(value_json,'$.provider')=? LIMIT 1", (room_id, row["seq"], provider)).fetchone():
+            return False
+        member = db.execute("SELECT adapter,session_id FROM members WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()
+        unknown = db.execute("SELECT 1 FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.run_id=? "
+                             "AND j.provider=? AND j.status='unknown' LIMIT 1", (room_id, context["run_id"], provider)).fetchone()
+        if member["adapter"] != "claude" or not member["session_id"] or unknown or not self.provider_clean(db, room_id, provider):
+            return False
+        db.execute("UPDATE members SET session_id=NULL WHERE room_id=? AND provider=?", (room_id, provider))
+        self.store._event(db, room_id, "partner_session_rotated", sender="system", provider=provider, run_id=context["run_id"],
+                          previous_run_id=context["run_id"], handoff_seq=row["seq"], context_tokens=recorded["context_tokens"],
+                          old_calls_replayed=False, scope="task")
+        return True
 
     def _rotate_after_handoff(self, db, room_id, room, objective, previous_run_id, new_run_id):
         """Start the checkpoint's author on a fresh session for this user round.

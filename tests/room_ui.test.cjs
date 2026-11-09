@@ -510,6 +510,14 @@ test('a round handoff and session rotation show one line each and the handoff ex
   const english = await browser({ language: 'en', rooms: [saved.room], saved });
   assert.match(english.get('events').textContent, /Claude Code wrote this round's handoff/);
   assert.match(english.get('events').textContent, /Claude Code moved to a new session and carries only this handoff/);
+
+  // Catches: the between-task record staying invisible, unreadable, or without English copy.
+  saved.events.push({ seq: 4, kind: 'task_handoff_recorded', sender: 'claude', provider: 'claude', job_id: jobId, run_id: null, task_id: 'T1', handoff, context_tokens: 500000, created_at: 1800000003 });
+  const betweenTasks = await browser({ rooms: [saved.room], saved });
+  assert.match(betweenTasks.get('events').textContent, /Claude Code 写好了任务交接/);
+  assert.equal((betweenTasks.get('events').textContent.match(/查看交接内容/g) || []).length, 2);
+  const betweenTasksEnglish = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.match(betweenTasksEnglish.get('events').textContent, /Claude Code wrote a handoff for the next task/);
   assert.match(english.get('events').textContent, /Settled decisions/);
 });
 

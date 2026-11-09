@@ -5019,6 +5019,8 @@ class RoomStore:
                 return None
             if member["identity_uncertain"]:
                 return None
+            if team is not None and self._team.rotate_between_tasks(db, job):
+                member = db.execute("SELECT * FROM members WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()
             db.execute("UPDATE jobs SET status='working' WHERE id=?", (job["id"],))
             db.execute("UPDATE rooms SET used=used+1,status='running' WHERE id=?", (room_id,))
             if team is not None:
@@ -5032,9 +5034,11 @@ class RoomStore:
             team_context = self._team.claim(db, job)
             handoff = (self._pending_round_handoff(db, room_id, provider)
                        if member["session_id"] is None and team_context and room["mode"] == "native_project" else None)
+            handoff_requested = team_context is not None and self._team.task_handoff_wanted(db, job, room, member)
             return {**dict(job), "status": "working", "session_id": member["session_id"],
                     "deadline": public_deadline(room["deadline"]), "goal": room["goal"], "mode": room["mode"], "work_mode": room["work_mode"],
                     "adapter": member["adapter"], "team": team_context, **({"round_handoff": handoff} if handoff else {}),
+                    **({"handoff_requested": True} if handoff_requested else {}),
                     "runtime_settings": json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None}
 
     def _pending_round_handoff(self, db, room_id, provider):

@@ -58,11 +58,14 @@ class HandoffSchema(unittest.TestCase):
 
 
 class HandoffParsing(unittest.TestCase):
-    def test_checkpoint_keeps_handoff_and_other_phases_drop_it_without_correction(self):
-        # Catches a misplaced handoff triggering an invalid_team_commands correction call, or being lost on checkpoint.
+    def test_task_ending_commands_keep_handoff_and_others_drop_it_without_correction(self):
+        # Catches a misplaced handoff triggering an invalid_team_commands correction call, or being lost where it is used.
         kept = parse("checkpoint", flat(**CHECKPOINT, handoff=HANDOFF))
         self.assertEqual(kept["commands"][0]["handoff"], HANDOFF)
-        dropped = parse("review", flat(type="review", task_id="T1", verdict="accept", reason="ok", handoff=HANDOFF))
+        for phase, command in (("review", dict(type="review", task_id="T1", verdict="accept", reason="ok")),
+                               ("work", dict(type="complete", task_id="T1", result="Done."))):
+            self.assertEqual(parse(phase, flat(**command, handoff=HANDOFF))["commands"][0]["handoff"], HANDOFF, phase)
+        dropped = parse("plan", flat(type="claim", task_id="T1", handoff=HANDOFF))
         self.assertNotIn("handoff", dropped["commands"][0])
         self.assertNotIn("handoff", parse("checkpoint", flat(**CHECKPOINT, handoff=None))["commands"][0])
 
@@ -379,6 +382,186 @@ class RoundHandoffService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("at least every 15 minutes of work", phases["work"])
         self.assertNotIn("every 15 minutes", phases["checkpoint"])
         self.assertNotIn("every 15 minutes", phases["plan"])
+
+
+LARGE = {"input_tokens": 1000, "cache_read_input_tokens": 500000, "cache_creation_input_tokens": 49000, "output_tokens": 500}
+SMALL = {"input_tokens": 1000, "cache_read_input_tokens": 30000, "cache_creation_input_tokens": 4000, "output_tokens": 500}
+BROKEN_HANDOFF = {"goal": "Missing every list."}
+
+
+def usage_totalling(tokens):
+    return {"input_tokens": 0, "cache_read_input_tokens": tokens, "cache_creation_input_tokens": 0, "output_tokens": 1}
+
+
+class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
+    """Two or three tasks in one round, driven through real storage and the service's own job loop."""
+    create = native.NativeRoomServiceTests.create
+    settle = native.NativeRoomServiceTests.settle
+    asyncTearDown = native.NativeRoomServiceTests.asyncTearDown
+
+    async def asyncSetUp(self):
+        await native.NativeRoomServiceTests.asyncSetUp(self)
+        self.fake.handler = self.handler
+        self.task_ids = ["T1", "T2"]
+        self.usage = lambda phase, task_id: LARGE   # what each Claude call reports having sent
+        self.handoff_on = {"T1"}                    # tasks whose work or review result carries a record
+        self.handoff_value = HANDOFF
+        self.reject_once = set()                    # tasks whose first review asks for changes
+        invoke = self.service.native_invoke
+        async def with_usage(agent, prompt, cwd, session_id=None, **options):
+            result = await invoke(agent, prompt, cwd, session_id=session_id, **options)
+            context = json.loads(prompt.split("CONTEXT DATA:\n", 1)[1])
+            result["usage"] = self.usage(context["job"]["job_phase"], (context.get("task") or {}).get("id"))
+            return result
+        self.service.native_invoke = with_usage
+
+    def handler(self, agent, context, cwd):
+        phase, board, task = context["job"]["job_phase"], context["team"], context["task"]
+        if phase in {"plan", "coordinate"}:
+            commands = []
+            if not board["tasks"] and agent == board["plan_author"]:
+                for index, task_id in enumerate(self.task_ids):
+                    commands += [native.proposal(task_id, paths=[f"{task_id}.py"], capability="python",
+                                                 dependencies=self.task_ids[:index][-1:]), {"type": "claim", "task_id": task_id}]
+            if board["tasks"] or commands:
+                commands.append({"type": "plan_ready"})
+            return native_reply(context, commands)
+        if phase == "work":
+            (cwd / f"{task['id']}.py").write_text(f"VALUE = {len(self.work_calls()) + 1}\n")
+            return self.with_record(agent, task, native_reply(context, [{"type": "complete", "task_id": task["id"], "result": "Updated the file."}]))
+        if phase == "review":
+            verdict = "changes_requested" if task["id"] in self.reject_once else "accept"
+            self.reject_once.discard(task["id"])
+            return self.with_record(agent, task, native_reply(context, [{"type": "review", "task_id": task["id"], "verdict": verdict, "reason": "Read the exact tree."}]))
+        if phase == "checkpoint":
+            return native_reply(context, [{"type": "checkpoint", "decision": "complete", "summary": "All done.", "next_goal": None,
+                                           "scope_reference": context["objective"]["scope_reference"], "question": None}])
+        if phase == "checkpoint_review":
+            return native_reply(context, [{"type": "checkpoint_review", "verdict": "accept", "reason": "Goal and delivery compared.",
+                                           "proposal_digest": context["objective"]["checkpoint_proposal"]["proposal_digest"]}])
+        self.fail(phase)
+
+    def with_record(self, agent, task, reply):
+        if agent == "claude" and task["id"] in self.handoff_on:
+            reply["commands"][0]["handoff"] = self.handoff_value
+        return reply
+
+    def calls(self, phase=None, task_id=None, agent="claude"):
+        return [call for call in self.fake.calls if call["agent"] == agent
+                and (phase is None or call["context"]["job"]["job_phase"] == phase)
+                and (task_id is None or (call["context"].get("task") or {}).get("id") == task_id)]
+
+    def work_calls(self):
+        return self.calls("work")
+
+    async def run_room(self, participants=None):
+        created = await self.create(participants=participants)
+        await self.settle()
+        state = await self.service.read_room(created["room"]["id"])
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        return state
+
+    def events(self, state, kind):
+        return [event for event in state["events"] if event["kind"] == kind]
+
+    async def test_next_task_starts_a_new_session_that_carries_only_the_record(self):
+        # Catches the record being lost, the old session being resumed, or the record being replayed on later calls.
+        self.task_ids = ["T1", "T2", "T3"]
+        state = await self.run_room()
+        rotated = self.events(state, "partner_session_rotated")
+        self.assertEqual([event["scope"] for event in rotated], ["task"])
+        self.assertEqual(self.events(state, "task_handoff_recorded")[0]["task_id"], "T1")
+        first, second, third = (self.calls("work", task)[0] for task in ("T1", "T2", "T3"))
+        self.assertIsNotNone(first["session_id"])
+        self.assertIsNone(second["session_id"], "the second task must not resume the large session")
+        self.assertEqual({key: second["context"]["round_handoff"][key] for key in HANDOFF}, HANDOFF)
+        self.assertIn("previous round or task left", second["prompt"])
+        self.assertIsNotNone(third["session_id"], "the new session is resumed afterwards")
+        self.assertNotEqual(third["session_id"], first["session_id"])
+        self.assertNotIn("round_handoff", third["context"])
+
+    async def test_threshold_is_the_exact_boundary(self):
+        # Catches an off-by-one in the between-task size limit.
+        for tokens, expected in ((399_999, 0), (400_000, 1)):
+            with self.subTest(tokens=tokens):
+                await native.NativeRoomServiceTests.asyncTearDown(self)
+                await self.asyncSetUp()
+                self.usage = lambda phase, task_id: usage_totalling(tokens)
+                state = await self.run_room()
+                self.assertEqual(len(self.events(state, "partner_session_rotated")), expected)
+
+    async def test_only_a_large_session_is_asked_and_only_claude(self):
+        # Catches every call paying for a record, or Codex being given an instruction its schema cannot answer.
+        self.usage = lambda phase, task_id: SMALL if phase in {"plan", "coordinate"} else LARGE
+        await self.run_room()
+        self.assertNotIn("handoff_requested", self.calls("work", "T1")[0]["context"], "the session was still small at this claim")
+        self.handoff_on = set()
+        await native.NativeRoomServiceTests.asyncTearDown(self)
+        await self.asyncSetUp()
+        await self.run_room()
+        large = self.calls("work", "T1")[0]
+        self.assertTrue(large["context"]["handoff_requested"])
+        self.assertIn("fill handoff", large["prompt"])
+        codex_reviews = self.calls("review", agent="codex")
+        self.assertTrue(codex_reviews and all(call["session_id"] for call in codex_reviews), "a resumed Codex session reported a large context")
+        for call in self.fake.calls:
+            if call["agent"] != "claude":
+                self.assertNotIn("handoff_requested", call["context"], call["agent"])
+
+    async def test_no_record_keeps_the_session_without_a_correction_call(self):
+        # Catches a skipped record costing an extra model call or dropping the session anyway.
+        self.handoff_on = set()
+        state = await self.run_room()
+        self.assertEqual(self.events(state, "partner_session_rotated"), [])
+        sessions = {call["session_id"] for call in self.calls("work")}
+        self.assertEqual(len(sessions), 1)
+        self.assertNotIn(None, sessions)
+        self.assertEqual(len(self.calls("work")), 2)
+
+    async def test_malformed_record_is_noted_and_keeps_the_session(self):
+        # Catches a broken record either replacing the session's memory or stopping the task.
+        self.handoff_value = BROKEN_HANDOFF
+        state = await self.run_room()
+        self.assertEqual(len(self.events(state, "round_handoff_invalid")), 1)
+        self.assertEqual(self.events(state, "partner_session_rotated"), [])
+        self.assertEqual(len({call["session_id"] for call in self.calls("work")}), 1)
+
+    async def test_rework_of_the_same_task_keeps_its_memory(self):
+        # Catches a rejected attempt being corrected by a session that no longer remembers it.
+        self.reject_once = {"T1"}
+        state = await self.run_room()
+        attempts = self.calls("work", "T1")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[1]["session_id"], attempts[0]["session_id"])
+        self.assertNotIn("round_handoff", attempts[1]["context"])
+        self.assertIsNone(self.calls("work", "T2")[0]["session_id"], "the next task still moves on")
+        self.assertEqual(len(self.events(state, "partner_session_rotated")), 1)
+
+    async def test_self_check_keeps_the_author_session_then_the_next_task_moves(self):
+        # Catches a self-check losing the work it reviews, and the accepted review's record going unused.
+        self.handoff_on = {"T1"}
+        state = await self.run_room(participants=["claude"])
+        work, review = self.calls("work", "T1")[0], self.calls("review", "T1")[0]
+        self.assertEqual(review["session_id"], work["session_id"])
+        self.assertIsNone(self.calls("work", "T2")[0]["session_id"])
+        self.assertEqual(self.events(state, "task_handoff_recorded")[-1]["task_id"], "T1")
+
+    async def test_rejected_review_records_nothing(self):
+        # Catches a record written while the task is still open being trusted as finished work.
+        self.handoff_on = {"T1"}
+        self.reject_once = {"T1"}
+        state = await self.run_room(participants=["claude"])
+        kinds = [event["job_id"] for event in self.events(state, "task_handoff_recorded")]
+        reviews = [call for call in self.calls("review", "T1")]
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual(len(kinds), len(self.calls("work", "T1")) + 1, "both attempts and the accepting review, not the rejecting one")
+
+    async def test_checkpoint_and_last_task_never_rotate(self):
+        # Catches a round-end judgement starting without the session that did the work.
+        self.task_ids = ["T1"]
+        state = await self.run_room()
+        self.assertEqual(self.events(state, "partner_session_rotated"), [])
+        self.assertEqual(self.calls("checkpoint")[0]["session_id"], self.calls("work", "T1")[0]["session_id"])
 
 
 if __name__ == "__main__":
