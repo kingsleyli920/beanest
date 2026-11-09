@@ -12,6 +12,7 @@ const { createChatLocation } = require('./chat-location');
 const { installExternalPages } = require('./external-pages');
 const { strings, loadLocale, saveLocale, installLocale } = require('./locale');
 const { loginShellPath, mergedPath } = require('./shell-path');
+const { parseInstallation, dataDirectoryName, runtimeDirectoryFor, serverLaunch } = require('./server-launch');
 
 let serverProcess;
 let quitting = false;
@@ -20,12 +21,22 @@ let mainWindow;
 let powerGuard;
 let currentLocale = 'zh-CN';
 
+function readInstallation() {
+  if (!app.isPackaged) return { kind: 'source', root: path.resolve(__dirname, '..') };
+  try {
+    return parseInstallation(readFileSync(path.join(process.resourcesPath, 'coordinator.json'), 'utf8'));
+  } catch {
+    return { kind: 'invalid' };
+  }
+}
+
 // Pin existing Chromium storage and the macOS single-instance lock before
 // changing the product name. No records are moved or copied to a second profile.
-const legacyDataPath = path.join(app.getPath('appData'), 'Local Agent Coordinator');
-mkdirSync(legacyDataPath, { recursive: true, mode: 0o700 });
-app.setPath('userData', legacyDataPath);
-app.setPath('sessionData', legacyDataPath);
+const installation = readInstallation();
+const dataPath = path.join(app.getPath('appData'), dataDirectoryName(installation));
+mkdirSync(dataPath, { recursive: true, mode: 0o700 });
+app.setPath('userData', dataPath);
+app.setPath('sessionData', dataPath);
 app.setName(APP_NAME);
 app.commandLine.appendSwitch('force-renderer-accessibility');
 if (!app.requestSingleInstanceLock()) app.exit(0);
@@ -49,38 +60,23 @@ app.on('activate', () => {
   if (mainWindow && !mainWindow.isDestroyed()) presentWindow(mainWindow);
 });
 
-function projectRoot() {
-  if (app.isPackaged) {
-    const metadata = JSON.parse(readFileSync(path.join(process.resourcesPath, 'coordinator.json'), 'utf8'));
-    if (typeof metadata.projectRoot !== 'string' || !path.isAbsolute(metadata.projectRoot)) {
-      throw new Error('Invalid local installation metadata');
-    }
-    return metadata.projectRoot;
-  }
-  return path.resolve(__dirname, '..');
-}
-
 function runtimeDirectory() {
-  const dir = path.join(projectRoot(), 'runtime', 'desktop-rooms');
+  const dir = runtimeDirectoryFor(installation, dataPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   return dir;
 }
 
-function pythonCommand(root) {
-  const venvPython = path.join(root, '.venv', 'bin', 'python');
-  return require('node:fs').existsSync(venvPython) ? venvPython : 'python3';
-}
-
 function startRoomServer() {
-  const root = projectRoot();
   const runtime = runtimeDirectory();
   const loginPath = loginShellPath();
-  const env = { ...process.env, PYTHONPATH: path.join(root, 'src'),
-    ...(loginPath ? { PATH: mergedPath(loginPath, process.env.PATH) } : {}) };
-  serverProcess = spawn(pythonCommand(root), [
-    '-m', 'local_agent_coordinator.room_server', '--runtime', runtime, '--port', '0',
-  ], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const launch = serverLaunch(installation, {
+    resourcesPath: process.resourcesPath, runtime, exists: existsSync,
+    env: { ...process.env, ...(loginPath ? { PATH: mergedPath(loginPath, process.env.PATH) } : {}) },
+  });
+  serverProcess = spawn(launch.command, launch.args, {
+    cwd: launch.cwd, env: launch.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  });
 
   return new Promise((resolve, reject) => {
     let output = '';
@@ -158,7 +154,7 @@ async function openWindow(url) {
   window.webContents.on('will-navigate', (event, target) => {
     if (!isOwnOrigin(target)) event.preventDefault();
   });
-  const chatLocation = createChatLocation(path.join(legacyDataPath, 'last-chat.json'));
+  const chatLocation = createChatLocation(path.join(dataPath, 'last-chat.json'));
   window.webContents.on('did-navigate-in-page', (_event, target, isMainFrame) => {
     if (isMainFrame) chatLocation.remember(target, url);
   });
@@ -184,8 +180,8 @@ function applyLocale(locale) {
 
 app.whenReady().then(async () => {
   try {
-    const preference = path.join(legacyDataPath, 'locale.json');
-    const legacyProfile = existsSync(path.join(legacyDataPath, 'Local Storage')) || existsSync(path.join(legacyDataPath, 'last-chat.json'));
+    const preference = path.join(dataPath, 'locale.json');
+    const legacyProfile = existsSync(path.join(dataPath, 'Local Storage')) || existsSync(path.join(dataPath, 'last-chat.json'));
     applyLocale(loadLocale(preference, app.getLocale(), legacyProfile));
     installLocale(ipcMain, () => mainWindow, () => serverUrl, (locale) => {
       saveLocale(preference, locale);
