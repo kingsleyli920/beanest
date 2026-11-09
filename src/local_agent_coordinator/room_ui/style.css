@@ -1567,13 +1567,16 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .delivery-pane .code-status-heading h3 { margin: 0; font-size: 13.5px; }
 .delivery-pane .code-status-summary { font-size: 13.5px; }
 .code-status-card.has-steps #code-delivery-states, .code-status-card.has-steps #code-delivery-note { display: none; }
-.delivery-steps { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
-.delivery-step { display: flex; flex-direction: column; gap: 6px; padding: 12px 13px; border-left: 1px solid var(--line2); color: var(--ink2); font-size: 12.5px; overflow-wrap: anywhere; }
-.delivery-step:first-child { border-left: 0; }
+/* Cards wrap instead of squeezing a long branch name into a sliver; the gap draws the dividers. */
+.delivery-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 12px; background: var(--line2); overflow: hidden; }
+.delivery-step { display: flex; flex-direction: column; gap: 6px; padding: 12px 13px; background: var(--surface); color: var(--ink2); font-size: 12.5px; overflow-wrap: anywhere; }
 .delivery-step.pending { background: var(--ask-bg); }
-.delivery-step-title { display: flex; align-items: center; gap: 7px; color: var(--ink); font-size: 13px; font-weight: 600; }
+.delivery-step-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; color: var(--ink); font-size: 13px; font-weight: 600; }
+.delivery-step-title > span { white-space: nowrap; }
+.delivery-step-tag { color: var(--muted); font-size: 11px; font-weight: 400; }
 .code-merge-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .code-merge-panel label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
+@media (max-width: 640px) { .code-merge-panel { grid-template-columns: minmax(0, 1fr); } }
 .code-merge-panel select { height: 30px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); color: var(--ink2); font-size: 12.5px; }
 .delivery-pane #code-status-details { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 12.5px; }
 .delivery-pane #code-file-list { margin: 6px 0; padding-left: 18px; font-size: 12.5px; color: var(--ink2); }

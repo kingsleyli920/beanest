@@ -81,8 +81,38 @@ def _published_status(canonical, changes, source, candidates, expected, deadline
     return {"state": "unknown", "reason": "published_work_mapping_unknown", "files": {**unknown_counts, "total": len(changes)}}
 
 
+def _branch_context(status, refs):
+    """Name the target's current branch and whether it is a work branch off mainline."""
+    if status.get("state") != "ready":
+        return None
+    mainline = status.get("mainline") or {}
+    upstream = status.get("upstream") or {}
+    name = None if status.get("detached") else status.get("branch")
+    # A detached HEAD has no branch to push, and commits already on the local
+    # mainline are judged against mainline; both keep the original verdict.
+    work_branch = bool(name) and mainline.get("state") == "ready" and mainline.get("relation") == "unmerged" and not refs["included"]
+    return {"name": name, "detached": status.get("detached") is True, "mainline": mainline.get("name"),
+        "relation": mainline.get("relation"), "ahead": mainline.get("ahead"), "behind": mainline.get("behind"),
+        "work_branch": work_branch,
+        "upstream": {key: upstream.get(key) for key in ("state", "name", "ahead", "behind")}}
+
+
+def _work_branch_push(branch):
+    """Read pushed state from the local tracking ref; the caller never contacts the remote."""
+    upstream = branch["upstream"]
+    ahead = upstream["ahead"]
+    if upstream["state"] == "none":
+        return {"state": "pending", "reason": "work_branch_no_upstream"}
+    if upstream["state"] != "ready" or not isinstance(ahead, int):
+        return {"state": "unknown", "reason": "work_branch_upstream_unknown"}
+    if ahead > 0:
+        return {"state": "pending", "reason": "work_branch_not_pushed"}
+    return {"state": "confirmed", "reason": None}
+
+
 def summarize(workspaces, *, statuses, native_states, canonical, canonical_changes=None, retained_states=(), refresh_remote=False, now, deadline=None, delivery_repository=None, remote_cache=None):
     main, remote, private, repositories, roots = [], [], [], {}, []
+    branch = None
     # Service calls always supply the host's binding. Keep the pure helper's
     # registered-project default for callers without room persistence.
     if delivery_repository is None:
@@ -140,7 +170,8 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
         if identity in repositories:
             continue
         if target:
-            repositories[identity] = {**refs, "workspace_id": item["id"]}
+            branch = _branch_context(status, refs)
+            repositories[identity] = {**refs, "workspace_id": item["id"], "branch": branch}
         candidate = (item, status, refs)
         candidates.append(candidate)
         if target:
@@ -207,6 +238,11 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
     for identity, refs in repositories.items():
         common = refs["common"]
         checked.add(common)
+        # On a work branch the question is whether that branch reached its
+        # remote, so mainline's GitHub state must not stand in for it.
+        if refs["branch"] and refs["branch"]["work_branch"]:
+            remote.append({**_work_branch_push(refs["branch"]), "workspace_id": refs["workspace_id"]})
+            continue
         key = (common, refs["mainline_name"], refs["main_head"])
         if key not in remote_checks:
             remote_checks[key] = (git_status.read_github_main(identity[1], refs["mainline_name"], refs["main_head"],
@@ -236,6 +272,7 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
         overall = {"state": "needs_attention", "reason": "untracked_items_need_decision"}
     return {"scope": "task_linked_workspaces", "state": overall["state"], "reason": overall["reason"],
         "main": main_status, "remote": remote_status, "published": published, "private": private_status,
+        "branch": branch,
         "issues": issues,
         "workspace": {**workspace_status, "checks": workspace_checks, "tracked": tracked if counts_known else None, "untracked": untracked if counts_known else None},
         "coverage": {"repositories": len(checked), "private_workspaces": len(native_states), "retained_workspaces": len(retained_states)},
