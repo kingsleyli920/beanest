@@ -1079,6 +1079,7 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 .public-progress-details .quiet-button { margin-top: 5px; padding: 3px 7px; font-size: 12px; }
 .partner-liveness { margin: 0 0 5px; }
 .partner-liveness.warning { color: var(--ask); font-weight: 600; }
+.partner-progress-status { margin: 0 0 5px; overflow-wrap: anywhere; }
 .public-progress-fallback { margin: 0; }
 
 .public-progress-details[open] .public-progress-preview { display: none; }

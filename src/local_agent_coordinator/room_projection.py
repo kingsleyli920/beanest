@@ -131,7 +131,7 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             {**{key: value for key, value in file.items() if key != "content"}, "content_available": isinstance(file.get("content"), str)}
             for file in snapshot["project"].get("files", [])]}
 
-    claimed, cleanup, activities, progress, flags = {}, {}, {}, {}, {}
+    claimed, cleanup, activities, progress, statuses, flags = {}, {}, {}, {}, {}, {}
     latest_cache_miss = latest_handoff = None
     for event in events:
         job_id = event.get("job_id")
@@ -147,6 +147,8 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             cleanup[job_id] = event.get("cleanup_confirmed")
         elif event["kind"] == "native_tool_activity":
             activities[job_id] = event
+        elif event["kind"] == "native_progress_status":
+            statuses[job_id] = event
         elif event["kind"] == "message" and event.get("native_progress"):
             progress[job_id] = event
         elif event["kind"] in {"native_partial_inspection_queued", "partner_handoff_inspection", "native_readonly_discussion"}:
@@ -187,7 +189,8 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             "partner_handoff_inspection": permission_job["partner_handoff_inspection"],
             "native_partial_inspection": permission_job["native_partial_inspection"],
             "native_readonly_discussion": "native_readonly_discussion" in phase_flags,
-            "latest_native_activity": activities.get(job["id"]), "latest_public_progress": public}
+            "latest_native_activity": activities.get(job["id"]), "latest_public_progress": public,
+            "latest_progress_status": statuses.get(job["id"])}
         jobs.append({**replace_text(job, "text", "job_text", room_id, job_id=job["id"]), **view})
         if job["status"] in {"queued", "working"}:
             live.append(view)

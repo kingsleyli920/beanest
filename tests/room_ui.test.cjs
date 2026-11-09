@@ -4369,6 +4369,68 @@ test('a working partner card says how recently it was active, and warns only aft
   assert.throws(() => ui.get('partner-liveness-claude'), /missing/);
 });
 
+function progressCard({ age = 5, status = 'working' } = {}) {
+  const now = Date.now() / 1000;
+  const saved = activeActivitySnapshot(); saved.room.mode = 'native_project';
+  saved.jobs[0].status = status; saved.jobs[0].claimed_at = now - 100;
+  saved.events.push({ seq: 100, kind: 'native_progress_status', sender: 'claude', job_id: saved.jobs[0].id, run_id: saved.current_run.id, text: '96/182 done, 0 failed', created_at: now - age });
+  return saved;
+}
+
+test('a working partner card shows the latest command progress under the liveness line, with its age', async () => {
+  // Catches the line missing, placed above liveness, or carrying a wrong age for recent and minutes-old updates.
+  const saved = progressCard();
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(ui.get('partner-progress-status-claude').textContent, '进度：96/182 done, 0 failed · 刚刚');
+  const lines = ui.get('public-progress-claude').children;
+  assert.equal(lines.indexOf(ui.get('partner-progress-status-claude')), lines.indexOf(ui.get('partner-liveness-claude')) + 1);
+  saved.events.at(-1).created_at = Date.now() / 1000 - 125; await ui.poll();
+  assert.equal(ui.get('partner-progress-status-claude').textContent, '进度：96/182 done, 0 failed · 2 分钟前');
+});
+
+test('command progress older than ten minutes says it may be out of date, and not before', async () => {
+  // Catches an old line reading as current, and the warning arriving early.
+  const fresh = progressCard({ age: 595 });
+  const ui = await browser({ rooms: [fresh.room], saved: fresh, nativeProjectSupport: true });
+  assert.equal(ui.get('partner-progress-status-claude').textContent, '进度：96/182 done, 0 failed · 9 分钟前');
+  fresh.events.at(-1).created_at = Date.now() / 1000 - 605; await ui.poll();
+  assert.equal(ui.get('partner-progress-status-claude').textContent, '进度：96/182 done, 0 failed · 10 分钟前（可能已过期）');
+});
+
+test('command progress appears only while the job is working', async () => {
+  // Catches a stale line on a queued job, or one left on the card after the job ended.
+  const queued = progressCard({ status: 'queued' });
+  const waiting = await browser({ rooms: [queued.room], saved: queued, nativeProjectSupport: true });
+  assert.throws(() => waiting.get('partner-progress-status-claude'), /missing/);
+  const saved = progressCard();
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.ok(ui.get('partner-progress-status-claude'));
+  saved.jobs[0].status = 'completed'; await ui.poll();
+  assert.throws(() => ui.get('partner-progress-status-claude'), /missing/);
+});
+
+test('command progress is untrusted display text: no markup, no chat line, no credit as activity', async () => {
+  // Catches rendering file text as markup, putting it in the timeline, or a fresh line hiding a stuck warning.
+  const saved = progressCard();
+  saved.jobs[0].claimed_at = Date.now() / 1000 - 900;
+  saved.events[saved.events.length - 1].text = '<img src=x onerror=alert(1)> 96/182';
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(ui.get('partner-progress-status-claude').textContent, '进度：<img src=x onerror=alert(1)> 96/182 · 刚刚');
+  assert.equal(ui.get('partner-progress-status-claude').children.length, 0);
+  assert.doesNotMatch(ui.get('events').textContent, /96\/182/);
+  assert.match(ui.get('partner-liveness-claude').textContent, /^已 \d+ 分钟没有新记录，可能卡住了$/);
+  assert.match(ui.get('partner-liveness-claude').className, /warning/);
+});
+
+test('command progress reads in English, with the unit agreeing in number', async () => {
+  // Catches Chinese copy in the English interface and "1 minutes ago".
+  const saved = progressCard({ age: 65 });
+  const ui = await browser({ language: 'en', rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(ui.get('partner-progress-status-claude').textContent, 'Progress: 96/182 done, 0 failed · 1 minute ago');
+  saved.events.at(-1).created_at = Date.now() / 1000 - 700; await ui.poll();
+  assert.equal(ui.get('partner-progress-status-claude').textContent, 'Progress: 96/182 done, 0 failed · 11 minutes ago (may be out of date)');
+});
+
 test('native tool activity is bound to the active provider job and never masquerades as tests passing or leaks raw command receipts into chat', async () => {
   const saved = activeActivitySnapshot(); saved.room.mode = 'native_project';
   saved.events.push({ seq: 100, kind: 'native_tool_activity', sender: 'claude', job_id: saved.jobs[0].id, run_id: saved.current_run.id, state: 'started', description: '正在使用工具',
@@ -6460,6 +6522,20 @@ test('paged rooms load a tail and prepend older original messages without moving
   await ui.poll(); assert.equal(ui.get('events').children.length, 131);
   assert.match(ui.get('events').textContent, /原始讨论1.*新的真实回复/s); assert.equal(ui.get('message').value, '保留未发送草稿');
   assert.ok(ui.requests.some((request) => request.path.includes('after_seq=130')));
+});
+
+test('a paged room shows command progress from the projected job when its event is not in the page', async () => {
+  // Catches the card reading only loaded events, which would lose the line once it scrolls out of the tail.
+  const source = withNaturalContinuation(objectiveSnapshot({ status: 'running' })); source.team.phase = 'working';
+  const now = Date.now() / 1000;
+  const active = { id: jobId, provider: 'codex', status: 'working', kind: 'team_work', run_id: source.current_run.id, work_mode: 'build', runtime_settings: { effective_permission: 'workspace_write' }, claimed_at: now - 30,
+    latest_progress_status: { kind: 'native_progress_status', sender: 'codex', job_id: jobId, text: '96/182 done, 0 failed', created_at: now - 5 } };
+  const saved = pagedFixture(source, [], [active]);
+  const ui = await browser({ rooms: [source.room], saved, pagingSupport: true, naturalContinuationSupport: true, executionPolicySupport: true, route(request) {
+    if (request.path.endsWith('/state')) return saved;
+    return eventPageRoute(request, []);
+  } });
+  assert.equal(ui.get('partner-progress-status-codex').textContent, '进度：96/182 done, 0 failed · 刚刚');
 });
 
 test('long UTF8 messages commit their entire escaped body before a small ACK and survive a failed state reload without replay', async () => {
