@@ -45,7 +45,7 @@ NATIVE_ADAPTERS = (
 INSTALL_SECONDS = 600
 _DOWNLOAD_FAILED = 90
 # Downloaded before running so a broken connection cannot run half a script.
-_INSTALL_SCRIPT = ('set -eu; file="$(mktemp -t beanest-install)"; trap \'rm -f "$file"\' EXIT; '
+_INSTALL_SCRIPT = ('set -eu; file="$(mktemp "${TMPDIR:-/tmp}/beanest-install.XXXXXX")"; trap \'rm -f "$file"\' EXIT; '
                    'curl -fsSL --connect-timeout 20 --max-time 180 "$1" -o "$file" || exit 90; "$2" "$file"')
 NATIVE_IDS = frozenset(item.id for item in NATIVE_ADAPTERS)
 
