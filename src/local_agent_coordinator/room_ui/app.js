@@ -848,8 +848,10 @@ function renderCodeRepository(entry) {
   if (!repository) return;
   const selected = repository.candidates.find((candidate) => candidate.workspace_id === repository.workspace_id);
   const selectedLabel = selected ? platformDisplayText(selected.label, selected.label_i18n) : null;
+  const currentBranch = repository.state === 'bound' ? entry.data?.delivery_summary?.branch : null;
+  const branchLabel = currentBranch?.name || (currentBranch?.detached ? t("当前提交（未在分支上）") : '');
   $('code-repository-label').textContent = repository.state === 'bound'
-    ? t("交付仓库：{p0}", { p0: selectedLabel || t("已指定仓库") }) : repository.state === 'unbound' ? t("交付仓库")
+    ? t("交付仓库：{p0}", { p0: [selectedLabel || t("已指定仓库"), branchLabel].filter(Boolean).join(' · ') }) : repository.state === 'unbound' ? t("交付仓库")
       : repository.reason === 'delivery_repository_unavailable' ? t("交付仓库：{p0}（暂时无法读取）", { p0: selectedLabel || t("已指定仓库") }) : codeRepositoryNotice(repository);
   $('code-repository-edit').textContent = repository.workspace_id ? t("更换") : t("选择仓库");
   $('code-repository-edit').disabled = !state.connected || entry.repositorySaving;
@@ -929,19 +931,67 @@ $('code-repository-save').addEventListener('click', async () => {
   }
 });
 
+// Only a result old enough to have drifted during a run is worth calling out;
+// the age comes from the room poll re-render, never from an extra Git read.
+const CODE_STATUS_OLD_SECONDS = 600;
+function codeStatusOldMinutes(observed, active) {
+  if (!active || !Number.isFinite(observed)) return 0;
+  const seconds = Date.now() / 1000 - observed;
+  return seconds >= CODE_STATUS_OLD_SECONDS ? Math.floor(seconds / 60) : 0;
+}
 function codeRunActive(snapshot = state.snapshot) {
   if (snapshot?.room?.work_activity?.state === 'working' || snapshot?.live?.jobs?.some((job) => job.status === 'working')) return true;
   return !!snapshot?.current_run && !['complete', 'completed', 'ready_for_user', 'needs_user', 'stopped', 'interrupted', 'cancelled', 'unknown'].includes(snapshot.current_run.status);
 }
-function taskGitDeliveryState(delivery) {
-  const states = [delivery.main?.state, delivery.remote?.state,
-    ...[delivery.private?.state, delivery.workspace?.state].filter(Boolean)];
-  return states.includes('pending') ? 'pending' : states.every(state => state === 'confirmed') ? 'confirmed' : 'unknown';
+function deliveryWorkBranch(delivery) {
+  return delivery?.branch?.work_branch === true && delivery.branch.name ? delivery.branch : null;
 }
-function taskDeliveryMessage(delivery, gitState) {
+function deliveryPendingOnlyFor(part, reasons) {
+  return part?.state === 'pending' && reasons.includes(part.reason)
+    && (part.checks || []).every((check) => check.state === 'confirmed' || reasons.includes(check.reason));
+}
+// A pending scope that needs no reminder: 'normal' lasts as long as the work
+// stays on its branch, 'running' only until the task ends.
+function deliveryScopeExpected(delivery, kind, active) {
+  const workBranch = deliveryWorkBranch(delivery);
+  if (kind === 'main') return workBranch && deliveryPendingOnlyFor(delivery.main, ['branch_not_on_mainline']) ? 'normal' : null;
+  if (!active) return null;
+  if (kind === 'workspace') return deliveryPendingOnlyFor(delivery.workspace, ['uncommitted_tracked_changes']) ? 'running' : null;
+  return kind === 'remote' && workBranch && deliveryPendingOnlyFor(delivery.remote, ['work_branch_not_pushed', 'work_branch_no_upstream']) ? 'running' : null;
+}
+function taskGitDeliveryState(delivery, active = false) {
+  const kinds = ['main', 'remote', ...['private', 'workspace'].filter((kind) => delivery[kind]?.state)];
+  const states = kinds.map((kind) => deliveryScopeExpected(delivery, kind, active) ? 'progress' : delivery[kind]?.state);
+  return states.includes('pending') ? 'pending' : states.every(state => state === 'confirmed') ? 'confirmed'
+    : states.every(state => state === 'confirmed' || state === 'progress') ? 'progress' : 'unknown';
+}
+function workBranchDeliveryMessage(delivery, branch, active) {
+  const remote = delivery.remote;
+  if (delivery.private?.state === 'pending' || !active && delivery.workspace?.state === 'pending') return t("还有工作区成果待提交");
+  if (active) return t("任务进行中，工作分支 {p0} 还在更新", { p0: branch.name });
+  if (remote?.reason === 'work_branch_no_upstream') return t("工作分支 {p0} 未设远端", { p0: branch.name });
+  if (remote?.state === 'pending') return t("工作分支 {p0} 还有 {p1} 次提交没推送", { p0: branch.name, p1: branch.upstream?.ahead });
+  return remote?.state === 'confirmed' ? t("工作分支 {p0} 已推送", { p0: branch.name }) : t("工作分支 {p0} 的推送状态未知", { p0: branch.name });
+}
+function workBranchPushStatus(branch, remote) {
+  const behind = branch.upstream?.behind;
+  const body = remote?.state === 'confirmed' ? Number.isSafeInteger(behind) && behind > 0 ? t("工作分支已推送，远端还多 {p0} 次提交", { p0: behind }) : t("工作分支已推送")
+    : remote?.reason === 'work_branch_no_upstream' ? t("工作分支未设远端")
+      : remote?.state === 'pending' ? t("工作分支还有 {p0} 次提交没推送", { p0: branch.upstream?.ahead }) : t("工作分支的推送状态未知");
+  return `${t("远端")}${interfaceColon()}${body}`;
+}
+function deliveryStatusBody(text) {
+  const colon = interfaceColon(), index = text.indexOf(colon);
+  return index < 0 ? text : text.slice(index + colon.length);
+}
+function taskDeliveryMessage(delivery, gitState, active = false) {
   const main = delivery.main?.state, remote = delivery.remote?.state, privateState = delivery.private?.state;
+  const branch = deliveryWorkBranch(delivery);
+  if (branch && deliveryScopeExpected(delivery, 'main', active)) return workBranchDeliveryMessage(delivery, branch, active);
+  const workspaceRunning = deliveryScopeExpected(delivery, 'workspace', active) === 'running';
   if (main === 'pending') return t("还有任务成果未合入主分支");
-  if (privateState === 'pending' || delivery.workspace?.state === 'pending') return t("还有工作区成果待提交");
+  if (privateState === 'pending' || delivery.workspace?.state === 'pending' && !workspaceRunning) return t("还有工作区成果待提交");
+  if (workspaceRunning) return t("任务进行中，工作区还有改动没提交");
   if (gitState === 'confirmed') return t("已提交代码已合入并同步 GitHub");
   if (main === 'confirmed') {
     if (remote === 'confirmed') return privateState === 'unknown' || delivery.workspace?.state === 'unknown' ? t("已提交代码已同步，工作区成果尚未核齐") : t("已提交代码已合入并同步 GitHub");
@@ -977,16 +1027,24 @@ function taskDeliveryStatus(part, kind) {
   return `${kind === 'main' ? t("主分支") : kind === 'private' ? t("伙伴工作区") : kind === 'workspace' ? t("工作区") : 'GitHub'}${interfaceColon()}${reasons[part?.reason] || fallback}`;
 }
 function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
+  const branch = deliveryWorkBranch(delivery);
+  if (branch && kind === 'main' && deliveryScopeExpected(delivery, 'main', false)) {
+    return `${t("主分支")}${interfaceColon()}${t("在工作分支 {p0} 上，比 {p1} 多 {p2} 次提交", { p0: branch.name, p1: branch.mainline, p2: branch.ahead })}`;
+  }
+  if (branch && kind === 'remote') return workBranchPushStatus(branch, delivery.remote);
   const issues = (Array.isArray(delivery.issues) ? delivery.issues : []).filter((issue) => issue.scope === kind && issue.state !== 'confirmed');
   const checks = (Array.isArray(delivery[kind]?.checks) ? delivery[kind].checks : []).filter((check) => check.state !== 'confirmed');
   const problems = [...issues, ...checks];
   if (!problems.length) return taskDeliveryStatus(delivery[kind], kind);
   const messages = [...new Set(problems.map((issue) => {
     const workspace = workspaces.find((item) => item.id === issue.workspace_id);
-    const label = workspace && (state.snapshot?.members?.find((member) => member.id === workspace.provider)?.name || platformDisplayText(workspace.label, workspace.label_i18n));
+    // Only the bound repository is named above the cards; any other workspace still needs its name here.
+    const partner = workspace && state.snapshot?.members?.find((member) => member.id === workspace.provider)?.name;
+    const namedAbove = workspace && workspace.id === state.codeStatusEntries.get(state.selected)?.repository?.workspace_id && !(delivery.coverage?.repositories > 1);
+    const label = workspace && (partner || (namedAbove ? '' : platformDisplayText(workspace.label, workspace.label_i18n)));
     return taskDeliveryStatus(issue, kind) + (label ? interfaceParen(label) : '');
   }))];
-  return messages.map((message, index) => index ? message.slice(message.indexOf('：') + 1) : message).join('；');
+  return messages.map((message, index) => index ? deliveryStatusBody(message) : message).join('；');
 }
 function taskPublishedMessage(published) {
   const files = published.files; const parts = [];
@@ -1035,7 +1093,7 @@ function renderCodeStatus() {
   card.hidden = !state.codeStatusSupported || !roomId;
   if (card.hidden) { state.codeStatusRendered = null; state.deliveryPending = 0; return; }
   const entry = codeStatusEntry(roomId); const data = entry.data;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [roomId, entry.workspaceId, data, entry.loading, entry.error, entry.repository, entry.repositoryEditing, entry.repositoryDraft, entry.repositorySaving, entry.repositoryError, state.connected, codeRunActive(), state.busy, !!state.pending, $('code-merge-target').value, naturalContinuation(state.snapshot, $('code-merge-target').value)?.canSend, state.snapshot?.members?.map((member) => member.id)]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), codeStatusOldMinutes(data?.observed_at, codeRunActive()), [roomId, entry.workspaceId, data, entry.loading, entry.error, entry.repository, entry.repositoryEditing, entry.repositoryDraft, entry.repositorySaving, entry.repositoryError, state.connected, codeRunActive(), state.busy, !!state.pending, $('code-merge-target').value, naturalContinuation(state.snapshot, $('code-merge-target').value)?.canSend, state.snapshot?.members?.map((member) => member.id)]]);
   if (fingerprint === state.codeStatusRendered) return;
   state.codeStatusRendered = fingerprint;
   renderCodeRepository(entry);
@@ -1050,12 +1108,15 @@ function renderCodeStatus() {
   $('code-status-refresh').disabled = entry.loading || entry.repositorySaving || !state.connected;
   const available = !!data && data.workspace_id === entry.workspaceId;
   const active = codeRunActive(); const stale = active || !state.connected || entry.loading || !!entry.error; const summary = $('code-local-summary');
-  summary.textContent = entry.loading ? t("正在读取代码状态…") : entry.error || `${stale && available && data.state === 'ready' ? t("上次检查：") : ''}${codeStateMessage(available ? data : null)}`;
+  const oldMinutes = available ? codeStatusOldMinutes(data.observed_at, active) : 0;
+  const oldAge = oldMinutes ? oldMinutes >= 60 ? t("{p0} 小时", { p0: Math.floor(oldMinutes / 60) }) : t("{p0} 分钟", { p0: oldMinutes }) : '';
+  const checkPrefix = oldAge ? t("{p0}前的结果：", { p0: oldAge }) : stale ? t("上次检查：") : '';
+  summary.textContent = entry.loading ? t("正在读取代码状态…") : entry.error || `${available && data.state === 'ready' ? checkPrefix : ''}${codeStateMessage(available ? data : null)}`;
   const delivery = available ? data?.delivery_summary : null;
   const deliveryKnown = delivery?.scope === 'task_linked_workspaces';
-  const gitState = deliveryKnown ? taskGitDeliveryState(delivery) : null;
+  const gitState = deliveryKnown ? taskGitDeliveryState(delivery, active) : null;
   const headline = $('code-status-summary');
-  headline.textContent = available && data.state === 'ready' ? t("{p0}尚未取得本任务的交付核对记录", { p0: stale ? t("上次检查：") : '' }) : summary.textContent;
+  headline.textContent = available && data.state === 'ready' ? t("{p0}尚未取得本任务的交付核对记录", { p0: checkPrefix }) : summary.textContent;
   headline.className = 'code-status-summary';
   $('code-delivery-states').hidden = !deliveryKnown && (!available || data.state !== 'ready');
   $('code-delivery-note').hidden = $('code-delivery-states').hidden;
@@ -1075,8 +1136,8 @@ function renderCodeStatus() {
   $('code-delivery-remote').textContent = t("GitHub：当前来源未返回远端核对结果");
   $('code-delivery-note').textContent = t("可刷新重新读取，或请伙伴核对并提交同步。");
   if (deliveryKnown) {
-    const prefix = stale ? t("上次检查：") : '';
-    headline.textContent = prefix + taskDeliveryMessage(delivery, gitState);
+    const prefix = checkPrefix;
+    headline.textContent = prefix + taskDeliveryMessage(delivery, gitState, active);
     $('code-delivery-main').textContent = prefix + taskDeliveryScopeStatus(delivery, 'main', data.workspaces);
     $('code-delivery-remote').textContent = prefix + taskDeliveryScopeStatus(delivery, 'remote', data.workspaces);
     if (!workspaceStatus.hidden) workspaceStatus.textContent = prefix + taskDeliveryScopeStatus(delivery, 'workspace', data.workspaces);
@@ -1088,10 +1149,10 @@ function renderCodeStatus() {
       ? t("GitHub 已同步的是当前主分支；上面的任务成果问题仍需核对，不能据此判断全部交付完成。")
       : t("主分支核对已提交代码，工作区核对尚未交付的成果；GitHub 核对当前主分支。");
   }
-  renderDeliverySteps(deliveryKnown ? delivery : null, data?.workspaces || [], codeRepository(entry));
+  renderDeliverySteps(deliveryKnown ? delivery : null, data?.workspaces || [], codeRepository(entry), active);
   $('code-published-note').hidden = !deliveryKnown || !delivery.published;
   $('code-published-note').textContent = deliveryKnown && delivery.published
-    ? (stale ? t("上次检查：") : '') + taskPublishedMessage(delivery.published) : '';
+    ? checkPrefix + taskPublishedMessage(delivery.published) : '';
   const repository = codeRepository(entry);
   if (repository && repository.state !== 'bound') {
     headline.textContent = codeRepositoryNotice(repository);
@@ -1104,7 +1165,7 @@ function renderCodeStatus() {
   const trackedKnown = Number.isSafeInteger(counts?.tracked) && counts.tracked >= 0;
   const merged = ['merged', 'same_branch'].includes(data?.mainline?.relation) && data?.mainline?.state === 'ready';
   const pendingTracked = trackedKnown ? counts.tracked > 0 : counts?.total > 0;
-  summary.className = `code-status-summary${available && !stale && data.state === 'ready' && !pendingTracked && (counts?.total === 0 || merged) ? ' is-clean' : available && (pendingTracked || data?.mainline?.relation === 'unmerged') ? ' is-dirty' : ''}`;
+  summary.className = `code-status-summary${available && !stale && data.state === 'ready' && !pendingTracked && (counts?.total === 0 || merged) ? ' is-clean' : available && (pendingTracked && !active || data?.mainline?.relation === 'unmerged' && !data?.branch) ? ' is-dirty' : ''}`;
   if (deliveryKnown) headline.className = `code-status-summary${(!repository || repository.state === 'bound') && !stale && gitState === 'confirmed' ? ' is-clean' : gitState === 'pending' ? ' is-dirty' : ''}`;
   $('code-tracked-status').hidden = !trackedKnown;
   $('code-tracked-status').textContent = trackedKnown ? t("已跟踪文件：{p0}", { p0: counts.tracked ? t("{p0} 个有改动，尚未提交", { p0: counts.tracked }) : t("无待提交改动") }) : '';
@@ -1117,11 +1178,12 @@ function renderCodeStatus() {
     ? `${data.branch || (data.detached ? t("当前提交（未在分支上）") : t("分支不可用"))}${data.unborn ? t(" · 尚无提交") : ''}` : '';
   $('code-status-branch').textContent = [workspace?.label, branch].filter(Boolean).join(' · ');
   const observed = data?.observed_at;
-  const freshness = Number.isFinite(observed) ? t("检查于 {p0}{p1}", { p0: timeLabel(observed, true), p1: !state.connected ? t(" · 本地连接已断开") : active ? t(" · 任务进行中，刷新查看最新改动") : '' }) : '';
+  const freshness = Number.isFinite(observed) ? t("检查于 {p0}{p1}", { p0: timeLabel(observed, true), p1: !state.connected ? t(" · 本地连接已断开") : oldAge ? t(" · 任务进行中，这是 {p0}前的旧结果，点刷新查看最新状态", { p0: oldAge }) : active ? t(" · 任务进行中，刷新查看最新改动") : '' }) : '';
   const queryStatus = available ? entry.loading ? t("正在重新核对，以上为上次结果") : entry.error : '';
   const remoteCheckedAt = available && deliveryKnown ? delivery.remote?.checked_at : null;
   const remoteFreshness = Number.isFinite(remoteCheckedAt) ? t("GitHub 检查于 {p0}", { p0: timeLabel(remoteCheckedAt, true) }) : '';
-  $('code-status-freshness').textContent = [freshness, remoteFreshness, queryStatus].filter(Boolean).join(' · ');
+  const pushBasis = available && deliveryKnown && deliveryWorkBranch(delivery) ? t("推送状态来自本机跟踪记录，未联网核对") : '';
+  $('code-status-freshness').textContent = [freshness, remoteFreshness, pushBasis, queryStatus].filter(Boolean).join(' · ');
   const commit = available ? data.last_commit : null;
   $('code-last-commit').hidden = !commit;
   $('code-commit-subject').textContent = commit?.subject || ''; $('code-commit-hash').textContent = commit?.short_hash || '';
@@ -1146,20 +1208,22 @@ function renderCodeStatus() {
   $('code-files-more').hidden = !available || remaining <= 0;
   $('code-files-more').textContent = remaining > 0 ? t("另有 {p0} 个文件未在本次状态中列出。", { p0: remaining }) : '';
 }
-function renderDeliverySteps(delivery, workspaces, repository) {
+function renderDeliverySteps(delivery, workspaces, repository, active = false) {
   const steps = $('delivery-steps');
   steps.hidden = !delivery || !!repository && repository.state !== 'bound';
   $('code-status-card').classList.toggle('has-steps', !steps.hidden);
-  const cells = steps.hidden ? [] : [['workspace', t("工作区")], ['main', t("主分支")], ['remote', 'GitHub'], ['private', t("伙伴副本")]]
+  const cells = steps.hidden ? [] : [['workspace', t("工作区")], ['main', t("主分支")], ['remote', deliveryWorkBranch(delivery) ? t("远端") : 'GitHub'], ['private', t("伙伴副本")]]
     .filter(([kind]) => ['main', 'remote'].includes(kind) || delivery[kind]);
-  state.deliveryPending = cells.filter(([kind]) => delivery[kind]?.state === 'pending').length;
+  state.deliveryPending = cells.filter(([kind]) => delivery[kind]?.state === 'pending' && !deliveryScopeExpected(delivery, kind, active)).length;
   steps.replaceChildren(...cells.map(([kind, label]) => {
     const value = delivery[kind]?.state; const text = taskDeliveryScopeStatus(delivery, kind, workspaces);
-    const tone = value === 'confirmed' ? 'ok' : value === 'pending' ? 'ask' : 'st';
-    const cell = element('div', '', `delivery-step ${value === 'pending' ? 'pending' : value === 'confirmed' ? 'confirmed' : 'unknown'}`);
+    const expected = deliveryScopeExpected(delivery, kind, active);
+    const tone = expected === 'running' ? 'wk' : expected === 'normal' ? 'todo' : value === 'confirmed' ? 'ok' : value === 'pending' ? 'ask' : 'st';
+    const cell = element('div', '', `delivery-step ${expected || (value === 'pending' ? 'pending' : value === 'confirmed' ? 'confirmed' : 'unknown')}`);
     const title = element('span', '', 'delivery-step-title');
-    title.append(element('span', ({ ok: '✓', ask: '!', st: '?' })[tone], `si ${tone}`), element('span', label));
-    cell.append(title, element('span', text.slice(text.indexOf('：') + 1)));
+    title.append(element('span', ({ ok: '✓', ask: '!', st: '?' })[tone] || '', `si ${tone}`), element('span', label));
+    if (expected === 'running') title.append(element('span', t("进行中"), 'delivery-step-tag'));
+    cell.append(title, element('span', deliveryStatusBody(text)));
     return cell;
   }));
 }

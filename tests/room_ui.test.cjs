@@ -7650,7 +7650,8 @@ test('a late code workspace result cannot replace a newer unavailable scope or l
 });
 test('active work labels old code observations and its terminal transition refreshes Git exactly once', async () => {
   const saved = completedSuggestionFixture(); saved.current_run.status = 'working'; saved.objective.status = 'running';
-  const data = projectCodeFixture(); data.uncommitted.total = 0; let reads = 0;
+  // Checked moments ago: results old enough to be called out are covered by their own test.
+  const data = projectCodeFixture(); data.uncommitted.total = 0; data.observed_at = Math.floor(Date.now() / 1000) - 30; let reads = 0;
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, codeStatusSupport: true,
     route(request) { if (request.path.includes('/code-status')) { reads++; return data; } } });
   assert.equal(ui.get('code-local-summary').textContent, '上次检查：工作区干净'); assert.equal(ui.get('code-local-summary').classList.contains('is-clean'), false);
@@ -8455,6 +8456,184 @@ test('task code delivery is compact and separates confirmed commits from files s
   await ui.click('code-status-refresh');
   assert.match(ui.get('code-delivery-main').textContent, /来源未提供可确认的核对结果/);
   assert.doesNotMatch(ui.get('code-delivery-note').textContent, /点击刷新核对 GitHub/);
+});
+
+// Shaped like the real code-status payload for a work-branch room (see test_code_delivery_work_branch_http.py).
+function workBranchDeliveryFixture({ remote = { state: 'confirmed', reason: null }, upstream = { state: 'ready', name: 'origin/codex/ranger-world-time', ahead: 0, behind: 0 }, tracked = 0 } = {}) {
+  const data = projectCodeFixture();
+  const repository = { id: 'delivery:ranger', kind: 'delivery', label: '交付所在仓库 · ranger-world-time', path: '/worktrees/ranger-world-time' };
+  const checkOf = (part) => ({ ...part, workspace_id: repository.id });
+  const workspace = tracked ? { state: 'pending', reason: 'uncommitted_tracked_changes' } : { state: 'confirmed', reason: null };
+  const main = { state: 'pending', reason: 'branch_not_on_mainline' };
+  Object.assign(data, { workspaces: [repository, data.workspaces[1]], workspace_id: repository.id, branch: 'codex/ranger-world-time',
+    observed_at: Math.floor(Date.now() / 1000) - 30, repository_root: repository.path,
+    mainline: { state: 'ready', name: 'main', relation: 'unmerged', ahead: 9, behind: 0, scope: 'repository_local_refs' }, upstream,
+    uncommitted: { total: tracked, tracked, staged: 0, unstaged: tracked, untracked: 0, conflicted: 0 }, files: [], files_truncated: false,
+    delivery_repository: { state: 'bound', reason: null, workspace_id: repository.id, source: 'user', candidates: [{ workspace_id: repository.id, label: repository.label }] },
+    delivery_summary: { scope: 'task_linked_workspaces', state: 'pending', reason: main.reason,
+      main: { ...main, checks: [checkOf(main)] }, remote: { ...remote, checks: [checkOf(remote)], checked_at: null, cached: false },
+      published: { state: 'confirmed', reason: null, files: { total: 0, matched: 0, missing: 0, different: 0, mode_unknown: 0 } },
+      private: { state: 'confirmed', reason: null },
+      issues: [{ scope: 'main', ...checkOf(main) }, ...(remote.state === 'confirmed' ? [] : [{ scope: 'remote', ...checkOf(remote) }]), ...(tracked ? [{ scope: 'workspace', ...checkOf(workspace), tracked, untracked: 0 }] : [])],
+      workspace: { ...workspace, checks: [{ ...checkOf(workspace), tracked, untracked: 0 }], tracked, untracked: 0 },
+      coverage: { repositories: 1, private_workspaces: 0, retained_workspaces: 0 },
+      branch: { name: 'codex/ranger-world-time', detached: false, mainline: 'main', relation: 'unmerged', ahead: 9, behind: 0, work_branch: true, upstream },
+      request: { available: true, repository_roots: [repository.path], targets: [{ repository_root: repository.path, target_branch: 'main' }] } } });
+  return data;
+}
+function deliveryCell(ui, label) { return ui.get('delivery-steps').children.find((cell) => cell.firstChild.textContent.includes(label)); }
+function deliveryCardBody(ui, label) { return deliveryCell(ui, label).children[1].textContent; }
+async function workBranchBrowser(data, mutate = (saved) => saved) {
+  const saved = withNaturalContinuation(completedSuggestionFixture()); mutate(saved);
+  const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true,
+    route(request) { if (request.path.includes('/code-status')) return data; } });
+  await ui.poll();
+  return { ui, saved };
+}
+const unpushedThree = { remote: { state: 'pending', reason: 'work_branch_not_pushed' }, upstream: { state: 'ready', name: 'origin/codex/ranger-world-time', ahead: 3, behind: 0 } };
+
+test('a pushed work branch reads as pushed, and being unmerged is a plain fact rather than a warning', async () => {
+  // Catches the 2026-11-08 screen: orange "未合入" card, orange title and a badge for normal branch work.
+  const { ui } = await workBranchBrowser(workBranchDeliveryFixture());
+  assert.equal(ui.get('code-status-summary').textContent, '工作分支 codex/ranger-world-time 已推送');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), false);
+  assert.equal(deliveryCardBody(ui, '主分支'), '在工作分支 codex/ranger-world-time 上，比 main 多 9 次提交');
+  assert.equal(deliveryCell(ui, '主分支').classList.contains('pending'), false);
+  assert.equal(deliveryCell(ui, '主分支').classList.contains('normal'), true);
+  assert.equal(deliveryCardBody(ui, '远端'), '工作分支已推送');
+  assert.equal(deliveryCell(ui, '远端').classList.contains('confirmed'), true);
+  assert.equal(ui.get('code-delivery-remote').textContent, '远端：工作分支已推送');
+  assert.equal(ui.get('tab-delivery-count').hidden, true);
+  assert.match(ui.get('code-status-freshness').textContent, /推送状态来自本机跟踪记录，未联网核对/);
+  assert.doesNotMatch(ui.get('code-status-freshness').textContent, /GitHub 检查于/);
+  assert.equal(ui.get('code-repository-label').textContent, '交付仓库：交付所在仓库 · ranger-world-time · codex/ranger-world-time');
+});
+
+test('a finished task with unpushed commits on a work branch must remind, with the real count', async () => {
+  // Catches the green "GitHub synced" tick that hid unpushed commits on the work branch.
+  const { ui } = await workBranchBrowser(workBranchDeliveryFixture(unpushedThree));
+  assert.equal(ui.get('code-status-summary').textContent, '工作分支 codex/ranger-world-time 还有 3 次提交没推送');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), true);
+  assert.equal(deliveryCardBody(ui, '远端'), '工作分支还有 3 次提交没推送');
+  assert.equal(deliveryCell(ui, '远端').classList.contains('pending'), true);
+  assert.equal(ui.get('tab-delivery-count').hidden, false);
+  assert.equal(ui.get('tab-delivery-count').textContent, '1');
+});
+
+test('a work branch without a remote reminds and an unreadable upstream is reported as unknown', async () => {
+  // Catches "no upstream" and "unknown" both collapsing into a reassuring or a guessed state.
+  const none = await workBranchBrowser(workBranchDeliveryFixture({ remote: { state: 'pending', reason: 'work_branch_no_upstream' }, upstream: { state: 'none', name: null, ahead: null, behind: null } }));
+  assert.equal(deliveryCardBody(none.ui, '远端'), '工作分支未设远端');
+  assert.equal(deliveryCell(none.ui, '远端').classList.contains('pending'), true);
+  assert.equal(none.ui.get('code-status-summary').textContent, '工作分支 codex/ranger-world-time 未设远端');
+  assert.equal(none.ui.get('tab-delivery-count').textContent, '1');
+  const unknown = await workBranchBrowser(workBranchDeliveryFixture({ remote: { state: 'unknown', reason: 'work_branch_upstream_unknown' }, upstream: { state: 'unknown', name: 'origin/x', ahead: null, behind: null } }));
+  assert.equal(deliveryCardBody(unknown.ui, '远端'), '工作分支的推送状态未知');
+  assert.equal(deliveryCell(unknown.ui, '远端').classList.contains('unknown'), true);
+  assert.equal(unknown.ui.get('code-status-summary').textContent, '工作分支 codex/ranger-world-time 的推送状态未知');
+  assert.equal(unknown.ui.get('code-status-summary').classList.contains('is-dirty'), false);
+  assert.equal(unknown.ui.get('tab-delivery-count').hidden, true);
+});
+
+test('during a run uncommitted and unpushed work is shown as in progress, and reminds once the run ends', async () => {
+  // Catches process state turning the badge orange mid-run, and a reminder that never comes back afterwards.
+  const data = workBranchDeliveryFixture({ ...unpushedThree, tracked: 2 });
+  const { ui, saved } = await workBranchBrowser(data, (value) => { value.room.work_activity = { state: 'working', working_jobs: 1, queued_jobs: 0, draining: false }; });
+  for (const label of ['工作区', '远端']) {
+    assert.equal(deliveryCell(ui, label).classList.contains('running'), true, label);
+    assert.equal(deliveryCell(ui, label).classList.contains('pending'), false, label);
+    assert.match(deliveryCell(ui, label).firstChild.textContent, /进行中/, label);
+  }
+  assert.equal(ui.get('tab-delivery-count').hidden, true);
+  assert.equal(ui.get('code-status-summary').textContent, '上次检查：任务进行中，工作分支 codex/ranger-world-time 还在更新');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), false);
+  assert.equal(ui.get('code-local-summary').classList.contains('is-dirty'), false);
+  saved.room.work_activity = { state: 'idle', working_jobs: 0, queued_jobs: 0, draining: false }; await ui.poll(); await ui.poll();
+  assert.equal(deliveryCell(ui, '工作区').classList.contains('pending'), true);
+  assert.equal(deliveryCell(ui, '远端').classList.contains('pending'), true);
+  assert.equal(deliveryCell(ui, '主分支').classList.contains('pending'), false);
+  assert.equal(ui.get('tab-delivery-count').textContent, '2');
+  assert.equal(ui.get('code-status-summary').textContent, '还有工作区成果待提交');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), true);
+});
+
+test('uncommitted changes on mainline during a run are in progress but an unpushed mainline keeps its original verdict', async () => {
+  // Catches the running rule either missing mainline work or softening GitHub main's own check.
+  const data = taskCodeDeliveryFixture();
+  data.delivery_summary.workspace = { state: 'pending', reason: 'uncommitted_tracked_changes', checks: [{ state: 'pending', reason: 'uncommitted_tracked_changes', workspace_id: 'project' }], tracked: 2, untracked: 0 };
+  data.delivery_summary.remote = { state: 'pending', reason: 'local_mainline_not_on_remote', checked_at: 1700000000 };
+  data.delivery_summary.branch = { name: 'master', detached: false, mainline: 'master', relation: 'same_branch', ahead: 0, behind: 0, work_branch: false, upstream: { state: 'ready', name: 'origin/master', ahead: 1, behind: 0 } };
+  data.observed_at = Math.floor(Date.now() / 1000) - 30;
+  const { ui } = await workBranchBrowser(data, (value) => { value.room.work_activity = { state: 'working', working_jobs: 1, queued_jobs: 0, draining: false }; });
+  assert.equal(deliveryCell(ui, '工作区').classList.contains('running'), true);
+  assert.equal(deliveryCell(ui, 'GitHub').classList.contains('pending'), true);
+  assert.equal(deliveryCardBody(ui, 'GitHub'), '当前主分支还有提交未同步');
+  assert.equal(ui.get('tab-delivery-count').textContent, '1');
+});
+
+test('on mainline a commit that is not on the mainline keeps the original warning', async () => {
+  // Catches the neutral treatment reaching anything but a real work branch.
+  const data = taskCodeDeliveryFixture();
+  data.delivery_summary.state = 'pending';
+  data.delivery_summary.main = { state: 'pending', reason: 'branch_not_on_mainline', checks: [{ state: 'pending', reason: 'branch_not_on_mainline', workspace_id: 'project' }] };
+  data.delivery_summary.issues = [{ scope: 'main', state: 'pending', reason: 'branch_not_on_mainline', workspace_id: 'project' }];
+  data.delivery_summary.branch = { name: 'master', detached: false, mainline: 'master', relation: 'merged', ahead: 0, behind: 2, work_branch: false, upstream: { state: 'none', name: null, ahead: null, behind: null } };
+  data.delivery_repository = { state: 'bound', reason: null, workspace_id: 'project', source: 'user', candidates: [{ workspace_id: 'project', label: '关联项目' }] };
+  const { ui } = await workBranchBrowser(data);
+  assert.equal(ui.get('code-status-summary').textContent, '还有任务成果未合入主分支');
+  assert.equal(ui.get('code-status-summary').classList.contains('is-dirty'), true);
+  assert.equal(deliveryCell(ui, '主分支').classList.contains('pending'), true);
+  assert.equal(deliveryCardBody(ui, '主分支'), '还有分支上的提交未合入');
+  assert.equal(deliveryCardBody(ui, 'GitHub'), '当前主分支已同步');
+  assert.equal(ui.get('tab-delivery-count').textContent, '1');
+});
+
+test('the delivery repository name is repeated in the cards only when there is more than one', async () => {
+  // Catches "（交付所在仓库 · 目录名）" on every card when the line above already names it.
+  const repeated = (count) => {
+    const data = workBranchDeliveryFixture(); delete data.delivery_summary.branch;
+    data.delivery_summary.coverage.repositories = count; return data;
+  };
+  const single = await workBranchBrowser(repeated(1));
+  assert.equal(deliveryCardBody(single.ui, '主分支'), '还有分支上的提交未合入');
+  assert.doesNotMatch(single.ui.get('code-delivery-main').textContent, /交付所在仓库/);
+  const multiple = await workBranchBrowser(repeated(2));
+  assert.equal(multiple.ui.get('code-delivery-main').textContent, '主分支：还有分支上的提交未合入（交付所在仓库 · ranger-world-time）');
+});
+
+test('results older than ten minutes during a run say how old they are, without any extra Git read', async () => {
+  // Catches a 37-minute-old answer looking like the current state, and a fix that adds polling.
+  const working = (value) => { value.room.work_activity = { state: 'working', working_jobs: 1, queued_jobs: 0, draining: false }; };
+  const now = Math.floor(Date.now() / 1000);
+  const old = workBranchDeliveryFixture(); old.observed_at = now - 37 * 60 - 5;
+  const opened = await workBranchBrowser(old, working);
+  const reads = () => opened.ui.requests.filter((request) => request.path.includes('/code-status')).length;
+  assert.equal(opened.ui.get('code-status-summary').textContent, '37 分钟前的结果：任务进行中，工作分支 codex/ranger-world-time 还在更新');
+  assert.equal(opened.ui.get('code-delivery-main').textContent, '37 分钟前的结果：主分支：在工作分支 codex/ranger-world-time 上，比 main 多 9 次提交');
+  assert.match(opened.ui.get('code-status-freshness').textContent, /这是 37 分钟前的旧结果，点刷新查看最新状态/);
+  const before = reads(); await opened.ui.poll(); await opened.ui.poll(); assert.equal(reads(), before);
+  const hours = workBranchDeliveryFixture(); hours.observed_at = now - 125 * 60;
+  assert.match((await workBranchBrowser(hours, working)).ui.get('code-status-summary').textContent, /^2 小时前的结果：/);
+  const recent = workBranchDeliveryFixture(); recent.observed_at = now - 9 * 60;
+  const fresh = await workBranchBrowser(recent, working);
+  assert.match(fresh.ui.get('code-status-summary').textContent, /^上次检查：/);
+  assert.doesNotMatch(fresh.ui.get('code-status-freshness').textContent, /旧结果/);
+  const idle = workBranchDeliveryFixture(); idle.observed_at = now - 37 * 60;
+  const finished = await workBranchBrowser(idle);
+  assert.equal(finished.ui.get('code-status-summary').textContent, '工作分支 codex/ranger-world-time 已推送');
+});
+
+test('the merge request says it merges into main and pushes, and English cards drop the repeated scope prefix', async () => {
+  // Catches a vague "sync" button in a room that must not touch main, and "Remote: Remote: ..." card text.
+  assert.match(html, /请伙伴提交、合入主分支并推送/); assert.doesNotMatch(html, /请伙伴提交并同步/);
+  const saved = withNaturalContinuation(completedSuggestionFixture());
+  const ui = await browser({ language: 'en', rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true,
+    route(request) { if (request.path.includes('/code-status')) return workBranchDeliveryFixture(unpushedThree); } });
+  await ui.poll();
+  assert.equal(deliveryCardBody(ui, 'Remote'), 'Work branch has 3 unpushed commits');
+  assert.equal(deliveryCardBody(ui, 'Main branch'), 'On work branch codex/ranger-world-time, 9 commits ahead of main');
+  assert.equal(ui.get('code-status-summary').textContent, 'Work branch codex/ranger-world-time has 3 unpushed commits');
+  assert.match(ui.get('code-repository-label').textContent, /codex\/ranger-world-time$/);
 });
 
 test('initial code display checks remote once while polling and workspace detail reads stay local', async () => {
