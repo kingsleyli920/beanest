@@ -728,7 +728,7 @@ function renderProgressPane() {
 function roomGroup(room) {
   if (!activeEntry(room)) return 'none';
   const activity = roomWorkActivity(room); const objective = room.objective_status;
-  if (activity && ['working', 'queued'].includes(activity.state) && objective !== 'paused') return 'go';
+  if (activity && ['working', 'queued'].includes(activity.state) && (objective !== 'paused' || room.objective_pause_requested === true)) return 'go';
   if (roomStopKind(room)) return 'go';
   if (['needs_user', 'awaiting_continue'].includes(objective)) return 'ask';
   if (['running', 'checkpoint'].includes(objective)) return 'go';
@@ -5630,7 +5630,7 @@ function renderObjectiveTakeovers(result, snapshot, objective) {
   const box = element('details', '', 'objective-takeovers');
   const latest = events.at(-1);
   box.append(element('summary', latest ? t("{p0} 已接手伙伴任务 · 查看分工变化", { p0: displayName(latest.owner) }) : t("有伙伴因额度受限停下 · 查看安排")));
-  for (const [id, info] of retired) box.append(element('p', t("{p0}：{p1}本次执行已确认清理；仍保留在任务成员中。", { p0: displayName(id), p1: executionMessage(info.reason) }), 'detail-caption'));
+  for (const [id, info] of retired) box.append(element('p', t("{p0}：{p1}本次执行已确认清理；仍保留在任务成员中。", { p0: displayName(id), p1: quotaBlockCodes.has(info.reason) ? t("额度已用完，本目标不再安排它。") : executionMessage(info.reason) }), 'detail-caption'));
   for (const event of events.slice(-16)) {
     const task = event.run_id === snapshot.current_run?.id ? snapshot.team?.tasks?.find((entry) => entry.id === event.task_id) : null;
     box.append(element('p', t("{p0} 接手 {p1} 的{p2}。", { p0: displayName(event.owner), p1: displayName(event.previous_owner), p2: task?.title ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务") }), 'detail-caption'));
@@ -6714,10 +6714,12 @@ function renderMemberPublicProgress(snapshot, member) {
   details.append(jump); holder.append(details);
 }
 
+const cacheMissNoteSeconds = 3600;
 function renderCacheMissNote(snapshot) {
   const note = $('cache-miss-note'); const miss = snapshot?.latest_native_cache_miss;
   const written = miss?.cache_creation_input_tokens;
-  const show = Number.isSafeInteger(written) && written > 0;
+  // One old miss says nothing about the calls since, so the note retires instead of staying up for the whole room.
+  const show = Number.isSafeInteger(written) && written > 0 && Date.now() / 1000 - miss.created_at < cacheMissNoteSeconds;
   note.hidden = !show;
   if (!show) { note.replaceChildren(); delete note.dataset.fingerprint; return; }
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), miss.provider, miss.seq, written, miss.created_at]);
@@ -6750,7 +6752,7 @@ function renderMembers(snapshot) {
     const displayStatus = waitingForPeer ? 'waiting_peer' : member?.status;
     const uncertainty = member?.identity_uncertain ? memberUncertainty(snapshot, member) : null;
     const retirement = objective?.retired_partners?.[provider];
-    const retiredActivity = member && objective?.status === 'running' && snapshot.room.status === 'running'
+    const retiredActivity = member && ((objective?.status === 'running' && snapshot.room.status === 'running') || objective?.status === 'paused')
       && activeEntry(snapshot.room) && !terminalTeamState(snapshot) && !member.identity_uncertain
       && ['idle', 'needs_user'].includes(member.status) && retirement?.cleanup_confirmed === true
       && ['agent_quota_exhausted', 'subscription_limit_reached'].includes(retirement.reason)
