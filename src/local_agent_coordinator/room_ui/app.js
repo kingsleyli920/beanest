@@ -6623,6 +6623,27 @@ function teamMemberTask(snapshot, member) {
   return t("暂无在途任务；交付与验收状态见群聊");
 }
 
+function livenessMinutes(seconds) {
+  const minutes = Math.floor(Math.max(0, seconds) / 60);
+  return minutes < 60 ? t("{p0} 分钟", { p0: minutes }) : t("{p0} 小时 {p1} 分钟", { p0: Math.floor(minutes / 60), p1: minutes % 60 });
+}
+const partnerQuietWarningSeconds = 600;
+// Answers "is it stuck?" from recorded timestamps only. A heartbeat proves the tool process is alive, nothing more.
+function partnerLiveness(job, tool, publicMessage) {
+  if (job?.status !== 'working') return null;
+  const now = Date.now() / 1000;
+  const lastRecord = Math.max(tool?.created_at || 0, publicMessage?.created_at || 0, job.claimed_at || 0);
+  if (!lastRecord) return null;
+  const quiet = Math.max(0, now - lastRecord);
+  if (quiet >= partnerQuietWarningSeconds) return { warning: true, text: t("已 {p0}没有新记录，可能卡住了", { p0: livenessMinutes(quiet) }) };
+  const parts = [quiet < 60 ? t("刚刚有活动") : t("{p0}前有活动", { p0: livenessMinutes(quiet) })];
+  const toolRunning = ['started', 'running'].includes(tool?.state);
+  const elapsed = toolRunning ? (Number.isFinite(tool.elapsed_time_seconds) ? tool.elapsed_time_seconds : now - tool.created_at) : null;
+  if (elapsed !== null && elapsed >= 60) parts.push(t("当前工具已运行 {p0}", { p0: livenessMinutes(elapsed) }));
+  if (Number.isFinite(job.claimed_at) && now - job.claimed_at >= 60) parts.push(t("这一步已做 {p0}", { p0: livenessMinutes(now - job.claimed_at) }));
+  if (publicMessage && now - publicMessage.created_at >= 300) parts.push(t("上次发言 {p0}前", { p0: livenessMinutes(now - publicMessage.created_at) }));
+  return { warning: false, text: parts.join(' · ') };
+}
 function renderMemberPublicProgress(snapshot, member) {
   const holder = $(`public-progress-${member.id}`);
   const events = activityRunEvents(snapshot);
@@ -6638,12 +6659,14 @@ function renderMemberPublicProgress(snapshot, member) {
   const tool = active && (active.latest_native_activity || [...events].reverse().find((event) => event.kind === 'native_tool_activity'
     && event.sender === member.id && event.job_id === active.id && ['started', 'running', 'completed', 'failed'].includes(event.state)));
   const scope = `${snapshot?.room.id || ''}:${active?.id || 'history'}`;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [scope, publicMessage, tool]]);
+  const liveness = partnerLiveness(active, tool, publicMessage);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [scope, publicMessage, tool, liveness]]);
   if (holder.dataset.fingerprint === fingerprint) return;
   const expanded = holder.dataset.scope === scope && holder.firstChild?.open === true;
   holder.dataset.fingerprint = fingerprint; holder.dataset.scope = scope; holder.replaceChildren();
   holder.hidden = !snapshot;
   if (!snapshot) return;
+  if (liveness) { const line = element('p', liveness.text, `partner-liveness${liveness.warning ? ' warning' : ''}`); line.id = `partner-liveness-${member.id}`; holder.append(line); }
   if (!publicMessage) {
     const text = tool ? `${['started', 'running'].includes(tool.state) ? nativeActionSentence(tool, true) : `${tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)}`} · ${timeLabel(tool.created_at)}`
       : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");

@@ -1077,6 +1077,8 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 .public-progress-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
 .public-progress-original { max-height: 10rem; overflow-y: auto; margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .public-progress-details .quiet-button { margin-top: 5px; padding: 3px 7px; font-size: 12px; }
+.partner-liveness { margin: 0 0 5px; }
+.partner-liveness.warning { color: var(--ask); font-weight: 600; }
 .public-progress-fallback { margin: 0; }
 
 .public-progress-details[open] .public-progress-preview { display: none; }

@@ -371,5 +371,15 @@ class RoundHandoffService(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("fill handoff", call["prompt"], call["agent"] + call["context"]["job"]["job_phase"])
 
 
+    async def test_only_long_running_phases_are_asked_to_report_progress(self):
+        # Catches the instruction vanishing from work calls, which brought back 76 silent minutes on a real room,
+        # or leaking into planning and checkpoint calls that have nothing to report.
+        await self.finished_room()
+        phases = {call["context"]["job"]["job_phase"]: call["prompt"] for call in self.fake.calls}
+        self.assertIn("at least every 15 minutes of work", phases["work"])
+        self.assertNotIn("every 15 minutes", phases["checkpoint"])
+        self.assertNotIn("every 15 minutes", phases["plan"])
+
+
 if __name__ == "__main__":
     unittest.main()

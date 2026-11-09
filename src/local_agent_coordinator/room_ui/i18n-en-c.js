@@ -901,4 +901,12 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "推送状态来自本机跟踪记录，未联网核对": "Push status comes from the local tracking record, not an online check",
   "{p0}前的结果：": "Result from {p0} ago: ",
   " · 任务进行中，这是 {p0}前的旧结果，点刷新查看最新状态": " · Task running. This result is from {p0} ago; refresh for the latest status",
+  "{p0} 分钟": "{p0} min",
+  "{p0} 小时 {p1} 分钟": "{p0} h {p1} min",
+  "已 {p0}没有新记录，可能卡住了": "No new record for {p0}. It may be stuck",
+  "刚刚有活动": "Active just now",
+  "{p0}前有活动": "Active {p0} ago",
+  "当前工具已运行 {p0}": "Current tool running for {p0}",
+  "这一步已做 {p0}": "This step has taken {p0}",
+  "上次发言 {p0}前": "Last spoke {p0} ago",
 });
