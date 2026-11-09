@@ -486,6 +486,33 @@ test('usage stays in member details; real peer requests and MCP identity remain 
   assert.equal(ui.get('member-cards').children.length, 3, 'MCP is a source, not another agent member');
 });
 
+test('a round handoff and session rotation show one line each and the handoff expands into its labelled parts', async () => {
+  // Catches: either timeline line missing, the handoff text unreachable or dumped as raw JSON, or English copy absent.
+  const handoff = { goal: '把数值改成二', done: ['main.py 写好了'], decisions: ['备注不动'], unverified: ['没跑引擎'], key_files: ['src/main.py'] };
+  const saved = snapshot({ events: [
+    { seq: 1, kind: 'round_handoff_recorded', sender: 'claude', provider: 'claude', job_id: jobId, run_id: null, handoff, context_tokens: 350000, created_at: 1800000000 },
+    { seq: 2, kind: 'partner_session_rotated', sender: 'system', provider: 'claude', run_id: null, handoff_seq: 1, context_tokens: 350000, created_at: 1800000001 },
+  ] });
+  const ui = await browser({ rooms: [saved.room], saved });
+  const text = ui.get('events').textContent;
+  assert.match(text, /Claude Code 写好了本轮交接/);
+  assert.match(text, /Claude Code 换了新会话，只带这份交接/);
+  assert.match(text, /查看交接内容/);
+  assert.match(text, /目标把数值改成二/);
+  assert.match(text, /已定决定备注不动/);
+  assert.match(text, /没验证的部分没跑引擎/);
+  assert.match(text, /关键文件src\/main\.py/);
+  assert.doesNotMatch(text, /"goal"|context_tokens/);
+  saved.events.push({ seq: 3, kind: 'run_started', number: 3, session_rotated: true, created_at: 1800000002 });
+  const rotatedRun = await browser({ rooms: [saved.room], saved });
+  assert.match(rotatedRun.get('activity-events').textContent, /第 3 轮协作已开始，保留此前交付，这一轮换了新会话/);
+
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.match(english.get('events').textContent, /Claude Code wrote this round's handoff/);
+  assert.match(english.get('events').textContent, /Claude Code moved to a new session and carries only this handoff/);
+  assert.match(english.get('events').textContent, /Settled decisions/);
+});
+
 test('a cache miss shows one short note for the latest occurrence and stays out of the chat', async () => {
   // Catches: the note missing, listing every miss, leaking into the chat, or showing the wrong unit.
   const miss = (seq, written) => ({ seq, kind: 'native_cache_miss', sender: 'claude', provider: 'claude', job_id: jobId, run_id: null,

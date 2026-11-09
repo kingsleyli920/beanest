@@ -610,6 +610,8 @@ def parse_events(agent: str, lines: list[bytes], *, structured: bool = False,
                         'code': _claude_native_error_code(event, result['session_id'])})
                 message = event.get('message', {})
                 if isinstance(message, dict):
+                    if not native_error and not sidechain and _usage(message.get('usage')):
+                        result['last_iteration_usage'] = _usage(message.get('usage'))
                     content = message.get('content')
                     for block in content if isinstance(content, list) else []:
                         if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
