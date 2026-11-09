@@ -1560,7 +1560,7 @@ class RoomStore:
             "OR receipt_room_id=? OR EXISTS (SELECT 1 FROM requests r WHERE r.room_id=? "
             "AND r.request_key=user_outbox.request_key AND r.fingerprint=user_outbox.canonical_fingerprint)",
             (self.clock(), room_id, room_id, room_id))
-        for table in ("project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
+        for table in ("partner_load", "project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
             db.execute("DELETE FROM " + table + " WHERE room_id=?", (room_id,))
         db.execute("DELETE FROM objective_progress WHERE objective_id IN (SELECT id FROM objectives WHERE room_id=?)", (room_id,))
         for table in ("native_workspaces", "native_handoffs", "native_handoff_exports", "native_session_history", "native_session_homes", "requests",

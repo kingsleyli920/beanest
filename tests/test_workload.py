@@ -90,6 +90,11 @@ class FairOrder(unittest.TestCase):
         profile = profile_from({"a": ("a", "normal"), "b": ("b", "normal")})
         self.assertEqual(workload.fair_order(["a", "b"], ["a", "b"], {"a": load(900, 1)}, profile), ["a", "b"])
 
+    def test_equal_candidates_in_a_configured_room_still_balance(self):
+        # Catches two ordinary accounts ignoring usage because a third account has a different share.
+        profile = profile_from({"a": ("a", "high"), "b": ("b", "normal"), "c": ("c", "normal")})
+        self.assertEqual(workload.fair_order(["b", "c"], ["a", "b", "c"], {"b": load(900, 1), "c": load(10, 1)}, profile)[0], "c")
+
     def test_ties_go_to_the_larger_share(self):
         # Catches the small account being handed the first job of every round.
         profile = profile_from({"low": ("low", "low"), "high": ("high", "high")})

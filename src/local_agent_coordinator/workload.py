@@ -86,7 +86,7 @@ def fair_order(candidates, members, loads, profile):
     Equal shares keep the given order, so a room nobody configured behaves as before.
     """
     by_member = {member: row for row in accounts(members, loads, profile) for member in row["members"]}
-    if len({by_member[member]["share"] for member in candidates}) <= 1:
+    if len({row["share"] for row in by_member.values()}) <= 1:
         return list(candidates)
     return sorted(candidates, key=lambda member: (by_member[member]["points"] / by_member[member]["share"], -by_member[member]["share"]))
 

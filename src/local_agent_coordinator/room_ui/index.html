@@ -63,6 +63,12 @@
           <div id="empty-avatars" class="empty-avatars" aria-hidden="true"></div>
           <h2><span data-i18n="要一起做什么？">要一起做什么？</span></h2>
           <p><span data-i18n="写下任务，选好的工具会讨论和互审。">写下任务，选好的工具会讨论和互审。</span><br><span data-i18n="需要你决定时，会在这里问你。">需要你决定时，会在这里问你。</span></p>
+          <section id="first-run-setup" class="first-run-setup" hidden aria-label="准备工具" data-i18n-aria-label="准备工具">
+            <h2><span data-i18n="先准备好 AI 工具">先准备好 AI 工具</span></h2>
+            <p><span data-i18n="点安装，再登录你已有的会员账号就能用，不用打开终端。想让它们互相配合，建议准备两个以上。">点安装，再登录你已有的会员账号就能用，不用打开终端。想让它们互相配合，建议准备两个以上。</span></p>
+            <div id="first-run-cards" class="first-run-cards"></div>
+            <button id="first-run-done" class="setup-primary" type="button" hidden><span data-i18n="开始使用">开始使用</span></button>
+          </section>
         </div>
         <details id="earlier-discussion" class="earlier-discussion" hidden><summary id="earlier-summary"><span data-i18n="更早的讨论">更早的讨论</span></summary><p id="earlier-note" class="detail-caption"></p><button id="earlier-load" class="quiet-button" type="button" hidden><span data-i18n="重新读取">重新读取</span></button><ol id="earlier-messages" class="events" aria-label="此前任务讨论" data-i18n-aria-label="此前任务讨论"></ol></details>
         <section id="collaboration-plan" class="collaboration-card" aria-label="任务分工" hidden data-i18n-aria-label="任务分工"></section>

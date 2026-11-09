@@ -35,7 +35,7 @@ AVAILABILITY_RECHECK_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/
 ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/account/refresh")
 LIFECYCLE_ROUTE = re.compile(rf"/api/(projects|rooms|partners)/({TASK_ID}|[a-z][a-z0-9_-]{{0,31}})/lifecycle")
 ERROR_STATUS = {
-    "native_login_unsupported":400, "login_operation_changed":409, "user_native_login_required":403,
+    "native_login_unsupported":400, "native_install_unsupported":400, "invalid_workload_level":400, "login_operation_changed":409, "user_native_login_required":403,
     "invalid_delivery_repository":409, "delivery_repository_unavailable":409, "user_delivery_repository_required":403,
     "invalid_code_workspace":400, "user_code_status_required":403,
     "media_not_found":404, "media_unavailable":404, "media_invalid_path":400,
@@ -241,7 +241,7 @@ class _RoomHandler(_Handler):
         try:
             target = urlsplit(self.path)
             if (target.scheme or target.netloc or target.query or target.fragment
-                    or re.fullmatch(r"/api/(?:mcp/)?native-adapters/[a-z][a-z0-9_-]{0,31}/login", target.path) is None):
+                    or re.fullmatch(r"/api/(?:mcp/)?native-adapters/[a-z][a-z0-9_-]{0,31}/(?:login|install)", target.path) is None):
                 raise _HTTPError(405, "method_not_allowed")
             self._check_access(api=True)
             body = self._body()
@@ -334,18 +334,19 @@ class _RoomHandler(_Handler):
             if self.headers.get('X-LAC-Instance') != self.server.instance_id:
                 raise _HTTPError(409, 'stale_instance')
             path = '/api/' + path[len('/api/mcp/'):]
-        login = re.fullmatch(r"/api/native-adapters/([a-z][a-z0-9_-]{0,31})/login", path)
+        login = re.fullmatch(r"/api/native-adapters/([a-z][a-z0-9_-]{0,31})/(login|install)", path)
         if login:
+            operate = service.native_login_operation if login[2] == "login" else service.native_install_operation
             if mcp:
                 raise _HTTPError(403, "user_native_login_required")
             if query:
                 raise _HTTPError(400, "invalid_arguments")
             if self.command == "GET":
-                return await service.native_login_operation(login[1])
+                return await operate(login[1])
             if self.command == "POST" and not body:
-                return await service.native_login_operation(login[1], "start")
+                return await operate(login[1], "start")
             if self.command == "DELETE" and isinstance(body, dict) and set(body) == {"operation_id"} and self._text(body["operation_id"], 128):
-                return await service.native_login_operation(login[1], "cancel", body["operation_id"])
+                return await operate(login[1], "cancel", body["operation_id"])
             raise _HTTPError(400, "invalid_arguments")
         media = re.fullmatch(rf"/api/rooms/({TASK_ID})/media(?:/(resolve|attach|[0-9a-f]{{64}}/access))?", path)
         if media:

@@ -1919,6 +1919,12 @@ class TeamStore:
         recorded = json.loads(row["value_json"]) if row else None
         if recorded is None or recorded["run_id"] != context["run_id"] or recorded["task_id"] == context["task_id"]:
             return False
+        if self.task(db, room_id, context["task_id"])["revision_attempts"]:
+            return False  # rework of any task needs the session that remembers the attempt
+        latest = db.execute("SELECT j.id FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.run_id=? AND j.provider=? "
+                            "AND j.id!=? ORDER BY j.rowid DESC LIMIT 1", (room_id, context["run_id"], provider, job["id"])).fetchone()
+        if latest is None or latest["id"] != recorded["job_id"]:
+            return False  # a later call chose to continue, so this record is out of date
         if db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? AND json_extract(value_json,'$.kind')='partner_session_rotated' "
                       "AND json_extract(value_json,'$.provider')=? LIMIT 1", (room_id, row["seq"], provider)).fetchone():
             return False

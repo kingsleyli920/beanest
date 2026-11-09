@@ -18,6 +18,9 @@ import tempfile
 
 
 STALE_SECONDS = 90
+# A provider may say the limit was hit without saying when it ends. A small
+# real request then is the only way to learn it has ended.
+PROBE_SECONDS = 3600
 _ADAPTERS = {"codex", "claude", "kimi"}
 
 
@@ -44,6 +47,7 @@ class QuotaGate:
         self.path = self.root / "quota-gates.json"
         self.salt, self.blocks = secrets.token_hex(32), {}
         self.unbound = {}
+        self.probed = {}
         self.rechecks = {}
         try:
             descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -194,6 +198,19 @@ class QuotaGate:
         self.rechecks.pop(adapter, None)
         self._save()
         return True
+
+    def probe_due(self, scope):
+        block = self.blocks.get(scope)
+        return (block is not None and block["resets_at"] is None and block["reason"] == "subscription_limit_reached"
+                and self.clock() - self.probed.get(scope, -PROBE_SECONDS) >= PROBE_SECONDS)
+
+    def note_probe(self, scope):
+        self.probed[scope] = self.clock()
+
+    def release_after_probe(self, scope):
+        """A real request succeeded, which is better evidence than any recorded limit."""
+        if self.blocks.pop(scope, None) is not None:
+            self._save()
 
     def request_recheck(self, scope, account):
         if not self.snapshot(scope, account)["can_request_recheck"]:

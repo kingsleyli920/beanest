@@ -495,6 +495,7 @@ class RoomService:
         self._workers: dict[tuple[str, str], asyncio.Task] = {}
         self._closed = False
         self._background_error = None
+        self._limit_probe = None
         self._cleanup_task = None
         self.shutdown_cleanup_confirmed = None
         self._projects: dict[str, ProjectWorkspace] = {}
@@ -946,8 +947,14 @@ class RoomService:
         self._available()
         return self._project_deletion_response(self.store.project_deletion(request_id))
 
+    def _schedule_limit_probe(self):
+        if (self.partner_manager is not None and (self._limit_probe is None or self._limit_probe.done())
+                and self.partner_manager.limit_probe_targets()):
+            self._limit_probe = asyncio.create_task(self.partner_manager.probe_unknown_limits())
+
     async def list_partners(self):
         self._available()
+        self._schedule_limit_probe()
         profiles = self.partner_manager.profiles() if self.partner_manager is not None else [
             {**spec, "enabled": True, "builtin": True, "lifecycle_state": "active",
              "installation": {"state": "unknown"},
@@ -1382,21 +1389,28 @@ class RoomService:
             raise RoomError("partner_management_unavailable")
         self.partner_manager.refresh_discovery()
         await self.partner_manager.refresh_setup()
+        self.partner_manager.adopt_ready_tool()
         self._sync_partners()
         return await self.list_partners()
 
     async def native_login_operation(self, adapter, action="get", operation_id=None):
+        return await self._native_setup_operation("native_login", adapter, action, operation_id)
+
+    async def native_install_operation(self, adapter, action="get", operation_id=None):
+        return await self._native_setup_operation("native_install", adapter, action, operation_id)
+
+    async def _native_setup_operation(self, kind, adapter, action, operation_id):
         self._available()
         if self.partner_manager is None:
             raise RoomError("partner_management_unavailable")
-        login = self.partner_manager.native_login
+        runner = getattr(self.partner_manager, kind)
         try:
             if action == "start":
-                operation = login.start(adapter)
+                operation = runner.start(adapter)
             elif action == "cancel":
-                operation = await login.cancel(adapter, operation_id)
+                operation = await runner.cancel(adapter, operation_id)
             else:
-                operation = login.snapshot(adapter)
+                operation = runner.snapshot(adapter)
         except ValueError as error:
             raise RoomError(str(error)) from None
         return {"operation": operation}
@@ -7072,7 +7086,11 @@ class RoomService:
             return
         self._closed = True
         if self.partner_manager is not None:
+            if self._limit_probe is not None and not self._limit_probe.done():
+                self._limit_probe.cancel()
+                await asyncio.gather(self._limit_probe, return_exceptions=True)
             await self.partner_manager.native_login.close()
+            await self.partner_manager.native_install.close()
         partner_tasks = [task for task in self._partner_tasks.values() if not task.done()]
         for task in partner_tasks:
             task.cancel()

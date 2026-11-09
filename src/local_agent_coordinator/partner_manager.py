@@ -25,7 +25,7 @@ from . import adapters, workload
 from .agent_registry import (AgentRegistry, AgentSpec, BEAN_STYLE_IDS,
                              TOKEN_FIELDS, default_bean_style, safe_agent_id, native_spec)
 from .quota_gate import QuotaGate
-from .native_setup import NATIVE_ADAPTERS, NativeLogin, native_adapter
+from .native_setup import NATIVE_ADAPTERS, NativeInstall, NativeLogin, native_adapter
 
 
 TRUSTED_ADAPTERS = {item.id: item.provider for item in NATIVE_ADAPTERS}
@@ -148,6 +148,7 @@ class PartnerManager:
         self._startup_discovery = startup_discovery
         self._setup_observations = {}
         self.native_login = NativeLogin(self.root, on_ready=self._login_ready)
+        self.native_install = NativeInstall(self.root, on_ready=self._install_ready)
         self._ensure_root()
         try:
             self.quota_gate = QuotaGate(self.root, clock)
@@ -189,6 +190,10 @@ class PartnerManager:
     def _login_ready(self, adapter):
         self._setup_observations[adapter] = "ready"
 
+    def _install_ready(self, adapter):
+        self._discovery = self._discover()
+        self._setup_observations[adapter] = "login_required"
+
     async def refresh_setup(self):
         """Explicit no-inference checks; GET and installation scans stay passive."""
         installed = {item["adapter"]: item["installed"] for item in self._discovery["tools"]}
@@ -198,6 +203,12 @@ class PartnerManager:
                 self._setup_observations["kimi"] = "ready" if observation["ready"] else "login_required"
             except (OSError, RuntimeError, asyncio.TimeoutError):
                 self._setup_observations["kimi"] = "unknown"
+        for adapter in ("claude", "codex"):
+            if installed.get(adapter) is True:
+                try:
+                    self._setup_observations[adapter] = "ready" if await adapters.login_confirmed(adapter, self.root) else "login_required"
+                except (OSError, RuntimeError, asyncio.TimeoutError):
+                    self._setup_observations[adapter] = "unknown"
 
     def supported_adapters(self):
         installed = {item["adapter"]: item["installed"] for item in self._discovery["tools"]}
@@ -208,8 +219,22 @@ class PartnerManager:
             result.append({"id": descriptor.id, "name": descriptor.name,
                            "setup": {"state": state, "install_url": descriptor.install_url,
                                      "login_supported": descriptor.login_supported,
-                                     "login_operation": self.native_login.snapshot(descriptor.id)}})
+                                     "login_operation": self.native_login.snapshot(descriptor.id),
+                                     "install_operation": self.native_install.snapshot(descriptor.id)}})
         return result
+
+    def adopt_ready_tool(self):
+        """A tool that was set up from inside the app should simply appear as a partner."""
+        with self._locked():
+            data = self._load()
+        known = {item["adapter"] for item in data["profiles"] if item["lifecycle_state"] != "removed"}
+        for adapter in ("kimi",):
+            if adapter in known or self._setup_observations.get(adapter) != "ready":
+                continue
+            try:
+                self.add(id=adapter, name=native_adapter(adapter).name, adapter=adapter)
+            except PartnerError:
+                pass  # the user removed it on purpose, or it already exists
 
     def refresh_discovery(self) -> dict:
         """Refresh installation observations on an explicit application open.
@@ -660,6 +685,30 @@ class PartnerManager:
     async def record_subscription_limit(self, partner_id, bound_identity):
         profile = await self.refresh_account(partner_id, force=True)
         self.quota_gate.record_limit(self.account_scope(partner_id), profile["account"], bound_identity=bound_identity)
+
+    def limit_probe_targets(self):
+        """One partner per account whose limit has no known end and is due another try."""
+        with self._locked():
+            data = self._load()
+        targets = {}
+        for item in data["profiles"]:
+            spec = self._spec(item) if item["enabled"] and item["lifecycle_state"] == "active" and not _connector(item) else None
+            if spec is not None and spec.native_account_status and self.quota_gate.probe_due(_scope(item)):
+                targets.setdefault(_scope(item), (item, spec))
+        return targets
+
+    async def probe_unknown_limits(self):
+        for scope, (item, spec) in self.limit_probe_targets().items():
+            self.quota_gate.note_probe(scope)
+            home = self.account_home(item["id"])
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                with adapters.account_home(item["adapter"], home):
+                    result = await spec.invoke("Reply with exactly: OK", self.root, None, 90)
+            except (OSError, RuntimeError, ValueError, asyncio.TimeoutError):
+                continue
+            if result.get("status") == "completed":
+                self.quota_gate.release_after_probe(scope)
 
     def account_identity(self, partner_id):
         return self.quota_gate.identity(self.get(partner_id)["account"])
