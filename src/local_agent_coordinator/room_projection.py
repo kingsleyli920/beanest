@@ -132,13 +132,15 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             for file in snapshot["project"].get("files", [])]}
 
     claimed, cleanup, activities, progress, flags = {}, {}, {}, {}, {}
-    latest_cache_miss = None
+    latest_cache_miss = latest_handoff = None
     for event in events:
         job_id = event.get("job_id")
         if not job_id:
             continue
         if event["kind"] == "native_cache_miss":
             latest_cache_miss = event
+        elif event["kind"] == "round_handoff_recorded":
+            latest_handoff = event
         elif event["kind"] == "job_claimed":
             claimed[job_id] = event
         elif event["kind"] == "job_cleanup":
@@ -150,6 +152,7 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
         elif event["kind"] in {"native_partial_inspection_queued", "partner_handoff_inspection", "native_readonly_discussion"}:
             flags.setdefault(job_id, set()).add(event["kind"])
     result["latest_native_cache_miss"] = latest_cache_miss
+    result["latest_round_handoff"] = latest_handoff
     observations = {item["job_id"]: item for item in snapshot.get("native_executions", [])}
     selected = set(job_ids) if job_ids is not None else {job["id"] for job in snapshot["jobs"] if job["status"] in {"queued", "working"}}
     if job_ids is None:

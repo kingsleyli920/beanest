@@ -143,7 +143,7 @@ Claude 的原生官方限额诊断由同一分类器处理：可信 `usage_limit
 
 成员由 AgentRegistry 登记，内置 Claude Code、Codex 和 Kimi Code（Kimi 被发现后加入）；PartnerManager 可登记最多32个已支持适配器或待配置连接器的独立会话配置，不会默认创建额外配置。配置ID标识会话身份，adapter标识实际CLI，provider标识供应商；多配置不能算作多种工具或独立额度。status.agents 仅提供新房间可用成员的 id/name/avatar/adapter/provider/capabilities/usage_source/usage_fields；每间创建时保存所选成员、名称与接入描述；后续注册或启停不会自动改动它。用户显式邀请只追加新成员，不修改原成员身份、历史 job 或已冻结 run snapshot。`provider` 来自服务选择的 adapter，`session_id` 来自实际 CLI 输出并核对续接身份，不能由模型正文伪造。时间为 Unix 秒。成员状态包含 queued / working / waiting_peer / needs_user / idle / failed / cancelled / interrupted，未知明确显示 unknown。房间状态为 running / completed / ready_for_user / needs_user / failed / cancelled / interrupted / budget_exhausted / unknown。completed只表示旧协议本轮队列结束；ready_for_user只表示共享子任务已交付并满足适用检查、待用户验收；独立审核与self_checked须分别显示，都不表示用户目标已验收；用户接受本轮另由 `current_run.accepted_at` 及 `collaboration.outcome.state:"accepted"` 表示，房间仍可继续下一轮。使用量是供应商提供的最新快照，带来源与范围；无数据为 null，不求和冒充总消耗。
 
-事件使用数据库全局自增 seq，常见 kind：message、member_status、job_created、job_claimed、job_finished、room_status、warning、usage、artifact、team_command、run_started、run_accepted、format_correction_queued/finished、execution_queued/started/finished、native_cache_miss。team建立后的新增事件记录当前run_id，旧事件不补写；执行事件中的run_id是执行ID，不能替代execution.team_run_id。team_command只记录受控动作类型与task_id；可见模型message和共享投影用于聊天呈现，不把原始commands结构或用量播进聊天。usage 事件在会话身份确认时带 session_id。native_cache_miss 是 Claude 续接调用的只读诊断：缓存读取为 0、写入不低于阈值，且距同一会话上一次 usage 不到 5 分钟时记录 provider、job_id、run_id、phase、cache_creation_input_tokens、seconds_since_previous_call，不存提示词或响应正文，不影响调度；room_state 以 latest_native_cache_miss 给出房间最近一条。每种只保存所需可见字段；不保存供应商隐藏推理、工具参数、凭据或原始诊断。执行程序的输出另存为脱敏、截断的不可信观察，不进入正常 message。重连读取 snapshot 恢复时间线，不重新推理。
+事件使用数据库全局自增 seq，常见 kind：message、member_status、job_created、job_claimed、job_finished、room_status、warning、usage、artifact、team_command、run_started、run_accepted、format_correction_queued/finished、execution_queued/started/finished、native_cache_miss、round_handoff_recorded/invalid、partner_session_rotated。team建立后的新增事件记录当前run_id，旧事件不补写；执行事件中的run_id是执行ID，不能替代execution.team_run_id。team_command只记录受控动作类型与task_id；可见模型message和共享投影用于聊天呈现，不把原始commands结构或用量播进聊天。usage 事件在会话身份确认时带 session_id。native_cache_miss 是 Claude 续接调用的只读诊断：缓存读取为 0、写入不低于阈值，且距同一会话上一次 usage 不到 5 分钟时记录 provider、job_id、run_id、phase、cache_creation_input_tokens、seconds_since_previous_call，不存提示词或响应正文，不影响调度；room_state 以 latest_native_cache_miss 给出房间最近一条；round_handoff_recorded 同理由 latest_round_handoff 给出。每种只保存所需可见字段；不保存供应商隐藏推理、工具参数、凭据或原始诊断。执行程序的输出另存为脱敏、截断的不可信观察，不进入正常 message。重连读取 snapshot 恢复时间线，不重新推理。
 
 ## 工作方式与直接阅读
 
@@ -205,7 +205,16 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 独立互审由任务状态机安排，不必另建重复审核任务。若同一规划版本仍有未认领项，常规协调后可再给每位成员一次明确补救，要求实际认领或说明阻碍；补救签名持久保存，计入原调用与期限。仍无进展时明确记录`team_plan_stalled`及缺少的负责人/确认，不自动替成员认领，也不无限重复唤醒。
 
-上述commands是存储的逻辑形状。原生严格schema按当前作业阶段限制type，采用14字段的固定封闭对象，未使用的字段必须为null；服务只剥离这份确切传输形状，随后仍按逻辑命令的完整键集、权限和任务版本校验。Claude原生调用例外：同一房间各阶段发送字节相同的并集schema，否则每次换阶段续接都会让整段提示词缓存失效；命令类型、can_propose和review/checkpoint_review的reason、checkpoint的summary非空，改由服务按作业真实阶段校验，违反时仍返回invalid_team_commands。自定义适配器可继续返回精简逻辑形状，未知、缺失或非空的多余字段不会被静默丢弃。消息不能为空且最多8000字符；propose.id必须是非空稳定标识，claim等task_id须引用同一标识，例如T1；仅未使用字段为null。规划阶段按确切清单版本及尚未认领的任务集合去重，允许分批认领；同一状态无进展不会无限唤醒成员。这里只描述协议，真实模型效果须单独记录。
+上述commands是存储的逻辑形状。原生严格schema按当前作业阶段限制type，采用14字段的固定封闭对象，未使用的字段必须为null；服务只剥离这份确切传输形状，随后仍按逻辑命令的完整键集、权限和任务版本校验。Claude原生调用例外：同一房间各阶段发送字节相同的并集schema，否则每次换阶段续接都会让整段提示词缓存失效；命令类型、can_propose和review/checkpoint_review的reason、checkpoint的summary非空，改由服务按作业真实阶段校验，违反时仍返回invalid_team_commands。自定义适配器可继续返回精简逻辑形状，未知、缺失或非空的多余字段不会被静默丢弃。Claude 并集schema的命令对象多一个传输字段 `handoff`（可为null），不进入逻辑命令；只有 checkpoint 命令携带时才被服务读取，其他命令即使填了也直接忽略，不触发格式纠错。消息不能为空且最多8000字符；propose.id必须是非空稳定标识，claim等task_id须引用同一标识，例如T1；仅未使用字段为null。规划阶段按确切清单版本及尚未认领的任务集合去重，允许分批认领；同一状态无进展不会无限唤醒成员。这里只描述协议，真实模型效果须单独记录。
+
+
+### 轮次交接与换新会话
+
+Claude 原生会话长期续接会把全部上下文带进每次调用。checkpoint 命令可选带 `handoff`：`goal`（≤1000字）、`done`/`decisions`/`unverified`（各≤12条，每条≤500字）、`key_files`（≤24条，每条≤240字），只写事实和位置。没写不算错误，也不多花一次纠错调用，只是下一轮不换会话；写坏了（超限或形状不对）同样不纠错，只记 `round_handoff_invalid`。收到后服务写 `round_handoff_recorded` 事件，带 run_id、objective_id、proposal_digest、内容和 `context_tokens`，取自本次调用最后一次 API 请求的 `input_tokens+cache_read_input_tokens+cache_creation_input_tokens`（result.usage 是整轮累计，只作拿不到逐次数据时的兜底）。
+
+用户发起的新一轮（新一轮 `/runs`、完成目标后的自然续写 followup-objective、定向后续 directed-objective）开始时，只有同时满足才换会话：native_project 房间；交接人的 adapter 是 Claude；上一目标状态 complete，且这份交接属于刚结束那一轮、其 proposal_digest 等于最终通过的 checkpoint；context_tokens 不小于 200000；交接人身份确定、有当前 session、上一轮没有未知结果 job、清理回执齐全。换法是把该成员 `session_id` 置空并写 `partner_session_rotated`，旧 session 留在 `native_session_history`，删除房间时照常清理；全程不重放旧调用。同一轮内 checkpoint 的 continue、answer、reassess 都不换。只换 checkpoint 作者本人（`available_members` 的第一位）：其他 Claude 成员的会话没有这份用量读数，保持续接。
+
+被换会话的成员下一个 job（无论阶段）在 context 带 `round_handoff`，提示词写明它只是上一轮记录，要按仓库现状核对，不增加权限也不扩大范围；目标、任务板、项目路径等其余上下文与平常相同。同一会话建立之后的 job 不再携带；首个 job 失败没建立会话时会再带一次。事件落在 SQLite，服务重启后交接和待带状态都保留。
 
 服务按成员单在途调用派发，不同成员可并行处理互不冲突的路径。write_paths按大小写折叠检查：无依赖关系的任务不能共用路径；即使有先后依赖，不同负责人也不能认领同一路径。已有文本基线仅首轮在规划确认后按任务范围分配负责人；后续轮不得换掉既有路径负责人。只有该任务的work响应能提交其write_paths内、归自己的文件，plan/coordinate/review/help/user只能返回空files。协调层以owner、逐文件hash、base_revision和不可变快照提交，允许不相交文件的安全合并，冲突不自动覆盖或重试。这里不开放原生编辑器、shell或任意目录。
 

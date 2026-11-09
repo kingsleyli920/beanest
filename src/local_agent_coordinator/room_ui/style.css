@@ -310,6 +310,9 @@ h1 { max-width: 40vw; overflow: hidden; margin: 0; color: var(--ink); font-size:
 .progress-marker { flex-shrink: 0; color: var(--muted); }
 .progress-text { overflow-wrap: anywhere; }
 .progress-task { flex-shrink: 0; color: var(--muted); font-size: 9px; }
+.handoff-details { margin: 6px 0 0 15px; color: var(--muted); font-size: 11px; }
+.handoff-details .handoff-label { margin-top: 6px; font-weight: 600; }
+.handoff-items { margin: 2px 0 0; padding-left: 16px; overflow-wrap: anywhere; }
 .event.progress.warning { margin-left: 49px; padding: 8px 11px; border: 1px solid var(--ask-line); border-radius: 10px; background: var(--ask-bg); color: var(--ask); }
 .activity-details { margin-top: 14px; padding: 13px 3px 0; border-top: 1px dashed var(--line); color: var(--muted); font-size: 10px; }
 .activity-details summary > span { margin-left: 5px; }

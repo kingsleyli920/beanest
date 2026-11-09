@@ -3544,7 +3544,7 @@ class RoomStore:
                 if (retained := self._directed_retained_work(db, room_id, provider)) and retained["observation"]["files"]]
         self._team.start_next(db, room_id, text, target, **binding, retry=not complete,
             verified_restart=True, execution_policy=policy, initial_providers=(target,),
-            fresh_providers=(target,) if native_recovery else None)
+            fresh_providers=(target,) if native_recovery else None, rotate_after_handoff=complete and not native_recovery)
         current = self._team.objectives.current(db, room_id)
         continuation = {"kind": "directed_user_request", "initial_recipient": target,
                         "source_run_id": binding["run_id"], "user_request": text,
@@ -4483,7 +4483,7 @@ class RoomStore:
             if previous is not None:
                 return False
             recipients = checked_target(target,self.member_ids_in_transaction(db,room_id))
-            self._team.start_next(db,room_id,text,recipients[0],run_id,revision,digest,retry=retry,source=source,work_mode=work_mode,runtime_settings=runtime_settings,execution_policy=execution_policy)
+            self._team.start_next(db,room_id,text,recipients[0],run_id,revision,digest,retry=retry,source=source,work_mode=work_mode,runtime_settings=runtime_settings,execution_policy=execution_policy,rotate_after_handoff=source == "user")
             self._remember_request(db, key, fingerprint, room_id)
             self._event(db,room_id,"message",sender=source,recipient=target,text=text,job_id=None)
             return True
@@ -4643,7 +4643,8 @@ class RoomStore:
                         or self._team.pending(db, room_id) or not user_message):
                     raise RoomError("objective_followup_unavailable")
                 self._team.start_next(db, room_id, previous["original_goal"], team["plan_author"], **binding,
-                                      retry=False, execution_policy={"mode": "autonomous"}, assessment=True)
+                                      retry=False, execution_policy={"mode": "autonomous"}, assessment=True,
+                                      rotate_after_handoff=True)
                 current = self._team.objectives.current(db, room_id)
                 continuation = {"kind": "user_followup", "source_objective_id": previous["id"],
                                 "source_run_id": binding["run_id"], "user_request": user_message, "user_request_recipient": message_target}
@@ -5013,10 +5014,29 @@ class RoomStore:
                         job_id=job["id"], work_mode=room["work_mode"], session_id=member["session_id"],
                         runtime_settings=json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None)
             team_context = self._team.claim(db, job)
+            handoff = (self._pending_round_handoff(db, room_id, provider)
+                       if member["session_id"] is None and team_context and room["mode"] == "native_project" else None)
             return {**dict(job), "status": "working", "session_id": member["session_id"],
                     "deadline": public_deadline(room["deadline"]), "goal": room["goal"], "mode": room["mode"], "work_mode": room["work_mode"],
-                    "adapter": member["adapter"], "team": team_context,
+                    "adapter": member["adapter"], "team": team_context, **({"round_handoff": handoff} if handoff else {}),
                     "runtime_settings": json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None}
+
+    def _pending_round_handoff(self, db, room_id, provider):
+        """The handoff owed to this member's first call in its rotated session."""
+        rotated = db.execute("SELECT seq,value_json FROM events WHERE room_id=? "
+                             "AND json_extract(value_json,'$.kind')='partner_session_rotated' "
+                             "AND json_extract(value_json,'$.provider')=? ORDER BY seq DESC LIMIT 1", (room_id, provider)).fetchone()
+        if rotated is None or db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
+                "AND json_extract(value_json,'$.kind')='job_claimed' AND json_extract(value_json,'$.sender')=? "
+                "AND json_extract(value_json,'$.session_id') IS NOT NULL LIMIT 1",
+                (room_id, rotated["seq"], provider)).fetchone():
+            return None
+        recorded = db.execute("SELECT value_json FROM events WHERE seq=? AND room_id=?",
+                              (json.loads(rotated["value_json"])["handoff_seq"], room_id)).fetchone()
+        if recorded is None:
+            return None
+        value = json.loads(recorded[0])
+        return {"source_run_id": value["run_id"], **value["handoff"]}
 
     def queued_for(self, room_id, provider):
         with self._connection() as db:
@@ -5473,7 +5493,7 @@ class RoomStore:
             if is_team:
                 self._team.finish(db, job, team_commands, message=message, artifact_revision=artifact_revision,
                                   artifact_digest=artifact_digest, artifact_files=artifact_files, error=error, uncertain=uncertain,
-                                  native_repair=native_repair,
+                                  native_repair=native_repair, usage=usage,
                                   local_rejection=(room["mode"] == "native_project" and correct_format
                                       and error in FORMAT_ERRORS and not uncertain and artifact_revision is None
                                       and self.completed_native_execution(db, job_id) is not None

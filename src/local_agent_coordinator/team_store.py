@@ -31,6 +31,7 @@ _COMMAND_FIELDS = {
 }
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 from .native_outcome import FORMAT_ERRORS, REPLY_MISTAKES
+from .round_handoff import ROTATION_MIN_CONTEXT_TOKENS, context_tokens, normalized_handoff
 from .stop_policy import host_block_recoverable
 
 
@@ -237,7 +238,7 @@ class TeamStore:
 
     def start_next(self, db, room_id, text, target, run_id, revision, digest, *, retry, source="user", work_mode=None, runtime_settings=None,
                    execution_policy=None, objective_id=None, assessment=False, resume_blocked=False, verified_restart=False,
-                   fresh_native_recovery=False, initial_providers=None, fresh_providers=None):
+                   fresh_native_recovery=False, initial_providers=None, fresh_providers=None, rotate_after_handoff=False):
         team = self.team(db, room_id)
         if team is None or team["current_run_id"] != run_id:
             raise RoomError("team_run_conflict")
@@ -310,6 +311,7 @@ class TeamStore:
             if initial_providers is None or member["provider"] in initial_providers:
                 db.execute("UPDATE members SET status='idle',current_task=NULL WHERE room_id=? AND provider=?", (room_id, member["provider"]))
         new_id = self._create_run(db, room_id, len(runs)+1)
+        rotated = rotate_after_handoff and not retry and self._rotate_after_handoff(db, room_id, room, objective, run_id, new_id)
         if objective_id:
             db.execute("UPDATE team_runs SET objective_id=? WHERE id=?", (objective_id, new_id))
             db.execute("UPDATE objectives SET status='running',stop_reason=NULL WHERE id=?", (objective_id,))
@@ -325,7 +327,7 @@ class TeamStore:
         if assessment:
             db.execute("UPDATE teams SET phase='ready_for_user' WHERE room_id=?", (room_id,))
         self.store._event(db, room_id, "run_started", sender=source, run_id=new_id, number=len(runs)+1,
-                          previous_run_id=run_id, retry=retry)
+                          previous_run_id=run_id, retry=retry, **({"session_rotated": True} if rotated else {}))
         return new_id
 
     def carry_unfinished(self, db, room_id, source_run_id, target_run_id, *, source_room_id=None, recovery_errors=(),
@@ -1432,7 +1434,8 @@ class TeamStore:
         if context["job_phase"] in {"checkpoint", "checkpoint_review"}:
             if (len(commands) != 1 or not isinstance(commands[0], dict)
                     or commands[0].get("type") != context["job_phase"]
-                    or set(commands[0]) != _COMMAND_FIELDS[context["job_phase"]]):
+                    or set(commands[0]) - ({"handoff"} if context["job_phase"] == "checkpoint" else set())
+                    != _COMMAND_FIELDS[context["job_phase"]]):
                 raise RoomError("invalid_objective_checkpoint")
             objective = self.objectives.current(db, job["room_id"])
             checkpoint = json.loads(objective["checkpoint_json"]) if objective and objective["checkpoint_json"] else None
@@ -1657,7 +1660,7 @@ class TeamStore:
         return repairs
 
     def finish(self, db, job, commands, *, message, artifact_revision, artifact_digest, artifact_files, error, uncertain,
-               native_repair=None, local_rejection=False):
+               native_repair=None, local_rejection=False, usage=None):
         room_id, provider = job["room_id"], job["provider"]
         context = self.job_context(db, job["id"])
         if error or uncertain:
@@ -1682,6 +1685,7 @@ class TeamStore:
             raise RoomError("team_context_changed")
         if context["job_phase"] == "checkpoint":
             self.objectives.propose(db, room_id, provider, commands[0])
+            self._record_round_handoff(db, job, context, commands[0].get("handoff"), usage)
             return
         if context["job_phase"] == "checkpoint_review":
             self.objectives.finish_checkpoint(db, room_id, reviewer=provider,
@@ -1809,6 +1813,58 @@ class TeamStore:
                 return
             db.execute("UPDATE shared_tasks SET status='blocked',blocked_reason='team_result_missing' WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND id=?",
                        (room_id, context["task_id"]))
+
+    def _record_round_handoff(self, db, job, context, value, usage):
+        """Keep a Claude checkpoint's handoff. A bad one is noted, never corrected:
+        it only means the next round keeps the current session."""
+        room_id, provider = job["room_id"], job["provider"]
+        adapter = db.execute("SELECT adapter FROM members WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()[0]
+        if value is None or adapter != "claude" or self.store._room(db, room_id)["mode"] != "native_project":
+            return
+        handoff = normalized_handoff(value)
+        if handoff is None:
+            self.store._event(db, room_id, "round_handoff_invalid", sender="system", provider=provider,
+                              job_id=job["id"], run_id=context["run_id"])
+            return
+        objective = self.objectives.current(db, room_id)
+        self.store._event(db, room_id, "round_handoff_recorded", sender=provider, provider=provider, job_id=job["id"],
+                          run_id=context["run_id"], objective_id=objective["id"],
+                          proposal_digest=json.loads(objective["checkpoint_json"])["proposal_digest"],
+                          handoff=handoff, context_tokens=context_tokens(usage))
+
+    def _rotate_after_handoff(self, db, room_id, room, objective, previous_run_id, new_run_id):
+        """Start the checkpoint's author on a fresh session for this user round.
+
+        Only a round that truly ended counts: the accepted checkpoint itself
+        must have carried the handoff, so an earlier draft or other run cannot.
+        Any doubt keeps today's resume path. The old session stays in history,
+        so room deletion can still clean it up.
+        """
+        if room["mode"] != "native_project" or objective is None or objective["status"] != "complete":
+            return False
+        row = db.execute("SELECT seq,value_json FROM events WHERE room_id=? "
+                         "AND json_extract(value_json,'$.kind')='round_handoff_recorded' ORDER BY seq DESC LIMIT 1",
+                         (room_id,)).fetchone()
+        recorded = json.loads(row["value_json"]) if row else None
+        checkpoint = json.loads(objective["checkpoint_json"] or "{}")
+        if (recorded is None or recorded["run_id"] != previous_run_id or recorded["objective_id"] != objective["id"]
+                or checkpoint.get("reviewed") is not True or recorded["proposal_digest"] != checkpoint.get("proposal_digest")
+                or recorded["context_tokens"] is None or recorded["context_tokens"] < ROTATION_MIN_CONTEXT_TOKENS):
+            return False
+        provider = recorded["provider"]
+        member = db.execute("SELECT adapter,session_id,identity_uncertain FROM members WHERE room_id=? AND provider=?",
+                            (room_id, provider)).fetchone()
+        # The new run already exists here, so the unknown-job check names the old one.
+        unknown = db.execute("SELECT 1 FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.run_id=? "
+                             "AND j.provider=? AND j.status='unknown' LIMIT 1", (room_id, previous_run_id, provider)).fetchone()
+        if (member is None or member["adapter"] != "claude" or not member["session_id"] or member["identity_uncertain"]
+                or unknown or not self.provider_clean(db, room_id, provider)):
+            return False
+        db.execute("UPDATE members SET session_id=NULL WHERE room_id=? AND provider=?", (room_id, provider))
+        self.store._event(db, room_id, "partner_session_rotated", sender="system", provider=provider, run_id=new_run_id,
+                          previous_run_id=previous_run_id, handoff_seq=row["seq"], context_tokens=recorded["context_tokens"],
+                          old_calls_replayed=False)
+        return True
 
     def _replan_parents(self, db, room_id):
         # NULL is ordinary/history, -1 requests a drain, >=0 binds a planning revision.

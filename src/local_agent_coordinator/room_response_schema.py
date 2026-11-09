@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .agent_registry import safe_agent_id
 from .block_contract import BLOCK_CAUSES
+from .round_handoff import handoff_schema
 from .team_store import _COMMAND_FIELDS
 
 
@@ -30,6 +31,10 @@ PHASE_NONEMPTY_TEXT = {
     "checkpoint": frozenset({"summary"}),
 }
 
+# Sits on the transport object only: no stored command contains it, the
+# per-phase schemas never offer it, and the service reads it for checkpoints.
+STABLE_ONLY_FIELD = "handoff"
+
 
 def stable_native_schema(adapter):
     """Whether this adapter's resumed sessions need one byte-identical schema.
@@ -46,7 +51,7 @@ def stable_command_shape(*, has_peers=True):
     Only the roster narrows it, and the roster already bounds the schema.
     """
     kinds = [kind for kind in _COMMAND_FIELDS if has_peers or kind != "request_help"]
-    return kinds, set().union(*(_COMMAND_FIELDS[kind] for kind in kinds))
+    return kinds, set().union(*(_COMMAND_FIELDS[kind] for kind in kinds)) | {STABLE_ONLY_FIELD}
 
 
 def command_shape(*, team_phase=None, can_propose=True, has_peers=True, native=False):
@@ -139,6 +144,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
             command_properties["type"]["description"] += (
                 " This schema is shared by every phase: the host accepts only the operations "
                 "the prompt names for the current job_phase.")
+            command_properties[STABLE_ONLY_FIELD] = handoff_schema()
         for field in {"dependencies", "write_paths", "repair_paths"} & fields:
             command_properties[field] = {"type": ["array", "null"], "items": {"type": "string"}}
         if "repair_paths" in fields:
@@ -175,7 +181,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
             for field in PHASE_NONEMPTY_TEXT.get(team_phase, ()):
                 command_properties[field].update(type="string", minLength=1)
         if native:
-            for field in fields - {"type"}:
+            for field in fields - {"type", STABLE_ONLY_FIELD}:
                 users = [kind for kind in kinds if field in _COMMAND_FIELDS[kind]]
                 rule = ("Used only by " + ", ".join(users) + "; for every other command type this field must be null. ")
                 command_properties[field]["description"] = rule + command_properties[field].get("description", "")
