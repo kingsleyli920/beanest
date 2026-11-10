@@ -381,6 +381,10 @@ def _usage(value: object) -> dict | None:
             if k in keys and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
 
 
+# Codex diagnostics that accompany a turn which still completed.
+CODEX_NOTICES = frozenset({'code_mode_disabled_notice', 'ignored_legacy_config_notice', 'model_resume_notice'})
+
+
 def _provider_error_code(message: object) -> str:
     """Classify in memory, never expose provider messages or embedded URLs."""
     if not isinstance(message, str):
@@ -395,6 +399,13 @@ def _provider_error_code(message: object) -> str:
             r'  user \(/[a-zA-Z0-9_ ./()@+-]{1,4096}/\.codex/config\.toml\): '
             r'`features\.rmcp_client` is ignored\.', message):
         return 'ignored_legacy_config_notice'
+    # Observed on resume after Codex's default model changed between calls (a
+    # partner left on its tool default). The turn itself completes normally.
+    if re.fullmatch(
+            r'This session was recorded with model `[A-Za-z0-9._:/-]{1,128}` but is resuming with '
+            r'`[A-Za-z0-9._:/-]{1,128}`\. Consider switching back to `[A-Za-z0-9._:/-]{1,128}` '
+            r'as it may affect Codex performance\.', message):
+        return 'model_resume_notice'
     # Add recovery rules only after observing and verifying an exact CLI
     # diagnostic. A completed turn alone does not make an unknown error safe.
     return 'unknown_provider_error'
@@ -558,7 +569,7 @@ def parse_events(agent: str, lines: list[bytes], *, structured: bool = False,
                     # ErrorItem is distinct from a tool invocation. Preserve a
                     # classified signal without leaking provider diagnostics.
                     code = _provider_error_code(item.get('message'))
-                    result['events'].append({'type': 'warning' if code in {'code_mode_disabled_notice', 'ignored_legacy_config_notice'} else 'provider_error',
+                    result['events'].append({'type': 'warning' if code in CODEX_NOTICES else 'provider_error',
                         'code': code})
                     if codex_compatibility:
                         codex_diagnostics.append(len(result['events']) - 1)
