@@ -12,6 +12,9 @@ ROTATION_MIN_CONTEXT_TOKENS = 200_000
 # Between tasks of one round the session still holds decisions the board does
 # not, so it takes a larger context before a written record is the better deal.
 TASK_ROTATION_MIN_CONTEXT_TOKENS = 400_000
+# A task can grow a session past that limit, and with a peer reviewing there is
+# no later call by this partner to ask, so the record is requested well before.
+TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS = 200_000
 
 GOAL_MAX_CHARACTERS = 1000
 ITEM_MAX_CHARACTERS = 500

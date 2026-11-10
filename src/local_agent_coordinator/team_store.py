@@ -22,7 +22,8 @@ _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 from .native_outcome import FORMAT_ERRORS, NATIVE_METADATA_ERROR, REPLY_MISTAKES
 from . import workload
-from .round_handoff import ROTATION_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS, context_tokens, normalized_handoff
+from .round_handoff import (ROTATION_MIN_CONTEXT_TOKENS, TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS,
+                            context_tokens, normalized_handoff)
 from .stop_policy import host_block_recoverable
 
 
@@ -1944,7 +1945,7 @@ class TeamStore:
         row = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='usage' "
                          "AND json_extract(value_json,'$.sender')=? ORDER BY seq DESC LIMIT 1", (job["room_id"], job["provider"])).fetchone()
         tokens = context_tokens(json.loads(row["value_json"]).get("usage")) if row else None
-        return tokens is not None and tokens >= TASK_ROTATION_MIN_CONTEXT_TOKENS
+        return tokens is not None and tokens >= TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS
 
     def rotate_between_tasks(self, db, job):
         """Start this work call on a fresh session when the last task left a record.
