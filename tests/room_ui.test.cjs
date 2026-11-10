@@ -11,8 +11,12 @@ const vm = require('node:vm');
 
 const assetRoot = path.join(__dirname, '..', 'src', 'local_agent_coordinator', 'room_ui');
 const html = fs.readFileSync(path.join(assetRoot, 'index.html'), 'utf8');
-const script = fs.readFileSync(path.join(assetRoot, 'app.js'), 'utf8');
-const markdownScript = fs.readFileSync(path.join(assetRoot, 'markdown.js'), 'utf8');
+// The page's classic scripts, in the order index.html loads them. Each one runs as
+// its own vm script so a load-order or duplicate-declaration fault fails here as it
+// would in a browser.
+const pageScripts = [...html.matchAll(/<script src="\/([^"]+)" defer><\/script>/g)]
+  .map(([, file]) => ({ file, source: fs.readFileSync(path.join(assetRoot, file), 'utf8') }));
+const script = pageScripts.filter(({ file }) => !/^(i18n|markdown)/.test(file)).map(({ source }) => source).join('\n');
 const roomId = '11111111-1111-4111-8111-111111111111';
 const jobId = '22222222-2222-4222-8222-222222222222';
 const catalog = [
@@ -315,11 +319,11 @@ async function browser({ language = 'zh-CN', languageStorage = new Map(), agents
       return { ok: true, status: 200, json: async () => structuredClone(value) };
     },
   });
-  for (const file of ['i18n-en-a.js', 'i18n-en-b.js', 'i18n-en-c.js', 'i18n.js']) {
-    if (fs.existsSync(path.join(assetRoot, file))) vm.runInContext(fs.readFileSync(path.join(assetRoot, file), 'utf8'), context, { filename: `room_ui/${file}` });
+  for (const [index, { file, source }] of pageScripts.entries()) {
+    // A browser drains microtasks between deferred scripts; a script that starts async work too early must show it.
+    if (index) await new Promise((resolve) => setImmediate(resolve));
+    await vm.runInContext(source, context, { filename: `room_ui/${file}` });
   }
-  vm.runInContext(markdownScript, context, { filename: 'room_ui/markdown.js' });
-  await vm.runInContext(script, context, { filename: 'room_ui/app.js' });
   // Most history tests explicitly open their saved fixture. The product itself
   // starts on the welcome page unless an exact room UUID is in the URL hash.
   if (selectSaved && saved && rooms.some((room) => room.id === saved.room.id)

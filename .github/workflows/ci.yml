@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test tests/room_ui.test.cjs tests/room_i18n.test.cjs
+      - run: node --test tests/room_ui.test.cjs tests/room_i18n.test.cjs tests/room_ui_scripts.test.cjs
   desktop:
     name: Desktop shell
     runs-on: ubuntu-latest
