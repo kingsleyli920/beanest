@@ -1331,7 +1331,13 @@ async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = No
     command = _command(agent, session_id, runtime_settings=runtime_settings) if schema_json is None else None
     status = await _subscription_status(agent, cwd)
     if not status['subscription_confirmed']:
-        raise RuntimeError(f'{agent} subscription authentication is unconfirmed; inference refused')
+        error = RuntimeError(f'{agent} subscription authentication is unconfirmed; inference refused')
+        # Inference was never launched; the auth check owns its own cleanup proof.
+        error.native_execution = {'agent': agent, 'never_started': True, 'tool_calls': 0, 'tool_results': 0,
+                                  'side_effects_possible': False,
+                                  'cleanup_confirmed': status.get('cleanup_confirmed') is True,
+                                  'exit_code': None, 'receipt_path': None}
+        raise error
     schema_directory = None
     try:
         if schema_json is not None:

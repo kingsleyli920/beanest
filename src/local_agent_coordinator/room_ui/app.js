@@ -86,6 +86,7 @@ const executionLabels = localizedLabels({
   invoke_interrupted: '本轮调用已中断，结果尚需核对。',
   invoke_failed: '本轮调用未取得可确认的结果。',
   provider_failed: '供应商调用未完成，请在工具与状态中核对异常。',
+  native_preflight_failed: '伙伴的模型服务连接失败，提示词没有发出。',
   subscription_limit_reached: '订阅额度已用完，请在对应工具查看恢复时间。',
   cli_nonzero_exit: '本地 CLI 未正常完成，请在工具与状态中核对异常。',
   unknown_provider_error: '供应商返回未知异常，请在工具与状态中核对记录。',
@@ -1816,10 +1817,16 @@ function setCatalog(agents) {
   // The first tool that becomes usable counts as the default choice, not as something left unticked.
   const firstUsable = state.noUsableTool && available.size > 0;
   state.noUsableTool = available.size === 0;
+  const defaults = agents.filter((agent) => available.has(agent.id) && !isAdditionalSession(agent) && ['claude', 'codex', 'kimi'].includes(agent.adapter || agent.id)).map((agent) => agent.id);
+  // Until someone picks by hand, a tool that appears after the page opened joins the default choice.
+  const appeared = state.defaultsSeen ? defaults.filter((id) => !state.defaultsSeen.has(id)) : [];
+  state.defaultsSeen = new Set([...(state.defaultsSeen || []), ...defaults]);
   if (state.selectedParticipants === null || firstUsable && !state.selectedParticipants.length) {
-    const defaults = ['claude', 'codex'].filter((id) => available.has(id));
     state.selectedParticipants = defaults.length ? defaults : agents.filter((agent) => available.has(agent.id) && !isAdditionalSession(agent)).slice(0, 2).map((agent) => agent.id);
-  } else state.selectedParticipants = state.selectedParticipants.filter((id) => eligible.has(id));
+  } else {
+    state.selectedParticipants = state.selectedParticipants.filter((id) => eligible.has(id));
+    if (!state.participantsChosen && !state.selected) state.selectedParticipants = [...new Set([...state.selectedParticipants, ...appeared])];
+  }
   renderParticipantPicker();
 }
 
@@ -1844,6 +1851,7 @@ function renderParticipantPicker() {
         if (state.selected || state.busy || state.managementBusy || state.pending || !selectableAgent(agent, { retainBlocked: !input.checked })) {
           input.checked = (state.selectedParticipants || []).includes(agent.id); return;
         }
+        state.participantsChosen = true;
         const selected = new Set(state.selectedParticipants || []);
         if (input.checked) selected.add(agent.id); else selected.delete(agent.id);
         if (selected.size > 8) { input.checked = false; showNotice(t("一次最多选择 8 个会话。"), 'error'); return; }
@@ -1960,7 +1968,9 @@ function memberAvailabilityLine(info) {
 // The card says only whether the partner is signed in; who it is shows under 账号与额度.
 function memberLoginCaption(account, id) {
   const partner = state.partners.find((entry) => entry.id === id);
-  if (state.adapters.find((adapter) => adapter.id === partner?.adapter)?.setup?.state === 'login_required') return t("还差登录");
+  const setupState = state.adapters.find((adapter) => adapter.id === partner?.adapter)?.setup?.state;
+  if (setupState === 'login_required') return t("还差登录");
+  if (setupState === 'ready' && account?.stale) return t("已登录");  // the tool has confirmed it; only the account details are old
   if (!account || account.state === 'not_checked') return t("登录未检查");
   if (account.stale) return t("登录待刷新");
   if (account.state === 'error') return t("登录检查未成功");
@@ -4722,7 +4732,8 @@ function memberActivity(snapshot, member) {
     status = 'needs_user'; label = t("本轮暂不参与");
     const takeover = [...(snapshot.events || [])].reverse().find((event) => event.kind === 'task_taken_over' && event.previous_owner === id
       && event.owner && (snapshot.team?.tasks || []).some((entry) => entry.owner === event.owner && ['assigned', 'working', 'waiting_peer', 'review'].includes(entry.status) && (!event.task_id || entry.id === event.task_id)));
-    task = t("此前额度受限。{p0}当前额度见下方。", { p0: takeover ? t("{p0} 正在接着做。", { p0: displayName(takeover.owner) }) : t("本轮安排保持。") });
+    const handedOn = takeover ? t("{p0} 正在接着做。", { p0: displayName(takeover.owner) }) : t("本轮安排保持。");
+    task = retired.reason === 'native_preflight_failed' ? t("模型服务连接失败，本目标不再安排它。{p0}", { p0: handedOn }) : t("此前额度受限。{p0}当前额度见下方。", { p0: handedOn });
   }
   else if (!job && objective?.status === 'awaiting_continue') { label = t("阶段已交付"); task = t("下一步已列在交付卡；无需逐阶段接受。"); }
   else if (objective?.status === 'paused' && !job) { label = objectiveLabel(objective); task = objective.pause_requested ? t("等当前处理结束后，不再派发下一项。") : t("当前进度保留，继续后接着处理原目标。"); }
@@ -5033,7 +5044,7 @@ function renderMembers(snapshot) {
     const retiredActivity = member && ((objective?.status === 'running' && snapshot.room.status === 'running') || objective?.status === 'paused')
       && activeEntry(snapshot.room) && !terminalTeamState(snapshot) && !member.identity_uncertain
       && ['idle', 'needs_user'].includes(member.status) && retirement?.cleanup_confirmed === true
-      && ['agent_quota_exhausted', 'subscription_limit_reached'].includes(retirement.reason)
+      && ['agent_quota_exhausted', 'subscription_limit_reached', 'native_preflight_failed'].includes(retirement.reason)
       && !snapshot.jobs.some((job) => job.provider === provider && ['queued', 'working'].includes(job.status))
       ? memberActivity(snapshot, member) : null;
     const paused = objective?.status === 'paused' && activeEntry(snapshot?.room) && !member?.identity_uncertain
@@ -6602,6 +6613,7 @@ function startNewRoom({ preserveRoomHash = false } = {}) {
   state.modeExplicit = draft?.modeExplicit || false;
   state.runtimeScope = 'new'; state.runtimeSettings = copyRuntimeSettings(draft?.runtimeSettings); state.runtimePermissionExplicit = draft?.runtimePermissionExplicit === true || draft?.mode === 'native_project' && !!draft?.runtimeDraftDirty && ['read_only', 'workspace_write'].includes(draft?.runtimeSettings?.permission); state.runtimeDraftDirty = !!draft?.runtimeDraftDirty; state.workModeDraftDirty = !!draft?.workModeDraftDirty; state.runtimeDraftToken = draft?.runtimeDraftToken || null; state.workModeDraftToken = draft?.workModeDraftToken || null;
   state.selectedParticipants = draft?.participants || state.selectedParticipants;
+  if (draft?.participants) state.participantsChosen = true;
   state.selectedProject = state.projects.some((project) => project.id === draft?.project && activeEntry(project)) ? draft.project : '';
   state.selectedParticipants = (state.selectedParticipants || []).filter((id) => state.catalog.some((agent) => agent.id === id && selectableAgent(agent, { retainBlocked: true }))); 
   chooseDefaultArtifactMode();

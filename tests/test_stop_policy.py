@@ -18,7 +18,7 @@ EXPECTED = {
     "auto": {"cli_nonzero_exit", "empty_response", "execution_failed", "execution_repair_no_change",
              "execution_version_stale", "invalid_agent_response", "invalid_project_files", "invalid_response_json",
              "invalid_target", "invalid_team_commands", "invalid_team_dependencies", "invalid_team_task", "invalid_text",
-             "message_too_large", "native_auth_unconfirmed", "native_json_files_forbidden", "native_no_progress",
+             "message_too_large", "native_auth_unconfirmed", "native_json_files_forbidden", "native_no_progress", "native_preflight_failed",
              "native_permission_required", "native_process_or_protocol_failure", "native_progress_unconfirmed",
              "native_protocol_invalid", "native_protocol_unknown", "native_provider_error", "native_tool_unpaired",
              "native_turn_incomplete", "native_turn_unconfirmed", "native_unchanged_reason_required", "output_limit",

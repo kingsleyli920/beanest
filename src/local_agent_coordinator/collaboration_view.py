@@ -65,6 +65,7 @@ def _with_display_i18n(view):
 
 _REASONS = {
     "all_partners_quota_exhausted": _system("伙伴的额度都用完了，进度已保留。有伙伴额度恢复后会自动继续。"),
+    "native_preflight_failed": _system("伙伴的模型服务暂时连不上，提示词没有发出，已有工作不受影响。"),
     "plan_read_only": _system("本轮只讨论方案，未保存文件修改；需要动手时可明确开始新一轮。"),
     "permission_read_only": _system("本轮统一为只读，不能修改文件或运行项目；需要动手时可在下一轮调整权限。"),
     "invalid_team_task": _system("伙伴提交的任务清单缺少有效信息，尚未接受这次交付。"),
@@ -190,6 +191,7 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         state = "unknown" if phase == "unknown" else "stopped"
         reason = reason or _system("协作因异常停止，未完成项仍保留。")
         next_action = (_system("不用你操作；有伙伴额度恢复后会自动继续。") if reason_code == "all_partners_quota_exhausted"
+                       else _system("点“继续”再试一次；没有发出的工作不会重复。") if reason_code == "native_preflight_failed"
                        else _system("先核对停止原因和现有交付；未确认结果不会自动重跑。"))
     elif stale or room["status"] == "needs_user" or any(task["status"] == "blocked" for task in tasks):
         state = "needs_user"

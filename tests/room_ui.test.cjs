@@ -5300,6 +5300,17 @@ test('retired partner cards describe a real takeover plainly and omit an unrecor
   assert.match(withoutTakeover.get('partner-activity-claude').textContent, /此前额度受限.*本轮安排保持/); assert.doesNotMatch(withoutTakeover.get('partner-activity-claude').textContent, /Codex 正在接着做/);
 });
 
+test('a partner retired because its model service never connected is not described as out of quota', async () => {
+  // Catches: a partner that could not start being reported as having run out of quota.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.objective.retired_partners = { claude: { reason: 'native_preflight_failed', cleanup_confirmed: true } };
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [{ id: 'takeover-task', owner: 'codex', status: 'working', title: '真实接手任务' }] };
+  saved.events = [{ seq: 1, kind: 'task_taken_over', owner: 'codex', previous_owner: 'claude', task_id: 'takeover-task', created_at: 1000 }]; saved.jobs = [];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(ui.get('partner-activity-claude').textContent, /本轮暂不参与.*模型服务连接失败.*Codex 正在接着做/);
+  assert.doesNotMatch(ui.get('partner-activity-claude').textContent, /额度/);
+});
+
 test('a task the host moved before work began is named in the chat in both languages', async () => {
   // Catches the rebalance line missing from the timeline or left untranslated.
   const saved = objectiveSnapshot({ status: 'running' });
@@ -7919,7 +7930,7 @@ test('a real bound reader response conflict retains the file version protection 
 });
 
 
-test('host-declared Kimi Code discovery remains dynamic with optional third selection and unknown quota', async () => {
+test('host-declared Kimi Code discovery is dynamic, selected by default like the other tools, and shows unknown quota', async () => {
   const agents = [...catalog.slice(0, 2), { id: 'kimi', adapter: 'kimi', name: 'Kimi Code', avatar: 'K' }];
   const partners = agents.map((agent) => ({ ...agent, adapter: agent.id, enabled: true, installation: { state: 'found' },
     health: { state: 'unknown' }, account: { state: 'unavailable', source: 'unsupported', reason: 'account_adapter_unsupported',
@@ -7929,8 +7940,7 @@ test('host-declared Kimi Code discovery remains dynamic with optional third sele
       discovery: { state: 'completed', scope: 'supported_cli_locations', tools: agents.map((agent) => ({ adapter: agent.id, name: agent.name, installed: true })) } };
   } });
   assert.match(ui.get('discovery-hint-text').textContent, /Claude Code、Codex、Kimi Code/);
-  assert.equal(participantInput(ui, 'kimi').checked, false, 'new provider never silently joins an existing selection');
-  await ui.invite('kimi');
+  assert.equal(participantInput(ui, 'kimi').checked, true, 'every supported tool that can work takes part unless someone unticks it');
   assert.deepEqual(ui.targets(), ['all', 'claude', 'codex', 'kimi']);
   assert.deepEqual(ui.members(), ['member-claude', 'member-codex', 'member-kimi']);
   await ui.click('open-partners');
@@ -8085,6 +8095,20 @@ test('a tool that is installed but not signed in is neither selectable nor descr
   assert.deepEqual(checked, ['codex']);
 });
 
+test('a tool found after the page opened joins the default choice, but not after someone picked by hand', async () => {
+  // Catches: a third tool set up in the app staying unticked, or a discovery overriding a deliberate choice.
+  const kimi = { id: 'kimi', adapter: 'kimi', name: 'Kimi Code', avatar: 'K' };
+  for (const picked of [false, true]) {
+    const agents = catalog.slice(0, 2).map((agent) => ({ ...agent }));
+    const ui = await browser({ agents });
+    if (picked) await ui.invite('codex', false);
+    agents.push(kimi);
+    await ui.poll();
+    if (participantInput(ui, 'kimi')) assert.equal(participantInput(ui, 'kimi').checked, !picked, `picked=${picked}`);
+    else assert.fail('the new tool should be listed');
+  }
+});
+
 test('official setup web bridge runs only on the explicit link click and leaves a visible address on failure', async () => {
   const opened = []; const setup = nativeSetupFixture('not_installed');
   setup.setup.install_operation = { id: 'install-one', adapter: 'kimi', state: 'failed', reason: 'install_failed' };
@@ -8147,7 +8171,7 @@ test('explicit partner choices survive an empty new-task draft, including an int
   for (const empty of [false, true]) {
     const storage = new Map(); const first = await browser({ agents, storage });
     await first.invite('claude', false); await first.invite('codex', false);
-    if (!empty) await first.invite('kimi');
+    await first.invite('kimi', !empty);
     await settle();
     const restored = await browser({ agents, storage });
     assert.equal(restored.get('message').value, '');

@@ -4883,8 +4883,12 @@ class RoomStore:
                    for job in db.execute("SELECT j.id,j.status FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE t.run_id=?",
                                          (team["current_run_id"],)))
 
-    def finish_quota_job(self, job_id):
-        """Record a precise provider refusal; retire only after cleanup proof."""
+    def finish_quota_job(self, job_id, code="subscription_limit_reached", *, peer_required=False):
+        """Record a precise provider refusal; retire only after cleanup proof.
+
+        A refusal the caller retires a partner for is not a question of quota,
+        so when no other partner remains (peer_required) the caller stops instead.
+        """
         with self._connection(write=True) as db:
             job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if job is None or job["status"] != "working":
@@ -4892,12 +4896,23 @@ class RoomStore:
             objective = self._team.objectives.current(db, job["room_id"])
             if objective is None or not json.loads(objective["policy_json"])["quota_failover"]:
                 return False
-            db.execute("UPDATE jobs SET status='failed',error='subscription_limit_reached' WHERE id=?", (job_id,))
+            if peer_required and not [member for member in self._team.objectives.available_members(db, job["room_id"])
+                                      if member != job["provider"]]:
+                return False
+            db.execute("UPDATE jobs SET status='failed',error=? WHERE id=?", (code, job_id))
             db.execute("UPDATE members SET status='needs_user',current_task=NULL WHERE room_id=? AND provider=?",
                        (job["room_id"], job["provider"]))
             self._event(db, job["room_id"], "job_finished", sender=job["provider"], job_id=job_id,
-                        status="failed", error="subscription_limit_reached")
+                        status="failed", error=code)
             return True
+
+    def record_preflight_retry(self, job_id, attempt, diagnostic):
+        """Diagnosis only: which attempt failed before its prompt was sent."""
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT room_id,provider FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is not None:
+                self._event(db, job["room_id"], "native_preflight_retry", sender=job["provider"], job_id=job_id,
+                            attempt=attempt, diagnostic=diagnostic if isinstance(diagnostic, dict) else None)
 
     def retire_quota(self, room_id, provider, reason, *, files=(), revision=None):
         with self._connection(write=True) as db:

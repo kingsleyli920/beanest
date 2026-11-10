@@ -559,3 +559,38 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetSessionMode(unittest.IsolatedAsyncioTestCase):
+    class Peer:
+        """A Kimi Code that refuses plan on a resumed session until it has been through default."""
+        def __init__(self):
+            self.modes, self.left_plan = [], False
+
+        async def request(self, method, params):
+            self.modes.append(params["modeId"])
+            if params["modeId"] == "default":
+                self.left_plan = True
+            elif params["modeId"] == "plan" and not self.left_plan:
+                raise kimi_acp.ACPError("native_provider_error", rpc_code=-32603)
+            return {}
+
+    async def test_a_resumed_plan_session_goes_through_default(self):
+        # Catches every second call of a read-only room failing before its prompt is even sent.
+        peer = self.Peer()
+        await kimi_acp.set_session_mode(peer, "s", "plan", True)
+        self.assertEqual(peer.modes, ["plan", "default", "plan"])
+
+    async def test_other_refusals_still_fail(self):
+        # Catches the workaround hiding a real failure on a new session or a different mode.
+        for mode, resumed, code in (("plan", False, -32603), ("yolo", True, -32603), ("plan", True, -32000)):
+            class Refusing:
+                calls = 0
+
+                async def request(self, method, params):
+                    type(self).calls += 1
+                    raise kimi_acp.ACPError("native_provider_error", rpc_code=code)
+            with self.subTest(mode=mode, resumed=resumed, code=code):
+                with self.assertRaises(kimi_acp.ACPError):
+                    await kimi_acp.set_session_mode(Refusing(), "s", mode, resumed)
+                self.assertEqual(Refusing.calls, 1, "no second attempt")

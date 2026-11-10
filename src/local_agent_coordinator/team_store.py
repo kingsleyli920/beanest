@@ -20,7 +20,7 @@ from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, RoomError, checked
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
-from .native_outcome import FORMAT_ERRORS, NATIVE_METADATA_ERROR, REPLY_MISTAKES
+from .native_outcome import FORMAT_ERRORS, NATIVE_METADATA_ERROR, NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES
 from . import workload
 from .round_handoff import (ROTATION_MIN_CONTEXT_TOKENS, TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS,
                             context_tokens, normalized_handoff)
@@ -334,7 +334,9 @@ class TeamStore:
                      "objective_stage_limit", "deadline_exceeded", "cancelled", "service_shutdown",
                      "invoke_interrupted", "explicit_new_attempt", "invalid_team_commands",
                      # Running out of quota pauses a task; it is not a question for the user.
-                     "all_partners_quota_exhausted", "agent_quota_exhausted", "subscription_limit_reached"}
+                     "all_partners_quota_exhausted", "agent_quota_exhausted", "subscription_limit_reached",
+                     # The call never reached a model; the task simply was not started.
+                     NATIVE_PREFLIGHT_FAILED}
         # A reply mistake applied nothing; the carried task is redone, not a
         # question for the user.
         resumable.update(REPLY_MISTAKES)
@@ -979,7 +981,7 @@ class TeamStore:
     def retire_quota(self, db, room_id, provider, reason, files, revision, *, preserve_task_id=None, defer_reconcile=False):
         objective = self.objectives.current(db, room_id)
         if (objective is None or not json.loads(objective["policy_json"])["quota_failover"]
-                or reason not in {"agent_quota_exhausted", "subscription_limit_reached"}):
+                or reason not in {"agent_quota_exhausted", "subscription_limit_reached", NATIVE_PREFLIGHT_FAILED}):
             return False
         if not self.provider_clean(db, room_id, provider):
             self.stop(db, room_id, "team_cleanup_unconfirmed", status="unknown")
