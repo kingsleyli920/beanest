@@ -57,6 +57,17 @@ def read_only(work_mode, settings):
     return work_mode == "plan" or bool(settings and settings["effective_permission"] in {"plan", "read_only"})
 
 
+def read_only_capabilities(room_mode):
+    """Task capabilities a read-only room may still plan.
+
+    Local development runs every partner in a read-only mode that can still
+    run non-modifying commands (Codex's sandbox, Claude's plan mode, Kimi under
+    a write-denying sandbox), so a task that only needs running is allowed
+    there; writes stay refused through empty write_paths and no files/edits.
+    """
+    return frozenset({"text", "python"}) if room_mode == "native_project" else frozenset({"text"})
+
+
 def native_permission(work_mode, settings, *, inspection=False):
     """Keep a claimed choice frozen; internal recovery retains its old boundary."""
     if inspection:

@@ -9,12 +9,14 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const {
-  archiveApp, copyNotices, filesLeakingText, keepPythonPath, keepBackendPath, missingNotices, nonPortableLinks,
-  prepareBundleForSigning, pruneBackendStage, releasePackagerOptions, requiredNoticePaths, verifyBundledRuntime,
-  NOTICES_SOURCE, RELEASE_NOTICES, RELEASE_BUNDLE_ID, PYTHON_MINOR,
+  archiveApp, copyNotices, filesLeakingText, holdsOnlyArch, isMachO, keepPythonPath, keepBackendPath, missingNotices,
+  nonPortableLinks, prepareBundleForSigning, pruneBackendStage, pythonRequest, releaseArch, releasePackagerOptions,
+  requiredNoticePaths, verifyBundledRuntime, wrongArchFiles,
+  NOTICES_SOURCE, PYTHON_BUILDS, RELEASE_NOTICES, RELEASE_BUNDLE_ID, PYTHON_MINOR,
 } = require('./build-release');
 
 const lib = `lib/python${PYTHON_MINOR}`;
+const macOnly = { skip: process.platform !== 'darwin' };
 
 test('the runtime keeps what the server imports', () => {
   for (const kept of ['bin', `bin/python${PYTHON_MINOR}`, 'lib', lib, `lib/libpython${PYTHON_MINOR}.dylib`,
@@ -58,11 +60,68 @@ test('only links a clean Mac can satisfy pass', () => {
 
 test('the release has its own identity and carries python and backend as resources', () => {
   const options = releasePackagerOptions({ stage: '/s', build: '/b', root: '/r', metadata: '/b/coordinator.json',
-    python: '/b/python', backend: '/b/backend', electronVersion: '44.9.3' });
+    python: '/b/python', backend: '/b/backend', electronVersion: '44.9.3', arch: 'x64' });
   assert.equal(options.appBundleId, 'io.github.kingsleyli920.beanest');
+  assert.equal(options.arch, 'x64');
   assert.equal(RELEASE_BUNDLE_ID, 'io.github.kingsleyli920.beanest');
   assert.deepEqual(options.extraResource,
     ['/b/coordinator.json', '/r/LICENSE', '/r/THIRD_PARTY_NOTICES.md', '/b/python', '/b/backend']);
+});
+
+// Catches: an Intel build silently packaging this Mac's Electron, or a typo turning into a bundle for no Mac.
+test('the target architecture comes from --arch, then the environment, then this machine', () => {
+  assert.equal(releaseArch([], {}, 'arm64'), 'arm64');
+  assert.equal(releaseArch(['--arch', 'x64'], {}, 'arm64'), 'x64');
+  assert.equal(releaseArch(['--arch=x64'], {}, 'arm64'), 'x64');
+  assert.equal(releaseArch([], { BEANEST_RELEASE_ARCH: 'x64' }, 'arm64'), 'x64');
+  assert.equal(releaseArch(['--arch', 'arm64'], { BEANEST_RELEASE_ARCH: 'x64' }, 'x64'), 'arm64');
+  assert.throws(() => releaseArch(['--arch', 'ia32'], {}, 'arm64'), /^Error: release_arch_unsupported:ia32$/);
+  assert.throws(() => releaseArch(['--arch'], {}, 'arm64'), /^Error: release_arch_unsupported:undefined$/);
+  assert.throws(() => releaseArch([], {}, 'ia32'), /^Error: release_arch_unsupported:ia32$/);
+});
+
+// Catches: asking uv for this Mac's CPython while packaging Electron for the other architecture.
+test('each target asks uv for its own CPython build', () => {
+  assert.equal(pythonRequest('arm64'), 'cpython-3.13.9-macos-aarch64-none');
+  assert.equal(pythonRequest('x64'), 'cpython-3.13.9-macos-x86_64-none');
+});
+
+// Catches: uv picking a newer python-build-standalone build than the one THIRD_PARTY_NOTICES.md describes.
+test('both CPython builds are pinned to the build the notices describe', async () => {
+  const builds = JSON.parse(await fs.readFile(PYTHON_BUILDS, 'utf8'));
+  assert.deepEqual(Object.keys(builds), ['cpython-3.13.9-macos-aarch64-none', 'cpython-3.13.9-macos-x86_64-none']);
+  assert.equal(builds['cpython-3.13.9-macos-aarch64-none'].url, 'https://github.com/astral-sh/python-build-standalone/'
+    + 'releases/download/20251028/cpython-3.13.9%2B20251028-aarch64-apple-darwin-install_only_stripped.tar.gz');
+  assert.equal(builds['cpython-3.13.9-macos-aarch64-none'].sha256,
+    'a4f7c192d7fc9eaa40f5b2bcc48c0baf1d02b7059a8257f5af7df1691a7bec6e');
+  assert.equal(builds['cpython-3.13.9-macos-x86_64-none'].url, 'https://github.com/astral-sh/python-build-standalone/'
+    + 'releases/download/20251028/cpython-3.13.9%2B20251028-x86_64-apple-darwin-install_only_stripped.tar.gz');
+  assert.equal(builds['cpython-3.13.9-macos-x86_64-none'].sha256,
+    '3243276042fcf8c5be43fc37c76ccd377b2ae78143c9ba714140c7cc793a4726');
+  for (const [family, key] of [['aarch64', 'cpython-3.13.9-macos-aarch64-none'], ['x86_64', 'cpython-3.13.9-macos-x86_64-none']]) {
+    assert.equal(builds[key].arch.family, family);
+    assert.equal(builds[key].build, '20251028');
+  }
+});
+
+// Catches: a universal or wrong-architecture binary passing as the target's.
+test('a file passes only when lipo reports the target slice alone', () => {
+  assert.equal(holdsOnlyArch('x86_64\n', 'x64'), true);
+  assert.equal(holdsOnlyArch('arm64\n', 'arm64'), true);
+  assert.equal(holdsOnlyArch('arm64\n', 'x64'), false);
+  assert.equal(holdsOnlyArch('x86_64\n', 'arm64'), false);
+  assert.equal(holdsOnlyArch('x86_64 arm64\n', 'x64'), false);
+  assert.equal(holdsOnlyArch('x86_64 arm64\n', 'arm64'), false);
+  assert.equal(holdsOnlyArch('arm64e\n', 'arm64'), false);
+  assert.equal(holdsOnlyArch('', 'x64'), false);
+});
+
+test('Mach-O files are recognised by their header', () => {
+  assert.equal(isMachO(Buffer.from([0xcf, 0xfa, 0xed, 0xfe])), true);
+  assert.equal(isMachO(Buffer.from([0xce, 0xfa, 0xed, 0xfe])), true);
+  assert.equal(isMachO(Buffer.from([0xca, 0xfe, 0xba, 0xbe])), true);
+  assert.equal(isMachO(Buffer.from('#!/b')), false);
+  assert.equal(isMachO(Buffer.from([0xcf, 0xfa])), false);
 });
 
 test('the build-machine path is found in nested text and binary files', async (t) => {
@@ -146,7 +205,7 @@ test('the bundle check fails the build when a notice is missing', async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const { app, resources } = await fixtureApp(root);
   await fs.rm(path.join(resources, 'licenses', 'libffi-LICENSE.txt'));
-  await assert.rejects(verifyBundledRuntime(app), /^Error: release_bundle_missing_notice:licenses\/libffi-LICENSE\.txt$/);
+  await assert.rejects(verifyBundledRuntime(app, 'arm64'), /^Error: release_bundle_missing_notice:licenses\/libffi-LICENSE\.txt$/);
 });
 
 // Catches: app.asar being left out of the build-path scan.
@@ -155,7 +214,7 @@ test('the bundle check fails the build when app.asar holds the build-machine pat
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const { app, resources } = await fixtureApp(root);
   await fs.writeFile(path.join(resources, 'app.asar'), Buffer.concat([Buffer.from([0, 255]), Buffer.from(os.homedir())]));
-  await assert.rejects(verifyBundledRuntime(app), /^Error: release_bundle_build_path:.*app\.asar$/);
+  await assert.rejects(verifyBundledRuntime(app, 'arm64'), /^Error: release_bundle_build_path:.*app\.asar$/);
 });
 
 // Catches: Electron's or our notices left beside the app, where the zip would lose them.
@@ -171,6 +230,59 @@ test('notices land inside the app resources', async (t) => {
   assert.deepEqual((await fs.readdir(path.join(resources, 'licenses'))).sort(), [...RELEASE_NOTICES].sort());
 });
 
+// A 64-bit Mach-O header with no load commands; enough for lipo to name its architecture.
+function thinMachO(cpuType, cpuSubtype) {
+  const header = Buffer.alloc(32);
+  header.writeUInt32LE(0xfeedfacf, 0);
+  header.writeUInt32LE(cpuType, 4);
+  header.writeUInt32LE(cpuSubtype, 8);
+  header.writeUInt32LE(2, 12);
+  return header;
+}
+const X86_64 = thinMachO(0x01000007, 3);
+const ARM64 = thinMachO(0x0100000c, 0);
+
+// Catches: Electron's extensionless executables escaping the check, and a universal file passing as either side.
+test('every Mach-O in the app outside the target architecture is reported', macOnly, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'beanest-arch-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const app = path.join(root, 'App.app');
+  const contents = path.join(app, 'Contents');
+  for (const dir of ['MacOS', 'Frameworks', 'Resources/python/lib']) await fs.mkdir(path.join(contents, dir), { recursive: true });
+  await fs.writeFile(path.join(contents, 'MacOS', 'App'), X86_64);
+  await fs.writeFile(path.join(contents, 'Resources', 'python', 'lib', 'libpython3.13.dylib'), ARM64);
+  await fs.writeFile(path.join(contents, 'Resources', 'python', 'lib', 'notes.so'), 'not a binary');
+  await fs.writeFile(path.join(root, 'x'), X86_64);
+  await fs.writeFile(path.join(root, 'a'), ARM64);
+  execFileSync('lipo', ['-create', path.join(root, 'x'), path.join(root, 'a'),
+    '-output', path.join(contents, 'Frameworks', 'Universal')]);
+  assert.deepEqual((await wrongArchFiles(app, 'x64')).sort(), [
+    'Contents/Frameworks/Universal(x86_64 arm64)', 'Contents/Resources/python/lib/libpython3.13.dylib(arm64)']);
+  assert.deepEqual((await wrongArchFiles(app, 'arm64')).sort(), [
+    'Contents/Frameworks/Universal(x86_64 arm64)', 'Contents/MacOS/App(x86_64)']);
+  await fs.rm(path.join(contents, 'Frameworks', 'Universal'));
+  await fs.writeFile(path.join(contents, 'Resources', 'python', 'lib', 'libpython3.13.dylib'), X86_64);
+  assert.deepEqual(await wrongArchFiles(app, 'x64'), []);
+});
+
+// Catches: the build finishing normally with an Electron of the other architecture inside.
+test('the bundle check fails the build on a binary of the other architecture', macOnly, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'beanest-verify-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { app } = await fixtureApp(root);
+  await fs.mkdir(path.join(app, 'Contents', 'MacOS'));
+  await fs.writeFile(path.join(app, 'Contents', 'MacOS', 'App'), X86_64);
+  await assert.rejects(verifyBundledRuntime(app, 'arm64'), /^Error: release_bundle_wrong_arch:arm64:Contents\/MacOS\/App\(x86_64\)$/);
+});
+
+// Catches: the zip or the bundle check still keyed to this Mac's architecture instead of the target's.
+test('the archive name and the bundle check follow the target architecture', async () => {
+  const source = await fs.readFile(path.join(__dirname, 'build-release.js'), 'utf8');
+  assert.ok(source.includes('`Beanest-${config.version}-macos-${arch}.zip`'));
+  assert.ok(source.includes('await verifyBundledRuntime(appPath, arch);'));
+  assert.equal(source.includes('process.arch}.zip'), false);
+});
+
 // Catches: adding files to the bundle after sealing it, which breaks the signature.
 test('notices and clean-up happen before the bundle is signed', async () => {
   const source = await fs.readFile(path.join(__dirname, 'build-release.js'), 'utf8');
@@ -182,7 +294,6 @@ test('notices and clean-up happen before the bundle is signed', async () => {
   }
 });
 
-const macOnly = { skip: process.platform !== 'darwin' };
 
 // Catches: the unused Electron icon and quarantine-style attributes reaching the seal.
 test('signing preparation removes the stock icon and extended attributes', macOnly, async (t) => {

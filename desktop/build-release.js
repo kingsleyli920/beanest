@@ -27,6 +27,36 @@ const LIBRARY_DROPS = new Set(['idlelib', 'ensurepip', 'tkinter', 'turtledemo', 
   `config-${PYTHON_MINOR}-darwin`]);
 // What a shared library may link against and still work on another Mac.
 const PORTABLE_LINK = /^(@(rpath|loader_path|executable_path)\/|\/usr\/lib\/|\/System\/Library\/)/;
+// Node's arch name -> uv's name for the CPython build and lipo's name for Mach-O slices.
+const TARGETS = { arm64: { uv: 'aarch64', macho: 'arm64' }, x64: { uv: 'x86_64', macho: 'x86_64' } };
+// Pins each target to the python-build-standalone build that THIRD_PARTY_NOTICES.md describes,
+// whatever uv's own list would pick today. uv checks the sha256 recorded there.
+const PYTHON_BUILDS = path.join(__dirname, 'python-builds.json');
+// Thin and universal Mach-O headers, in either byte order.
+const MACHO_MAGICS = new Set([0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca]);
+
+// `--arch x64`, `--arch=x64` or BEANEST_RELEASE_ARCH; this machine's architecture otherwise.
+function releaseArch(argv, env, hostArch) {
+  const at = argv.findIndex((item) => item === '--arch' || item.startsWith('--arch='));
+  const requested = at < 0 ? env.BEANEST_RELEASE_ARCH || hostArch
+    : argv[at].startsWith('--arch=') ? argv[at].slice('--arch='.length) : argv[at + 1];
+  if (!Object.hasOwn(TARGETS, requested ?? '')) throw new Error(`release_arch_unsupported:${requested}`);
+  return requested;
+}
+
+function pythonRequest(arch) {
+  return `cpython-${PYTHON_VERSION}-macos-${TARGETS[arch].uv}-none`;
+}
+
+function isMachO(header) {
+  return header.length >= 4 && MACHO_MAGICS.has(header.readUInt32BE(0));
+}
+
+// `lipo -archs` output -> whether the file holds exactly the target's slice and nothing else.
+function holdsOnlyArch(lipoArchs, arch) {
+  const found = lipoArchs.trim().split(/\s+/).filter(Boolean);
+  return found.length === 1 && found[0] === TARGETS[arch].macho;
+}
 
 // Relative POSIX path inside a standalone CPython tree -> copy it or not.
 function keepPythonPath(relative) {
@@ -51,9 +81,9 @@ function nonPortableLinks(otoolOutput) {
     .filter((link) => link && !PORTABLE_LINK.test(link));
 }
 
-function releasePackagerOptions({ stage, build, root, metadata, python, backend, electronVersion }) {
+function releasePackagerOptions({ stage, build, root, metadata, python, backend, electronVersion, arch }) {
   const local = localPackagerOptions({ stage, build, root, metadata, electronVersion });
-  return { ...local, appBundleId: RELEASE_BUNDLE_ID, extraResource: [...local.extraResource, python, backend] };
+  return { ...local, arch, appBundleId: RELEASE_BUNDLE_ID, extraResource: [...local.extraResource, python, backend] };
 }
 
 function run(command, args, options = {}) {
@@ -140,6 +170,35 @@ function archiveApp(appPath, archive) {
   run('ditto', ['-c', '-k', '--norsrc', '--noextattr', '--keepParent', appPath, archive]);
 }
 
+// Every Mach-O file under the app, found by header rather than by name: Electron's
+// executables and frameworks have no extension.
+async function allMachOFiles(directory) {
+  const entries = await fs.readdir(directory, { recursive: true, withFileTypes: true });
+  const found = [];
+  const header = Buffer.alloc(4);
+  for (const entry of entries.filter((item) => item.isFile())) {
+    const file = path.join(entry.parentPath, entry.name);
+    const handle = await fs.open(file, 'r');
+    try {
+      const { bytesRead } = await handle.read(header, 0, 4, 0);
+      if (isMachO(header.subarray(0, bytesRead))) found.push(file);
+    } finally {
+      await handle.close();
+    }
+  }
+  return found;
+}
+
+// A slice for the other architecture would mean a mixed-up build; a missing slice, an app that cannot start.
+async function wrongArchFiles(appPath, arch) {
+  const wrong = [];
+  for (const file of await allMachOFiles(appPath)) {
+    const archs = run('lipo', ['-archs', file]).trim();
+    if (!holdsOnlyArch(archs, arch)) wrong.push(`${path.relative(appPath, file)}(${archs})`);
+  }
+  return wrong;
+}
+
 async function machOFiles(directory) {
   const entries = await fs.readdir(directory, { recursive: true, withFileTypes: true });
   return entries.filter((entry) => entry.isFile()
@@ -149,9 +208,11 @@ async function machOFiles(directory) {
 
 // Runs the packaged interpreter with an empty environment from an unrelated
 // directory, the way it will start on a machine with nothing else installed.
-async function verifyBundledRuntime(appPath) {
+async function verifyBundledRuntime(appPath, arch) {
   const resources = path.join(appPath, 'Contents', 'Resources');
   const python = path.join(resources, 'python');
+  const wrongArch = await wrongArchFiles(appPath, arch);
+  if (wrongArch.length) throw new Error(`release_bundle_wrong_arch:${arch}:${wrongArch.join(',')}`);
   for (const file of await machOFiles(python)) {
     const links = nonPortableLinks(run('otool', ['-L', file]));
     if (links.length) throw new Error(`release_bundle_external_link:${file}:${links.join(',')}`);
@@ -173,14 +234,18 @@ async function main() {
   if (process.platform !== 'darwin') throw new Error('The release bundle currently supports macOS.');
   const { packager } = await import('@electron/packager');
   const root = path.resolve(__dirname, '..');
+  const arch = releaseArch(process.argv.slice(2), process.env, process.arch);
   const build = process.env.BEANEST_RELEASE_DIR
-    ? path.resolve(process.env.BEANEST_RELEASE_DIR) : path.join(root, 'runtime', 'desktop-release');
+    ? path.resolve(process.env.BEANEST_RELEASE_DIR) : path.join(root, 'runtime', 'desktop-release', arch);
   await fs.rm(build, { recursive: true, force: true });
   const stage = path.join(build, 'source');
   const config = await stageShell(stage);
 
-  run('uv', ['python', 'install', '--quiet', PYTHON_VERSION]);
-  const managed = run('uv', ['python', 'find', '--managed-python', PYTHON_VERSION]).trim();
+  // A private install directory: the user's own uv Pythons and ~/.local/bin stay as they are.
+  const uvPython = { env: { ...process.env, UV_PYTHON_INSTALL_DIR: path.join(build, 'uv-python') } };
+  run('uv', ['python', 'install', '--quiet', '--no-bin', '--python-downloads-json-url', PYTHON_BUILDS,
+    pythonRequest(arch)], uvPython);
+  const managed = run('uv', ['python', 'find', '--managed-python', pythonRequest(arch)], uvPython).trim();
   const pythonHome = path.dirname(path.dirname(await fs.realpath(managed)));
   const pythonStage = path.join(build, 'python');
   const backendStage = path.join(build, 'backend');
@@ -196,7 +261,7 @@ async function main() {
   const metadata = path.join(build, 'coordinator.json');
   await fs.writeFile(metadata, JSON.stringify({ bundled: true }), { mode: 0o644 });
   const [outputPath] = await packager(releasePackagerOptions({ stage, build, root, metadata,
-    python: pythonStage, backend: backendStage, electronVersion: config.devDependencies.electron }));
+    python: pythonStage, backend: backendStage, electronVersion: config.devDependencies.electron, arch }));
   await verifyLocalBundle(outputPath, RELEASE_BUNDLE_ID);
   const appPath = path.join(outputPath, `${APP_NAME}.app`);
   await copyNotices(outputPath, path.join(appPath, 'Contents', 'Resources'));
@@ -205,8 +270,8 @@ async function main() {
   // after download. Seal the whole bundle; a Developer ID replaces this later.
   run('codesign', ['--force', '--deep', '--sign', '-', appPath]);
   run('codesign', ['--verify', '--deep', '--strict', appPath]);
-  await verifyBundledRuntime(appPath);
-  const archive = path.join(build, `Beanest-${config.version}-macos-${process.arch}.zip`);
+  await verifyBundledRuntime(appPath, arch);
+  const archive = path.join(build, `Beanest-${config.version}-macos-${arch}.zip`);
   archiveApp(appPath, archive);
   console.log(appPath);
   console.log(archive);
@@ -218,7 +283,8 @@ if (require.main === module) main().catch((error) => {
 });
 
 module.exports = {
-  archiveApp, copyNotices, filesLeakingText, keepPythonPath, keepBackendPath, missingNotices, nonPortableLinks,
-  prepareBundleForSigning, pruneBackendStage, releasePackagerOptions, requiredNoticePaths, verifyBundledRuntime,
-  NOTICES_SOURCE, RELEASE_NOTICES, RELEASE_BUNDLE_ID, PYTHON_VERSION, PYTHON_MINOR,
+  archiveApp, copyNotices, filesLeakingText, holdsOnlyArch, isMachO, keepPythonPath, keepBackendPath, missingNotices,
+  nonPortableLinks, prepareBundleForSigning, pruneBackendStage, pythonRequest, releaseArch, releasePackagerOptions,
+  requiredNoticePaths, verifyBundledRuntime, wrongArchFiles,
+  NOTICES_SOURCE, PYTHON_BUILDS, RELEASE_NOTICES, RELEASE_BUNDLE_ID, PYTHON_VERSION, PYTHON_MINOR,
 };

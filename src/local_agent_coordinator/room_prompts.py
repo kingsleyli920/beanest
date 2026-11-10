@@ -15,7 +15,7 @@ from .message_capacity import MAX_PROMPT_BYTES
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, project_digest as _project_digest
 from .room_contract import RoomError
 from .room_store import PROJECT_MODES, RoomStore
-from .runtime_settings import read_only
+from .runtime_settings import read_only, read_only_capabilities
 
 
 _BLOCK_PROTOCOL = (
@@ -325,7 +325,8 @@ class RoomPromptMixin:
                     "text": job["text"], **job["team"]},
             "recent_visible_messages": [{"sender": event["sender"], "recipient": event.get("recipient"), **_excerpt(event["text"], 1000)}
                 for event in snapshot["events"] if event["kind"] == "message"][-12:],
-            "available_capabilities": ["text"] + (["python"] if job["mode"] in PROJECT_MODES and not read_only(job.get("work_mode"), job.get("runtime_settings")) else []),
+            "available_capabilities": (sorted(read_only_capabilities(job["mode"])) if read_only(job.get("work_mode"), job.get("runtime_settings"))
+                                       else ["text"] + (["python"] if job["mode"] in PROJECT_MODES else [])),
             "unavailable_capabilities": ["image"],
             "objective": snapshot.get("objective"),
             "current_user_updates": _direct_updates(snapshot["events"]),
@@ -609,7 +610,8 @@ class RoomPromptMixin:
             if job["mode"] == "native_project":
                 project_instruction += (" Use the provider's native read-only/plan capabilities to inspect and discuss. "
                                         "Non-modifying native commands are available where supported by that provider. "
-                                        "Propose text tasks with empty write_paths and no files/edits; do not implement project changes.")
+                                        "Propose tasks with empty write_paths and no files/edits: capability text, or python when the task "
+                                        "only needs to run non-modifying commands. Do not implement project changes.")
             else:
                 project_instruction += (" Unified host permission is READ ONLY for every member. Only propose text tasks with "
                                         "empty write_paths; do not submit files/edits or request execution. Describe proposed "
@@ -773,7 +775,8 @@ class RoomPromptMixin:
             "A review command is exactly {type,task_id,verdict,reason}; a block fills type/task_id/reason/cause and nulls other allowed fields. "
             "checkpoint uses summary; checkpoint_review uses reason and proposal_digest. "
             + self._native_schema_instruction(job) +
-            "WORK MODE plan/permission read_only is for inspection and discussion, not implementation; propose text tasks with empty paths. "
+            "WORK MODE plan/permission read_only is for inspection and discussion, not implementation; propose tasks with empty paths "
+            "(capability text, or python for running non-modifying commands). "
             "Non-modifying native commands are permitted where supported by the provider's actual read-only/plan mode. "
             "A provider's plan mode is not a claim of an OS-level sandbox. Do not implement project changes in that mode. "
             "WORK MODE build starts implementation immediately, without requiring the user to accept a plan. "

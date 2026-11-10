@@ -20,6 +20,7 @@ class NativePermissionPolicyHTTPTests(unittest.TestCase):
         http.LongTeamResultHTTPTests.setUp(self)
         (self.source / "main.py").write_text("VALUE = 1\n")
         self.write_source = False
+        self.read_only_capability = "text"
 
     def create(self, goal, *, mode="build", permission="full_access"):
         code, value = self.request("POST", "/api/rooms", {
@@ -35,7 +36,8 @@ class NativePermissionPolicyHTTPTests(unittest.TestCase):
         if phase in {"plan", "coordinate"}:
             commands = []
             if not context["team"]["tasks"] and agent == context["team"]["plan_author"]:
-                commands = [proposal("T1", paths=[] if limited else ["main.py"], capability="text"),
+                commands = [proposal("T1", paths=[] if limited else ["main.py"],
+                                     capability=self.read_only_capability if limited else "text"),
                             {"type": "claim", "task_id": "T1"}]
             return native.native_reply(context, [*commands, {"type": "plan_ready"}])
         if phase == "work":
@@ -118,6 +120,29 @@ class NativePermissionPolicyHTTPTests(unittest.TestCase):
                         self.assertFalse(call["context"]["native_readonly_discussion"])
                         self.assertIn("Non-modifying native commands and checks are permitted", call["prompt"])
                         self.assertNotIn("Do not implement, edit, run tests/engine", call["prompt"])
+
+    def test_read_only_local_development_can_plan_a_task_that_only_runs_commands(self):
+        # Catches: a read-only plan whose task needs running (capability python, no write paths)
+        # stopping the whole objective, though every partner can run non-modifying commands there.
+        self.read_only_capability = "python"
+        for mode, permission in (("plan", "full_access"), ("build", "plan"), ("build", "read_only")):
+            with self.subTest(mode=mode, permission=permission):
+                first_call = len(self.native.calls)
+                final = self.create("Run the project and report what it prints.", mode=mode, permission=permission)
+                self.assertEqual(final["team"]["tasks"][0]["status"], "accepted", final["team"])
+                self.assertTrue(all(job["error"] is None for job in final["jobs"]))
+                self.assertEqual([(task["capability"], task["write_paths"]) for task in final["team"]["tasks"]], [("python", [])])
+                self.assertEqual((self.source / "main.py").read_text(), "VALUE = 1\n")
+                for call in self.native.calls[first_call:]:
+                    self.assertEqual(call["context"]["available_capabilities"], ["python", "text"])
+
+    def test_read_only_local_development_still_refuses_a_task_that_makes_images(self):
+        # Catches: widening the read-only allowance beyond running commands.
+        self.read_only_capability = "image"
+        final = self.create("Draw a picture of the result.", mode="build", permission="plan")
+        self.assertNotEqual(final["objective"]["status"], "complete")
+        self.assertIn("permission_read_only", [job["error"] for job in final["jobs"]])
+        self.assertEqual(final["team"]["tasks"], [])
 
     def test_public_permissions_and_frozen_legacy_or_recovery_choices_are_distinct(self):
         code, options = self.request("GET", "/api/runtime-options")

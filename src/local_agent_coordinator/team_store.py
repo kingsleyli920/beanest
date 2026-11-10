@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 import re
 from uuid import uuid4
 
-from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only
+from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, read_only_capabilities
 from .execution_policy import task_finished, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 from .objective_store import ObjectiveStore
 from .block_contract import BlockContractError, normalize_block_cause
@@ -1521,7 +1521,8 @@ class TeamStore:
                         or command["capability"] not in {"text", "python", "image"}):
                     raise RoomError("invalid_team_task")
                 _paths(command["write_paths"], max_length=1024 if room["mode"] in {"project_folder", "native_project"} else 240)
-                if read_only(room["work_mode"], json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None) and (command["write_paths"] or command["capability"] != "text"):
+                if read_only(room["work_mode"], json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None) and (
+                        command["write_paths"] or command["capability"] not in read_only_capabilities(room["mode"])):
                     raise RoomError("plan_read_only" if room["work_mode"] == "plan" else "permission_read_only")
                 proposals.append(command)
             elif kind == "plan_ready":
@@ -1569,7 +1570,8 @@ class TeamStore:
                             raise RoomError("invalid_target")
                         if not isinstance(command["capability"], str) or command["capability"] not in {"text", "python", "image"}:
                             raise RoomError("invalid_team_commands")
-                        if read_only(room["work_mode"], json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None) and command["capability"] != "text":
+                        if (read_only(room["work_mode"], json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None)
+                                and command["capability"] not in read_only_capabilities(room["mode"])):
                             raise RoomError("plan_read_only" if room["work_mode"] == "plan" else "permission_read_only")
                 elif kind == "block":
                     if context["job_phase"] not in {"work", "review"}:

@@ -1,0 +1,36 @@
+{
+  "cpython-3.13.9-macos-aarch64-none": {
+    "name": "cpython",
+    "arch": {
+      "family": "aarch64",
+      "variant": null
+    },
+    "os": "macos",
+    "libc": "none",
+    "major": 3,
+    "minor": 13,
+    "patch": 9,
+    "prerelease": "",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251028/cpython-3.13.9%2B20251028-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "sha256": "a4f7c192d7fc9eaa40f5b2bcc48c0baf1d02b7059a8257f5af7df1691a7bec6e",
+    "variant": null,
+    "build": "20251028"
+  },
+  "cpython-3.13.9-macos-x86_64-none": {
+    "name": "cpython",
+    "arch": {
+      "family": "x86_64",
+      "variant": null
+    },
+    "os": "macos",
+    "libc": "none",
+    "major": 3,
+    "minor": 13,
+    "patch": 9,
+    "prerelease": "",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251028/cpython-3.13.9%2B20251028-x86_64-apple-darwin-install_only_stripped.tar.gz",
+    "sha256": "3243276042fcf8c5be43fc37c76ccd377b2ae78143c9ba714140c7cc793a4726",
+    "variant": null,
+    "build": "20251028"
+  }
+}

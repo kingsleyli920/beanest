@@ -1755,7 +1755,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         callback({"type": "native_progress", "item_id": "late", "session_id": self.fake.calls[0]["session_id"], "text": "Late callback."})
         self.assertEqual(len(self.service.store.snapshot(created["room"]["id"])["events"]), count)
 
-    async def test_unchanged_metadata_outside_task_scope_still_rejects_without_import(self):
+    async def test_unchanged_metadata_outside_task_scope_is_dropped_without_import(self):
         original = self.handler
         def handler(agent, context, cwd):
             value = original(agent, context, cwd)
@@ -1766,8 +1766,10 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         created = await self.create()
         await self.settle()
         result = await self.service.read_room(created["room"]["id"])
-        self.assertEqual(result["team"]["stop_reason"], "team_scope_conflict")
-        self.assertEqual(self.service._project(created["room"]["id"]).snapshot()["revision"], 1)
+        self.assertIsNone(result["team"]["stop_reason"])
+        self.assertEqual(result["objective"]["status"], "complete")
+        project = self.service._project(created["room"]["id"]).snapshot()
+        self.assertNotIn("outside.txt", [file["path"] for file in project["files"]])
 
     async def test_unowned_file_change_stays_private_and_is_not_imported(self):
         original = self.handler

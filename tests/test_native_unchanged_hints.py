@@ -72,13 +72,18 @@ class OptionalNativeHintsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(file['sha256'], hashlib.sha256(b'VALUE = 2\n').hexdigest())
         self.assertTrue(file['verified'])
 
-    async def test_hint_outside_owned_scope_still_rejects(self):
+    async def test_hint_outside_owned_scope_is_dropped_without_stopping_the_room(self):
+        # Catches: a harmless "left this other file alone" note stopping the whole objective,
+        # while the owned change still publishes and the outside path gains nothing.
         def mutate(cwd, reply):
             (cwd / 'main.py').write_text('VALUE = 2\n')
             reply['unchanged_paths'] = [{'path': 'outside.txt', 'reason': 'Not owned.'}]
         result = await self.run_work(mutate)
-        self.assert_not_published(result)
-        self.assertEqual(result['team']['stop_reason'], 'team_scope_conflict')
+        self.assertEqual(result['objective']['status'], 'complete', result['team'])
+        self.assertIsNone(result['team']['stop_reason'])
+        paths = [f['path'] for f in result['objective']['delivery']['files']]
+        self.assertIn('main.py', paths)
+        self.assertNotIn('outside.txt', paths)
 
     async def test_malformed_supplied_hint_still_rejects(self):
         def mutate(cwd, reply):
