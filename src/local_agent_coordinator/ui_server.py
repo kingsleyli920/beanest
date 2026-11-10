@@ -27,6 +27,7 @@ ASSET_ROUTES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/view-account.js": ("view-account.js", "text/javascript; charset=utf-8"),
+    "/view-manager.js": ("view-manager.js", "text/javascript; charset=utf-8"),
     "/boot.js": ("boot.js", "text/javascript; charset=utf-8"),
     "/i18n-en-a.js": ("i18n-en-a.js", "text/javascript; charset=utf-8"),
     "/i18n-en-b.js": ("i18n-en-b.js", "text/javascript; charset=utf-8"),
