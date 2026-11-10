@@ -9,7 +9,7 @@ from __future__ import annotations
 from .agent_registry import safe_agent_id
 from .block_contract import BLOCK_CAUSES
 from .round_handoff import handoff_schema
-from .team_store import _COMMAND_FIELDS
+from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS
 
 
 _TEAM_PHASES = frozenset({"plan", "coordinate", "work", "review", "help", "user", "checkpoint", "checkpoint_review"})

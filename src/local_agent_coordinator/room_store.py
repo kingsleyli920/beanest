@@ -21,6 +21,7 @@ from . import job_progress
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
+from .room_contract import RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
 from .stop_policy import continues_automatically, OWN_RECOVERY
@@ -40,12 +41,6 @@ NATIVE_CACHE_MISS_MIN_WRITE_TOKENS = 200_000
 NATIVE_CACHE_MISS_WINDOW_SECONDS = 300
 
 
-class RoomError(RuntimeError):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
-
-
 def checked_work_mode(value):
     """None means omitted; legacy is a persisted compatibility marker only."""
     if value is not None and (not isinstance(value, str) or value not in WORK_MODES):
@@ -57,24 +52,6 @@ def checked_lifecycle_action(value):
     if not isinstance(value, str) or value not in LIFECYCLE_ACTIONS:
         raise RoomError("invalid_lifecycle_action")
     return LIFECYCLE_ACTIONS[value]
-
-
-def checked_message(value: object) -> str:
-    from .message_capacity import checked_message_text, MessageCapacityError
-    try:
-        return checked_message_text(value)
-    except MessageCapacityError as error:
-        raise RoomError(error.code) from None
-
-
-def checked_text(value: object, maximum: int = 3000) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum or "\0" in value:
-        raise RoomError("invalid_text")
-    try:
-        value.encode("utf-8")
-    except UnicodeError:
-        raise RoomError("invalid_text") from None
-    return value.strip()
 
 
 def checked_target(value: object, members: tuple[str, ...]) -> tuple[str, ...]:

@@ -14,23 +14,12 @@ from .runtime_settings import normalized_settings, RuntimeSettingsError, read_on
 from .execution_policy import task_finished, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 from .objective_store import ObjectiveStore
 from .block_contract import BlockContractError, normalize_block_cause
-from .room_store import NATIVE_METADATA_ERROR, RoomError, checked_text, checked_message
+from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, RoomError, checked_text, checked_message
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
-_COMMAND_FIELDS = {
-    "propose": {"type", "id", "title", "description", "acceptance", "dependencies", "write_paths", "capability"},
-    "claim": {"type", "task_id"},
-    "complete": {"type", "task_id", "result"},
-    "block": {"type", "task_id", "reason", "cause"},
-    "review": {"type", "task_id", "verdict", "reason"},
-    "request_help": {"type", "task_id", "to", "text", "capability", "repair_paths"},
-    "plan_ready": {"type"},
-    "checkpoint": {"type", "decision", "summary", "next_goal", "scope_reference", "question"},
-    "checkpoint_review": {"type", "verdict", "reason", "proposal_digest"},
-}
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
-from .native_outcome import FORMAT_ERRORS, REPLY_MISTAKES
+from .native_outcome import FORMAT_ERRORS, NATIVE_METADATA_ERROR, REPLY_MISTAKES
 from . import workload
 from .round_handoff import ROTATION_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS, context_tokens, normalized_handoff
 from .stop_policy import host_block_recoverable
