@@ -53,7 +53,7 @@ package="Beanest-$version-macos-$arch.zip"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-say "正在下载豆窝 $version（$( [ "$arch" = arm64 ] && echo "Apple 芯片" || echo "Intel" )版）……"
+say "正在下载豆窝 $version（$( [ "$arch" = arm64 ] && echo "Apple 芯片" || echo "Intel " )版）……"
 curl -fL --progress-bar -o "$work/$package" "$base/$package" || fail "下载 $package 失败。"
 curl -fsSL -o "$work/SHA256SUMS" "$base/SHA256SUMS" || fail "下载校验文件失败。"
 expected=$(awk -v name="$package" '$2 == name || $2 == "*" name { print $1 }' "$work/SHA256SUMS")
