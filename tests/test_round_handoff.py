@@ -401,6 +401,7 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await native.NativeRoomServiceTests.asyncSetUp(self)
+        native.no_rebalance(self.service)
         self.fake.handler = self.handler
         self.task_ids = ["T1", "T2"]
         self.usage = lambda phase, task_id: LARGE   # what each Claude call reports having sent
@@ -540,6 +541,23 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("round_handoff", attempts[1]["context"])
         self.assertIsNone(self.calls("work", "T2")[0]["session_id"], "the next task still moves on")
         self.assertEqual(len(self.events(state, "partner_session_rotated")), 1)
+
+    async def test_a_session_that_grows_during_a_peer_reviewed_task_still_moves_on(self):
+        # Catches the record being asked for too late: with a peer reviewing, this partner has no later call to write it in.
+        def usage(phase, task_id):
+            return usage_totalling(250_000) if phase in {"plan", "coordinate"} else usage_totalling(600_000)
+        self.usage = usage
+        await self.run_room()
+        first = self.calls("work", "T1")[0]
+        self.assertTrue(first["context"]["handoff_requested"], "asked while still under the rotation size")
+        self.assertIsNone(self.calls("work", "T2")[0]["session_id"])
+
+    async def test_a_request_alone_does_not_move_a_session_that_stayed_small(self):
+        # Catches the earlier request also lowering the size at which a session is replaced.
+        self.usage = lambda phase, task_id: usage_totalling(250_000)
+        state = await self.run_room()
+        self.assertEqual(self.events(state, "partner_session_rotated"), [])
+        self.assertEqual(self.events(state, "task_handoff_recorded"), [])
 
     async def test_rework_of_an_earlier_task_keeps_the_session_even_after_another_tasks_record(self):
         # Catches a rejected task being reworked by a new session that only knows a different task's record.

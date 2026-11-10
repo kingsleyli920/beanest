@@ -195,6 +195,7 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
         self.review_tokens = 1000
         self.totals = {}
         self.service.store.account_workloads = lambda: self.profiles
+        native.no_rebalance(self.service)
         invoke = self.service.native_invoke
         async def with_usage(agent, prompt, cwd, session_id=None, **options):
             result = await invoke(agent, prompt, cwd, session_id=session_id, **options)

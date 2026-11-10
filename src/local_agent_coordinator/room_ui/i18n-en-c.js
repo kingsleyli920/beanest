@@ -948,4 +948,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "本轮工作量 {p0}%": "This round {p0}% of the work",
   "本轮工作量 {p0}% · 设定 {p1}%": "This round {p0}% of the work · set to {p1}%",
   "额度已用完，本目标不再安排它。": "Out of quota. It gets no more work in this objective. ",
+  "为均衡工作量，{p0}已从 {p1} 改由 {p2} 负责。": "To balance the work, {p0} moved from {p1} to {p2}.",
 });

@@ -16,9 +16,12 @@ from wait_support import poll, scaled
 
 class NativeHelpRepairHTTPTests(unittest.TestCase):
     request = http.LongTeamResultHTTPTests.request
-    setUp = http.LongTeamResultHTTPTests.setUp
     tearDown = http.LongTeamResultHTTPTests.tearDown
     settled = http.LongTeamResultHTTPTests.settled
+
+    def setUp(self):
+        http.LongTeamResultHTTPTests.setUp(self)
+        native.no_rebalance(self.service)
 
     def handler(self, agent, context, cwd):
         async def reply():
