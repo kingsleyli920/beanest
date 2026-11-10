@@ -6036,6 +6036,43 @@ function withRuntimeConfiguration(saved, { canEdit = true, pending = false } = {
   return saved;
 }
 
+function unrecordedRuntimeRoom(mode) {
+  const saved = withNaturalContinuation(objectiveSnapshot({ status: 'complete', decision: 'complete' }));
+  saved.room.mode = mode; saved.room.work_mode = 'build'; saved.room.runtime_settings = null;
+  saved.current_run.runtime_settings = null; saved.current_run.work_mode = 'build';
+  saved.runtime_configuration = { can_edit: true, reason: null, desired: { work_mode: 'build', runtime_settings: null }, pending: false, pending_reason: null };
+  return saved;
+}
+
+test('a finished reply-only room started without choosing models can still pick them for the next message', async () => {
+  // Catches: a room whose start recorded no model settings keeping every partner's model fixed after the round ends.
+  const saved = unrecordedRuntimeRoom('text_artifacts'); const options = runtimeOptionsFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return options;
+    if (request.path.endsWith('/messages')) return saved;
+  } });
+  await ui.click('runtime-shortcut-claude');
+  assert.equal(ui.get('runtime-model-claude').disabled, false);
+  assert.doesNotMatch(ui.get('runtime-settings-note').textContent, /固定/);
+  selectRuntime(ui, 'runtime-model-claude', 'opus'); await ui.click('runtime-settings-close');
+  ui.type('换个模型再想一个'); await ui.submit();
+  const body = ui.posts().at(-1).body;
+  assert.equal(body.runtime_settings.permission, 'workspace_write');
+  assert.equal(body.runtime_settings.members.claude.model, 'opus');
+  assert.equal(body.runtime_settings.members.codex.model, null);
+});
+
+test('a local-development room with no recorded settings stays view-only', async () => {
+  // Catches: the reply-only default leaking into native rooms, where a missing record means an old, unknown permission.
+  const saved = unrecordedRuntimeRoom('native_project'); const options = runtimeOptionsFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, nativeProjectSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return options;
+  } });
+  await ui.click('runtime-shortcut-claude');
+  assert.match(ui.get('runtime-shortcut-claude').getAttribute('aria-label'), /未记录模型.*本轮已固定/);
+  assert.match(ui.get('runtime-settings-note').textContent, /已固定/);
+});
+
 test('natural runtime edits stay local until one atomic message and show desired pending settings while the actual run stays frozen', async () => {
   const saved = withRuntimeConfiguration(withNaturalContinuation(objectiveSnapshot({ status: 'running' })));
   const actual = structuredClone(saved.room.runtime_settings); const options = runtimeOptionsFixture();
