@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 
-from local_agent_coordinator import adapters, room_service
+from local_agent_coordinator import adapters, room_prompts
 from local_agent_coordinator.room_service import RoomError, RoomService
 
 
@@ -14,7 +14,7 @@ class TeamContextBudgetTests(unittest.TestCase):
     def setUp(self):
         # Exercise compaction under an explicitly small input budget. The
         # production prompt budget is independent of the response-size cap.
-        budget = patch.object(room_service, 'MAX_PROMPT_BYTES', 128 * 1024)
+        budget = patch.object(room_prompts, 'MAX_PROMPT_BYTES', 128 * 1024)
         budget.start()
         self.addCleanup(budget.stop)
         self.deliverable = "交付🙂" * 1000
@@ -150,7 +150,7 @@ class TeamContextBudgetTests(unittest.TestCase):
         original = copy.deepcopy((self.snapshot, self.project, tasks))
         # The current protocol plus exact source-plan envelope is larger than
         # the old response cap. Give this input fixture its own bounded budget.
-        with patch.object(room_service, 'MAX_PROMPT_BYTES', 192 * 1024):
+        with patch.object(room_prompts, 'MAX_PROMPT_BYTES', 192 * 1024):
             prompt = self.prompt()
         self.assertLess(len(prompt.encode()), 192 * 1024)
         context = self.context(prompt)

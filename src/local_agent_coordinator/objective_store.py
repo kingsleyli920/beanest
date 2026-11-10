@@ -10,7 +10,7 @@ import json
 from uuid import uuid4
 
 from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached
-from .room_store import RoomError, checked_text
+from .room_contract import RoomError, checked_text
 from .stop_policy import continues_automatically, OWN_RECOVERY
 
 
