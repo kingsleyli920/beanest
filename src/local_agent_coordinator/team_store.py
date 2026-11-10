@@ -20,6 +20,7 @@ from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, RoomError, checked
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
+from .stop_policy import continues_automatically
 from .native_outcome import CALL_DIED, FORMAT_ERRORS, NATIVE_METADATA_ERROR, NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES
 from . import workload
 from .round_handoff import (ROTATION_MIN_CONTEXT_TOKENS, TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS,
@@ -341,7 +342,8 @@ class TeamStore:
         # question for the user.
         resumable.update(REPLY_MISTAKES)
         resumable.update(recovery_errors)
-        if self.store._room(db, room_id)["mode"] != "native_project":
+        reply_only = self.store._room(db, room_id)["mode"] != "native_project"
+        if reply_only:
             # A dead reply-only call applied nothing. Native work has its own audit.
             resumable.update(CALL_DIED)
         text_failure = self._host_text_failure_source(db, room_id, source_run_id)
@@ -364,6 +366,7 @@ class TeamStore:
                 if (task["status"] in {"assigned", "working", "waiting_peer", "review", "open"}
                         or (task["status"] == "cancelled" and task["blocked_reason"] == "cancel_requested")
                         or task["blocked_reason"] in resumable
+                        or reply_only and task["status"] == "unknown" and continues_automatically(task["blocked_reason"])
                         or task["id"] in (recovery_task_errors or {})
                            and task["blocked_reason"] == recovery_task_errors[task["id"]]):
                     values["status"] = ("review" if task["result_version"] and task["review_reason"] is None else

@@ -30,7 +30,8 @@ FORMAT_ERRORS = frozenset({
 # applied until its reply is parsed. If its process dies first, the call changed
 # nothing and can simply be made again. A plain chat has no board to resume, so
 # its failed call stays visible for the user to judge.
-CALL_DIED = frozenset({"cli_nonzero_exit", "protocol_turn_incomplete"})
+CALL_DIED = frozenset({"cli_nonzero_exit", "protocol_turn_incomplete",
+                       "native_protocol_invalid", "native_process_or_protocol_failure"})
 
 
 def reply_call_died(job, result):

@@ -18,9 +18,20 @@ def died(_agent, _permission, *, code="cli_nonzero_exit", events=()):
             "events": list(events), "cleanup_confirmed": True}
 
 
+class SessionAwareFaults(FolderFaults):
+    """Lets a fault report the session its call really resumed."""
+    def __init__(self):
+        super().__init__()
+        self.session_of = {}
+
+    async def __call__(self, agent, prompt, cwd, session_id=None, timeout=120):
+        self.session_of[agent] = session_id
+        return await super().__call__(agent, prompt, cwd, session_id=session_id, timeout=timeout)
+
+
 class ReplyOnlyCrashes(ServiceCase):
     def make_service(self):
-        self.provider = FolderFaults()
+        self.provider = SessionAwareFaults()
         self.provider.handler = folder_handler
         return RoomService(self.root / "rooms.sqlite3", self.root / "workspaces", registry=registry(self.provider))
 
@@ -47,7 +58,7 @@ class ReplyOnlyCrashes(ServiceCase):
 
     async def test_one_dead_call_is_made_again_and_nobody_notices(self):
         # Catches: one killed process stopping the room and interrupting the others.
-        for code in ("cli_nonzero_exit", "protocol_turn_incomplete"):
+        for code in ("cli_nonzero_exit", "protocol_turn_incomplete", "native_protocol_invalid", "native_process_or_protocol_failure"):
             with self.subTest(code=code):
                 self.provider.faults = [Fault("claude", 1, phase="work", result=lambda a, p: died(a, p, code=code))]
                 final = await self.final(await self.create())
@@ -86,16 +97,19 @@ class ReplyOnlyCrashes(ServiceCase):
 
     async def test_a_provider_error_with_an_unknown_outcome_can_still_be_continued(self):
         # Catches: phase "unknown" being a dead end when nothing outside a native project is at stake.
-        def failed(_agent, _permission):
-            return {"session_id": str(uuid4()), "status": "failed", "failure_code": "unknown_provider_error",
+        def failed(agent, _permission):
+            return {"session_id": self.provider.session_of[agent] or str(uuid4()), "status": "failed", "failure_code": "unknown_provider_error",
                     "text": "", "usage": None, "events": [], "cleanup_confirmed": True}
-        self.provider.faults = [Fault("claude", 1, phase="plan", result=failed)]
+        self.provider.faults = [Fault("claude", 1, phase="work", result=failed)]
         room_id = await self.create()
         stopped = await self.final(room_id)
         self.assertEqual((stopped["team"]["phase"], stopped["team"]["stop_reason"]), ("unknown", "unknown_provider_error"))
+        self.assertTrue(any(task["status"] == "unknown" for task in stopped["team"]["tasks"]), stopped["team"]["tasks"])
         self.assertTrue(stopped["continuation"]["can_send"], stopped["continuation"])
         final = await self.press_continue_as_host(room_id)
+        # Catches: carried tasks staying "unknown", so nobody works and the room waits forever.
         self.assertEqual(final["objective"]["status"], "complete")
+        self.assertFalse(any(task["status"] == "unknown" for task in final["team"]["tasks"]), final["team"]["tasks"])
 
     async def test_a_dead_call_that_ran_a_tool_is_not_replayed(self):
         # Catches: re-running a call that may really have done something.
