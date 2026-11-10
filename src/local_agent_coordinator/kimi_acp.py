@@ -593,6 +593,22 @@ def safe_failure_diagnostic(value):
     return result or None
 
 
+async def set_session_mode(connection, session_id, mode, resumed):
+    """Kimi Code 2 reports a resumed plan-mode session as default, then refuses plan.
+
+    Going through default first gets the same mode back. Nothing has been sent
+    to the model yet, so the brief change cannot affect a turn.
+    """
+    params = {"sessionId": session_id, "modeId": mode}
+    try:
+        await connection.request("session/set_mode", params)
+    except ACPError as error:
+        if not (resumed and mode == "plan" and getattr(error, "rpc_code", None) == -32603):
+            raise
+        await connection.request("session/set_mode", {**params, "modeId": "default"})
+        await connection.request("session/set_mode", params)
+
+
 class TurnUpdates:
     def __init__(self, callback, progress_fingerprint=None):
         from .native_adapters import _Stream
@@ -716,6 +732,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         process, connection = await start(cwd, on_update=updates, permission=permission, progress_file=progress_file)
         _remember(process.pid, owned, await asyncio.to_thread(_processes))
         initialized = await initialize(connection)
+        resumed = session_id is not None
         if session_id is None:
             session = await connection.request("session/new", {"cwd": str(cwd), "mcpServers": []})
             session_id = session.get("sessionId")
@@ -731,7 +748,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         if effort is not None:
             await connection.request("session/set_config_option", {"sessionId": session_id, "configId": "thinking", "value": effort})
         mode = {"plan": "plan", "read_only": "plan", "full_access": "yolo", "workspace_write": "auto"}[permission]
-        await connection.request("session/set_mode", {"sessionId": session_id, "modeId": mode})
+        await set_session_mode(connection, session_id, mode, resumed)
         path = session_wire(cwd, session_id)
         before = wire_offset(path)
         updates.session_id, updates.active = session_id, True

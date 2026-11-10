@@ -369,7 +369,7 @@ if (typeof window.beanestDesktop?.setLocale === 'function'
       const draft = state.drafts.get('new');
       if (draft) {
         $('message').value = draft.text; state.target = draft.target; state.targetExplicit = true;
-        if (Array.isArray(draft.participants)) state.selectedParticipants = [...draft.participants];
+        if (Array.isArray(draft.participants)) { state.selectedParticipants = [...draft.participants]; state.participantsChosen = true; }
         if (validRuntimeSettings(draft.runtimeSettings)) {
           state.runtimeSettings = copyRuntimeSettings(draft.runtimeSettings);
           state.runtimeDraftDirty = draft.runtimeDraftDirty; state.runtimeDraftToken = draft.runtimeDraftToken;

@@ -1817,10 +1817,16 @@ function setCatalog(agents) {
   // The first tool that becomes usable counts as the default choice, not as something left unticked.
   const firstUsable = state.noUsableTool && available.size > 0;
   state.noUsableTool = available.size === 0;
+  const defaults = agents.filter((agent) => available.has(agent.id) && !isAdditionalSession(agent) && ['claude', 'codex', 'kimi'].includes(agent.adapter || agent.id)).map((agent) => agent.id);
+  // Until someone picks by hand, a tool that appears after the page opened joins the default choice.
+  const appeared = state.defaultsSeen ? defaults.filter((id) => !state.defaultsSeen.has(id)) : [];
+  state.defaultsSeen = new Set([...(state.defaultsSeen || []), ...defaults]);
   if (state.selectedParticipants === null || firstUsable && !state.selectedParticipants.length) {
-    const defaults = ['claude', 'codex'].filter((id) => available.has(id));
     state.selectedParticipants = defaults.length ? defaults : agents.filter((agent) => available.has(agent.id) && !isAdditionalSession(agent)).slice(0, 2).map((agent) => agent.id);
-  } else state.selectedParticipants = state.selectedParticipants.filter((id) => eligible.has(id));
+  } else {
+    state.selectedParticipants = state.selectedParticipants.filter((id) => eligible.has(id));
+    if (!state.participantsChosen && !state.selected) state.selectedParticipants = [...new Set([...state.selectedParticipants, ...appeared])];
+  }
   renderParticipantPicker();
 }
 
@@ -1845,6 +1851,7 @@ function renderParticipantPicker() {
         if (state.selected || state.busy || state.managementBusy || state.pending || !selectableAgent(agent, { retainBlocked: !input.checked })) {
           input.checked = (state.selectedParticipants || []).includes(agent.id); return;
         }
+        state.participantsChosen = true;
         const selected = new Set(state.selectedParticipants || []);
         if (input.checked) selected.add(agent.id); else selected.delete(agent.id);
         if (selected.size > 8) { input.checked = false; showNotice(t("一次最多选择 8 个会话。"), 'error'); return; }
@@ -6604,6 +6611,7 @@ function startNewRoom({ preserveRoomHash = false } = {}) {
   state.modeExplicit = draft?.modeExplicit || false;
   state.runtimeScope = 'new'; state.runtimeSettings = copyRuntimeSettings(draft?.runtimeSettings); state.runtimePermissionExplicit = draft?.runtimePermissionExplicit === true || draft?.mode === 'native_project' && !!draft?.runtimeDraftDirty && ['read_only', 'workspace_write'].includes(draft?.runtimeSettings?.permission); state.runtimeDraftDirty = !!draft?.runtimeDraftDirty; state.workModeDraftDirty = !!draft?.workModeDraftDirty; state.runtimeDraftToken = draft?.runtimeDraftToken || null; state.workModeDraftToken = draft?.workModeDraftToken || null;
   state.selectedParticipants = draft?.participants || state.selectedParticipants;
+  if (draft?.participants) state.participantsChosen = true;
   state.selectedProject = state.projects.some((project) => project.id === draft?.project && activeEntry(project)) ? draft.project : '';
   state.selectedParticipants = (state.selectedParticipants || []).filter((id) => state.catalog.some((agent) => agent.id === id && selectableAgent(agent, { retainBlocked: true }))); 
   chooseDefaultArtifactMode();
