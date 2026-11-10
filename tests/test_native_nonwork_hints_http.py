@@ -390,15 +390,18 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
                 for file in self.service._project(self.room_id).files_for_paths(list(DOCS)):
                     self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
 
-    def test_work_phase_hints_outside_owned_paths_still_reject_without_import(self):
+    def test_work_phase_hints_outside_owned_paths_are_dropped_without_import(self):
+        # Catches: "left these other files alone" notes stopping the objective, or such a
+        # note letting an outside path be imported.
         self.hold_claude = False
         self.target_phase = "work"
         self.create()
-        final = self.wait(lambda value: any(job["error"] == "team_scope_conflict" for job in value["jobs"]) and self.quiescent(value))
-        self.assertEqual(final["project"]["revision"], 1)
-        self.assertNotEqual(final["objective"]["status"], "complete")
+        final = self.wait(lambda value: value["objective"]["status"] == "complete" and self.quiescent(value))
+        self.assertFalse(any(job["error"] == "team_scope_conflict" for job in final["jobs"]))
         task = next(task for task in final["team"]["tasks"] if task["id"] == "T1")
-        self.assertEqual((task["owner"], task["result_version"]), ("codex", 0))
+        self.assertEqual((task["owner"], task["status"]), ("codex", "accepted"))
+        for file in self.service._project(self.room_id).files_for_paths(list(DOCS)):
+            self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
 
     def test_recovery_requires_exact_journal_context_and_unchanged_private_trees(self):
         stopped = self.bootstrap_legacy_stopped()

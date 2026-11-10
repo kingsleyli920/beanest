@@ -5404,14 +5404,17 @@ class RoomService(RoomPromptMixin):
             if observed["files"] != correction["files"]:
                 raise RoomError("native_recovery_unpublished_changes")
         changed = {file["path"] for file in collected["files"]}
-        unchanged = {entry["path"] for entry in parsed["unchanged_paths"]}
         if job["team"]["job_phase"] != "work":
             # Read-only references in planning/review are not write scopes or
             # proof that a file was read. Only the installed S/D audit above
             # decides whether this call changed anything publishable.
             parsed["unchanged_paths"] = []
-        elif unchanged - set(allowed):
-            raise RoomError("team_scope_conflict")
+        else:
+            # A note that a file outside the task's scope was left alone (often
+            # "I changed nothing" from a run-only task) is not a scope claim.
+            # The audit above already keeps real unowned changes private, so
+            # the note is dropped instead of stopping the room.
+            parsed["unchanged_paths"] = [entry for entry in parsed["unchanged_paths"] if entry["path"] in set(allowed)]
         # Retained handoff files can be unchanged during this call while still
         # differing from the published baseline. The audited disk diff wins.
         parsed["unchanged_paths"] = [entry for entry in parsed["unchanged_paths"] if entry["path"] not in changed]
