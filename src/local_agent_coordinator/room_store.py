@@ -4700,6 +4700,26 @@ class RoomStore:
             self._settle(db, room_id)
             return True
 
+    def finish_read_only_objective(self, room_id, binding):
+        """A delivered read-only discussion ends its objective.
+
+        No assessment or later stage runs, and nothing claims an
+        implementation finished: the round is simply over, so the room stops
+        presenting it as work in progress and a follow-up starts afresh.
+        """
+        with self._connection(write=True) as db:
+            team = self._team.team(db, room_id)
+            objective = self._team.objectives.current(db, room_id)
+            if (team is None or objective is None or objective["status"] != "running"
+                    or team["current_run_id"] != binding["run_id"] or team["phase"] != "ready_for_user"
+                    or self._team.pending(db, room_id)):
+                return False
+            db.execute("UPDATE objectives SET status='complete',stop_reason=NULL WHERE id=?", (objective["id"],))
+            self._event(db, room_id, "objective_discussion_delivered", sender="system", objective_id=objective["id"],
+                        run_id=binding["run_id"])
+            self._settle(db, room_id)
+            return True
+
     def begin_objective_checkpoint(self, room_id, binding):
         with self._connection(write=True) as db:
             team = self._team.team(db, room_id)

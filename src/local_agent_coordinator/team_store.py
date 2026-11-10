@@ -2394,6 +2394,11 @@ class TeamStore:
             if not db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?", (room_id,)).fetchone():
                 if objective is not None and json.loads(objective["retired_json"]):
                     return self._coordinate(db, room_id, planning_members)
+                if read_only(room["work_mode"], json.loads(room["runtime_settings_json"] or "null")):
+                    # Every member has spoken and the author saw nothing to do:
+                    # a read-only question was answered in the discussion itself.
+                    db.execute("UPDATE teams SET phase='ready_for_user' WHERE room_id=?", (room_id,))
+                    return True
                 self.stop(db, room_id, "team_plan_missing")
                 return False
             unready = db.execute("SELECT provider FROM team_members WHERE room_id=? AND plan_ready_revision!=?",

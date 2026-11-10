@@ -133,3 +133,71 @@ class ReadOnlyFilesTests(RestartCase):
                                                if event["kind"] == "format_correction_queued"])
         self.assertEqual((self.source / "main.py").read_text(), "VALUE = 1\n")
         self.assertTrue(all(task["status"] == "accepted" for task in final["team"]["tasks"]), final["team"])
+
+
+class ReadOnlyDeliveryTests(RestartCase):
+    async def delivered_plan_room(self):
+        room_id = await self.create(work_mode="plan")
+        await self.settle()
+        return room_id, await self.service.read_room(room_id)
+
+    async def test_a_delivered_plan_room_is_finished_not_left_running(self):
+        # Catches: a delivered read-only discussion staying "running", so the page offered
+        # 暂停推进, listed it in progress, and every restart marked it interrupted.
+        room_id, delivered = await self.delivered_plan_room()
+        self.assertEqual(delivered["team"]["phase"], "ready_for_user")
+        self.assertEqual(delivered["objective"]["status"], "complete")
+        self.assertEqual((self.source / "main.py").read_text(), "VALUE = 1\n")
+        await self.service.shutdown()
+        self.service = self.make_service()
+        after = await self.service.read_room(room_id)
+        self.assertEqual(after["objective"]["status"], "complete")
+        self.assertNotIn("service_restarted", [event.get("code") for event in after["events"]])
+
+    async def test_a_follow_up_cut_off_by_quitting_is_still_answered(self):
+        # Catches: a question sent after delivery vanishing when the app quits before the reply.
+        room_id, delivered = await self.delivered_plan_room()
+        before = len([event for event in delivered["events"] if event["kind"] == "message" and event["sender"] != "user"])
+        started = asyncio.Event()
+        answer = self.provider.__class__.__call__
+        async def stuck(provider, agent, prompt, cwd, session_id=None, timeout=120):
+            started.set()
+            await asyncio.Event().wait()
+        with patch.object(self.provider.__class__, "__call__", stuck):
+            await self.service.send_message(room_id, "What about naming?", "all", str(uuid4()), intent="continue",
+                                            binding=delivered["continuation"]["binding"])
+            await asyncio.wait_for(started.wait(), 10)
+            await self.service.shutdown()
+        self.assertIs(self.provider.__class__.__call__, answer)
+        self.service = self.make_service()
+        final = await self.host_continue(room_id)
+        follow_up = max(event["seq"] for event in final["events"] if event["kind"] == "message" and event["sender"] == "user")
+        answers = [event for event in final["events"] if event["kind"] == "message" and event["sender"] != "user" and event["seq"] > follow_up]
+        self.assertTrue(any(job["error"] in {"service_shutdown", "cancel_requested", "service_restarted"} or job["status"] in {"cancelled", "interrupted"}
+                            for job in final["jobs"]), "the follow-up call was really cut off")
+        self.assertTrue(answers)
+
+
+class AnsweredInDiscussionTests(RestartCase):
+    def answer_without_tasks(self, agent, context):
+        if context["job"]["job_phase"] in {"plan", "coordinate"}:
+            return response(context, message="The answer is 40.", commands=[])
+        return folder_handler(agent, context)
+
+    async def test_a_read_only_question_answered_in_discussion_is_delivered(self):
+        # Catches: a plan-mode question answered while planning (no task needed) stopping with
+        # team_plan_missing and waiting for the user to press continue.
+        self.provider.handler = self.answer_without_tasks
+        room_id = await self.create(work_mode="plan")
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertNotIn("team_plan_missing", [event.get("code") for event in final["events"]])
+        self.assertEqual((final["team"]["phase"], final["objective"]["status"]), ("ready_for_user", "complete"))
+
+    async def test_a_build_room_without_a_plan_still_stops(self):
+        # Catches: widening the shortcut to build work, where no task list means nothing was done.
+        self.provider.handler = self.answer_without_tasks
+        room_id = await self.create()
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["team"]["stop_reason"], "team_plan_missing")

@@ -1918,8 +1918,12 @@ class RoomService(RoomPromptMixin):
             self.store.require_task_decision(room_id, binding)
             return
         if read_only(snapshot["room"]["work_mode"], snapshot["room"].get("runtime_settings")):
-            # Discussion can finish without claiming implementation completion
-            # or starting another autonomous assessment/implementation stage.
+            # Discussion finishes without claiming implementation completion or
+            # starting another autonomous assessment/implementation stage. Left
+            # running, the room looked busy forever: it offered 暂停推进, was
+            # listed as in progress, and a restart treated it as interrupted.
+            if objective["status"] == "running" and snapshot["team"]["phase"] == "ready_for_user":
+                self.store.finish_read_only_objective(room_id, binding)
             return
         if objective["status"] == "running" and snapshot["team"]["phase"] == "ready_for_user":
             if (snapshot["room"]["mode"] == "python_sandbox"
