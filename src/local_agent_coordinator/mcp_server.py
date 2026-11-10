@@ -39,7 +39,7 @@ def create_server(bridge: Bridge) -> MCPServer:
             await bridge.shutdown()
 
     server = MCPServer(
-        "Local Agent Coordinator", version="0.2.0", log_level="ERROR", lifespan=lifespan,
+        "Local Agent Coordinator", version="0.3.0", log_level="ERROR", lifespan=lifespan,
         instructions=("Use coordinator_status first. Start only explicitly requested, bounded text tasks. "
                       "Reuse a stable request_id on retries; never recreate unknown work. "
                       "Read until idle or awaiting_input; idle is a finished turn, not verified task completion. "

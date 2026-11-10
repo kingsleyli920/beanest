@@ -913,16 +913,16 @@ class TeamStore:
                             (room_id, provider)).fetchone()
         if member is None or member[0]:
             return False
-        for event in db.execute("SELECT value_json FROM events WHERE room_id=? ORDER BY seq", (room_id,)):
-            value = json.loads(event[0])
-            if value["kind"] == "job_claimed" and value.get("sender") == provider:
-                receipt = db.execute("SELECT value_json FROM events WHERE room_id=? "
-                                     "AND json_extract(value_json,'$.kind')='job_cleanup' "
-                                     "AND json_extract(value_json,'$.job_id')=? ORDER BY seq DESC LIMIT 1",
-                                     (room_id, value["job_id"])).fetchone()
-                if receipt is None or json.loads(receipt[0]).get("cleanup_confirmed") is not True:
-                    return False
-        return True
+        # Asked of every member on each poll of a finished room, so it cannot decode the whole log.
+        return db.execute("""
+            SELECT 1 FROM events claimed
+            WHERE claimed.room_id=? AND json_extract(claimed.value_json,'$.kind')='job_claimed'
+              AND json_extract(claimed.value_json,'$.sender')=?
+              AND COALESCE((SELECT json_extract(receipt.value_json,'$.cleanup_confirmed') FROM events receipt
+                            WHERE receipt.room_id=claimed.room_id AND json_extract(receipt.value_json,'$.kind')='job_cleanup'
+                              AND json_extract(receipt.value_json,'$.job_id')=json_extract(claimed.value_json,'$.job_id')
+                            ORDER BY receipt.seq DESC LIMIT 1), 0) IS NOT 1
+            LIMIT 1""", (room_id, provider)).fetchone() is None
 
     def make_grant(self, db, room_id, provider, paths, files, revision, epoch, *, partner_operation=None, partner_target=None):
         objective = self.objectives.current(db, room_id)

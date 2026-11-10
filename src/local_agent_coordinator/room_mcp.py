@@ -382,7 +382,7 @@ class RoomHTTPClient:
 
 def create_server(client: RoomHTTPClient) -> MCPServer:
     server = MCPServer(
-        "Beanest", version="0.2.0", log_level="ERROR",
+        "Beanest", version="0.3.0", log_level="ERROR",
         instructions=("Connect only to the selected already-running desktop room app. Use room_status first. "
                       "room_start and room_send consume existing subscription quota; act only within the user scope. "
                       "Keep the same request_id for the same intent. Unknown mutations must be inspected with "

@@ -14,7 +14,15 @@ const PYTHON_VERSION = '3.13.9';
 const PYTHON_MINOR = PYTHON_VERSION.split('.').slice(0, 2).join('.');
 const BACKEND_PACKAGE = 'local_agent_coordinator';
 const ELECTRON_NOTICES = [['LICENSE', 'ELECTRON-LICENSE'], ['LICENSES.chromium.html', 'LICENSES.chromium.html']];
+// Copied into Contents/Resources/licenses; each is listed in THIRD_PARTY_NOTICES.md.
+const NOTICES_SOURCE = path.join(__dirname, 'release-notices');
+const RELEASE_NOTICES = ['RELEASE-SOURCES.md', 'bzip2-LICENSE.txt', 'cpython-license.rst', 'expat-COPYING.txt',
+  'hacl-star-LICENSE.txt', 'libffi-LICENSE.txt', 'libmpdec-COPYRIGHT.txt', 'libuuid-LICENSE.txt', 'mantle-LICENSE.md',
+  'mimalloc-LICENSE.txt', 'openssl-LICENSE.txt', 'reactiveobjc-LICENSE.md'];
+const PATHSPEC_LICENSE = 'backend/pathspec-1.1.1.dist-info/licenses/LICENSE';
 const BACKEND_ASSET_SUFFIXES = new Set(['.py', '.html', '.js', '.css']);
+// Standalone MCP servers: nothing in the app starts them and their dependencies are not bundled.
+const BACKEND_DROPS = new Set(['mcp_server.py', 'room_mcp.py']);
 const LIBRARY_DROPS = new Set(['idlelib', 'ensurepip', 'tkinter', 'turtledemo', 'test', 'site-packages',
   `config-${PYTHON_MINOR}-darwin`]);
 // What a shared library may link against and still work on another Mac.
@@ -29,11 +37,11 @@ function keepPythonPath(relative) {
   if (parts.length === 2) return parts[1] === `python${PYTHON_MINOR}` || /^libpython.*\.dylib$/.test(parts[1]);
   if (parts.includes('__pycache__')) return false;
   if (LIBRARY_DROPS.has(parts[2])) return false;
-  return !(parts[2] === 'lib-dynload' && parts[3]?.startsWith('_tkinter'));
+  return !(parts[2] === 'lib-dynload' && /^_(tkinter|ctypes_test)\./.test(parts[3] ?? ''));
 }
 
 function keepBackendPath(relative) {
-  if (relative.split('/').includes('__pycache__')) return false;
+  if (relative.split('/').includes('__pycache__') || BACKEND_DROPS.has(relative)) return false;
   const extension = path.posix.extname(relative);
   return extension === '' || BACKEND_ASSET_SUFFIXES.has(extension);
 }
@@ -78,18 +86,58 @@ async function stageBackend(root, python, target) {
     'import json,sys,tomllib;print(json.dumps(tomllib.load(open(sys.argv[1],"rb"))["project"]["dependencies"]))',
     path.join(root, 'pyproject.toml')]));
   run('uv', ['pip', 'install', '--quiet', '--no-deps', '--python', python, '--target', target, ...dependencies]);
-  await fs.rm(path.join(target, 'bin'), { recursive: true, force: true });
+  await pruneBackendStage(target);
 }
 
-async function filesLeakingText(directory, text) {
+// uv leaves console scripts and its own lock file in the install target.
+async function pruneBackendStage(target) {
+  for (const name of ['bin', '.lock']) await fs.rm(path.join(target, name), { recursive: true, force: true });
+}
+
+// target: a directory, walked recursively, or a single file such as app.asar.
+async function filesLeakingText(target, text) {
   const needle = Buffer.from(text);
-  const entries = await fs.readdir(directory, { recursive: true, withFileTypes: true });
+  const files = (await fs.stat(target)).isFile() ? [target]
+    : (await fs.readdir(target, { recursive: true, withFileTypes: true })).filter((item) => item.isFile())
+      .map((entry) => path.join(entry.parentPath, entry.name));
   const leaks = [];
-  for (const entry of entries.filter((item) => item.isFile())) {
-    const file = path.join(entry.parentPath, entry.name);
+  for (const file of files) {
     if ((await fs.readFile(file)).includes(needle)) leaks.push(file);
   }
   return leaks;
+}
+
+function requiredNoticePaths() {
+  return [...ELECTRON_NOTICES.map(([, to]) => to), 'LICENSE', 'THIRD_PARTY_NOTICES.md',
+    `python/lib/python${PYTHON_MINOR}/LICENSE.txt`, PATHSPEC_LICENSE, ...RELEASE_NOTICES.map((name) => `licenses/${name}`)];
+}
+
+// An empty file counts as missing: a failed download must not pass as a notice.
+async function missingNotices(resources) {
+  const missing = [];
+  for (const relative of requiredNoticePaths()) {
+    const stat = await fs.stat(path.join(resources, relative)).catch(() => null);
+    if (!stat?.isFile() || stat.size === 0) missing.push(relative);
+  }
+  return missing;
+}
+
+// Packager puts Electron's notices beside the app, where a zip of the app would lose them.
+async function copyNotices(outputPath, resources) {
+  for (const [from, to] of ELECTRON_NOTICES) await fs.copyFile(path.join(outputPath, from), path.join(resources, to));
+  await fs.mkdir(path.join(resources, 'licenses'), { recursive: true });
+  for (const name of RELEASE_NOTICES) await fs.copyFile(path.join(NOTICES_SOURCE, name), path.join(resources, 'licenses', name));
+}
+
+// Extended attributes would otherwise be sealed into the signature or end up in the zip.
+function prepareBundleForSigning(appPath) {
+  return fs.rm(path.join(appPath, 'Contents', 'Resources', 'electron.icns'), { force: true })
+    .then(() => run('xattr', ['-cr', appPath]));
+}
+
+// Resource forks and extended attributes would otherwise appear as __MACOSX entries.
+function archiveApp(appPath, archive) {
+  run('ditto', ['-c', '-k', '--norsrc', '--noextattr', '--keepParent', appPath, archive]);
 }
 
 async function machOFiles(directory) {
@@ -108,8 +156,10 @@ async function verifyBundledRuntime(appPath) {
     const links = nonPortableLinks(run('otool', ['-L', file]));
     if (links.length) throw new Error(`release_bundle_external_link:${file}:${links.join(',')}`);
   }
-  for (const directory of [python, path.join(resources, 'backend')]) {
-    const leaks = await filesLeakingText(directory, os.homedir());
+  const missing = await missingNotices(resources);
+  if (missing.length) throw new Error(`release_bundle_missing_notice:${missing.join(',')}`);
+  for (const target of [python, path.join(resources, 'backend'), path.join(resources, 'app.asar')]) {
+    const leaks = await filesLeakingText(target, os.homedir());
     if (leaks.length) throw new Error(`release_bundle_build_path:${leaks.join(',')}`);
   }
   const check = 'import sys;sys.path.insert(0,sys.argv[1]);import asyncio,fcntl,sqlite3,ssl,pathspec;'
@@ -149,17 +199,15 @@ async function main() {
     python: pythonStage, backend: backendStage, electronVersion: config.devDependencies.electron }));
   await verifyLocalBundle(outputPath, RELEASE_BUNDLE_ID);
   const appPath = path.join(outputPath, `${APP_NAME}.app`);
-  // Packager puts these beside the app, where a zip of the app would lose them.
-  for (const [from, to] of ELECTRON_NOTICES) {
-    await fs.copyFile(path.join(outputPath, from), path.join(appPath, 'Contents', 'Resources', to));
-  }
+  await copyNotices(outputPath, path.join(appPath, 'Contents', 'Resources'));
+  await prepareBundleForSigning(appPath);
   // Packager leaves a partial signature, which macOS reports as a damaged app
   // after download. Seal the whole bundle; a Developer ID replaces this later.
   run('codesign', ['--force', '--deep', '--sign', '-', appPath]);
   run('codesign', ['--verify', '--deep', '--strict', appPath]);
   await verifyBundledRuntime(appPath);
   const archive = path.join(build, `Beanest-${config.version}-macos-${process.arch}.zip`);
-  run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', appPath, archive]);
+  archiveApp(appPath, archive);
   console.log(appPath);
   console.log(archive);
 }
@@ -170,6 +218,7 @@ if (require.main === module) main().catch((error) => {
 });
 
 module.exports = {
-  filesLeakingText, keepPythonPath, keepBackendPath, nonPortableLinks, releasePackagerOptions,
-  RELEASE_BUNDLE_ID, PYTHON_VERSION, PYTHON_MINOR,
+  archiveApp, copyNotices, filesLeakingText, keepPythonPath, keepBackendPath, missingNotices, nonPortableLinks,
+  prepareBundleForSigning, pruneBackendStage, releasePackagerOptions, requiredNoticePaths, verifyBundledRuntime,
+  NOTICES_SOURCE, RELEASE_NOTICES, RELEASE_BUNDLE_ID, PYTHON_VERSION, PYTHON_MINOR,
 };
