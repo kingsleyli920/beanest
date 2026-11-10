@@ -26,6 +26,23 @@ FORMAT_ERRORS = frozenset({
 }) | REPLY_MISTAKES
 
 
+# A collaborating partner outside a native project only replies: nothing is
+# applied until its reply is parsed. If its process dies first, the call changed
+# nothing and can simply be made again. A plain chat has no board to resume, so
+# its failed call stays visible for the user to judge.
+CALL_DIED = frozenset({"cli_nonzero_exit", "protocol_turn_incomplete"})
+
+
+def reply_call_died(job, result):
+    """A reply-only call whose process ended without a reply and ran no tool."""
+    if not job.get("team") or job.get("mode") == "native_project" or not isinstance(result, dict):
+        return False
+    events = result.get("events")
+    return (result.get("status") != "completed" and result.get("failure_code") in CALL_DIED
+            and not (isinstance(events, list) and any(
+                isinstance(event, dict) and event.get("type") == "tool_observed" for event in events)))
+
+
 # A call that ended before its prompt could reach the model. The partner is
 # retried, then leaves the objective; nothing here is an unknown outcome.
 NATIVE_PREFLIGHT_FAILED = "native_preflight_failed"

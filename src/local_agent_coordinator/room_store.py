@@ -4573,7 +4573,10 @@ class RoomStore:
             elif action == "restart-objective":
                 if room["mode"] == "native_project" and self._native_continuation_requires_recovery(db, room_id):
                     raise RoomError("native_recovery_required")
-                if (team["current_run_id"] != binding["run_id"] or team["phase"] not in {"stopped", "cancelled", "interrupted"}
+                restartable = {"stopped", "cancelled", "interrupted"}
+                if room["mode"] != "native_project" and continues_automatically(team["stop_reason"]):
+                    restartable.add("unknown")  # See can_restart_objective: replies applied nothing.
+                if (team["current_run_id"] != binding["run_id"] or team["phase"] not in restartable
                         or self._team.pending(db, room_id) or room["stop_confirmed"] == 0
                         or not all(self._continuation_provider_clean(db, room_id, member) for member in self.member_ids_in_transaction(db, room_id))):
                     raise RoomError("objective_restart_unsafe")
@@ -4905,6 +4908,14 @@ class RoomStore:
             self._event(db, job["room_id"], "job_finished", sender=job["provider"], job_id=job_id,
                         status="failed", error=code)
             return True
+
+    def record_call_retry(self, job_id, attempt, code):
+        """Diagnosis only: a reply-only call died and is being made again."""
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT room_id,provider FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is not None:
+                self._event(db, job["room_id"], "partner_call_retry", sender=job["provider"], job_id=job_id,
+                            attempt=attempt, code=code)
 
     def record_preflight_retry(self, job_id, attempt, diagnostic):
         """Diagnosis only: which attempt failed before its prompt was sent."""

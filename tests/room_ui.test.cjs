@@ -3246,6 +3246,16 @@ test('runtime choices survive new-goal drafts and unsupported tools keep default
   await ui.poll(); assert.equal(ui.posts().length, 0, 'polling, drafts and opening tasks do not refresh native model catalogs');
 });
 
+test('a reply-only room without saved settings shows the tool defaults, not a missing record', async () => {
+  // Catches: every default project room reading “权限：未记录 · 未记录模型”.
+  const saved = withCurrentRun(snapshot({ status: 'running' }), { status: 'in_progress', can_continue: false, can_retry: false });
+  saved.room.mode = 'project_folder';
+  const ui = await browser({ rooms: [saved.room], saved, route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });
+  await openRuntimeSettings(ui);
+  assert.match(ui.get('runtime-settings-summary').textContent, /权限：副本内修改/);
+  assert.doesNotMatch(ui.get('runtime-settings-body').textContent, /没有保存权限/);
+});
+
 test('old frozen runs without a runtime snapshot do not claim an observed permission or model', async () => {
   const saved = withCurrentRun(snapshot({ status: 'running' }), { status: 'in_progress', can_continue: false, can_retry: false });
   const ui = await browser({ rooms: [saved.room], saved, route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });

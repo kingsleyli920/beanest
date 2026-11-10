@@ -31,7 +31,7 @@ from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
 from .team_store import _COMMAND_FIELDS
-from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed
+from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, reply_call_died
 from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
                            TASK_HANDOFF_INSTRUCTION, _BLOCK_PROTOCOL, _DIRECTED_CONTEXT_INSTRUCTION, _direct_updates, _excerpt,
@@ -1455,7 +1455,12 @@ class RoomService(RoomPromptMixin):
                           and self.store.stage_cleanup_confirmed(room_id)
                           and snapshot["room"]["lifecycle_state"] == "active")
             objective = snapshot.get("objective")
-            run["can_restart_objective"] = bool(clean_idle and snapshot["team"]["phase"] in {"stopped", "cancelled", "interrupted"}
+            restartable_phases = {"stopped", "cancelled", "interrupted"}
+            if snapshot["room"]["mode"] != "native_project" and continues_automatically(snapshot["team"].get("stop_reason")):
+                # Replies apply nothing until accepted; a recoverable failure
+                # outside a native project has no scene to preserve.
+                restartable_phases.add("unknown")
+            run["can_restart_objective"] = bool(clean_idle and snapshot["team"]["phase"] in restartable_phases
                                                 and snapshot["cancellation_confirmed"] is not False
                                                 and not identity_unknown and not native_recovery_required)
             run["restart_objective_reason"] = None if run["can_restart_objective"] else (
@@ -5711,8 +5716,15 @@ class RoomService(RoomPromptMixin):
                             raise
                         evidence = error.native_execution
                     else:
-                        if attempts >= _PREFLIGHT_RETRIES or not preflight_failed(job["session_id"], result=result):
+                        died = reply_call_died(job, result)
+                        if attempts >= _PREFLIGHT_RETRIES or not (died or preflight_failed(job["session_id"], result=result)):
                             break
+                        if died:
+                            attempts += 1
+                            invoked, cleanup_confirmed = False, True
+                            self.store.record_call_retry(job["id"], attempts, result["failure_code"])
+                            await asyncio.sleep(_PREFLIGHT_RETRY_DELAY_SECONDS)
+                            continue
                         evidence = result["native_execution"]
                         if native:
                             # Only so a room purge can find the empty session it left.
@@ -5772,10 +5784,11 @@ class RoomService(RoomPromptMixin):
                     self.store.finish_partner_interruption(job["id"], partner_operation["id"], invoked=invoked)
                 else:
                     # Cancelling a call that resumed a known session leaves that
-                    # session where it was; only a fresh session can be lost.
-                    settled = (not native and invoked and job["session_id"] is not None
-                               and (getattr(error, "cleanup_confirmed", False) is True
-                                    or getattr(error, "native_execution", {}).get("cleanup_confirmed") is True))
+                    # session where it was. Outside a native project a fresh
+                    # call has no session to doubt: the next call starts anew.
+                    confirmed = (getattr(error, "cleanup_confirmed", False) is True
+                                 or getattr(error, "native_execution", {}).get("cleanup_confirmed") is True)
+                    settled = (not native and invoked and (bool(job.get("team")) if job["session_id"] is None else confirmed))
                     self.store.finish_job(job["id"], error="invoke_interrupted", uncertain=invoked,
                                           **({"identity_uncertain": False} if settled else {}))
                 cleanup_confirmed = (getattr(error, "native_execution", {}).get("cleanup_confirmed") is True
@@ -5950,6 +5963,10 @@ class RoomService(RoomPromptMixin):
             # The prompt never left and nothing ran: no session or effect to doubt.
             self.store.finish_job(job["id"], error=NATIVE_PREFLIGHT_FAILED)
             return
+        if reply_call_died(job, result):
+            # Nothing was applied and the partner's session is where it was.
+            self.store.finish_job(job["id"], session_id=job["session_id"], error=result["failure_code"])
+            return
         text = ""
         if not job.get("team") and job.get("mode") not in PROJECT_MODES and isinstance(result.get("text"), str):
             text = _visible(result["text"][:8000])
@@ -5992,8 +6009,10 @@ class RoomService(RoomPromptMixin):
             if native and code == "subscription_limit_reached" and observation.get("side_effects_possible"):
                 code = "native_side_effects_unconfirmed"
             code = code if isinstance(code, str) and code in _FAILURES else "provider_failed"
+            # The session was confirmed above; outside a native project the
+            # failure leaves the outcome open, not who the partner is.
             self.store.finish_job(job["id"], session_id=identity, message=text, usage=usage,
-                                  error=code, uncertain=True)
+                                  error=code, uncertain=True, **({"identity_uncertain": False} if job.get("team") and not native else {}))
             return
         parsed = None
         try:
