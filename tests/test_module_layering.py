@@ -58,6 +58,10 @@ class StoreLayeringTests(unittest.TestCase):
         # Catches the schema reaching into a store for its private constants again.
         self.assertEqual(imported_modules("room_response_schema") & STORES, set())
 
+    def test_prompt_assembly_does_not_import_the_service(self):
+        # Catches room_prompts growing a dependency on the service it is mixed into.
+        self.assertNotIn("room_service", imported_modules("room_prompts"))
+
     def test_no_store_can_reach_itself(self):
         # Catches a cycle through any intermediate module, not just direct imports.
         graph = {path.stem: imported_modules(path.stem) for path in PACKAGE.glob("*.py")}

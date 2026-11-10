@@ -52,6 +52,11 @@ def _uuid(value) -> str | None:
         return None
 
 
+def project_digest(snapshot: dict) -> str:
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=True,
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
 def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
