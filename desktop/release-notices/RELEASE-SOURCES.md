@@ -6,6 +6,8 @@ This file applies to the release app and ships in it at `Contents/Resources/lice
 
 The app includes `libffmpeg.dylib` at `Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/`. Its version string is `git-2026-07-15-6cfe2122b0`. It comes from the prebuilt Electron v44.9.3 for macOS arm64, is unchanged except for the code signature, and stays a separate dynamic library. Its license text is the `ffmpeg` entry in `Contents/Resources/LICENSES.chromium.html`.
 
+The Intel (x64) app carries the same library from the prebuilt Electron v44.9.3 for macOS x64. Its version string is also `git-2026-07-15-6cfe2122b0`, so the source below applies to both apps.
+
 The corresponding source is reached in this order:
 
 | What | Where |
@@ -18,6 +20,8 @@ The corresponding source is reached in this order:
 ## 简体中文
 
 App 内的 `libffmpeg.dylib` 位于 `Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/`，版本串 `git-2026-07-15-6cfe2122b0`。它来自 macOS arm64 的 Electron v44.9.3 预编译包，除代码签名外没有改动，仍是单独的动态库。许可文本见 `Contents/Resources/LICENSES.chromium.html` 中的 `ffmpeg` 一项。
+
+Intel（x64）版 App 里的这个库来自 macOS x64 的 Electron v44.9.3 预编译包，版本串同样是 `git-2026-07-15-6cfe2122b0`，对应源码和 arm64 版相同。
 
 对应源码按上表查找：Electron `v44.9.3` tag 的 `DEPS` 指向 Chromium `152.0.7977.167`，Chromium 的 `DEPS` 指向 FFmpeg 提交 `2b68d2babae73714846961fb0ee47e3b3d2e39a9`。上游 FFmpeg 仓库是 https://git.ffmpeg.org/ffmpeg.git。
 
@@ -37,4 +41,4 @@ App 内的 `libffmpeg.dylib` 位于 `Contents/Frameworks/Electron Framework.fram
 | `reactiveobjc-LICENSE.md` | ReactiveObjC at the commit pinned by Electron v44.9.3 | https://github.com/ReactiveCocoa/ReactiveObjC/blob/74ab5baccc6f7202c8ac69a8d1e152c29dc1ea76/LICENSE.md |
 | `cpython-license.rst` | CPython 3.13.9 | https://github.com/python/cpython/blob/v3.13.9/Doc/license.rst |
 
-The CPython build is python-build-standalone tag `20251028`: https://github.com/astral-sh/python-build-standalone/tree/20251028
+The CPython build is python-build-standalone tag `20251028`, `aarch64-apple-darwin` in the arm64 app and `x86_64-apple-darwin` in the x64 app: https://github.com/astral-sh/python-build-standalone/tree/20251028

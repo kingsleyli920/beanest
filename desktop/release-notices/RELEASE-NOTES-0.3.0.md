@@ -22,7 +22,7 @@
 
 这个版本没有经过 Apple 公证，所以第一次打开要多走几步，之后就不用了。
 
-1. 下载 `Beanest-0.3.0-macos-arm64.zip`，双击解压，得到“豆窝”。
+1. 按你的 Mac 下载对应的压缩包：Apple 芯片（M 系列）下载 `Beanest-0.3.0-macos-arm64.zip`，Intel 芯片下载 `Beanest-0.3.0-macos-x64.zip`。不确定是哪种，可以点屏幕左上角的苹果菜单 →“关于本机”，看“芯片”或“处理器”那一栏。双击解压，得到“豆窝”。
 2. 把“豆窝”拖到“应用程序”文件夹。
 3. 双击打开。macOS 会提示无法验证这个 App，并且不让打开，点“完成”关掉提示。
 4. 打开“系统设置 → 隐私与安全性”，往下翻到“安全性”，找到关于“豆窝”的提示，点“仍要打开”。
@@ -30,7 +30,7 @@
 
 ### 支持范围
 
-目前只能在 Apple 芯片（M 系列）的 Mac 上用，Intel Mac、Windows 和 Linux 都用不了。
+Apple 芯片（M 系列）的 Mac 用 `Beanest-0.3.0-macos-arm64.zip`，Intel 芯片的 Mac 用 `Beanest-0.3.0-macos-x64.zip`。Windows 和 Linux 目前用不了。
 
 ### 需要你自己准备
 
@@ -66,7 +66,7 @@ This is the first version you can download and run directly. The app carries the
 
 This version is not notarized by Apple, so the first launch takes a few extra steps. You only do this once.
 
-1. Download `Beanest-0.3.0-macos-arm64.zip` and double-click it to unzip. You get an app named 豆窝.
+1. Download the zip for your Mac: `Beanest-0.3.0-macos-arm64.zip` for Apple silicon (M series), `Beanest-0.3.0-macos-x64.zip` for Intel. If you're not sure which you have, choose Apple menu → About This Mac and look at Chip or Processor. Double-click the zip to unzip it. You get an app named 豆窝.
 2. Drag 豆窝 into your Applications folder.
 3. Double-click it. macOS says it can't verify the app and won't open it. Close that message with Done.
 4. Open System Settings → Privacy & Security, scroll down to Security, find the message about 豆窝, and click Open Anyway.
@@ -74,7 +74,7 @@ This version is not notarized by Apple, so the first launch takes a few extra st
 
 ### What it runs on
 
-Macs with Apple silicon (M series) only. Intel Macs, Windows and Linux are not supported at this time.
+Macs with Apple silicon (M series) use `Beanest-0.3.0-macos-arm64.zip`, and Intel Macs use `Beanest-0.3.0-macos-x64.zip`. Windows and Linux are not supported at this time.
 
 ### What you need
 
