@@ -21,6 +21,7 @@ from local_agent_coordinator.room_server import create_room_server
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError
 import test_native_room_service as native
+from wait_support import poll_async, scaled, within
 
 
 class PartnerLifecycleOperationsTests(unittest.TestCase):
@@ -64,7 +65,7 @@ class PartnerLifecycleOperationsTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def request(self, method, path, body=None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=scaled(3))
         headers = {"X-LAC-Token": self.server.token, "Content-Type": "application/json"}
         try:
             connection.request(method, path, json.dumps(body) if body is not None else None, headers)
@@ -106,7 +107,7 @@ class PartnerLifecycleOperationsTests(unittest.TestCase):
         route = "/api/partners/claude-a/lifecycle"
         status, result = self.request("POST", route, body)
         self.assertEqual(status, 200, result)
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + scaled(2)
         while time.monotonic() < deadline:
             status, profiles = self.request("GET", "/api/partners")
             self.assertEqual(status, 200, profiles)
@@ -177,13 +178,13 @@ class PartnerLifecycleOperationsTests(unittest.TestCase):
                 self.assertTrue(entered.wait(2))
                 status, deleted = self.request("POST", f"/api/rooms/{room}/lifecycle", {"action": "remove", "request_id": "delete-affected-room"})
                 self.assertEqual(status, 200, deleted)
-                deadline = time.monotonic() + 2
+                deadline = time.monotonic() + scaled(2)
                 while time.monotonic() < deadline and self.request("GET", "/api/rooms/" + room)[0] != 404:
                     time.sleep(.005)
                 self.assertEqual(self.request("GET", "/api/rooms/" + room)[0], 404)
             finally:
                 release.set()
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + scaled(2)
             while time.monotonic() < deadline:
                 status, result = self.request("GET", "/api/partners/lifecycle-operations/remove-alongside-room")
                 if result["partner_lifecycle_operation"]["status"] == "completed":
@@ -287,7 +288,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
                 work_mode="build", runtime_settings={"permission": "full_access", "members": runtime_members},
                 execution_policy={"mode": "autonomous"})
         self.fixture_room = created["room"]["id"]
-        await asyncio.wait_for(self.working.wait(), 3)
+        await within(self.working.wait(), 3)
         return created["room"]["id"]
 
     async def attempted(self, request_id):
@@ -312,13 +313,11 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
                     or (room in self.service._executions and not self.service._executions[room].done()))
 
     async def wait_for(self, predicate):
-        for _ in range(600):
+        def check():
             self.service._resume_partner_operations()
-            value = predicate()
-            if value:
-                return value
-            await asyncio.sleep(0.01)
-        self.fail("Partner operation did not reach its expected state.")
+            return predicate()
+        return await poll_async(check, timeout=6, interval=0.01,
+                                describe=lambda value: "Partner operation did not reach its expected state.")
 
     async def test_owned_cancel_preserves_d_then_fresh_readonly_transfer_import_self_check_and_natural_followup(self):
         choices = {provider: {"model": provider + "-fixture", "effort": "high"} for provider in ("claude", "codex")}
@@ -384,7 +383,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
             response = await self.service.send_message(room, "Clarify the existing result without replaying old work.", "all",
                 "followup-after-partner-removal", intent="continue", binding=final["continuation"]["binding"],
                 runtime_settings={"permission": "full_access", "members": {**choices, "codex": {"model": "codex-fixture", "effort": "low"}}})
-            await asyncio.wait_for(started.wait(), 3)
+            await within(started.wait(), 3)
             self.assertNotEqual(response["objective"]["id"], final["objective"]["id"])
             self.assertEqual({call["agent"] for call in self.transport_calls[calls:]}, {"codex"})
             self.assertEqual(response["room"]["runtime_settings"]["members"]["claude"], choices["claude"])
@@ -425,7 +424,7 @@ class PartnerNativeHandoffTests(unittest.IsolatedAsyncioTestCase):
             return await value if asyncio.iscoroutine(value) else value
         self.fake.handler = held
         await self.service.set_partner_lifecycle("claude", "remove", request_id="pause-typed-inspection")
-        await asyncio.wait_for(started.wait(), 3)
+        await within(started.wait(), 3)
         before = self.service.store.snapshot(room)
         await self.service.objective_action(room, "pause", "pause-during-handoff", objective_id=before["objective"]["id"])
         release.set()

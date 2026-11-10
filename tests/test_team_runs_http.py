@@ -18,6 +18,7 @@ from local_agent_coordinator.room_server import create_room_server, publish_conn
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.partner_manager import PartnerManager
 from tests import test_team_service as fixtures
+from wait_support import scaled
 
 HAS_MCP = importlib.util.find_spec("mcp") is not None
 if HAS_MCP:
@@ -46,7 +47,7 @@ class TeamRunHTTPTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def request(self, method, path, value=None, *, mcp=False, token=None):
-        connection = http.client.HTTPConnection("127.0.0.1",self.port,timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1",self.port,timeout=scaled(3))
         headers = {"X-LAC-Token":token or (self.server.mcp_token if mcp else self.server.token)}
         if mcp:
             headers["X-LAC-Instance"] = self.server.instance_id

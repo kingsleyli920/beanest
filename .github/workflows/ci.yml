@@ -9,6 +9,8 @@ jobs:
     name: Python integration (${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      LAC_TEST_WAIT_SCALE: '3'
     strategy:
       fail-fast: false
       matrix:

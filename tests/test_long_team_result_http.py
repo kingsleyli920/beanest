@@ -21,6 +21,7 @@ import test_native_room_service as native
 import test_team_runs_http as http
 from test_team_store import proposal
 import test_team_store as store_fixtures
+from wait_support import scaled
 
 
 class LongTeamResultHTTPTests(unittest.TestCase):
@@ -93,6 +94,7 @@ class LongTeamResultHTTPTests(unittest.TestCase):
         fraction of a second. Fail when nothing changes for `stall` seconds (a
         stuck room) or after `limit` seconds in total (a room that never ends).
         """
+        stall, limit = scaled(stall), scaled(limit)
         start = changed = time.monotonic()
         seen = None
         while True:

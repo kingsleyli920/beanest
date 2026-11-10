@@ -6,6 +6,7 @@ import test_team_runs_http as http_fixtures
 import test_native_room_service as native_fixtures
 from test_folder_service import FolderProvider, response
 from test_team_store import proposal
+from wait_support import poll
 
 
 class NativeRoomHTTPTests(unittest.TestCase):
@@ -27,14 +28,11 @@ class NativeRoomHTTPTests(unittest.TestCase):
         return source, value["project"]["id"]
 
     def wait(self, room_id, predicate):
-        until = time.monotonic() + 8
-        while time.monotonic() < until:
+        def read():
             code, result = self.request("GET", "/api/rooms/" + room_id)
             self.assertEqual(code, 200)
-            if predicate(result):
-                return result
-            time.sleep(0.005)
-        self.fail("Native HTTP room did not settle")
+            return result
+        return poll(read, predicate, timeout=8, describe=lambda result: "Native HTTP room did not settle")
 
     def test_natural_chat_continuation_is_user_only_bound_atomic_and_idempotent(self):
         _, project_id = self.configure()
