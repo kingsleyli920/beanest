@@ -9,6 +9,7 @@ from unittest.mock import patch
 from local_agent_coordinator.room_service import RoomError, RoomService, _response
 from local_agent_coordinator.room_store import RoomStore
 from local_agent_coordinator.agent_registry import AgentRegistry, AgentSpec, default_registry
+from wait_support import within
 
 
 IDENTITIES = {"claude": "11111111-1111-4111-8111-111111111111",
@@ -79,7 +80,7 @@ class RoomServiceTests(unittest.IsolatedAsyncioTestCase):
                 if not tasks:
                     return
                 await asyncio.gather(*tasks)
-        await asyncio.wait_for(wait(), 2)
+        await within(wait(), 2)
 
     async def create(self, target="claude"):
         return await self.service.create_room("A shared text goal", target, str(uuid4()))
@@ -355,7 +356,7 @@ class RoomServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.service.invoke = stubborn
         room = await self.create()
-        await asyncio.wait_for(started.wait(), 1)
+        await within(started.wait(), 1)
         try:
             with patch("local_agent_coordinator.room_service.asyncio.wait", immediate_wait):
                 snapshot = await self.service.cancel_room(room["room"]["id"])

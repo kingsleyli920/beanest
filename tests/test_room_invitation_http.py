@@ -19,6 +19,7 @@ from test_kimi_native_setup import configuration
 from test_kimi_setup_http import SetupFixture
 from test_native_room_service import NativeTransport, native_reply
 from test_team_store import proposal
+from wait_support import poll
 
 
 SHARED = "Published current canonical delivery before the invitation.\n"
@@ -78,13 +79,7 @@ class RoomInvitationHTTPTests(unittest.TestCase):
         return self.request("GET", f"/api/rooms/{room_id or self.room_id}")
 
     def wait_room(self, room_id, condition):
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            snapshot = self.read(room_id)
-            if condition(snapshot):
-                return snapshot
-            time.sleep(.005)
-        self.fail("Invitation fixture did not settle: " + json.dumps({
+        return poll(lambda: self.read(room_id), condition, timeout=5, describe=lambda snapshot: "Invitation fixture did not settle: " + json.dumps({
             "room": snapshot["room"]["status"], "team": snapshot["team"]["phase"],
             "objective": snapshot["objective"]["status"],
             "jobs": [{key: job[key] for key in ("provider", "status", "error")} for job in snapshot["jobs"]],

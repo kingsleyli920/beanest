@@ -16,6 +16,7 @@ from local_agent_coordinator.project_catalog import ProjectCatalogError
 from local_agent_coordinator.room_server import create_room_server
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError, RoomStore
+from wait_support import scaled
 
 
 class LifecycleStoreTests(unittest.TestCase):
@@ -359,7 +360,7 @@ class LifecycleHTTPTests(unittest.TestCase):
 
     def request(self, path, body, *, token=None):
         port = self.server.server_address[1]
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=scaled(3))
         data = json.dumps(body).encode()
         try:
             connection.request("POST", path, data, {"Content-Type": "application/json",

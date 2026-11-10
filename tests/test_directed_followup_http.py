@@ -20,6 +20,7 @@ from test_kimi_setup_http import SetupFixture
 from test_native_room_service import NativeTransport, native_reply
 from test_team_runs_http import TeamRunHTTPTests as _Helpers
 from test_team_store import proposal
+from wait_support import poll
 
 
 FOLLOWUP = "请 Claude 单独补充本次交付说明。\n保留此前成果，不重做旧任务。"
@@ -75,13 +76,7 @@ class DirectedFollowupHTTPTests(unittest.TestCase):
                             for (room, _), worker in list(self.service._workers.items())))
 
     def wait(self, predicate):
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            snapshot = self.read()
-            if predicate(snapshot):
-                return snapshot
-            time.sleep(.005)
-        self.fail("Synthetic directed fixture did not settle: " + json.dumps({
+        return poll(self.read, predicate, timeout=5, describe=lambda snapshot: "Synthetic directed fixture did not settle: " + json.dumps({
             "phase": snapshot["team"]["phase"], "stop": snapshot["team"]["stop_reason"],
             "objective": snapshot["objective"]["status"],
             "jobs": [{key: job[key] for key in ("provider", "status", "error")} for job in snapshot["jobs"]]}))

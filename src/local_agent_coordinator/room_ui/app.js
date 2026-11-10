@@ -331,11 +331,15 @@ const quotaBlockCodes = new Set(['all_partners_quota_exhausted', 'subscription_l
 function taskQuotaHeld(task) { return task?.status === 'blocked' && task.block_cause == null && quotaBlockCodes.has(task.blocked_reason); }
 function taskAutoBlocked(task) { return task?.status === 'blocked' && !decisionBlockCauses.has(task.block_cause) && !taskQuotaHeld(task); }
 const blockCodePattern = /^[a-z][a-z0-9_]{2,80}$/;
-// Mirrors native_outcome.REPLY_MISTAKES / FORMAT_ERRORS: the service corrects these itself.
-const selfCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 'invalid_target', 'team_files_forbidden',
+// Mirrors native_outcome.FORMAT_ERRORS (REPLY_MISTAKES included): the service corrects these itself.
+const replyCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 'invalid_target', 'team_files_forbidden',
   'team_capability_unavailable', 'native_json_files_forbidden', 'team_write_path_conflict', 'invalid_agent_response',
   'invalid_team_commands', 'invalid_team_task', 'invalid_team_dependencies', 'invalid_project_files', 'invalid_text',
-  'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required', 'team_scope_conflict']);
+  'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required']);
+// A scope conflict is a state conflict, so the service never corrects it inside
+// the call. It still asks nothing of the user: stop_policy continues the
+// objective, so the page words it the same way.
+const selfCorrectedCodes = new Set([...replyCorrectedCodes, 'team_scope_conflict']);
 // Mirrors stop_policy.py: only these stops wait for the user (USER_STOPS),
 // keep the scene for inspection (KEEP_SCENE) or have their own quota wait.
 // The host continues every other stop of an autonomous objective once per

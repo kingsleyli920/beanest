@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, uuid5
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError
 from tests.test_room_artifacts import DRAFT, REVISED, FakeProvider, change, collaboration, response
+from wait_support import poll_async, scaled, within
 
 
 def snapshot_digest(snapshot):
@@ -93,6 +94,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
         finishing. Fail when no task finishes for `stall` seconds (a stuck
         scheduler) or after `limit` seconds in total.
         """
+        stall, limit = scaled(stall), scaled(limit)
         loop = asyncio.get_running_loop()
         start = loop.time()
         while True:
@@ -110,10 +112,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
                     raise task.exception()
 
     async def until(self, predicate):
-        async def wait():
-            while not predicate():
-                await asyncio.sleep(0.001)
-        await asyncio.wait_for(wait(), 2)
+        await poll_async(predicate, timeout=2, interval=0.001)
 
     def block_runner(self):
         release = asyncio.Event()
@@ -254,7 +253,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.runner.started = asyncio.Event()
                 self.block_runner()
                 created = await self.create("cancel-" + str(confirmed))
-                await asyncio.wait_for(self.runner.started.wait(), 2)
+                await within(self.runner.started.wait(), 2)
                 run_id = self.runner.calls[-1]["run_id"]
                 saved = await self.service.cancel_room(created["room"]["id"])
                 await self.settle()
@@ -267,7 +266,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelling_global_lock_queue_never_invokes_its_runner(self):
         release = self.block_runner()
         first = await self.create("lock-holder")
-        await asyncio.wait_for(self.runner.started.wait(), 2)
+        await within(self.runner.started.wait(), 2)
         second = await self.create("lock-waiter")
         room_id = second["room"]["id"]
         await self.until(lambda: bool(self.service.store.snapshot(room_id)["executions"]))
@@ -287,7 +286,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
         release = self.block_runner()
         initial = await self.create()
         room_id = initial["room"]["id"]
-        await asyncio.wait_for(self.runner.started.wait(), 2)
+        await within(self.runner.started.wait(), 2)
 
         def user_revision(agent, context):
             previous = next(file for file in context["project"]["files"] if file["path"] == "toy.py")
@@ -378,7 +377,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.runner.result = {"status": "unknown", "cleanup_confirmed": False}
         created = await self.create("unknown-during-new-work")
         room_id = created["room"]["id"]
-        await asyncio.wait_for(self.runner.started.wait(), 2)
+        await within(self.runner.started.wait(), 2)
         model_started, model_cleaned = asyncio.Event(), asyncio.Event()
 
         async def new_work(agent, context):
@@ -390,7 +389,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         self.provider.handler = new_work
         await self.service.send_message(room_id, "Consider a further change", "claude", "new-during-run")
-        await asyncio.wait_for(model_started.wait(), 2)
+        await within(model_started.wait(), 2)
         release.set()
         await self.settle()
         self.assertTrue(model_cleaned.is_set())

@@ -16,6 +16,7 @@ from local_agent_coordinator.native_workspace import NativeWorkspaceError
 from local_agent_coordinator.room_response_schema import command_shape
 from test_team_store import proposal
 from test_folder_service import FolderProvider, response
+from wait_support import within
 
 
 def cached_partners(service, availability):
@@ -142,7 +143,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
                     if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                         raise result
             self.fail("scheduler did not settle")
-        await asyncio.wait_for(wait(), 10)
+        await within(wait(), 10)
         self.assertIsNone(self.service._background_error)
 
     def handler(self, agent, context, cwd):
@@ -196,7 +197,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             participants=["claude", "codex"], work_mode="build",
             runtime_settings={"permission": "full_access", "members": {}},
             execution_policy={"mode": "autonomous"})
-        await asyncio.wait_for(working.wait(), 3)
+        await within(working.wait(), 3)
         room_id = created["room"]["id"]
         update = ("Do not wait for external validation. Use the complete private verification tree already available "
                   "to run the relevant checks yourself; the business goal and permission remain unchanged.")
@@ -250,7 +251,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         created = await self.service.create_room(goal, "claude", str(uuid4()), mode="native_project",
             project_id=self.registration["project"]["id"], participants=["claude", "codex"], work_mode="build",
             runtime_settings={"permission": "full_access", "members": {}}, execution_policy={"mode": "autonomous"})
-        await asyncio.wait_for(working.wait(), 3)
+        await within(working.wait(), 3)
         update = ("The optional display audit remains withdrawn. Choose the existing safe noninteractive check and its "
                   "order yourself within current permissions. Publication still needs my explicit consent.")
         await self.service.send_message(created["room"]["id"], update, "claude", str(uuid4()), source="user")
@@ -408,7 +409,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.fake.handler = handler
                 created = await self.create()
                 room_id = created["room"]["id"]
-                await asyncio.wait_for(started.wait(), 3)
+                await within(started.wait(), 3)
                 update = "Before closing, reassess the original acceptance using this new confirmation."
                 request_id = str(uuid4())
                 await self.service.send_message(room_id, update, held["agent"], request_id, source="mcp")
@@ -442,7 +443,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(job, cancelled)
         with patch.object(self.service, "_prepare_native_workspace", prepare):
             created = await self.create()
-            await asyncio.wait_for(asyncio.to_thread(preparing.wait), 3)
+            await within(asyncio.to_thread(preparing.wait), 3)
             update = "This direct update arrived during workspace preparation, before the final prompt."
             await self.service.send_message(created["room"]["id"], update, "claude", str(uuid4()), source="mcp")
             release.set()
@@ -1039,14 +1040,14 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(agent, context, cwd)
         self.fake.handler = handler
         await self.service.recover_native(room_id, "inspect-partial-retained-work", **binding)
-        await asyncio.wait_for(inspected.wait(), 3)
+        await within(inspected.wait(), 3)
         during = await self.service.read_room(room_id)
         self.assertEqual(during["team"]["tasks"][0]["result_version"], 0)
         self.assertEqual(during["team"]["tasks"][1]["status"], "assigned")
         self.assertEqual(self.service._project(room_id).snapshot()["revision"], 1)
         self.assertEqual(during["objective"]["delivery"]["total"], 0)
         release_inspection.set()
-        await asyncio.wait_for(resumed.wait(), 3)
+        await within(resumed.wait(), 3)
         after_inspection = await self.service.read_room(room_id)
         self.assertEqual(after_inspection["team"]["tasks"][0]["result_version"], 0)
         self.assertEqual(self.service._project(room_id).snapshot()["revision"], 1)
@@ -1235,7 +1236,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(agent, context, cwd)
         self.fake.handler = handler
         recovering = await self.service.recover_native(room_id, "partial-pause-recovery", **binding)
-        await asyncio.wait_for(inspected.wait(), 3)
+        await within(inspected.wait(), 3)
         objective_id = recovering["objective"]["id"]
         await self.service.objective_action(room_id, "pause", "pause-partial-inspection", objective_id=objective_id)
         release.set()
@@ -1514,7 +1515,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(agent, context, cwd)
         self.fake.handler = handler
         created = await self.create()
-        await asyncio.wait_for(ready.wait(), 5)
+        await within(ready.wait(), 5)
         room_id = created["room"]["id"]
         before = await self.service.read_room(room_id)
         self.assertEqual(before["objective"]["status"], "checkpoint")
@@ -1545,7 +1546,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(agent, context, cwd)
         self.fake.handler = handler
         created = await self.create()
-        await asyncio.wait_for(ready.wait(), 5)
+        await within(ready.wait(), 5)
         room_id = created["room"]["id"]
         before = await self.service.read_room(room_id)
         async def refresh(members, policy):
@@ -1576,7 +1577,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(agent, context, cwd)
         self.fake.handler = handler
         created = await self.create()
-        await asyncio.wait_for(started.wait(), 3)
+        await within(started.wait(), 3)
         room_id = created["room"]["id"]
         before = await self.service.read_room(room_id)
         await self.service.objective_action(room_id, "pause", "natural-pause", objective_id=before["objective"]["id"])
@@ -1604,7 +1605,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return original(agent, context, cwd)
         self.fake.handler = handler
         created = await self.create()
-        await asyncio.wait_for(started.wait(), 5)
+        await within(started.wait(), 5)
         room_id = created["room"]["id"]
         self.service._retire_quota(room_id, "codex", "agent_quota_exhausted")
         before = await self.service.read_room(room_id)
@@ -1731,7 +1732,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             return value
         self.fake.handler = handler
         created = await self.create()
-        await asyncio.wait_for(ready.wait(), 5)
+        await within(ready.wait(), 5)
         during = await self.service.read_room(created["room"]["id"])
         messages = [event for event in during["events"] if event.get("native_progress")]
         self.assertEqual([event["text"] for event in messages], [text, text, "Public message prefix"])
@@ -1793,7 +1794,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_awaits_native_cleanup_and_stops_dispatch(self):
         self.fake.hold = asyncio.Event()
         created = await self.create()
-        await asyncio.wait_for(self.fake.started.wait(), 3)
+        await within(self.fake.started.wait(), 3)
         stopped = await self.service.cancel_room(created["room"]["id"])
         count = len(self.fake.calls)
         await asyncio.sleep(0)

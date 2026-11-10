@@ -10,6 +10,7 @@ from uuid import uuid4
 from test_kimi_fenced_http import FencedACPFixture
 from test_native_room_service import native_reply
 from test_team_store import proposal
+from wait_support import poll
 
 
 class ReadinessFixture(FencedACPFixture):
@@ -93,13 +94,7 @@ class ReadinessFixture(FencedACPFixture):
         return value
 
     def wait(self, predicate):
-        deadline = time.monotonic() + 12
-        while time.monotonic() < deadline:
-            value = self.read()
-            if predicate(value):
-                return value
-            time.sleep(.005)
-        raise AssertionError({'team': value['team'], 'jobs': value['jobs']})
+        return poll(self.read, predicate, timeout=12, describe=lambda value: {'team': value['team'], 'jobs': value['jobs']})
 
 
 class CoordinationReadinessHTTPTests(unittest.TestCase):

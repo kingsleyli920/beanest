@@ -15,6 +15,7 @@ from local_agent_coordinator.quota_gate import QuotaGate
 from local_agent_coordinator.room_service import RoomError, RoomService
 from tests import test_room_server as http
 from tests.test_claude_usage import usage as claude_usage
+from wait_support import within
 
 
 def account(adapter="codex", *, email="person@example.test", used=20, pool="codex", resets=2000):
@@ -327,8 +328,10 @@ class QuotaDispatchTests(unittest.IsolatedAsyncioTestCase):
                                    partners=manager, registry=manager.registry(), clock=lambda: 1000)
         with patch.object(adapters, "account_status", new=AsyncMock(return_value=account("claude", used=None))) as metadata:
             await self.service.create_room("Work", "claude", "native-quota", participants=["claude"])
-            while any(not task.done() for task in self.service._workers.values()):
-                await asyncio.gather(*list(self.service._workers.values()))
+            async def workers_finished():
+                while any(not task.done() for task in self.service._workers.values()):
+                    await asyncio.gather(*list(self.service._workers.values()))
+            await within(workers_finished(), 5)
             self.assertEqual(manager.get("alias")["availability"]["state"], "blocked")
             with self.assertRaises(RoomError) as caught:
                 await self.service.create_room("Another task", "alias", "blocked-alias", participants=["alias"])

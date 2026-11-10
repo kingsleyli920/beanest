@@ -9,6 +9,7 @@ import unittest
 
 from local_agent_coordinator.room_server import create_room_server, publish_connection
 from local_agent_coordinator.room_service import RoomError
+from wait_support import scaled
 
 
 ROOM = "11111111-1111-4111-8111-111111111111"
@@ -92,7 +93,7 @@ class RoomHTTPTests(unittest.TestCase):
         if data is not None:
             fields.update({"Content-Type": "application/json", "Content-Length": str(len(data))})
         fields.update(headers or {})
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=scaled(3))
         try:
             connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
             for name, value in fields.items():

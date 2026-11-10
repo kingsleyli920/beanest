@@ -19,6 +19,7 @@ from local_agent_coordinator.partner_manager import PartnerError, PartnerManager
 from local_agent_coordinator.project_catalog import ProjectCatalogError
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError
+from wait_support import poll_async, within
 
 
 class NoRunner:
@@ -88,13 +89,10 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
                 if not tasks:
                     return
                 await asyncio.gather(*tasks)
-        await asyncio.wait_for(drain(), timeout=3)
+        await within(drain(), 3)
 
     async def wait_for_calls(self, count):
-        async def wait():
-            while len(self.fake.calls) < count:
-                await asyncio.sleep(0)
-        await asyncio.wait_for(wait(), timeout=2)
+        await poll_async(lambda: len(self.fake.calls) >= count, timeout=2, interval=0.001)
 
     async def fixture_project(self, *, name='Fictional project', content=None):
         source = self.root / ('source-' + str(len(list(self.root.glob('source-*')))))

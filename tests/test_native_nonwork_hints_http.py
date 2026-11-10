@@ -20,6 +20,7 @@ from test_kimi_setup_http import SetupFixture
 from test_native_room_service import NativeTransport, native_reply
 from test_team_store import proposal
 from fixtures.retired_nonwork_host import forced_readonly_recovery, reject_nonwork_hints
+from wait_support import poll
 
 
 DOCS = ("docs/one.md", "docs/two.md", "docs/three.md")
@@ -146,13 +147,7 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
                             for (room, _), worker in list(self.service._workers.items())))
 
     def wait(self, predicate):
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            snapshot = self.read()
-            if predicate(snapshot):
-                return snapshot
-            time.sleep(.005)
-        self.fail("Synthetic hint fixture did not settle: " + json.dumps({
+        return poll(self.read, predicate, timeout=5, describe=lambda snapshot: "Synthetic hint fixture did not settle: " + json.dumps({
             "team": snapshot["team"]["phase"], "stop": snapshot["team"]["stop_reason"],
             "objective": snapshot["objective"]["status"],
             "jobs": [{key: job[key] for key in ("provider", "status", "error")} for job in snapshot["jobs"]],

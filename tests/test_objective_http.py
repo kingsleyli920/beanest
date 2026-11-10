@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 import test_autonomous_objectives as objective_fixtures
 from test_autonomous_objectives import POLICY
 import test_team_runs_http as http_fixtures
+from wait_support import poll
 
 
 class ObjectiveHTTPTests(unittest.TestCase):
@@ -23,23 +24,21 @@ class ObjectiveHTTPTests(unittest.TestCase):
         self.provider.handler = handler
 
     def wait(self, room_id, predicate, *, timeout=4):
-        deadline = time.monotonic() + timeout
-        snapshot = None
-        while time.monotonic() < deadline:
+        def read():
             code, snapshot = self.request("GET", "/api/rooms/" + room_id)
             self.assertEqual(code, 200)
-            if predicate(snapshot):
-                return snapshot
-            time.sleep(0.005)
-        objective = (snapshot or {}).get("objective") or {}
-        last_call = self.provider.calls[-1]["context"] if self.provider.calls else {}
-        diagnostic = {"timeout": timeout, "stage": objective.get("stage"),
-            "status": objective.get("status"), "stop_reason": objective.get("stop_reason"),
-            "team_phase": ((snapshot or {}).get("team") or {}).get("phase"),
-            "calls": len(self.provider.calls), "last_phase": last_call.get("job", {}).get("job_phase"),
-            "background_error": repr(self.service._background_error),
-            "provider_assertion_failures": self.provider.assertion_failures}
-        self.fail("Objective fixture did not reach expected state: " + repr(diagnostic))
+            return snapshot
+        def describe(snapshot):
+            objective = (snapshot or {}).get("objective") or {}
+            last_call = self.provider.calls[-1]["context"] if self.provider.calls else {}
+            diagnostic = {"timeout": timeout, "stage": objective.get("stage"),
+                "status": objective.get("status"), "stop_reason": objective.get("stop_reason"),
+                "team_phase": ((snapshot or {}).get("team") or {}).get("phase"),
+                "calls": len(self.provider.calls), "last_phase": last_call.get("job", {}).get("job_phase"),
+                "background_error": repr(self.service._background_error),
+                "provider_assertion_failures": self.provider.assertion_failures}
+            return "Objective fixture did not reach expected state: " + repr(diagnostic)
+        return poll(read, predicate, timeout=timeout, describe=describe)
 
     def create_objective(self):
         code, created = self.request("POST", "/api/rooms", {"goal": "Deliver the bounded checked item.", "target": "claude",

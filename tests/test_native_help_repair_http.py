@@ -2,7 +2,6 @@
 import asyncio
 from pathlib import Path
 import threading
-import time
 import unittest
 from uuid import uuid4
 from unittest.mock import patch
@@ -12,6 +11,7 @@ from local_agent_coordinator.room_store import RoomError
 import test_long_team_result_http as http
 import test_native_room_service as native
 from test_team_store import proposal
+from wait_support import poll, scaled
 
 
 class NativeHelpRepairHTTPTests(unittest.TestCase):
@@ -201,7 +201,7 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
             code, value = self.request("POST", f"/api/rooms/{room}/messages", {"text": "继续", "target": "all", "request_id": str(uuid4()),
                 "intent": "continue", "binding": {"run_id": run["id"], "revision": run["revision"], "digest": run["digest"]}})
             self.assertEqual(code, 200, value)
-            self.assertTrue(self.inspection_started.wait(3))
+            self.assertTrue(self.inspection_started.wait(scaled(3)))
             current = self.service.store.snapshot(room)
             self.assertFalse(any(job["status"] == "working" and job["kind"] == "team_work" for job in current["jobs"]
                                  if not any(event["kind"] == "native_partial_inspection_queued" and event.get("job_id") == job["id"] for event in current["events"])))
@@ -294,7 +294,7 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
             code, value = self.request("POST", f"/api/rooms/{room}/messages", {"text": "继续", "target": "all", "request_id": str(uuid4()),
                 "intent": "continue", "binding": {"run_id": run["id"], "revision": run["revision"], "digest": run["digest"]}})
             self.assertEqual(code, 200, value)
-            self.assertTrue(self.inspection_started.wait(3))
+            self.assertTrue(self.inspection_started.wait(scaled(3)))
             call = self.native.calls[before_calls]
             path = call["context"]["task"]["write_paths"][0]
             (call["cwd"] / path).write_text("Changed after host froze the proposed bytes.\n")
@@ -315,7 +315,7 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
             code, recovering = self.request("POST", f"/api/rooms/{room}/messages", {"text": "继续", "target": "all", "request_id": str(uuid4()),
                 "intent": "continue", "binding": {"run_id": run["id"], "revision": run["revision"], "digest": run["digest"]}})
             self.assertEqual(code, 200, recovering)
-            self.assertTrue(self.inspection_started.wait(3))
+            self.assertTrue(self.inspection_started.wait(scaled(3)))
             code, paused = self.request("POST", f"/api/rooms/{room}/pause", {"request_id": str(uuid4()), "objective_id": recovering["objective"]["id"]})
             self.assertEqual(code, 200, paused)
         finally:
@@ -373,19 +373,17 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
         def hold(*args):
             prepared.update(original(*args))
             started.set()
-            release.wait(3)
+            release.wait(scaled(3))
             return prepared
         with patch.object(self.service, "_prepare_native_help_repairs", side_effect=hold):
             future = asyncio.run_coroutine_threadsafe(self.service.recover_native(room, str(uuid4()), run_id=run["id"],
                 revision=run["revision"], digest=run["digest"]), self.server.runner.loop)
             try:
-                self.assertTrue(started.wait(3))
+                self.assertTrue(started.wait(scaled(3)))
                 future.cancel()
             finally:
                 release.set()
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline and any(Path(item["project"]).parent.parent.exists() for item in prepared.values()):
-                time.sleep(0.005)
+            poll(lambda: not any(Path(item["project"]).parent.parent.exists() for item in prepared.values()), timeout=3)
         self.assertTrue(prepared)
         self.assertTrue(all(not Path(item["project"]).parent.parent.exists() for item in prepared.values()))
         self.assertEqual(self.service.store.snapshot(room)["current_run"]["id"], run["id"])
