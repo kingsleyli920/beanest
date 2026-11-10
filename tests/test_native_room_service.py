@@ -68,6 +68,11 @@ def native_reply(context, commands=(), *, unchanged=(), resolved=()):
             "unchanged_paths": list(unchanged), "resolved_conflicts": list(resolved)}
 
 
+def no_rebalance(service):
+    """For a test about something else: with no partner able to receive a handed-over task, planned owners stay."""
+    service.store.task_capabilities = lambda provider: ()
+
+
 def legacy_metadata_host(method):
     """Only this temporary service emulates the retired gate for old recovery tests."""
     @wraps(method)

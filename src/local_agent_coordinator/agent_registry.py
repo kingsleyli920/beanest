@@ -83,6 +83,8 @@ class AgentSpec:
     invoke_structured: Callable[..., Awaitable[dict]] | None = None
     supports_runtime_settings: bool = False
     native_account_status: bool = False
+    # Which kinds of task this partner can be handed; a narrower partner declares fewer.
+    task_capabilities: tuple[str, ...] = ("text", "python")
 
     def __post_init__(self):
         if (not safe_agent_id(self.id) or not isinstance(self.name, str)

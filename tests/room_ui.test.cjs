@@ -5300,6 +5300,18 @@ test('retired partner cards describe a real takeover plainly and omit an unrecor
   assert.match(withoutTakeover.get('partner-activity-claude').textContent, /此前额度受限.*本轮安排保持/); assert.doesNotMatch(withoutTakeover.get('partner-activity-claude').textContent, /Codex 正在接着做/);
 });
 
+test('a task the host moved before work began is named in the chat in both languages', async () => {
+  // Catches the rebalance line missing from the timeline or left untranslated.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [{ id: 'write', title: '整理导入脚本', owner: 'codex', status: 'assigned' }] };
+  saved.jobs = [];
+  saved.events = [{ seq: 1, kind: 'task_rebalanced', run_id: saved.current_run.id, task_id: 'write', title: '整理导入脚本', previous_owner: 'claude', owner: 'codex',
+    assignment_epoch: 1, reason: 'over_share', created_at: 1100 }];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(ui.get('events').textContent, /为均衡工作量，.*整理导入脚本.*已从 Claude Code 改由 Codex 负责/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(english.get('events').textContent, /To balance the work, .*moved from Claude Code to Codex/);
+});
 test('work that reached the repository from outside the room is shown in the chat in both languages', async () => {
   // Catches: the host detecting outside commits but the user seeing nothing,
   // or "1 commits" / untranslated Chinese in the English interface.

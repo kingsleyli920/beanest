@@ -12,7 +12,7 @@ from uuid import uuid4
 from local_agent_coordinator import adapters, native_adapters
 from local_agent_coordinator.room_store import RoomError
 from test_kimi_work_quota_http import WorkQuotaFixture
-from test_native_room_service import native_reply
+from test_native_room_service import native_reply, no_rebalance
 from test_team_store import proposal
 
 
@@ -62,6 +62,7 @@ class SuccessorSubmissionFixture(WorkQuotaFixture):
     def __init__(self, *, hold_review=False, review_outside=False, legacy_review_failure=False):
         compile(_PEER_CLI, '<fictional-peer-cli>', 'exec')
         super().__init__(legacy=False)
+        no_rebalance(self.service)
         # Folder capture happens when the room starts: this is an existing
         # registered file, not a new unpublished path with no old owner/grant.
         (self.source / 'second.md').write_bytes(self.original)

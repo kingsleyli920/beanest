@@ -5,6 +5,7 @@ lifecycles separate prevents an empty model queue from certifying a goal.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 from pathlib import PurePosixPath
 import re
@@ -733,10 +734,13 @@ class TeamStore:
                 continue
             phase = "plan" if team["phase"] == "planning" else "coordinate"
             text = ("You have joined this existing group task. Read its current goal, user updates, shared board and "
-                    "delivered files. Preserve existing owners and reviewed results; help only with genuinely unfinished work. "
+                    "delivered files. Preserve the owners of started tasks and reviewed results; help only with genuinely unfinished work. "
                     + ("Propose or confirm the current plan using the normal team commands."
                        if phase == "plan" else "Coordinate with the existing plan; claim only available unowned work if needed."))
-            changed = self._queue(db, room_id, provider, phase, text=text) or changed
+            queued = self._queue(db, room_id, provider, phase, text=text)
+            if queued and phase == "coordinate":
+                self._rebalance_unstarted(db, room_id)  # planning rooms balance when the plan is confirmed
+            changed = queued or changed
         return changed
 
     def response_blocked(self, db, room_id, provider, phase, task=None):
@@ -1791,6 +1795,8 @@ class TeamStore:
                 db.execute("UPDATE shared_tasks SET status=?,review_reason=?,blocked_reason=?,revision_attempts="
                            "revision_attempts+? WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND id=?",
                            (status, command["reason"], reason, int(command["verdict"] == "changes_requested"), room_id, command["task_id"]))
+                if status in {"accepted", "self_checked"}:
+                    self._rebalance_unstarted(db, room_id)
             self.store._event(db, room_id, "team_command", sender=provider, job_id=job["id"],
                               command=kind, task_id=command.get("task_id", command.get("id")))
         for parent in replan_parents:
@@ -1852,6 +1858,54 @@ class TeamStore:
             return list(candidates)
         return workload.fair_order(candidates, members, self._loads(db, room_id, self.team(db, room_id)["current_run_id"]),
                                    self._workload_profile())
+
+    def _rebalance_unstarted(self, db, room_id):
+        """Move claimed work nobody has begun to the least occupied accounts.
+
+        Runs when the plan is confirmed, when a task is accepted and when a new
+        peer joins. Only a task never handed over, with no work call ever made
+        and with no one else on its paths may move, so no file authority has to
+        change hands. A queued work call counts as begun: a peer holds one call
+        at a time, so it is the owner's next step, and leaving it avoids racing
+        the claim. Having moved once settles a task, so it cannot bounce back.
+        """
+        if self.store._room(db, room_id)["stop_requested"]:
+            return
+        members = self.objectives.available_members(db, room_id)
+        if len(members) < 2:
+            return
+        run_id = self.team(db, room_id)["current_run_id"]
+        open_work = [task for task in db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid",
+                                                 (room_id, run_id)).fetchall()
+                     if task["owner"] in members and task["status"] in {"assigned", "working", "waiting_peer"}]
+        worked = {row[0] for row in db.execute("SELECT DISTINCT task_id FROM team_jobs WHERE room_id=? AND run_id=? AND phase='work'",
+                                               (room_id, run_id))}
+        # A claim made while answering the user is the closest record of the user choosing an owner.
+        chosen = {row[0] for row in db.execute(
+            "SELECT json_extract(e.value_json,'$.task_id') FROM events e JOIN team_jobs j ON j.job_id=json_extract(e.value_json,'$.job_id') "
+            "WHERE e.room_id=? AND j.run_id=? AND j.phase='user' AND json_extract(e.value_json,'$.kind')='team_command' "
+            "AND json_extract(e.value_json,'$.command')='claim'", (room_id, run_id))}
+        # Earlier rounds count: a file they wrote still belongs to its author.
+        writers = Counter(path.casefold() for row in db.execute("SELECT write_paths_json FROM shared_tasks WHERE room_id=? AND owner IS NOT NULL",
+                                                                (room_id,)) for path in json.loads(row[0]))
+
+        def movable(task):
+            return (task["status"] == "assigned" and task["assignment_epoch"] == 0 and task["result_version"] == 0
+                    and not task["inherited_from_run"] and not task["repair_execution_id"] and not task["review_reason"]
+                    and not json.loads(task["ownership_grant_json"] or "{}")
+                    and task["id"] not in worked and task["id"] not in chosen
+                    and all(writers[path.casefold()] == 1 for path in json.loads(task["write_paths_json"])))
+
+        tasks = [{"id": task["id"], "owner": task["owner"], "dependencies": json.loads(task["dependencies_json"]),
+                  "capability": task["capability"], "title": task["title"], "epoch": task["assignment_epoch"], "movable": movable(task)}
+                 for task in open_work]
+        moves = workload.rebalance(tasks, members, self._loads(db, room_id, run_id), self._workload_profile(),
+                                   lambda task, member: task["capability"] in self.store.task_capabilities(member))
+        for task, receiver in moves:
+            db.execute("UPDATE shared_tasks SET owner=?,assignment_epoch=assignment_epoch+1,ownership_grant_json=NULL "
+                       "WHERE room_id=? AND run_id=? AND id=?", (receiver, room_id, run_id, task["id"]))
+            self.store._event(db, room_id, "task_rebalanced", sender="system", run_id=run_id, task_id=task["id"], title=task["title"],
+                              previous_owner=task["owner"], owner=receiver, assignment_epoch=task["epoch"] + 1, reason="over_share")
 
     def workload_summary(self, db, room_id):
         team = self.team(db, room_id)
@@ -2330,6 +2384,7 @@ class TeamStore:
             unready = [row for row in unready if row[0] in planning_members]
             unowned = any(task["status"] == "open" and task["owner"] is None for task in tasks)
             if not unready and not unowned and not any(task["status"] == "blocked" for task in tasks):
+                self._rebalance_unstarted(db, room_id)
                 db.execute("UPDATE teams SET phase='working' WHERE room_id=?", (room_id,))
                 changed = True
             else:

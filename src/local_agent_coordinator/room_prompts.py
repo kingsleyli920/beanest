@@ -483,7 +483,7 @@ class RoomPromptMixin:
             "have owners and all peers confirm the plan; a message saying you will work is not a claim. "
             "The plan author may propose the whole list, claim their own parts and plan_ready in the SAME response. "
             "Claim ONLY work for yourself that you can deliver; let other peers choose their parts. "
-            "Claim one or two parts if others can take the rest, rather than reserving all development. "
+            "Claim one or two parts if others can take the rest, rather than reserving all development; the host may move unstarted tasks to other peers to balance the work before it starts. "
             "Other initial planners describe their abilities/preferences; if the task list is not yet present, commands:[] "
             "is correct. A coordinate call sees the recorded list: claim useful unowned tasks and plan_ready for that revision. "
             "All peers confirm the exact plan before work. Do not manufacture extra tasks just to use all peers. "

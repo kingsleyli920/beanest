@@ -377,6 +377,7 @@ class RoomService(RoomPromptMixin):
                                agent_adapters={item["id"]: item.get("adapter", "") for item in self.registry.describe()},
                                agent_bean_styles={item["id"]: item["bean_style"] for item in self.registry.describe()})
         self.store.account_home_for = self._partner_home
+        self.store.task_capabilities = self._task_capabilities
         if self.partner_manager is not None:
             self.store.account_workloads = self._account_workloads
         self.user_outbox_scope = self.store.user_outbox_scope(hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest())
@@ -1246,6 +1247,10 @@ class RoomService(RoomPromptMixin):
         self.partner_manager.set_account_source(partner_id, source)
         self._runtime_catalogs.pop(self.partner_manager.account_scope(partner_id), None)
         return await self.list_partners()
+
+    def _task_capabilities(self, provider):
+        spec = self.registry.get(provider)
+        return spec.task_capabilities if spec is not None else ()
 
     def _account_workloads(self):
         """Unreadable settings must not stop scheduling; every partner is then an ordinary account."""

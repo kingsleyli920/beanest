@@ -13,8 +13,11 @@ from test_team_store import proposal
 
 class PartialRecoveryQuotaHTTPTests(unittest.TestCase):
     request = http.LongTeamResultHTTPTests.request
-    setUp = http.LongTeamResultHTTPTests.setUp
     settled = http.LongTeamResultHTTPTests.settled
+
+    def setUp(self):
+        http.LongTeamResultHTTPTests.setUp(self)
+        native.no_rebalance(self.service)
 
     def tearDown(self):
         if hasattr(self, "release_inspection"):
