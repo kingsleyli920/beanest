@@ -1,5 +1,6 @@
 """Actual loopback language assets, with no model, account, or desktop launch."""
 from pathlib import Path
+import re
 import threading
 import unittest
 
@@ -22,6 +23,18 @@ class LanguageAssetHTTPTests(unittest.TestCase):
         self.server.shutdown()
         self.thread.join(2)
         self.server.server_close()
+
+    def test_every_script_the_page_loads_is_served_as_javascript(self):
+        # Catches a script added to index.html without a server route, which a browser sees as a 404.
+        html = (self.assets / 'index.html').read_text(encoding='utf-8')
+        scripts = re.findall(r'<script src="/([^"]+)"', html)
+        self.assertGreaterEqual(len(scripts), 6)
+        for filename in scripts:
+            with self.subTest(filename=filename):
+                status, headers, body = self.request('GET', '/' + filename, token=False)
+                self.assertEqual(status, 200)
+                self.assertEqual(body, (self.assets / filename).read_bytes())
+                self.assertEqual(headers['Content-Type'], 'text/javascript; charset=utf-8')
 
     def test_each_catalog_is_served_exactly_with_existing_security_and_without_api_access(self):
         for filename in ('i18n-en-a.js', 'i18n-en-b.js', 'i18n-en-c.js', 'i18n.js'):

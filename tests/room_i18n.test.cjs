@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const asset = path.join(__dirname, '../src/local_agent_coordinator/room_ui');
+const pageSourceFiles = fs.readdirSync(asset).filter(name => name.endsWith('.js') && !name.startsWith('i18n')).sort();
 function runtime({ language = 'en-CA', stored, denyStorage = false, desktop, hash = '' } = {}) {
   const storage = new Map(stored ? [['beanest:locale', stored]] : []);
   const context = vm.createContext({ window: { location: { hash }, ...(desktop ? { beanestDesktop: desktop } : {}) }, navigator: { language },
@@ -41,7 +42,7 @@ test('every English entry is still used by the source, so renamed copy cannot le
   // Catches dead keys like the nine left by the 交付文件 → 工作快照对照 rename (copy audit §1.9).
   const {dictionary} = runtime();
   const root = path.join(__dirname, '..');
-  const sources = [path.join(asset, 'app.js'), path.join(asset, 'markdown.js'), path.join(asset, 'index.html'),
+  const sources = [...pageSourceFiles.map(name => path.join(asset, name)), path.join(asset, 'index.html'),
     ...fs.readdirSync(path.join(root, 'src/local_agent_coordinator')).filter(name => name.endsWith('.py')).map(name => path.join(root, 'src/local_agent_coordinator', name))]
     .map(file => fs.readFileSync(file, 'utf8')).join('\n');
   // Only a whole quoted literal counts; a key that merely appears inside a longer string is unused.
@@ -65,7 +66,7 @@ test('every literal the interface translates has English copy, from the page and
   const {dictionary} = runtime();
   const read = file => fs.readFileSync(file, 'utf8');
   const unescape = text => JSON.parse(`"${text}"`);
-  const page = ['app.js', 'markdown.js'].map(name => read(path.join(asset, name))).join('\n');
+  const page = pageSourceFiles.map(name => read(path.join(asset, name))).join('\n');
   const service = fs.readdirSync(path.join(__dirname, '../src/local_agent_coordinator')).filter(name => name.endsWith('.py'))
     .map(name => read(path.join(__dirname, '../src/local_agent_coordinator', name))).join('\n');
   const keys = [...page.matchAll(/\bt\("((?:[^"\\]|\\.)*)"/g), ...service.matchAll(/_system\("((?:[^"\\]|\\.)*)"/g)].map(match => unescape(match[1]));
