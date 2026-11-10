@@ -1180,6 +1180,16 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 .native-tool-setup { display: grid; align-items: start; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 10px; margin: 12px 0; }
 .native-login-url, .native-login-code { overflow-wrap: anywhere; font-size: 12px; }
 .native-setup-card h3 { margin-top: 0; }
+.native-setup-stage { margin: 2px 0 8px; color: var(--muted); font-size: 13px; }
+.native-setup-stage.ready { color: var(--ok, #2f7a55); font-weight: 600; }
+.first-run-setup { width: min(720px, 100%); text-align: left; }
+.first-run-setup > h2 { text-align: center; }
+.first-run-setup > p { margin: 0 0 18px; color: var(--muted); text-align: center; }
+.first-run-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.first-run-setup > .setup-primary { display: block; margin: 18px auto 0; padding: 9px 22px; font-size: 14px; }
+.setup-primary { padding: 6px 14px; border: 0; border-radius: 9px; background: var(--ink); color: var(--paper); font-weight: 600; cursor: pointer; }
+.setup-primary:disabled { opacity: .55; cursor: default; }
+.empty-room.needs-setup > h2, .empty-room.needs-setup > p, .empty-room.needs-setup > .empty-avatars { display: none; }
 
 .room-member-invitation { margin: 10px 0; }
 .member-invitation-options { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
@@ -1536,6 +1546,11 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .member-availability.waiting { background: var(--sunken); color: var(--ink2); }
 .member-quota { display: flex; flex-direction: column; gap: 5px; }
 .member-quota:empty { display: none; }
+.member-workload { margin: 0; color: var(--ink2); font-size: 12px; }
+.member-workload:empty { display: none; }
+.account-workload { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink2); font-size: 12px; }
+.account-workload select { min-width: 72px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper); color: var(--ink); }
+.account-workload-setting { display: flex; flex-direction: column; gap: 4px; }
 .quota-row { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 8px; align-items: center; color: var(--muted); font-size: 11.5px; }
 .quota-row .quota-value { color: var(--ink2); font-weight: 600; white-space: nowrap; }
 .quota-row.low .quota-value { color: var(--ask); }

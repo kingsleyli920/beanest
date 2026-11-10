@@ -1,14 +1,16 @@
-"""Known native tools and their user-triggered official login processes.
+"""Known native tools and their user-triggered official install and login processes.
 
-Discovery only resolves known executable locations. Login output is discarded
-after extracting the official device URL; neither credentials nor raw output
-are exposed through this module.
+Discovery only resolves known executable locations. Install output is discarded.
+Login output is discarded after extracting the official sign-in URL; neither
+credentials nor raw output are exposed through this module.
 """
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 import re
+import time
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
@@ -21,17 +23,30 @@ class NativeAdapter:
     name: str
     provider: str
     install_url: str
-    login_supported: bool = False
+    install_script: str
+    install_shell: str
+    login_arguments: tuple[str, ...]
+    login_hosts: frozenset[str] = frozenset()
+    login_supported: bool = True
 
     def resolve(self):
         return getattr(adapters, "find_" + self.id)()
 
 
 NATIVE_ADAPTERS = (
-    NativeAdapter("claude", "Claude Code", "anthropic", "https://code.claude.com/docs/en/setup"),
-    NativeAdapter("codex", "Codex", "openai", "https://developers.openai.com/codex/cli/"),
-    NativeAdapter("kimi", "Kimi Code", "moonshot", "https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html", True),
+    NativeAdapter("claude", "Claude Code", "anthropic", "https://code.claude.com/docs/en/setup",
+                  "https://claude.ai/install.sh", "/bin/bash", ("auth", "login", "--claudeai"),
+                  frozenset({"claude.ai", "claude.com", "platform.claude.com"})),
+    NativeAdapter("codex", "Codex", "openai", "https://developers.openai.com/codex/cli/",
+                  "https://chatgpt.com/codex/install.sh", "/bin/sh", ("login",), frozenset({"auth.openai.com"})),
+    NativeAdapter("kimi", "Kimi Code", "moonshot", "https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html",
+                  "https://code.kimi.com/kimi-code/install.sh", "/bin/bash", ("login",)),
 )
+INSTALL_SECONDS = 600
+_DOWNLOAD_FAILED = 90
+# Downloaded before running so a broken connection cannot run half a script.
+_INSTALL_SCRIPT = ('set -eu; file="$(mktemp "${TMPDIR:-/tmp}/beanest-install.XXXXXX")"; trap \'rm -f "$file"\' EXIT; '
+                   'curl -fsSL --connect-timeout 20 --max-time 180 "$1" -o "$file" || exit 90; "$2" "$file"')
 NATIVE_IDS = frozenset(item.id for item in NATIVE_ADAPTERS)
 
 
@@ -64,6 +79,18 @@ def device_url(raw):
             if code is not None and re.fullmatch(r"[A-Za-z0-9-]{1,64}", code) is None:
                 continue
             return candidate, code
+        except ValueError:
+            continue
+    return None
+
+
+def sign_in_url(descriptor, raw):
+    """The first link on this tool's own sign-in host, for when no browser opens."""
+    for candidate in re.findall(r"https://[^\s<>\"\x1b]+", raw):
+        candidate = candidate.rstrip(".,;)")
+        try:
+            if urlsplit(candidate).netloc in descriptor.login_hosts:
+                return candidate
         except ValueError:
             continue
     return None
@@ -109,42 +136,33 @@ class NativeLogin:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _run(self, descriptor, operation):
+    async def _supervise(self, argv, consume, *, seconds=None):
+        """Run one child to its end and report how it ended, always cleaning it up."""
         from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
-        from .kimi_acp import managed_configuration
         process, owned, readers = None, {}, []
-        cancelled, code = False, None
+        outcome = {"code": None, "cancelled": False, "clean": True, "error": False, "timed_out": False}
+        deadline = None if seconds is None else time.monotonic() + seconds
         try:
-            try:
-                executable = descriptor.resolve()
-            except RuntimeError:
-                operation["reason"] = "cli_missing"
-                return
+            Path(self.cwd).mkdir(mode=0o700, parents=True, exist_ok=True)  # absent until something is first saved
             process = await asyncio.create_subprocess_exec(
-                executable, "login", cwd=self.cwd, env=adapters._environment(),
+                *argv, cwd=self.cwd, env=adapters._environment(),
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=65536)
             _remember(process.pid, owned, await asyncio.to_thread(_processes))
-
-            async def consume(stream):
-                while raw := await stream.readline():
-                    match = device_url(raw.decode("utf-8", "replace"))
-                    if match:
-                        operation.update(state="waiting", verification_uri=match[0], user_code=match[1])
-
             readers = [asyncio.create_task(consume(stream)) for stream in (process.stdout, process.stderr)]
-            while process.returncode is None:
+            while process.returncode is None and not outcome["timed_out"]:
                 _remember(process.pid, owned, await asyncio.to_thread(_processes))
                 try:
                     await asyncio.wait_for(asyncio.shield(process.wait()), .2)
                 except asyncio.TimeoutError:
-                    pass
-            await asyncio.gather(*readers)
-            code = process.returncode
+                    outcome["timed_out"] = deadline is not None and time.monotonic() > deadline
+            if not outcome["timed_out"]:
+                await asyncio.gather(*readers)
+                outcome["code"] = process.returncode
         except asyncio.CancelledError:
-            cancelled = True
+            outcome["cancelled"] = True
         except (OSError, RuntimeError, ValueError):
-            operation["reason"] = "login_failed"
+            outcome["error"] = True
         finally:
             async def cleanup():
                 clean = await _cleanup(process, owned) if process is not None else True
@@ -153,17 +171,77 @@ class NativeLogin:
                         task.cancel()
                 await asyncio.gather(*readers, return_exceptions=True)
                 return clean
-            clean, interrupted = await _settle_cleanup(cleanup())
-            cancelled |= interrupted
-            operation.update(verification_uri=None, user_code=None)
-            if cancelled:
-                operation.update(state="cancelled", reason="login_cancelled" if clean else "login_cleanup_unconfirmed")
-            elif code == 0 and clean:
-                configuration = managed_configuration()
-                ready = configuration["state"] == "ready"
-                operation.update(state="completed" if ready else "failed",
-                                 reason=None if ready else "login_route_unconfirmed")
-                if ready and self.on_ready is not None:
-                    self.on_ready(descriptor.id)
-            else:
-                operation.update(state="failed", reason=(operation["reason"] or "login_failed") if clean else "login_cleanup_unconfirmed")
+            outcome["clean"], interrupted = await _settle_cleanup(cleanup())
+            outcome["cancelled"] |= interrupted
+        return outcome
+
+    async def _run(self, descriptor, operation):
+        from .kimi_acp import managed_configuration
+        try:
+            executable = descriptor.resolve()
+        except RuntimeError:
+            operation.update(state="failed", reason="cli_missing")
+            return
+
+        async def consume(stream):
+            while raw := await stream.readline():
+                text = raw.decode("utf-8", "replace")
+                if descriptor.id == "kimi":
+                    match = device_url(text)
+                    if match:
+                        operation.update(state="waiting", verification_uri=match[0], user_code=match[1])
+                elif operation["state"] == "starting" or operation["verification_uri"] is None:
+                    url = sign_in_url(descriptor, text)
+                    operation.update(state="waiting", verification_uri=url or operation["verification_uri"])
+
+        if descriptor.id != "kimi":
+            operation.update(state="waiting")  # the tool opens the browser by itself
+        outcome = await self._supervise((executable, *descriptor.login_arguments), consume)
+        operation.update(verification_uri=None, user_code=None)
+        if outcome["cancelled"]:
+            operation.update(state="cancelled", reason="login_cancelled" if outcome["clean"] else "login_cleanup_unconfirmed")
+        elif outcome["code"] == 0 and outcome["clean"]:
+            ready = descriptor.id != "kimi" or managed_configuration()["state"] == "ready"
+            operation.update(state="completed" if ready else "failed", reason=None if ready else "login_route_unconfirmed")
+            if ready and self.on_ready is not None:
+                self.on_ready(descriptor.id)
+        else:
+            operation.update(state="failed", reason="login_failed" if outcome["clean"] else "login_cleanup_unconfirmed")
+
+
+class NativeInstall(NativeLogin):
+    """Runs a tool's own official installer, only when the user asks for it."""
+
+    def start(self, adapter):
+        descriptor = native_adapter(adapter)
+        if descriptor is None:
+            raise ValueError("native_install_unsupported")
+        task = self.tasks.get(adapter)
+        if task is not None and not task.done():
+            return self.snapshot(adapter)
+        operation = {"id": str(uuid4()), "adapter": adapter, "state": "starting", "reason": None}
+        self.operations[adapter] = operation
+        self.tasks[adapter] = asyncio.create_task(self._run(descriptor, operation))
+        return self.snapshot(adapter)
+
+    async def _run(self, descriptor, operation):
+        async def consume(stream):
+            while await stream.read(65536):
+                pass  # installer chatter can hold paths and is never shown
+
+        outcome = await self._supervise(("/bin/bash", "-c", _INSTALL_SCRIPT, "beanest-install",
+                                         descriptor.install_script, descriptor.install_shell),
+                                        consume, seconds=INSTALL_SECONDS)
+        if outcome["cancelled"]:
+            operation.update(state="cancelled", reason="install_cancelled" if outcome["clean"] else "install_cleanup_unconfirmed")
+            return
+        reason = ("install_cleanup_unconfirmed" if not outcome["clean"] else "install_timeout" if outcome["timed_out"]
+                  else "download_failed" if outcome["code"] == _DOWNLOAD_FAILED else None if outcome["code"] == 0 else "install_failed")
+        if reason is None:
+            try:
+                descriptor.resolve()
+            except RuntimeError:
+                reason = "install_not_found"
+        operation.update(state="failed" if reason else "completed", reason=reason)
+        if reason is None and self.on_ready is not None:
+            self.on_ready(descriptor.id)

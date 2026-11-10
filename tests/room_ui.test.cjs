@@ -3640,6 +3640,36 @@ test('quota fallback describes the current integration and promises continued us
   }
 });
 
+test('each account shows its part of the round and its workload level can be changed', async () => {
+  // Catches: the percentages missing or attached to the wrong partner, a setting that never reaches the server, or English copy absent.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.workload = { configured: true, accounts: [
+    { scope: 'claude', members: ['claude'], share: 3, level: 'high', points: 600, calls: 2, target_percent: 75, actual_percent: 60 },
+    { scope: 'codex', members: ['codex'], share: 1, level: 'low', points: 400, calls: 2, target_percent: 25, actual_percent: 40 },
+  ] };
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, workload_level: 'high', account: claudeUsageAccount([]) },
+    { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'low' }];
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
+    route(request) { if (request.path === '/api/partners/claude/workload') return { partners, supported_adapters: [] }; } });
+  assert.equal(ui.get('member-workload-claude').textContent, '本轮工作量 60% · 设定 75%');
+  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 40% · 设定 25%');
+  const select = descendants(ui.get('provider-account-claude')).find((node) => node.dataset?.focusKey === 'account-workload');
+  assert.equal(select.value, 'high');
+  select.value = 'low'; select.fire('change'); await settle();
+  assert.deepEqual(ui.posts().filter((post) => post.path.endsWith('/workload')).map((post) => [post.path, post.body]),
+    [['/api/partners/claude/workload', { level: 'low' }]]);
+
+  saved.workload.configured = false;
+  const plain = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(plain.get('member-workload-claude').textContent, '本轮工作量 60%');
+  saved.workload = null;
+  const none = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(none.get('member-workload-claude').textContent, '');
+  saved.workload = { configured: true, accounts: [{ scope: 'claude', members: ['claude'], share: 3, level: 'high', points: 600, calls: 2, target_percent: 75, actual_percent: 60 }] };
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(english.get('member-workload-claude').textContent, 'This round 60% of the work · set to 75%');
+});
+
 test('composer keeps editable text and send controls outside the independently scrollable setup area', async () => {
   const ui = await browser(); const context = ui.get('composer-context');
   assert.equal(descendants(context).includes(ui.get('message')), false);
@@ -7959,7 +7989,7 @@ test('uncertain login start is checked only by GET and cancellation uses the exa
   await ui.click('close-manager'); now += 2000; await ui.runTimers();
   assert.equal(ui.requests.filter((request) => request.path.includes('/login') && request.method === 'GET').length, reads);
   await ui.click('open-partners'); nativeLoginButton(ui, 'nativeLoginCancel').fire('click'); await settle();
-  assert.match(ui.get('native-tool-setup').textContent, /登录已取消.*原任务保持不变/);
+  assert.match(ui.get('native-tool-setup').textContent, /登录已取消.*可以重新登录/);
   assert.equal(ui.posts().filter((request) => request.path.includes('/login')).length, 1);
   assert.equal(ui.posts().some((request) => request.path.includes('/rooms')), false);
 });
@@ -7971,22 +8001,82 @@ test('native setup shows install and unknown states honestly and never renders u
     if (request.path === '/api/partners') return { partners: [], supported_adapters: [setup] };
   } });
   await ui.click('open-partners');
-  assert.match(ui.get('native-tool-setup').textContent, /尚未安装.*官方安装说明/);
+  assert.match(ui.get('native-tool-setup').textContent, /还没安装.*安装/);
   assert.equal(nativeLoginButton(ui, 'nativeLoginStart'), undefined);
   setup = nativeSetupFixture('unknown', operation); await ui.poll();
-  assert.match(ui.get('native-tool-setup').textContent, /状态尚未确认/);
+  assert.match(ui.get('native-tool-setup').textContent, /等待登录/);
   assert.equal(descendants(ui.get('native-tool-setup')).some((node) => node.tagName === 'A'), false);
   assert.doesNotMatch(ui.get('native-tool-setup').textContent, /已就绪|已登录|剩余0%/);
   assert.equal(ui.posts().length, 0);
 });
 
+function firstRunAdapters(states) {
+  return Object.entries(states).map(([id, setup]) => ({ id, name: id, setup: { login_supported: true, install_url: 'https://example.test/setup', login_operation: null, install_operation: null, ...setup } }));
+}
+function setupRoute(body) {
+  return (request) => {
+    if (!['/api/partners', '/api/partners/discover'].includes(request.path.split('?')[0])) return undefined;
+    const value = body();
+    return { ...value, connection_protocol: { id: 'beanest-json-v1' }, discovery: { state: 'completed', scope: 'supported_cli_locations', observed_at: 1800000000,
+      tools: value.supported_adapters.map((adapter) => ({ adapter: adapter.id, name: adapter.id, installed: adapter.setup.state !== 'not_installed' })) } };
+  };
+}
+
+test('a new user is walked through install and sign-in on the first screen, and nobody else sees it', async () => {
+  // Catches: the setup steps missing, the wrong step offered, a start button before any tool can work, or regular users being nagged.
+  let adapters = firstRunAdapters({ claude: { state: 'not_installed' }, codex: { state: 'not_installed' }, kimi: { state: 'not_installed' } });
+  const partnerRows = () => catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, selectable: true, installation: { state: 'found' } }));
+  const listing = setupRoute(() => ({ partners: partnerRows(), supported_adapters: adapters }));
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/native-adapters/claude/install') return { operation: { id: 'one', adapter: 'claude', state: 'starting', reason: null } };
+    return listing(request);
+  } });
+  await ui.poll();
+  assert.equal(ui.get('first-run-setup').hidden, false);
+  assert.match(ui.get('first-run-cards').textContent, /还没安装.*安装/);
+  assert.equal(ui.get('first-run-done').hidden, true, 'nothing can work yet');
+  const install = descendants(ui.get('first-run-cards')).find((node) => node.tagName === 'BUTTON' && node.textContent === '安装');
+  install.fire('click'); await settle();
+  assert.deepEqual(ui.posts().filter((post) => post.path.includes('/install')).map((post) => post.path), ['/api/native-adapters/claude/install']);
+  assert.match(ui.get('first-run-cards').textContent, /正在安装/);
+
+  adapters = firstRunAdapters({ claude: { state: 'login_required' }, codex: { state: 'not_installed' }, kimi: { state: 'not_installed' } });
+  await ui.poll();
+  assert.match(ui.get('first-run-cards').textContent, /还差登录.*登录/);
+  assert.equal(ui.get('first-run-done').hidden, true, 'an installed tool that is not signed in cannot work yet');
+
+  adapters = firstRunAdapters({ claude: { state: 'ready' }, codex: { state: 'not_installed' }, kimi: { state: 'not_installed' } });
+  await ui.poll();
+  assert.match(ui.get('first-run-cards').textContent, /可以用了/);
+  assert.equal(ui.get('first-run-done').hidden, false);
+  await ui.click('first-run-done');
+  assert.equal(ui.get('first-run-setup').hidden, true);
+
+  for (const states of [{ claude: { state: 'ready' } }, { claude: { state: 'unknown' }, kimi: { state: 'not_installed' } }]) {
+    const regular = await browser({ agents: catalog.slice(0, 2), route: setupRoute(() => ({ partners: partnerRows(), supported_adapters: firstRunAdapters(states) })) });
+    await regular.poll();
+    assert.equal(regular.get('first-run-setup').hidden, true, JSON.stringify(states));
+  }
+});
+
+test('a tool that is installed but not signed in is neither selectable nor described as signed in', async () => {
+  // Catches a partner being picked for work it cannot do, and the card claiming a login that does not exist.
+  const adapters = firstRunAdapters({ claude: { state: 'login_required' }, codex: { state: 'ready' } });
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, selectable: true, installation: { state: 'found' }, account: { state: 'available', stale: false } }));
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, route: setupRoute(() => ({ partners, supported_adapters: adapters })) });
+  await ui.poll();
+  const checked = descendants(ui.get('participant-picker')).filter((node) => node.tagName === 'INPUT' && node.checked).map((node) => node.dataset.participant);
+  assert.deepEqual(checked, ['codex']);
+});
+
 test('official setup web bridge runs only on the explicit link click and leaves a visible address on failure', async () => {
   const opened = []; const setup = nativeSetupFixture('not_installed');
+  setup.setup.install_operation = { id: 'install-one', adapter: 'kimi', state: 'failed', reason: 'install_failed' };
   const ui = await browser({ desktopBridge: { openWebPage(url) { opened.push(url); return Promise.resolve(false); } }, route(request) {
     if (request.path === '/api/partners') return { partners: [], supported_adapters: [setup] };
   } });
   await ui.click('open-partners'); assert.equal(opened.length, 0);
-  const link = descendants(ui.get('native-tool-setup')).find((node) => node.tagName === 'A' && node.textContent === '官方安装说明');
+  const link = descendants(ui.get('native-tool-setup')).find((node) => node.tagName === 'A' && node.textContent === '官方说明');
   link.fire('click'); await settle();
   assert.deepEqual(opened, [setup.setup.install_url]); assert.match(ui.get('manager-notice').textContent, /网页未打开.*复制/);
   assert.ok(ui.get('native-tool-setup').textContent.includes(setup.setup.install_url)); assert.equal(ui.posts().length, 0);
@@ -8236,7 +8326,7 @@ test('Kimi quota windows show supplied remaining values and an explicit official
   assert.doesNotMatch(ui.get('composer-usage-kimi').title, /未取得|未支持/);
   partners[2].availability = availabilityFixture({ state: 'blocked', selectable: false, reason: 'quota_exhausted' });
   const limited = await browser({ agents, partners, rooms: [saved.room], saved });
-  assert.match(limited.get('availability-kimi').textContent, /^额度用完 · 恢复时间未知$/);
+  assert.match(limited.get('availability-kimi').textContent, /^额度用完 · 供应商没给恢复时间，每小时自动试一次$/);
   assert.equal(limited.get('composer-usage-kimi').classList.contains('quota-blocked'), true);
 });
 
@@ -9177,7 +9267,7 @@ test('ready native setup hides settled success and cancellation but keeps active
     setup = nativeSetupFixture('ready', { id: 'current-login', adapter: 'kimi', state }); await ui.poll();
     assert.equal(ui.get('native-tool-setup').hidden, false, state);
   }
-  assert.match(ui.get('native-tool-setup').textContent, /官方登录未完成/);
+  assert.match(ui.get('native-tool-setup').textContent, /登录没有完成/);
   assert.ok(nativeLoginButton(ui, 'nativeLoginStart'), 'a real failure keeps explicit retry available');
   assert.equal(ui.get('message').value, '保留草稿'); assert.match(ui.get('recipient-button').textContent, /Codex/);
   assert.equal(ui.posts().length, 0);

@@ -99,6 +99,7 @@ class RoomStore:
                  clock=time.time, agents: dict[str, str] | None = None, agent_adapters=None,
                  agent_bean_styles=None, team_max_calls: int = 32, team_timeout: float = 7200):
         self.path = Path(path).absolute()
+        self.account_workloads = dict  # replaced by the service when a partner directory exists
         self.max_calls = max_calls
         self.room_timeout = room_timeout
         self.team_max_calls = team_max_calls
@@ -1559,7 +1560,7 @@ class RoomStore:
             "OR receipt_room_id=? OR EXISTS (SELECT 1 FROM requests r WHERE r.room_id=? "
             "AND r.request_key=user_outbox.request_key AND r.fingerprint=user_outbox.canonical_fingerprint)",
             (self.clock(), room_id, room_id, room_id))
-        for table in ("project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
+        for table in ("partner_load", "project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
             db.execute("DELETE FROM " + table + " WHERE room_id=?", (room_id,))
         db.execute("DELETE FROM objective_progress WHERE objective_id IN (SELECT id FROM objectives WHERE room_id=?)", (room_id,))
         for table in ("native_workspaces", "native_handoffs", "native_handoff_exports", "native_session_history", "native_session_homes", "requests",
@@ -5346,6 +5347,8 @@ class RoomStore:
             room = self._room(db, room_id)
             if room["stop_requested"]:
                 return
+            member_before = db.execute("SELECT adapter,session_id,usage_json FROM members WHERE room_id=? AND provider=?",
+                                       (room_id, provider)).fetchone()
             if inspection_observation is not None:
                 if room["mode"] != "project_folder":
                     raise RoomError("project_inspection_unavailable")
@@ -5418,6 +5421,8 @@ class RoomStore:
                        (member_status, int(identity_uncertain), json.dumps(usage) if usage else None, room_id, provider))
             self._event(db, room_id, "job_finished", sender=provider, job_id=job_id,
                         status=status, error=error)
+            if is_team:
+                self._team.record_load(db, job, team_context, usage, member_before)
             if usage:
                 confirmed_session = session_id if session_id and error != "session_identity_changed" else None
                 self._event(db, room_id, "usage", sender=provider, job_id=job_id, usage=usage,
@@ -5928,7 +5933,7 @@ class RoomStore:
                 native_workspaces.append({"provider": item["provider"], "state": "blocked" if state.get("blocked") else "ready",
                     "conflicts": [{"path": conflict["path"], "reason": "native_merge_conflict"} for conflict in state.get("conflicts", [])],
                     "blocked": state.get("blocked", [])})
-            result = {"room": room, "runtime_configuration": self._runtime_configuration(db, row), "members": members, "events": timeline, "jobs": jobs,
+            result = {"room": room, "workload": self._team.workload_summary(db, room_id), "runtime_configuration": self._runtime_configuration(db, row), "members": members, "events": timeline, "jobs": jobs,
                     "current_run": current, "runs": runs,
                     "conversation_budget": {"used":sum(run["budget"]["used"] for run in runs), "run_count":len(runs),
                                             "run_limit":None, "max_calls":None} if runs else None,

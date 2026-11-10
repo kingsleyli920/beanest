@@ -407,6 +407,8 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
         self.handoff_on = {"T1"}                    # tasks whose work or review result carries a record
         self.handoff_value = HANDOFF
         self.reject_once = set()                    # tasks whose first review asks for changes
+        self.independent = False                    # tasks may run in any order
+        self.record_once = set()                    # tasks that leave a record only on their first result
         invoke = self.service.native_invoke
         async def with_usage(agent, prompt, cwd, session_id=None, **options):
             result = await invoke(agent, prompt, cwd, session_id=session_id, **options)
@@ -422,7 +424,7 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
             if not board["tasks"] and agent == board["plan_author"]:
                 for index, task_id in enumerate(self.task_ids):
                     commands += [native.proposal(task_id, paths=[f"{task_id}.py"], capability="python",
-                                                 dependencies=self.task_ids[:index][-1:]), {"type": "claim", "task_id": task_id}]
+                                                 dependencies=[] if self.independent else self.task_ids[:index][-1:]), {"type": "claim", "task_id": task_id}]
             if board["tasks"] or commands:
                 commands.append({"type": "plan_ready"})
             return native_reply(context, commands)
@@ -444,6 +446,8 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
     def with_record(self, agent, task, reply):
         if agent == "claude" and task["id"] in self.handoff_on:
             reply["commands"][0]["handoff"] = self.handoff_value
+            if task["id"] in self.record_once:
+                self.handoff_on.discard(task["id"])
         return reply
 
     def calls(self, phase=None, task_id=None, agent="claude"):
@@ -536,6 +540,25 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("round_handoff", attempts[1]["context"])
         self.assertIsNone(self.calls("work", "T2")[0]["session_id"], "the next task still moves on")
         self.assertEqual(len(self.events(state, "partner_session_rotated")), 1)
+
+    async def test_rework_of_an_earlier_task_keeps_the_session_even_after_another_tasks_record(self):
+        # Catches a rejected task being reworked by a new session that only knows a different task's record.
+        self.independent = True
+        self.handoff_on = {"T2"}
+        self.reject_once = {"T1"}
+        await self.run_room()
+        rework = self.calls("work", "T1")[1]
+        self.assertIsNotNone(rework["session_id"])
+        self.assertNotIn("round_handoff", rework["context"])
+
+    async def test_a_later_result_without_a_record_makes_the_old_record_stale(self):
+        # Catches a new session being handed a record written before the rework it never heard about.
+        self.handoff_on = {"T1"}
+        self.record_once = {"T1"}
+        self.reject_once = {"T1"}
+        state = await self.run_room()
+        self.assertEqual(self.events(state, "partner_session_rotated"), [])
+        self.assertIsNotNone(self.calls("work", "T2")[0]["session_id"])
 
     async def test_self_check_keeps_the_author_session_then_the_next_task_moves(self):
         # Catches a self-check losing the work it reviews, and the accepted review's record going unused.

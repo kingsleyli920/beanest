@@ -294,7 +294,7 @@ const state = {
   selectedParticipants: null, partnerDirectorySeen: false, selectedProject: '', projects: [], partners: [], adapters: [],
   memberInvitationSupported: false, memberInvitations: new Map(), memberInviting: new Set(), memberInvitationFingerprint: null,
   discovery: null, discoveryOpened: false, discoveryInFlight: false, discoveryLastOpened: null,
-  nativeLogins: new Map(), nativeLoginBusy: new Set(), nativeLoginErrors: new Map(), nativeLoginTimer: null, nativeSetupFingerprint: null,
+  nativeLogins: new Map(), nativeInstalls: new Map(), firstRunOpen: false, firstRunDismissed: false, firstRunFingerprint: '', noUsableTool: false, nativeLoginBusy: new Set(), nativeLoginErrors: new Map(), nativeLoginTimer: null, nativeSetupFingerprint: null,
   connectionTemplates: [], connectionProtocol: null, configuringPartnerId: null,
   beanStyleOptions: beanStyles, selectedBeanStyle: 'sprout', beanStyleChosen: false,
   pendingPartner: null, pendingPartnerScopeChanged: false,
@@ -770,6 +770,15 @@ function memberQuotaWindows(id) {
       const remaining = percentValue(window.remaining_percent); const used = percentValue(window.used_percent);
       return { window, remaining: remaining !== null ? remaining : used !== null ? 100 - used : null, stale: quota.stale === true };
     }).filter((entry) => entry.remaining !== null).slice(0, 3);
+}
+function renderMemberWorkload(id, workload) {
+  const holder = document.getElementById(`member-workload-${id}`);
+  if (!holder) return;
+  const account = workload?.accounts?.find((row) => row.members.includes(id));
+  const text = !Number.isInteger(account?.actual_percent) ? ''
+    : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
+      : t("本轮工作量 {p0}%", { p0: account.actual_percent });
+  if (holder.textContent !== text) holder.textContent = text;
 }
 function renderMemberQuota(id) {
   const holder = document.getElementById(`member-quota-${id}`);
@@ -1953,7 +1962,10 @@ function setCatalog(agents) {
   rememberAgents(agents);
   const eligible = new Set(agents.filter((agent) => selectableAgent(agent, { retainBlocked: true })).map((agent) => agent.id));
   const available = new Set(agents.filter((agent) => selectableAgent(agent)).map((agent) => agent.id));
-  if (state.selectedParticipants === null) {
+  // The first tool that becomes usable counts as the default choice, not as something left unticked.
+  const firstUsable = state.noUsableTool && available.size > 0;
+  state.noUsableTool = available.size === 0;
+  if (state.selectedParticipants === null || firstUsable && !state.selectedParticipants.length) {
     const defaults = ['claude', 'codex'].filter((id) => available.has(id));
     state.selectedParticipants = defaults.length ? defaults : agents.filter((agent) => available.has(agent.id) && !isAdditionalSession(agent)).slice(0, 2).map((agent) => agent.id);
   } else state.selectedParticipants = state.selectedParticipants.filter((id) => eligible.has(id));
@@ -2042,7 +2054,8 @@ function memberCard(id, descriptor = {}) {
   details.append(element('summary', t("任务会话与 Token")), session,
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
   const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
-  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, usageSummary, details, accountFooter(id));
+  const workload = element('p', '', 'member-workload'); workload.id = `member-workload-${id}`;
+  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, workload, usageSummary, details, accountFooter(id));
   return card;
 }
 
@@ -2088,13 +2101,15 @@ function memberAvailabilityLine(info) {
   if (!info.value || !info.blocked) return null;
   const reason = info.value.reason;
   if (['subscription_limit_reached', 'quota_exhausted'].includes(reason)) return { tone: 'wait',
-    text: Number.isFinite(info.value.resets_at) ? t("额度用完 · {p0} 恢复", { p0: timeLabel(info.value.resets_at, true) }) : t("额度用完 · 恢复时间未知") };
+    text: Number.isFinite(info.value.resets_at) ? t("额度用完 · {p0} 恢复", { p0: timeLabel(info.value.resets_at, true) }) : t("额度用完 · 供应商没给恢复时间，每小时自动试一次") };
   if (reason === 'quota_reset_due') return { tone: 'wait', text: t("额度应已恢复 · 点“账号与额度”确认") };
   if (reason === 'account_identity_unknown') return { tone: 'ask', text: t("登录待确认 · 点“账号与额度”刷新") };
   return { tone: 'ask', text: t("状态待确认 · 点“账号与额度”刷新") };
 }
 // The card says only whether the partner is signed in; who it is shows under 账号与额度.
-function memberLoginCaption(account) {
+function memberLoginCaption(account, id) {
+  const partner = state.partners.find((entry) => entry.id === id);
+  if (state.adapters.find((adapter) => adapter.id === partner?.adapter)?.setup?.state === 'login_required') return t("还差登录");
   if (!account || account.state === 'not_checked') return t("登录未检查");
   if (account.stale) return t("登录待刷新");
   if (account.state === 'error') return t("登录检查未成功");
@@ -2333,7 +2348,7 @@ function updateAccountFooter(details, id) {
     : windows.length ? t("{p0} 个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
   details.firstChild.lastChild.textContent = status;
   const body = details.lastChild;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.workload_level, state.workloadSavingId, state.workloadRevision, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
   if (body.dataset.fingerprint === fingerprint) return;
   body.dataset.fingerprint = fingerprint;
   body.replaceChildren();
@@ -2428,9 +2443,37 @@ function updateAccountFooter(details, id) {
   auto.append(checkbox, element('span', t("展开时每分钟更新")));
   body.append(refresh, auto);
   if (loginSource) body.append(...accountSourceControls(id, partner, loginSource));
+  if (partner) body.append(workloadControl(id, partner));
   if (!compact) body.append(element('p', availabilityWatchSupported()
     ? t("只查询登录与额度，不启动模型。面板收起后停止单独刷新；前台仍每分钟检查可用状态，页面隐藏后暂停。")
     : t("只查询登录与额度，不启动模型。面板收起或页面隐藏后停止自动查询。"), 'detail-caption'));
+}
+// How much this account takes on; the setting belongs to the account, so aliases change together.
+function workloadControl(id, partner) {
+  const row = element('label', '', 'account-workload');
+  const select = element('select'); select.dataset.focusKey = 'account-workload';
+  select.disabled = state.workloadSavingId === id || state.managementBusy;
+  for (const [value, label] of [['low', t("少")], ['normal', t("中")], ['high', t("多")]]) {
+    const option = element('option', label); option.value = value; select.append(option);
+  }
+  select.value = partner.workload_level || 'normal';
+  select.setAttribute('aria-label', t("{p0}所用账号的工作量", { p0: displayName(id) }));
+  select.addEventListener('change', () => void saveWorkload(id, select.value));
+  row.append(element('span', t("工作量")), select);
+  const holder = element('div', '', 'account-workload-setting');
+  holder.append(row, element('p', t("额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。现在先用于分配审查。"), 'detail-caption'));
+  return holder;
+}
+async function saveWorkload(id, level) {
+  state.workloadSavingId = id; renderMembers(state.snapshot); renderGlobalPartners();
+  try {
+    acceptPartners(await api(workspaceApi.partner(id, 'workload'), 'POST', { level }));
+  } catch (error) {
+    showNotice(error.message || t("工作量未确认保存，请重试。"), 'error');
+  } finally {
+    state.workloadSavingId = null; state.workloadRevision = (state.workloadRevision || 0) + 1;
+    renderMembers(state.snapshot); renderGlobalPartners();
+  }
 }
 function accountRefreshKey(id) {
   const partner = state.partners.find((entry) => entry.id === id);
@@ -3358,8 +3401,11 @@ function eligibleAgent(agent) {
   const removed = latest?.action === 'remove' && latest.status === 'completed';
   return !removed && !pendingPartnerOperation(agent.id) && agent.enabled !== false && activeEntry(agent) && (!registered || (registered.enabled !== false && activeEntry(registered)));
 }
+function notSetUp(agent) {
+  return ['not_installed', 'login_required'].includes(state.adapters.find((adapter) => adapter.id === (agent?.adapter || agent?.id))?.setup?.state);
+}
 function selectableAgent(agent, { retainBlocked = false } = {}) {
-  return eligibleAgent(agent) && (retainBlocked || !availabilityInfo(agent.id).blocked);
+  return eligibleAgent(agent) && !notSetUp(agent) && (retainBlocked || !availabilityInfo(agent.id).blocked);
 }
 function quotaPendingLabel(id) {
   const agent = state.catalog.find((entry) => entry.id === id);
@@ -4225,7 +4271,7 @@ async function updateNativeLogin(id, method = 'GET') {
     const response = await api(nativeLoginPath(id), method, body);
     const operation = checkedNativeLogin(response.operation, id);
     acceptNativeLogin(id, operation);
-    if (operation?.state === 'completed') await refreshManager();
+    if (operation?.state === 'completed') { state.nativeLoginBusy.delete(id); await refreshAfterSetup(); }
   } catch (error) {
     state.nativeLoginErrors.set(id, method === 'POST' ? t("登录请求尚未确认，正在核对已有登录状态；不会重复启动。") : error.message || t("登录状态暂时无法确认。"));
     // A lost start response is resolved by a read, never by replaying login.
@@ -4237,59 +4283,124 @@ async function updateNativeLogin(id, method = 'GET') {
 function syncNativeLoginTimer() {
   if (state.nativeLoginTimer) clearTimeout(state.nativeLoginTimer);
   state.nativeLoginTimer = null;
-  if (!state.connected || state.manager !== 'partners') return;
-  const pending = state.adapters.filter((adapter) => adapter.setup?.login_supported === true
-    && !state.nativeLoginBusy.has(adapter.id) && activeNativeLogin(state.nativeLogins.has(adapter.id) ? state.nativeLogins.get(adapter.id) : adapter.setup.login_operation));
-  if (!pending.length) return;
+  if (!state.connected || (state.manager !== 'partners' && !firstRunVisible())) return;
+  const ready = state.adapters.filter((adapter) => adapter.setup && !state.nativeLoginBusy.has(adapter.id));
+  const logins = ready.filter((adapter) => adapter.setup.login_supported === true && activeNativeLogin(nativeLoginOf(adapter)));
+  const installs = ready.filter((adapter) => activeNativeInstall(nativeInstallOf(adapter)));
+  if (!logins.length && !installs.length) return;
   state.nativeLoginTimer = setTimeout(() => {
     state.nativeLoginTimer = null;
-    for (const adapter of pending) void updateNativeLogin(adapter.id);
+    for (const adapter of logins) void updateNativeLogin(adapter.id);
+    for (const adapter of installs) void updateNativeInstall(adapter.id);
   }, 1500);
 }
+function activeNativeInstall(operation) { return operation?.state === 'starting'; }
+function nativeInstallOf(adapter) { return state.nativeInstalls.has(adapter.id) ? state.nativeInstalls.get(adapter.id) : adapter.setup.install_operation; }
+function nativeLoginOf(adapter) { return state.nativeLogins.has(adapter.id) ? state.nativeLogins.get(adapter.id) : adapter.setup.login_operation; }
+async function refreshAfterSetup() {
+  await refreshManager();
+  await discoverOnOpen({ reopen: true, manual: true });
+  renderNativeSetup();
+}
+async function updateNativeInstall(id, method = 'GET') {
+  if (!state.connected || state.nativeLoginBusy.has(id)) return;
+  const adapter = state.adapters.find((item) => item.id === id);
+  const existing = adapter && nativeInstallOf(adapter);
+  state.nativeLoginBusy.add(id); state.nativeLoginErrors.delete(id); renderNativeSetup();
+  try {
+    const body = method === 'DELETE' ? { operation_id: existing?.id } : method === 'POST' ? {} : undefined;
+    const response = await api(`/api/native-adapters/${encodeURIComponent(id)}/install`, method, body);
+    const operation = response.operation;
+    state.nativeInstalls.set(id, operation);
+    if (operation?.state === 'completed') { state.nativeLoginBusy.delete(id); await refreshAfterSetup(); }
+  } catch (error) {
+    state.nativeLoginErrors.set(id, method === 'POST' ? t("安装请求没有确认，正在核对；不会重复安装。") : error.message || t("安装状态暂时无法确认。"));
+    if (method === 'POST') state.nativeInstalls.set(id, { id: '', adapter: id, state: 'starting' });
+  } finally {
+    state.nativeLoginBusy.delete(id); renderNativeSetup();
+  }
+}
+function nativeInstallFailure(reason) {
+  return ({ download_failed: t("下载失败，请检查网络后重试。"), install_timeout: t("安装超时了，请检查网络后重试。"),
+    install_not_found: t("安装结束了，但没有找到这个工具。可以重试，或看官方说明。") })[reason] || t("安装没有成功，可以重试，或看官方说明。");
+}
+function setupButton(label, primary, onClick, disabled, dataset = {}) {
+  const button = element('button', label, primary ? 'setup-primary' : 'quiet-button'); button.type = 'button';
+  Object.assign(button.dataset, dataset);
+  button.disabled = disabled; button.addEventListener('click', onClick);
+  return button;
+}
+// One card per tool: install, then sign in, then ready. Only the current step is on screen.
+function nativeSetupCard(adapter) {
+  const setup = adapter.setup; const operation = nativeLoginOf(adapter); const install = nativeInstallOf(adapter);
+  const busy = !state.connected || state.nativeLoginBusy.has(adapter.id);
+  const card = element('section', '', 'manager-card native-setup-card'); card.dataset.adapterSetup = adapter.id;
+  const stage = setup.state === 'not_installed' && activeNativeInstall(install) ? t("正在安装") : activeNativeLogin(operation) ? t("等待登录")
+    : ({ not_installed: t("还没安装"), login_required: t("还差登录"), ready: t("可以用了"), unknown: t("正在确认") })[setup.state];
+  card.append(element('h3', adapter.name || adapter.id), element('p', stage, `native-setup-stage ${setup.state}`));
+  const actions = element('div', '', 'manager-card-actions');
+  if (setup.state === 'not_installed') {
+    if (activeNativeInstall(install)) {
+      card.append(element('p', t("通常一两分钟，可以先做别的。"), 'detail-caption'));
+      if (install.id) actions.append(setupButton(t("取消"), false, () => void updateNativeInstall(adapter.id, 'DELETE'), busy));
+    } else {
+      if (install?.state === 'failed') card.append(element('p', nativeInstallFailure(install.reason), 'detail-caption'));
+      actions.append(setupButton(install?.state === 'failed' ? t("重试") : t("安装"), true, () => void updateNativeInstall(adapter.id, 'POST'), busy));
+      if (install?.state === 'failed') { const link = nativeSetupLink(t("官方说明"), setup.install_url); if (link) { actions.append(link); card.append(element('p', setup.install_url, 'native-login-url')); } }
+    }
+  } else if (setup.login_supported === true) {
+    if (activeNativeLogin(operation)) {
+      const waiting = adapter.id !== 'kimi' || operation.state === 'waiting';
+      card.append(element('p', waiting ? t("请在浏览器里完成登录，完成后这里会自动更新。") : t("正在准备官方登录…"), 'detail-caption'));
+      const link = nativeSetupLink(adapter.id === 'kimi' ? t("打开官方登录页") : t("没打开浏览器？点这里"), operation.verification_uri); if (link) actions.append(link);
+      if (typeof operation.user_code === 'string' && operation.user_code.length <= 80) card.append(element('p', t("授权码：{p0}", { p0: operation.user_code }), 'native-login-code'));
+      if (operation.id) actions.append(setupButton(t("取消登录"), false, () => void updateNativeLogin(adapter.id, 'DELETE'), busy, { nativeLoginCancel: adapter.id }));
+    } else {
+      if (['failed', 'cancelled'].includes(operation?.state)) card.append(element('p', operation.state === 'cancelled' ? t("本次登录已取消，可以重新登录。") : t("登录没有完成，可以重新登录。"), 'detail-caption'));
+      if (setup.state !== 'ready' || operation?.state === 'failed') actions.append(setupButton(t("登录"), true, () => void updateNativeLogin(adapter.id, 'POST'), busy, { nativeLoginStart: adapter.id }));
+    }
+  }
+  if (state.nativeLoginErrors.has(adapter.id)) card.append(element('p', state.nativeLoginErrors.get(adapter.id), 'notice error'));
+  card.append(actions);
+  return card;
+}
+function firstRunVisible() {
+  if (state.selected || state.firstRunDismissed || !state.adapters.length || state.discovery?.state !== 'completed' || state.discoveryInFlight) return !state.selected && !state.firstRunDismissed && !!state.firstRunOpen;
+  // A status that could not be read must not nag someone whose tools already work.
+  if (!state.adapters.some((adapter) => ['ready', 'unknown'].includes(adapter.setup?.state))) state.firstRunOpen = true;
+  return !!state.firstRunOpen;
+}
+function renderFirstRun() {
+  const visible = firstRunVisible();
+  $('first-run-setup').hidden = !visible;
+  $('empty-room').classList.toggle('needs-setup', visible);
+  $('first-run-done').hidden = !visible || !state.adapters.some((adapter) => adapter.setup?.state === 'ready');
+  if (!visible) return;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), state.adapters.map((item) => item.setup), [...state.nativeLogins], [...state.nativeInstalls], [...state.nativeLoginBusy], [...state.nativeLoginErrors], state.connected]);
+  if (fingerprint === state.firstRunFingerprint) return;
+  state.firstRunFingerprint = fingerprint;
+  $('first-run-cards').replaceChildren(...state.adapters.filter((adapter) => adapter.setup).map(nativeSetupCard));
+}
+$('first-run-done').addEventListener('click', () => {
+  state.firstRunDismissed = true; state.firstRunOpen = false;
+  state.selectedParticipants = state.catalog.filter((agent) => selectableAgent(agent) && !isAdditionalSession(agent)).slice(0, 3).map((agent) => agent.id);
+  renderParticipantPicker(); renderFirstRun(); syncParticipants(null); renderMembers(null); renderControls();
+  $('message').focus();
+});
 function renderNativeSetup() {
   const adapters = state.adapters.filter((adapter) => adapter.setup
     && ['not_installed', 'login_required', 'ready', 'unknown'].includes(adapter.setup.state)
     && (adapter.setup.login_supported === true || adapter.setup.state === 'not_installed' && adapter.setup.install_url)
     && (adapter.setup.state !== 'ready' || state.nativeLoginBusy.has(adapter.id) || state.nativeLoginErrors.has(adapter.id)
-      || activeNativeLogin(state.nativeLogins.has(adapter.id) ? state.nativeLogins.get(adapter.id) : adapter.setup.login_operation)
-      || (state.nativeLogins.has(adapter.id) ? state.nativeLogins.get(adapter.id) : adapter.setup.login_operation)?.state === 'failed'));
+      || activeNativeLogin(nativeLoginOf(adapter)) || nativeLoginOf(adapter)?.state === 'failed'));
   const container = $('native-tool-setup');
   container.hidden = !adapters.length || state.lifecycleViews.partners !== 'active';
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [adapters, [...state.nativeLogins], [...state.nativeLoginBusy], [...state.nativeLoginErrors], state.connected, state.lifecycleViews.partners]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [adapters, [...state.nativeLogins], [...state.nativeInstalls], [...state.nativeLoginBusy], [...state.nativeLoginErrors], state.connected, state.lifecycleViews.partners]]);
   if (fingerprint !== state.nativeSetupFingerprint) {
-    state.nativeSetupFingerprint = fingerprint; container.replaceChildren();
-    for (const adapter of adapters) {
-      const setup = adapter.setup;
-      const operation = state.nativeLogins.has(adapter.id) ? state.nativeLogins.get(adapter.id) : setup.login_operation;
-      const card = element('section', '', 'manager-card native-setup-card'); card.dataset.adapterSetup = adapter.id;
-      card.append(element('h3', adapter.name || adapter.id), element('p', ({ not_installed: t("尚未安装"), login_required: t("需要在官方页面登录"), ready: t("已有订阅接入已就绪"), unknown: t("接入状态尚未确认") })[setup.state], 'detail-caption'));
-      const actions = element('div', '', 'manager-card-actions');
-      if (setup.state === 'not_installed') {
-        const link = nativeSetupLink(t("官方安装说明"), setup.install_url); if (link) { actions.append(link); card.append(element('p', setup.install_url, 'native-login-url')); }
-      }
-      if (setup.login_supported === true && setup.state !== 'not_installed') {
-        if (activeNativeLogin(operation)) {
-          card.append(element('p', operation.state === 'waiting' ? t("等待你在官方页面完成登录；不会启动任务。") : t("正在准备官方登录…"), 'detail-caption'));
-          const link = nativeSetupLink(t("打开官方登录页"), operation.verification_uri); if (link) actions.append(link);
-          if (typeof operation.user_code === 'string' && operation.user_code.length <= 80) card.append(element('p', t("授权码：{p0}", { p0: operation.user_code }), 'native-login-code'));
-          if (link) card.append(element('p', operation.verification_uri, 'native-login-url'));
-          if (operation.id) {
-            const cancel = element('button', t("取消登录"), 'quiet-button'); cancel.type = 'button'; cancel.dataset.nativeLoginCancel = adapter.id;
-            cancel.disabled = !state.connected || state.nativeLoginBusy.has(adapter.id); cancel.addEventListener('click', () => void updateNativeLogin(adapter.id, 'DELETE')); actions.append(cancel);
-          }
-        } else {
-          if (operation?.state === 'completed') card.append(element('p', setup.state === 'ready' ? t("官方登录已完成。按需选择伙伴参加新任务。") : t("官方登录已完成，接入状态仍待检测。"), 'detail-caption'));
-          if (['failed', 'cancelled'].includes(operation?.state)) card.append(element('p', operation.state === 'cancelled' ? t("本次登录已取消，原任务保持不变。") : t("官方登录未完成，可重新尝试；原任务保持不变。"), 'detail-caption'));
-          if (setup.state !== 'ready' || operation?.state === 'failed') {
-            const start = element('button', t("官方登录"), 'quiet-button'); start.type = 'button'; start.dataset.nativeLoginStart = adapter.id;
-            start.disabled = !state.connected || state.nativeLoginBusy.has(adapter.id); start.addEventListener('click', () => void updateNativeLogin(adapter.id, 'POST')); actions.append(start);
-          }
-        }
-      }
-      if (state.nativeLoginErrors.has(adapter.id)) card.append(element('p', state.nativeLoginErrors.get(adapter.id), 'notice error'));
-      card.append(actions); container.append(card);
-    }
+    state.nativeSetupFingerprint = fingerprint;
+    container.replaceChildren(...adapters.map(nativeSetupCard));
   }
+  renderFirstRun();
   syncNativeLoginTimer();
 }
 
@@ -4491,7 +4602,9 @@ function monitorTaskText(task) {
 function renderGlobalPartners() {
   renderPartnerViewVisibility();
   renderLifecycleFilter('partners', state.partners);
-  const partners = visibleEntries('partners', state.partners);
+  // A tool that is not installed yet appears only as its setup card above.
+  const partners = visibleEntries('partners', state.partners).filter((partner) => partner.installation?.state !== 'missing'
+    || !state.adapters.some((adapter) => adapter.id === partner.adapter && adapter.setup));
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [partners, state.lifecycleViews.partners, state.busy, !!state.pending, state.managementBusy, state.accountRefreshId, !!state.pendingPartner, state.partnerLifecycleSupported, [...state.partnerOperations.values()], state.catalog.map((agent) => agent.id), partners.map((partner) => availabilityInfo(partner.id).detail), state.availabilityError, state.availabilityRecheck?.id]]);
   if (fingerprint === state.partnerListFingerprint) return;
   state.partnerListFingerprint = fingerprint;
@@ -5275,7 +5388,7 @@ function renderEvents(snapshot, { preservePosition = false } = {}) {
   const collaborationChanged = renderCollaboration(snapshot);
   renderDocumentShortcuts(snapshot);
   $('empty-room').hidden = !!snapshot;
-  if (!snapshot) { $('new-events').hidden = true; return; }
+  if (!snapshot) { renderFirstRun(); $('new-events').hidden = true; return; }
   const events = [...snapshot.events].filter((event) => Number.isSafeInteger(event.seq)).sort((a, b) => a.seq - b.seq);
   let added = 0;
   for (const original of events) {
@@ -6756,7 +6869,7 @@ function renderMembers(snapshot) {
     $(`availability-${provider}`).textContent = line ? line.text : '';
     $(`availability-${provider}`).classList.toggle('blocked', line?.tone === 'ask');
     $(`availability-${provider}`).classList.toggle('waiting', line?.tone === 'wait');
-    $(`account-email-${provider}`).textContent = memberLoginCaption(account);
+    $(`account-email-${provider}`).textContent = memberLoginCaption(account, provider);
     updateAccountFooter($(`provider-account-${provider}`), provider);
     const hasJobs = snapshot?.jobs?.some((job) => job.provider === provider);
     const waitingForPeer = member?.status === 'idle' && !member.identity_uncertain
@@ -6798,6 +6911,7 @@ function renderMembers(snapshot) {
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
     renderMemberQuota(provider);
+    renderMemberWorkload(provider, snapshot?.workload);
     $(`session-${provider}`).textContent = member?.session_id ? `${member.identity_uncertain ? t("最后已知会话") : t("原生会话")}${interfaceColon()}${member.session_id}` : (notStarted ? t("尚未创建会话") : t("会话身份尚未返回或确认"));
     const usage = member?.usage;
     $(`usage-summary-${provider}`).textContent = usage == null ? t("任务用量快照不可用") : t("已收到任务用量快照");

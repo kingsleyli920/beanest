@@ -28,6 +28,7 @@ MAX_OUTPUT = 2 * 1024 * 1024
 MAX_TEXT = 128 * 1024
 CODEX_APP = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CLAUDE_SYSTEM_PATHS = (Path('/opt/homebrew/bin/claude'), Path('/usr/local/bin/claude'))
+CLAUDE_SUBSCRIPTIONS = ('pro', 'max', 'ultra', 'team', 'enterprise')
 CODE_MODE_DISABLED_NOTICE = (
     'Code Mode is unavailable because code-mode host is disabled. '
     'Code mode will fail closed; enable `features.code_mode_host` and '
@@ -73,7 +74,7 @@ def _find_cli(command: str, fallbacks: tuple[Path, ...]) -> str | None:
 
 
 def _install_locations(agent):
-    return {'codex': (CODEX_APP,),
+    return {'codex': (Path.home() / '.local/bin/codex', CODEX_APP),
             'claude': (Path.home() / '.local/bin/claude', *CLAUDE_SYSTEM_PATHS),
             'kimi': (Path.home() / '.kimi-code/bin/kimi',)}[agent]
 
@@ -292,7 +293,7 @@ def _authentication(agent: str, code: int, text: str) -> dict:
     safe['subscription_confirmed'] = (raw.get('loggedIn') is True
         and raw.get('authMethod') == 'claude.ai'
         and raw.get('apiProvider') == 'firstParty'
-        and raw.get('subscriptionType') in ('pro', 'max'))
+        and raw.get('subscriptionType') in CLAUDE_SUBSCRIPTIONS)
     return safe
 
 
@@ -1212,6 +1213,15 @@ async def kimi_status(cwd, *, timeout=10):
     from .kimi_acp import status
     await _ensure_cli('kimi', cwd, timeout=timeout)
     return await status(cwd, timeout=timeout)
+
+
+async def login_confirmed(agent, cwd, *, timeout=10):
+    """Whether this tool is signed in to a subscription; reads no credential."""
+    path = {'codex': find_codex, 'claude': find_claude}[agent]()
+    command = {'codex': [path, 'login', 'status'],
+               'claude': [path, '--safe-mode', '--restricted', 'auth', 'status', '--json']}[agent]
+    lines, code = await _run(command, '', cwd, timeout, include_stderr=True)
+    return _authentication(agent, code, b'\n'.join(lines)[:65536].decode('utf-8', errors='replace'))['subscription_confirmed']
 
 
 async def account_status(agent, cwd, *, timeout=10):

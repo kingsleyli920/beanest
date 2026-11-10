@@ -167,6 +167,7 @@ class TeamRunHTTPTests(unittest.TestCase):
         with patch(prefix+"find_claude",return_value="/virtual/claude"), \
              patch(prefix+"find_codex",return_value="/virtual/codex"), \
              patch(prefix+"find_json_cli",return_value="/virtual/connector"), \
+             patch(prefix+"login_confirmed",new=AsyncMock(return_value=True)), \
              patch(prefix+"_run",side_effect=AssertionError("No native commands in this test")), \
              patch(prefix+"check_json_cli",new=AsyncMock(return_value={"ready":True,"version":"1.0","billing":"local"})):
             code,discovery = self.request("POST","/api/partners/discover",{})

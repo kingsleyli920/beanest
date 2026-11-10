@@ -58,6 +58,8 @@ npm --prefix desktop ci
 npm --prefix desktop run build:release
 ```
 
+打开这个 App 后，没有装 Claude Code、Codex 或 Kimi Code 也没关系：首页可以一键运行各家的官方安装脚本，再用你自己的账号登录。
+
 构建时需要 [uv](https://docs.astral.sh/uv/) 和网络，目前只支持 Apple 芯片的 macOS。App 和 zip 生成在 `runtime/desktop-release/`。App 自带 Python 和后端，用户数据放在 `~/Library/Application Support/io.github.kingsleyli920.beanest`。Agent CLI 仍需用户自己安装并登录。这个构建只做了临时签名，没有公证，第一次打开时 macOS 会要求到系统设置里允许。
 
 ## 怎么使用
