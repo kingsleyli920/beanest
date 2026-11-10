@@ -5300,6 +5300,17 @@ test('retired partner cards describe a real takeover plainly and omit an unrecor
   assert.match(withoutTakeover.get('partner-activity-claude').textContent, /此前额度受限.*本轮安排保持/); assert.doesNotMatch(withoutTakeover.get('partner-activity-claude').textContent, /Codex 正在接着做/);
 });
 
+test('a partner retired because its model service never connected is not described as out of quota', async () => {
+  // Catches: a partner that could not start being reported as having run out of quota.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.objective.retired_partners = { claude: { reason: 'native_preflight_failed', cleanup_confirmed: true } };
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [{ id: 'takeover-task', owner: 'codex', status: 'working', title: '真实接手任务' }] };
+  saved.events = [{ seq: 1, kind: 'task_taken_over', owner: 'codex', previous_owner: 'claude', task_id: 'takeover-task', created_at: 1000 }]; saved.jobs = [];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(ui.get('partner-activity-claude').textContent, /本轮暂不参与.*模型服务连接失败.*Codex 正在接着做/);
+  assert.doesNotMatch(ui.get('partner-activity-claude').textContent, /额度/);
+});
+
 test('a task the host moved before work began is named in the chat in both languages', async () => {
   // Catches the rebalance line missing from the timeline or left untranslated.
   const saved = objectiveSnapshot({ status: 'running' });

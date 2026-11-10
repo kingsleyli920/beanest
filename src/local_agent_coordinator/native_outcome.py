@@ -26,6 +26,44 @@ FORMAT_ERRORS = frozenset({
 }) | REPLY_MISTAKES
 
 
+# A call that ended before its prompt could reach the model. The partner is
+# retried, then leaves the objective; nothing here is an unknown outcome.
+NATIVE_PREFLIGHT_FAILED = "native_preflight_failed"
+_IDENTITY_OR_QUOTA_FACTS = frozenset({
+    "native_session_identity_mismatch", "subscription_limit_reached", "native_cleanup_unconfirmed",
+})
+
+
+def prompt_never_sent(observation):
+    """The adapter's own receipt: no prompt left the host and nothing is running.
+
+    Kimi's ACP reports `prompt_sent` from a flag set just before the send; the
+    CLI adapters report `never_started` before spawning a model. Anything
+    weaker keeps the conservative path, which must never replay real work.
+    """
+    if (not isinstance(observation, dict) or observation.get("cleanup_confirmed") is not True
+            or observation.get("side_effects_possible") is not False
+            or type(observation.get("tool_calls")) is not int or observation["tool_calls"] != 0
+            or type(observation.get("tool_results")) is not int or observation["tool_results"] != 0):
+        return False
+    diagnostic = observation.get("failure_diagnostic")
+    return observation.get("never_started") is True or (isinstance(diagnostic, dict) and diagnostic.get("prompt_sent") is False)
+
+
+def preflight_failed(session_id, *, result=None, error=None):
+    """Is this finished call a retryable failure that never reached the model?"""
+    if error is not None:
+        return prompt_never_sent(getattr(error, "native_execution", None))
+    if (not isinstance(result, dict) or result.get("status") == "completed"
+            or result.get("failure_code") in _IDENTITY_OR_QUOTA_FACTS
+            or result.get("cleanup_confirmed") is False
+            # A returned identity other than the one this call resumed is a
+            # real identity question, even when the prompt never left.
+            or session_id is not None and result.get("session_id") not in {None, session_id}):
+        return False
+    return prompt_never_sent(result.get("native_execution"))
+
+
 def completed_execution(observation):
     """Require native terminal, process exit, tool closure and process cleanup."""
     return (isinstance(observation, dict) and observation.get("status") == "completed"

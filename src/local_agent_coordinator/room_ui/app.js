@@ -86,6 +86,7 @@ const executionLabels = localizedLabels({
   invoke_interrupted: '本轮调用已中断，结果尚需核对。',
   invoke_failed: '本轮调用未取得可确认的结果。',
   provider_failed: '供应商调用未完成，请在工具与状态中核对异常。',
+  native_preflight_failed: '伙伴的模型服务连接失败，提示词没有发出。',
   subscription_limit_reached: '订阅额度已用完，请在对应工具查看恢复时间。',
   cli_nonzero_exit: '本地 CLI 未正常完成，请在工具与状态中核对异常。',
   unknown_provider_error: '供应商返回未知异常，请在工具与状态中核对记录。',
@@ -4722,7 +4723,8 @@ function memberActivity(snapshot, member) {
     status = 'needs_user'; label = t("本轮暂不参与");
     const takeover = [...(snapshot.events || [])].reverse().find((event) => event.kind === 'task_taken_over' && event.previous_owner === id
       && event.owner && (snapshot.team?.tasks || []).some((entry) => entry.owner === event.owner && ['assigned', 'working', 'waiting_peer', 'review'].includes(entry.status) && (!event.task_id || entry.id === event.task_id)));
-    task = t("此前额度受限。{p0}当前额度见下方。", { p0: takeover ? t("{p0} 正在接着做。", { p0: displayName(takeover.owner) }) : t("本轮安排保持。") });
+    const handedOn = takeover ? t("{p0} 正在接着做。", { p0: displayName(takeover.owner) }) : t("本轮安排保持。");
+    task = retired.reason === 'native_preflight_failed' ? t("模型服务连接失败，本目标不再安排它。{p0}", { p0: handedOn }) : t("此前额度受限。{p0}当前额度见下方。", { p0: handedOn });
   }
   else if (!job && objective?.status === 'awaiting_continue') { label = t("阶段已交付"); task = t("下一步已列在交付卡；无需逐阶段接受。"); }
   else if (objective?.status === 'paused' && !job) { label = objectiveLabel(objective); task = objective.pause_requested ? t("等当前处理结束后，不再派发下一项。") : t("当前进度保留，继续后接着处理原目标。"); }
@@ -5033,7 +5035,7 @@ function renderMembers(snapshot) {
     const retiredActivity = member && ((objective?.status === 'running' && snapshot.room.status === 'running') || objective?.status === 'paused')
       && activeEntry(snapshot.room) && !terminalTeamState(snapshot) && !member.identity_uncertain
       && ['idle', 'needs_user'].includes(member.status) && retirement?.cleanup_confirmed === true
-      && ['agent_quota_exhausted', 'subscription_limit_reached'].includes(retirement.reason)
+      && ['agent_quota_exhausted', 'subscription_limit_reached', 'native_preflight_failed'].includes(retirement.reason)
       && !snapshot.jobs.some((job) => job.provider === provider && ['queued', 'working'].includes(job.status))
       ? memberActivity(snapshot, member) : null;
     const paused = objective?.status === 'paused' && activeEntry(snapshot?.room) && !member?.identity_uncertain

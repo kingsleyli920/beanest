@@ -31,7 +31,7 @@ from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
 from .team_store import _COMMAND_FIELDS
-from .native_outcome import FORMAT_ERRORS
+from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed
 from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
                            TASK_HANDOFF_INSTRUCTION, _BLOCK_PROTOCOL, _DIRECTED_CONTEXT_INSTRUCTION, _direct_updates, _excerpt,
@@ -51,10 +51,14 @@ _FAILURES = {"deadline_exceeded", "process_or_output_failure", "cli_nonzero_exit
 _FAILURES.update(NATIVE_RECOVERY_ERRORS)
 _FAILURES.update({"native_auth_unconfirmed", "native_provider_error", "native_turn_unconfirmed",
                   "native_turn_incomplete", "native_tool_unpaired", "native_permission_required",
-                  "empty_response", "invalid_response_json", "output_limit"})
+                  "empty_response", "invalid_response_json", "output_limit", NATIVE_PREFLIGHT_FAILED})
 
 
 PROGRESS_POLL_SECONDS = 15
+# A native call that failed before its prompt was sent is retried in place,
+# this many times, after this pause.
+_PREFLIGHT_RETRIES = 1
+_PREFLIGHT_RETRY_DELAY_SECONDS = 2
 
 
 def _visible(text: str) -> str:
@@ -5613,7 +5617,7 @@ class RoomService(RoomPromptMixin):
                 job["partner_handoff_inspection"] = self.store.partner_inspection(job["id"])
             invoked = False
             cleanup_confirmed = True
-            quota_refused = False
+            retire_reason = None
             native = job.get("mode") == "native_project"
             try:
                 cwd = self.workspace / room_id / provider
@@ -5663,40 +5667,66 @@ class RoomService(RoomPromptMixin):
                 if not native:
                     invoked = True
                     cleanup_confirmed = False
-                if native:
-                    from .room_response_schema import native_room_response_schema
-                    schema = native_room_response_schema(spec.adapter,
-                        member_ids=self.store.member_ids(room_id), provider=provider,
-                        team_phase=job["team"]["job_phase"], can_propose=provider == job["team"]["plan_author"])
-                    receipt_dir = self.workspace.parent / "native-receipts" / room_id
-                    permission = self._native_permission(job)
-                    operation = self._with_progress_channel(job, lambda progress_kwargs: self.native_invoke(
-                        spec.adapter, prompt, cwd, session_id=job["session_id"], timeout=timeout,
-                        permission=permission, response_schema=schema,
-                        on_activity=lambda event, bound_job=job: self._record_native_event(bound_job, event),
-                        receipt_dir=receipt_dir, progress_fingerprint=self._native_progress_fingerprint(job, cwd),
-                        **progress_kwargs, **runtime_kwargs))
-                elif self.invoke is not None:
-                    operation = self.invoke(provider, prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
-                elif spec.invoke_structured is not None:
-                    from .room_response_schema import response_schema
-                    team_schema = ({"team_phase": job["team"]["job_phase"],
-                                    "can_propose": provider == job["team"]["plan_author"]}
-                                   if job.get("team") else {})
-                    schema = response_schema(project=job.get("mode") in PROJECT_MODES,
-                                             member_ids=self.store.member_ids(room_id), provider=provider,
-                                             collaboration=bool(job.get("team")),
-                                             folder=job.get("mode") == "project_folder", **team_schema)
-                    operation = spec.invoke_structured(prompt, cwd, session_id=job["session_id"],
-                                                       timeout=timeout, response_schema=schema, **runtime_kwargs)
-                else:
-                    operation = spec.invoke(prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
-                operation = self._with_account_home(spec.adapter, home, operation)
-                # Native transport owns its deadline and process-group cleanup.
-                # A second equal wait_for can erase its cancellation receipt.
-                invoked = True
-                cleanup_confirmed = False
-                result = await operation if native else await asyncio.wait_for(operation, timeout=timeout)
+                def begin_call():
+                    if native:
+                        from .room_response_schema import native_room_response_schema
+                        schema = native_room_response_schema(spec.adapter,
+                            member_ids=self.store.member_ids(room_id), provider=provider,
+                            team_phase=job["team"]["job_phase"], can_propose=provider == job["team"]["plan_author"])
+                        receipt_dir = self.workspace.parent / "native-receipts" / room_id
+                        permission = self._native_permission(job)
+                        operation = self._with_progress_channel(job, lambda progress_kwargs: self.native_invoke(
+                            spec.adapter, prompt, cwd, session_id=job["session_id"], timeout=timeout,
+                            permission=permission, response_schema=schema,
+                            on_activity=lambda event, bound_job=job: self._record_native_event(bound_job, event),
+                            receipt_dir=receipt_dir, progress_fingerprint=self._native_progress_fingerprint(job, cwd),
+                            **progress_kwargs, **runtime_kwargs))
+                    elif self.invoke is not None:
+                        operation = self.invoke(provider, prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
+                    elif spec.invoke_structured is not None:
+                        from .room_response_schema import response_schema
+                        team_schema = ({"team_phase": job["team"]["job_phase"],
+                                        "can_propose": provider == job["team"]["plan_author"]}
+                                       if job.get("team") else {})
+                        schema = response_schema(project=job.get("mode") in PROJECT_MODES,
+                                                 member_ids=self.store.member_ids(room_id), provider=provider,
+                                                 collaboration=bool(job.get("team")),
+                                                 folder=job.get("mode") == "project_folder", **team_schema)
+                        operation = spec.invoke_structured(prompt, cwd, session_id=job["session_id"],
+                                                           timeout=timeout, response_schema=schema, **runtime_kwargs)
+                    else:
+                        operation = spec.invoke(prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
+                    return self._with_account_home(spec.adapter, home, operation)
+                attempts = 0
+                while True:
+                    operation = begin_call()
+                    # Native transport owns its deadline and process-group cleanup.
+                    # A second equal wait_for can erase its cancellation receipt.
+                    invoked = True
+                    cleanup_confirmed = False
+                    try:
+                        result = await operation if native else await asyncio.wait_for(operation, timeout=timeout)
+                    except Exception as error:
+                        if attempts >= _PREFLIGHT_RETRIES or not preflight_failed(job["session_id"], error=error):
+                            raise
+                        evidence = error.native_execution
+                    else:
+                        if attempts >= _PREFLIGHT_RETRIES or not preflight_failed(job["session_id"], result=result):
+                            break
+                        evidence = result["native_execution"]
+                        if native:
+                            # Only so a room purge can find the empty session it left.
+                            self._retain_native_session_identity(job, evidence, result.get("session_id"))
+                    # The attempt left nothing running and no prompt was sent.
+                    attempts += 1
+                    invoked, cleanup_confirmed = False, True
+                    self.store.record_preflight_retry(job["id"], attempts, evidence.get("failure_diagnostic"))
+                    await asyncio.sleep(_PREFLIGHT_RETRY_DELAY_SECONDS)
+                    remaining = seconds_available(job["deadline"], self.clock())
+                    if remaining is not None and remaining <= 0:
+                        raise RoomError("deadline_exceeded")
+                    timeout = remaining if native else min(call_limit, remaining) if remaining is not None else call_limit
+                preflight = preflight_failed(job["session_id"], result=result)
                 observation = result.get("native_execution") or {} if native else {}
                 cleanup_confirmed = (result.get("cleanup_confirmed") is True and observation.get("cleanup_confirmed") is True if native else
                                      result.get("failure_code") != "process_or_output_failure")
@@ -5721,12 +5751,15 @@ class RoomService(RoomPromptMixin):
                         # Failure to bind a global limit must not conceal the
                         # actual room-level native failure or invent a login.
                         pass
-                quota_refused = (result.get("failure_code") == "subscription_limit_reached"
-                                 and cleanup_confirmed
-                                 and (not native or not observation.get("side_effects_possible")
-                                      or self._quota_left_tree_unchanged(job))
-                                 and self.store.finish_quota_job(job["id"]))
-                if not quota_refused:
+                if (result.get("failure_code") == "subscription_limit_reached"
+                        and cleanup_confirmed
+                        and (not native or not observation.get("side_effects_possible")
+                             or self._quota_left_tree_unchanged(job))
+                        and self.store.finish_quota_job(job["id"])):
+                    retire_reason = "subscription_limit_reached"
+                elif preflight and self.store.finish_quota_job(job["id"], NATIVE_PREFLIGHT_FAILED, peer_required=True):
+                    retire_reason = NATIVE_PREFLIGHT_FAILED
+                else:
                     self._finish(job, result)
             except asyncio.CancelledError as error:
                 # invoke owns process-group termination; the caller awaits this task before confirmation.
@@ -5738,7 +5771,13 @@ class RoomService(RoomPromptMixin):
                 if partner_operation:
                     self.store.finish_partner_interruption(job["id"], partner_operation["id"], invoked=invoked)
                 else:
-                    self.store.finish_job(job["id"], error="invoke_interrupted", uncertain=invoked)
+                    # Cancelling a call that resumed a known session leaves that
+                    # session where it was; only a fresh session can be lost.
+                    settled = (not native and invoked and job["session_id"] is not None
+                               and (getattr(error, "cleanup_confirmed", False) is True
+                                    or getattr(error, "native_execution", {}).get("cleanup_confirmed") is True))
+                    self.store.finish_job(job["id"], error="invoke_interrupted", uncertain=invoked,
+                                          **({"identity_uncertain": False} if settled else {}))
                 cleanup_confirmed = (getattr(error, "native_execution", {}).get("cleanup_confirmed") is True
                                      if native and invoked else True)
                 raise
@@ -5756,11 +5795,19 @@ class RoomService(RoomPromptMixin):
                 self.store.finish_job(job["id"], error=error.code,
                                       uncertain=invoked or error.code == "project_commit_unconfirmed")
             except Exception as error:
+                preflight = preflight_failed(job["session_id"], error=error)
                 if native and getattr(error, "native_execution", None):
                     self.store.record_native_execution(job["id"], error.native_execution, "failed")
                     self._retain_native_session_identity(job, error.native_execution)
                     cleanup_confirmed = error.native_execution.get("cleanup_confirmed") is True
-                self.store.finish_job(job["id"], error="invoke_failed", uncertain=invoked)
+                if not preflight:
+                    self.store.finish_job(job["id"], error="invoke_failed", uncertain=invoked)
+                else:
+                    cleanup_confirmed = True
+                    if self.store.finish_quota_job(job["id"], NATIVE_PREFLIGHT_FAILED, peer_required=True):
+                        retire_reason = NATIVE_PREFLIGHT_FAILED
+                    else:
+                        self.store.finish_job(job["id"], error=NATIVE_PREFLIGHT_FAILED)
             finally:
                 if native and not invoked:
                     # The host never called the adapter; no new native session
@@ -5769,8 +5816,8 @@ class RoomService(RoomPromptMixin):
                         "never_started": True, "tool_calls": 0, "tool_results": 0,
                         "side_effects_possible": False, "cleanup_confirmed": True}, "not_started")
                 self.store.record_job_cleanup(job["id"], confirmed=cleanup_confirmed)
-            if quota_refused:
-                self._retire_quota(room_id, provider, "subscription_limit_reached")
+            if retire_reason:
+                self._retire_quota(room_id, provider, retire_reason)
             await self._refresh_active_quota_members(room_id)
             if job.get("team") and self.store.snapshot(room_id)["team"]["phase"] in {
                     "stopped", "unknown", "cancelled", "interrupted"}:
@@ -5898,6 +5945,10 @@ class RoomService(RoomPromptMixin):
             return
         if not isinstance(result, dict):
             self.store.finish_job(job["id"], error="invalid_adapter_response", uncertain=True)
+            return
+        if preflight_failed(job["session_id"], result=result):
+            # The prompt never left and nothing ran: no session or effect to doubt.
+            self.store.finish_job(job["id"], error=NATIVE_PREFLIGHT_FAILED)
             return
         text = ""
         if not job.get("team") and job.get("mode") not in PROJECT_MODES and isinstance(result.get("text"), str):
