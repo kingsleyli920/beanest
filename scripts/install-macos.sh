@@ -75,12 +75,14 @@ dest="$target/$APP_NAME"
 
 if pgrep -f "$dest/Contents/MacOS/" >/dev/null 2>&1; then
   say "正在退出正在运行的豆窝……"
-  osascript -e 'tell application "豆窝" to quit' >/dev/null 2>&1 || true
-  for _ in $(seq 1 40); do
+  # By bundle id: a development build may share the display name.
+  osascript -e 'tell application id "io.github.kingsleyli920.beanest" to quit' >/dev/null 2>&1 || true
+  # The app gives its background service up to 20 seconds to stop.
+  for _ in $(seq 1 120); do
     pgrep -f "$dest/Contents/MacOS/" >/dev/null 2>&1 || break
     sleep 0.5
   done
-  pgrep -f "$dest/Contents/MacOS/" >/dev/null 2>&1 && fail "豆窝还没退出。请先在豆窝里退出，再重新运行这条命令。"
+  pgrep -f "$dest/Contents/MacOS/" >/dev/null 2>&1 && fail "豆窝还没退出。如果它弹出了提示，点“好”；然后再运行一次这条命令。"
 fi
 
 if [ -e "$dest" ]; then
