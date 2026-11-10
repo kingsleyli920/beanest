@@ -55,12 +55,19 @@ The app above needs this checkout and its Python environment. To build one you c
 
 ```bash
 npm --prefix desktop ci
-npm --prefix desktop run build:release
+npm --prefix desktop run build:release                 # this Mac's chip
+npm --prefix desktop run build:release -- --arch x64   # Intel
 ```
 
 Once the app is open, you don't need Claude Code, Codex or Kimi Code installed already: the first screen can run each provider's official install script in one click, and you then sign in with your own account.
 
-This needs [uv](https://docs.astral.sh/uv/) and network access at build time, and currently targets macOS on Apple Silicon. The app and a zip land in `runtime/desktop-release/`. The app carries its own Python and backend and keeps user data in `~/Library/Application Support/io.github.kingsleyli920.beanest`. Users still install and sign in to their agent CLIs. The build is ad-hoc signed and not notarized, so macOS asks people to allow it in System Settings the first time.
+This needs [uv](https://docs.astral.sh/uv/) and network access at build time. An Apple silicon Mac can build both the Apple silicon and the Intel app, and the app needs macOS 13 or later. The app and a zip land in `runtime/desktop-release/arm64/` or `runtime/desktop-release/x64/`. The app carries its own Python and backend and keeps user data in `~/Library/Application Support/io.github.kingsleyli920.beanest`. Users still install and sign in to their agent CLIs. The build is ad-hoc signed and not notarized, so a zip downloaded in a browser has to be allowed in System Settings the first time.
+
+A published release can also be installed or updated with one Terminal command. It picks the package for the Mac's chip, checks its checksum and signature, and does not trigger the cannot-verify prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
+```
 
 ## Using Beanest
 

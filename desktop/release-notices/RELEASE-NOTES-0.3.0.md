@@ -18,9 +18,17 @@
 - 还没装这些工具也可以：打开 App 后，首页可以一键运行各家的官方安装脚本，再用你自己的账号登录。
 - 界面有中文和英文。
 
-### 第一次打开
+### 安装
 
-这个版本没有经过 Apple 公证，所以第一次打开要多走几步，之后就不用了。
+**用终端装（推荐）**：打开“终端”（在“应用程序 → 实用工具”里），粘贴下面这一行，按回车。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
+```
+
+它会按你这台 Mac 的芯片下载对应的包，核对文件没被改过，装进“应用程序”并打开。这样装不会弹出“无法验证”的提示。以后有新版本，再运行一次同一行就是升级，对话记录和设置都会保留。
+
+**手动下载**：这个版本没有经过 Apple 公证，所以手动下载的第一次打开要多走几步，之后就不用了。
 
 1. 按你的 Mac 下载对应的压缩包：Apple 芯片（M 系列）下载 `Beanest-0.3.0-macos-arm64.zip`，Intel 芯片下载 `Beanest-0.3.0-macos-x64.zip`。不确定是哪种，可以点屏幕左上角的苹果菜单 →“关于本机”，看“芯片”或“处理器”那一栏。双击解压，得到“豆窝”。
 2. 把“豆窝”拖到“应用程序”文件夹。
@@ -30,7 +38,7 @@
 
 ### 支持范围
 
-Apple 芯片（M 系列）的 Mac 用 `Beanest-0.3.0-macos-arm64.zip`，Intel 芯片的 Mac 用 `Beanest-0.3.0-macos-x64.zip`。Windows 和 Linux 目前用不了。
+需要 macOS 13 或更新的系统。Apple 芯片（M 系列）的 Mac 用 `Beanest-0.3.0-macos-arm64.zip`，Intel 芯片的 Mac 用 `Beanest-0.3.0-macos-x64.zip`。Windows 和 Linux 目前用不了。
 
 ### 需要你自己准备
 
@@ -41,6 +49,10 @@ Apple 芯片（M 系列）的 Mac 用 `Beanest-0.3.0-macos-arm64.zip`，Intel �
 - 适合一个人在自己的 Mac 上用，粗糙的地方还不少。
 - 对话和交付记录存在你的 Mac 上，服务只在本机运行，不要把它开放到网络上。这些工具工作时，会把内容发给各自的服务商。
 - 开发副本不是沙箱。开启完全访问（Full Access）后，这些工具可以执行命令、联网，也能读到你账号能读到的其他文件。
+
+### 开源组件
+
+App 里带的 FFmpeg 按 LGPL 授权，对应源码是本页附件 `beanest-0.3.0-ffmpeg-source.tar.gz`。其他组件的许可文本在 App 的 `Contents/Resources/licenses` 和 `THIRD_PARTY_NOTICES.md` 里。
 
 ### 反馈问题
 
@@ -62,9 +74,17 @@ This is the first version you can download and run directly. The app carries the
 - If you don't have these tools yet, the app's first screen can run each provider's official install script in one click, and you then sign in with your own account.
 - The interface is available in English and Chinese.
 
-### Opening it for the first time
+### Installing
 
-This version is not notarized by Apple, so the first launch takes a few extra steps. You only do this once.
+**From Terminal (recommended):** open Terminal (in Applications → Utilities), paste this line and press Return.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
+```
+
+It downloads the package for your Mac's chip, checks that the file is unchanged, puts the app in Applications and opens it. Installed this way, macOS does not show the cannot-verify prompt. To update later, run the same line again; your conversations and settings are kept.
+
+**Downloading by hand:** this version is not notarized by Apple, so a manual download takes a few extra steps the first time you open it. You only do this once.
 
 1. Download the zip for your Mac: `Beanest-0.3.0-macos-arm64.zip` for Apple silicon (M series), `Beanest-0.3.0-macos-x64.zip` for Intel. If you're not sure which you have, choose Apple menu → About This Mac and look at Chip or Processor. Double-click the zip to unzip it. You get an app named 豆窝.
 2. Drag 豆窝 into your Applications folder.
@@ -74,7 +94,7 @@ This version is not notarized by Apple, so the first launch takes a few extra st
 
 ### What it runs on
 
-Macs with Apple silicon (M series) use `Beanest-0.3.0-macos-arm64.zip`, and Intel Macs use `Beanest-0.3.0-macos-x64.zip`. Windows and Linux are not supported at this time.
+macOS 13 or later. Macs with Apple silicon (M series) use `Beanest-0.3.0-macos-arm64.zip`, and Intel Macs use `Beanest-0.3.0-macos-x64.zip`. Windows and Linux are not supported at this time.
 
 ### What you need
 
@@ -85,6 +105,10 @@ At least one paid plan with Claude, ChatGPT or Kimi. Beanest does not provide ac
 - It is meant for one person on their own Mac, and you should expect rough edges.
 - Conversations and deliveries are kept on your Mac and the service runs locally. Do not expose it to a network. While they work, these tools send content to their own providers.
 - A development copy is not a sandbox. With Full Access, these tools can run commands, use the network, and read other files your account can read.
+
+### Open-source components
+
+The app includes FFmpeg under the LGPL. Its corresponding source is attached to this release as `beanest-0.3.0-ffmpeg-source.tar.gz`. License texts for the other components are in the app's `Contents/Resources/licenses` and `THIRD_PARTY_NOTICES.md`.
 
 ### Reporting a problem
 

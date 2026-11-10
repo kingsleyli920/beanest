@@ -8,7 +8,7 @@ The app includes `libffmpeg.dylib` at `Contents/Frameworks/Electron Framework.fr
 
 The Intel (x64) app carries the same library from the prebuilt Electron v44.9.3 for macOS x64. Its version string is also `git-2026-07-15-6cfe2122b0`, so the source below applies to both apps.
 
-The corresponding source is reached in this order:
+The corresponding source is attached to the same GitHub Release as `beanest-0.3.0-ffmpeg-source.tar.gz` (SHA-256 `131930c4fa37f07352660bf997d86044ac0a57cebdc7b809a0142d49e0f0be5a`): Chromium's FFmpeg tree at the commit below, the one patch Electron applies to it, and Electron's build arguments, with rebuild notes in its `README.md`. The same source can also be reached in this order:
 
 | What | Where |
 | --- | --- |
@@ -23,7 +23,7 @@ App 内的 `libffmpeg.dylib` 位于 `Contents/Frameworks/Electron Framework.fram
 
 Intel（x64）版 App 里的这个库来自 macOS x64 的 Electron v44.9.3 预编译包，版本串同样是 `git-2026-07-15-6cfe2122b0`，对应源码和 arm64 版相同。
 
-对应源码按上表查找：Electron `v44.9.3` tag 的 `DEPS` 指向 Chromium `152.0.7977.167`，Chromium 的 `DEPS` 指向 FFmpeg 提交 `2b68d2babae73714846961fb0ee47e3b3d2e39a9`。上游 FFmpeg 仓库是 https://git.ffmpeg.org/ffmpeg.git。
+对应源码作为附件 `beanest-0.3.0-ffmpeg-source.tar.gz` 放在同一个 GitHub Release 里（SHA-256 同上），包含下述提交的 Chromium FFmpeg 源码、Electron 对它打的唯一补丁和 Electron 的编译参数，重新编译的方法见包内 `README.md`。也可以按上表自己查找：Electron `v44.9.3` tag 的 `DEPS` 指向 Chromium `152.0.7977.167`，Chromium 的 `DEPS` 指向 FFmpeg 提交 `2b68d2babae73714846961fb0ee47e3b3d2e39a9`。上游 FFmpeg 仓库是 https://git.ffmpeg.org/ffmpeg.git。
 
 ## Where each notice file came from · 各许可文件的来源
 
