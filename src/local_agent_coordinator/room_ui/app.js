@@ -2179,7 +2179,9 @@ function runtimeSubmissionError() {
 }
 function runtimePermissionName(permission) {
   const name = ({ plan: 'Plan', read_only: t("只读"), workspace_write: t("副本内修改"), full_access: 'Full Access' })[permission] || t("未记录");
-  return nativePermissionAvailable() && ['read_only', 'workspace_write'].includes(permission) ? t("历史设置：{p0}", { p0: name }) : name;
+  // Only native rooms moved to Plan and Full Access; these names are current elsewhere.
+  const room = state.snapshot?.room; const native = room ? room.mode === 'native_project' : state.mode === 'native_project';
+  return native && nativePermissionAvailable() && ['read_only', 'workspace_write'].includes(permission) ? t("历史设置：{p0}", { p0: name }) : name;
 }
 function nativePlanPermissionsAvailable() {
   return nativePermissionAvailable() && state.runtimeOptions?.permissions?.some((permission) => permission.id === 'plan' && permission.legacy !== true);
@@ -2302,7 +2304,9 @@ function runtimeContext() {
   const workMode = (configuration || editable) ? state.workMode : run?.work_mode || room?.work_mode;
   const unsent = configuration && Object.keys(pendingRuntimeChanges()).length > 0;
   const supported = state.runtimeOptions?.scope === 'coordinator_owned_only';
-  return { room, run, editable, locked, recorded, choices, workMode, supported, newGoal, nativeHandoff, nativeRecovery, configuration, unsent };
+  // Reply-only rooms never choose settings: their calls use each tool's own.
+  const unrecorded = !editable && !recorded && (!room?.mode || room.mode === 'native_project');
+  return { room, run, editable, locked, recorded, unrecorded, choices, workMode, supported, newGoal, nativeHandoff, nativeRecovery, configuration, unsent };
 }
 function runtimePartnerReadOnly(id) {
   return state.partnerLifecycleSupported && state.snapshot?.members?.some((member) => member.id === id && member.configuration_dispatchable === false) === true;
@@ -2320,9 +2324,9 @@ function runtimeShortcutModelLabel(model, models) {
   return resolved ? t("{p0}（默认）", { p0: resolved.name || resolved.id }) : t("默认推荐");
 }
 function renderRuntimeShortcuts(context = runtimeContext()) {
-  const { room, editable, recorded, choices, workMode, newGoal, nativeRecovery, configuration, unsent } = context;
+  const { room, editable, recorded, unrecorded, choices, workMode, newGoal, nativeRecovery, configuration, unsent } = context;
   const caption = configuration ? unsent ? t("发消息后生效 · ") : configuration.pending ? t("后续工作生效 · ") : t("设置 · ") : room ? editable ? newGoal ? t("新目标 · ") : t("下一轮 · ") : t("本轮 · ") : '';
-  $('runtime-settings-summary').textContent = configuration ? t("{p0}权限：{p1}", { p0: caption, p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) }) : nativeRecovery ? t("继续沿用本任务设置") : !editable && !recorded ? t("权限：未记录")
+  $('runtime-settings-summary').textContent = configuration ? t("{p0}权限：{p1}", { p0: caption, p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) }) : nativeRecovery ? t("继续沿用本任务设置") : unrecorded ? t("权限：未记录")
     : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
   for (const id of state.participantIds) {
     const group = state.partnerControls.get(id); if (!group) continue;
@@ -2332,9 +2336,9 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     const choice = historical ? recorded?.members?.[id] : choices.members[id];
     const models = state.runtimeOptions?.partners?.[id]?.models || [];
     const model = models.find((entry) => entry.id === choice?.model);
-    const fullModelLabel = !editable && !recorded ? t("未记录模型") : choice?.model ? model ? runtimeModelLabel(model, models) : choice.model : t("跟随工具");
+    const fullModelLabel = unrecorded ? t("未记录模型") : choice?.model ? model ? runtimeModelLabel(model, models) : choice.model : t("跟随工具");
     const modelLabel = model ? runtimeShortcutModelLabel(model, models) : fullModelLabel;
-    const effort = !editable && !recorded ? t("未记录强度") : ({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[choice?.effort] || choice?.effort || t("默认强度");
+    const effort = unrecorded ? t("未记录强度") : ({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[choice?.effort] || choice?.effort || t("默认强度");
     const shortEffort = effort === t("默认强度") ? t("默认") : effort;
     const text = `${displayName(id)} · ${modelLabel} · ${shortEffort}${historical ? t(" · 仅查看") : ''} ⌄`;
     if (button.dataset.label !== text) {
@@ -2359,7 +2363,7 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
   $('runtime-shortcuts-caption').hidden = !room;
 }
 function renderRuntimeSettings() {
-  const { room, editable, locked, recorded, choices, workMode, supported, newGoal, nativeHandoff, configuration, unsent } = runtimeContext();
+  const { room, editable, locked, recorded, unrecorded, choices, workMode, supported, newGoal, nativeHandoff, configuration, unsent } = runtimeContext();
   $('runtime-settings').hidden = !!state.reader || materialsOpen();
   renderRuntimeShortcuts();
   const permission = choices.permission;
@@ -2407,7 +2411,7 @@ function renderRuntimeSettings() {
   if (body.dataset.fingerprint === fingerprint) return;
   const focusedId = nodeContains(body, document.activeElement) ? document.activeElement.id : '';
   body.dataset.fingerprint = fingerprint; body.replaceChildren();
-  if (!editable && !recorded) { body.append(element('p', t("这份记录没有保存权限、模型或思考强度，无法确认当时的设置。"), 'detail-caption')); return; }
+  if (unrecorded) { body.append(element('p', t("这份记录没有保存权限、模型或思考强度，无法确认当时的设置。"), 'detail-caption')); return; }
   const label = element('label', workMode === 'plan' ? t("动手时统一权限 ") : t("统一权限 "), 'runtime-permission'); const select = element('select'); select.id = 'runtime-permission';
   label.hidden = !!state.runtimePartner;
   const nativePermissions = nativePlanPermissionsAvailable();

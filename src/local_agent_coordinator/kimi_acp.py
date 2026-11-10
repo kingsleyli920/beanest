@@ -107,6 +107,14 @@ class ACPConnection:
         while await self.process.stderr.read(65536):
             pass
 
+    def _read_only_refusal(self, params):
+        """The option id that refuses this one tool, when the call is read-only."""
+        if self.permission not in {"plan", "read_only"} or not isinstance(params, dict) or not isinstance(params.get("options"), list):
+            return None
+        options = [item for item in params["options"] if isinstance(item, dict) and isinstance(item.get("optionId"), str)]
+        return next((item["optionId"] for kind in ("reject_once", "reject_always")
+                     for item in options if item.get("kind") == kind), None)
+
     async def send(self, value):
         self.process.stdin.write(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n")
         await self.process.stdin.drain()
@@ -145,7 +153,12 @@ class ACPConnection:
                     elif "id" in row:
                         # A native permission question remains a real question.
                         # The coordinator cannot silently approve it for a user.
-                        if method == "session/request_permission" and isinstance(params, dict):
+                        refusal = self._read_only_refusal(params) if method == "session/request_permission" else None
+                        if refusal is not None:
+                            # A read-only call has already been told it cannot
+                            # act; the partner carries on without this tool.
+                            await self.send({"jsonrpc": "2.0", "id": row["id"], "result": {"outcome": {"outcome": "selected", "optionId": refusal}}})
+                        elif method == "session/request_permission" and isinstance(params, dict):
                             if self.on_update is not None:
                                 tool = params.get("toolCall", {})
                                 title = tool.get("title") if isinstance(tool, dict) else None

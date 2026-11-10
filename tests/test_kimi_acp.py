@@ -166,6 +166,12 @@ FAKE_ACP = textwrap.dedent(r'''
                 (root / "child-pid").write_text(str(child.pid))
                 tool("23:unfinished-read")
                 (root / "prompt-held").touch()
+            elif case == "permission_refusable":
+                pending_prompt = row["id"]
+                send({"id": 9001, "method": "session/request_permission", "params": {
+                    "sessionId": sid, "toolCall": {"toolCallId": "23:permission", "title": "Fictional native question"},
+                    "options": [{"optionId": "approve-once", "name": "Approve once", "kind": "allow_once"},
+                                {"optionId": "refuse", "name": "Reject", "kind": "reject_once"}]}})
             elif case == "permission":
                 pending_prompt = row["id"]
                 send({"id": 9001, "method": "session/request_permission", "params": {
@@ -514,6 +520,22 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result["native_execution"]["tool_results"], 0)
                 elif case == "nonzero":
                     self.assertEqual(result["native_execution"]["exit_code"], 7)
+
+    async def test_a_read_only_call_refuses_the_tool_and_keeps_working(self):
+        # Catches: Plan permission turning a tool request into a question the user cannot answer.
+        self.scenario("permission_refusable")
+        result = await self.invoke(permission="plan")
+        self.assertEqual(result["status"], "completed", result)
+        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
+
+    async def test_full_access_never_answers_a_tool_request_for_the_user(self):
+        # Catches: the read-only refusal leaking into a mode where the question is real.
+        self.scenario("permission_refusable")
+        result = await self.invoke(permission="full_access")
+        self.assert_failed(result, "native_permission_required")
+        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "cancelled"}})
 
     async def test_real_native_permission_request_is_cancelled_without_auto_approval(self):
         self.scenario("permission")
