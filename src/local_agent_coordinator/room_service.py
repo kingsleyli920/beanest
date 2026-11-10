@@ -1605,7 +1605,8 @@ class RoomService(RoomPromptMixin):
             return "auto" if recoverable else None
         if team.get("phase") == "stopped" and team.get("stop_reason") == "all_partners_quota_exhausted":
             return "quota_wait" if policy.get("quota_failover") else None
-        if (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted"}
+        # Same phases as _schedule_auto_continue: quitting the app leaves it cancelled.
+        if (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
                 and continues_automatically(team.get("stop_reason"))):
             return "auto"
         return None
@@ -5883,7 +5884,8 @@ class RoomService(RoomPromptMixin):
                      if item["id"] == job["team"]["task_id"]), None)
         project_mode = job["mode"] in PROJECT_MODES
         if read_only(job.get("work_mode"), job.get("runtime_settings")) and (parsed.get("files") or parsed.get("edits")):
-            raise RoomError("plan_read_only" if job.get("work_mode") == "plan" else "permission_read_only")
+            # Nothing is written yet: the partner resends with the content in its text.
+            raise RoomError("team_files_forbidden")
         for index, command in enumerate(parsed["commands"]):
             if command["type"] in {"propose", "request_help"} and command["capability"] == "python" and not project_mode:
                 raise RoomError("team_capability_unavailable")
@@ -6028,7 +6030,9 @@ class RoomService(RoomPromptMixin):
             # Enforce the user's chosen boundary before even expanding an edit
             # or dispatching an inspection; provider prose is not authorization.
             if read_only(job.get("work_mode"), job.get("runtime_settings")) and (parsed.get("files") or parsed.get("edits")):
-                raise RoomError("plan_read_only" if job.get("work_mode") == "plan" else "permission_read_only")
+                # In a team the partner corrects its reply; a plain chat shows the refusal.
+                raise RoomError("team_files_forbidden" if job.get("team") else
+                                "plan_read_only" if job.get("work_mode") == "plan" else "permission_read_only")
             if native:
                 if job.get("partner_handoff_inspection"):
                     self._finish_partner_handoff_inspection(job, parsed, identity, usage, observation)

@@ -1207,8 +1207,12 @@ class RoomStore:
             tasks = db.execute("SELECT id,status,owner,result_digest,result_version,blocked_reason,block_cause "
                                "FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY id",
                                (room_id, team["current_run_id"])).fetchall()
-            board = [team["stop_reason"] or (objective["stop_reason"] if objective else None),
-                     [list(task) for task in tasks]]
+            reason = team["stop_reason"] or (objective["stop_reason"] if objective else None)
+            board = [reason, [list(task) for task in tasks]]
+            if reason in {"service_restarted", "service_shutdown"}:
+                # Quitting the app is not a stop the work caused; quitting again
+                # before a task finished must still resume.
+                board.append(team["current_run_id"])
             fingerprint = hashlib.sha256(json.dumps(board, sort_keys=True).encode()).hexdigest()
             repeated = db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
                                   "AND json_extract(value_json,'$.kind')='objective_auto_continued' "
@@ -5776,9 +5780,17 @@ class RoomStore:
                                "UNION SELECT room_id FROM executions WHERE status IN ('queued','working')").fetchall()
             for row in rooms:
                 room_id = row[0]
+                # A collaborating reply-only call applies nothing before its reply is
+                # parsed; one the restart cut off is isolated below, not a doubt about
+                # who the partner is. Native work and plain chats keep the old rule.
+                reply_only = (self._room(db, room_id)["mode"] != "native_project" and self._team.team(db, room_id) is not None
+                              and db.execute("SELECT 1 FROM executions WHERE room_id=? AND status IN ('queued','working') LIMIT 1",
+                                             (room_id,)).fetchone() is None)
+                cut_off = db.execute("SELECT id,provider FROM jobs WHERE room_id=? AND status='working'", (room_id,)).fetchall()
                 self._team.stop(db, room_id, "service_restarted", status="interrupted")
-                db.execute("UPDATE members SET identity_uncertain=1 WHERE room_id=? AND provider IN "
-                           "(SELECT provider FROM jobs WHERE room_id=? AND status='working')", (room_id, room_id))
+                if not reply_only:
+                    db.execute("UPDATE members SET identity_uncertain=1 WHERE room_id=? AND provider IN "
+                               "(SELECT provider FROM jobs WHERE room_id=? AND status='working')", (room_id, room_id))
                 db.execute("UPDATE jobs SET status='interrupted',error='service_restarted' WHERE room_id=? "
                            "AND status IN ('queued','working')", (room_id,))
                 db.execute("UPDATE members SET status='interrupted',current_task=NULL WHERE room_id=?", (room_id,))
@@ -5786,6 +5798,18 @@ class RoomStore:
                 db.execute("UPDATE executions SET status='interrupted' WHERE room_id=? "
                            "AND status IN ('queued','working')", (room_id,))
                 self._event(db, room_id, "warning", sender="system", code="service_restarted_no_retry")
+                if reply_only:
+                    # A killed service cannot confirm its tool processes exited. In a
+                    # reply-only room such a process can only touch its own session,
+                    # so its partner moves to a fresh one and nothing is left to clean.
+                    team = self._team.team(db, room_id)
+                    run_id = team["current_run_id"] if team is not None else None
+                    for job in cut_off:
+                        db.execute("UPDATE members SET session_id=NULL WHERE room_id=? AND provider=?", (room_id, job["provider"]))
+                        self._event(db, room_id, "job_cleanup", sender="system", job_id=job["id"], provider=job["provider"],
+                                    cleanup_confirmed=True, isolated_from_session=True)
+                        self._event(db, room_id, "partner_session_rotated", sender="system", provider=job["provider"],
+                                    run_id=run_id, previous_run_id=run_id, old_calls_replayed=False, scope="service_restarted")
             # A crash between the last cleanup and checkpoint scheduling may
             # leave no queued job. Startup records the stop rather than
             # resuming mid-flight; the host's automatic continue (stop_policy)

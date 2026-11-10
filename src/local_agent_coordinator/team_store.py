@@ -344,8 +344,10 @@ class TeamStore:
         resumable.update(recovery_errors)
         reply_only = self.store._room(db, room_id)["mode"] != "native_project"
         if reply_only:
-            # A dead reply-only call applied nothing. Native work has its own audit.
+            # A dead reply-only call applied nothing, nor did one a killed service
+            # cut off. Native work has its own audit.
             resumable.update(CALL_DIED)
+            resumable.add("service_restarted")
         text_failure = self._host_text_failure_source(db, room_id, source_run_id)
         if text_failure:
             resumable.update({"invalid_text", "message_too_large"})
@@ -1215,7 +1217,11 @@ class TeamStore:
             "team_plan_locked": " Only the plan author proposes, and only while planning; omit propose commands now.",
             "invalid_target": (" request_help.to must name a different available peer; with repair_paths it may be null. "
                                "If no peer is available, finish with a self-checked result or block with a concrete reason."),
-            "team_files_forbidden": " Only a work call for its own task may submit files, edits or project requests.",
+            "team_files_forbidden": (" This room is read-only: files must be [] and edits [] or null; put any proposed "
+                                     "change or document in your text result instead."
+                                     if read_only(self.store._room(db, job["room_id"])["work_mode"],
+                                                  json.loads(self.store._room(db, job["room_id"])["runtime_settings_json"] or "null"))
+                                     else " Only a work call for its own task may submit files, edits or project requests."),
             "team_capability_unavailable": " The requested capability is unavailable in this room; use text.",
             "native_json_files_forbidden": (" Native calls write files directly in the private project tree; leave "
                                             "files and edits empty in the JSON reply."),
