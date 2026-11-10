@@ -792,7 +792,7 @@ test('descriptor names, avatars and model text stay inert with CSP-compatible lo
   assert.deepEqual([...messageAvatar.attributes], [['aria-hidden', 'true']]);
   assert.deepEqual(messageAvatar.dataset, { agent: 'test_peer' });
   assert.equal(descendants(ui.document.root).some((node) => ['IMG', 'SVG', 'IFRAME'].includes(node.tagName)), false);
-  assert.deepEqual(ui.document.querySelectorAll('script').map((node) => node.getAttribute('src')), ['/i18n-en-a.js', '/i18n-en-b.js', '/i18n-en-c.js', '/i18n.js', '/markdown.js', '/app.js', '/view-account.js', '/view-manager.js', '/boot.js']);
+  assert.deepEqual(ui.document.querySelectorAll('script').map((node) => node.getAttribute('src')), ['/i18n-en-a.js', '/i18n-en-b.js', '/i18n-en-c.js', '/i18n.js', '/markdown.js', '/app.js', '/view-account.js', '/view-manager.js', '/view-setup.js', '/boot.js']);
   assert.equal(ui.document.querySelectorAll('link')[0].getAttribute('href'), '/style.css');
   assert.equal(ui.document.querySelectorAll('style').length, 0);
   assert.doesNotMatch(html, /\bon\w+\s*=|\bstyle\s*=|https?:\/\//i);
