@@ -252,6 +252,12 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((accounts["codex"]["actual_percent"], accounts["third"]["actual_percent"]), (75, 25))
         self.assertEqual(accounts["codex"]["target_percent"], 50)
 
+    async def test_planners_are_told_related_work_is_not_a_dependency(self):
+        # Catches planners being left to chain tasks that partners could do at the same time.
+        await self.finished()
+        plan = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "plan")
+        self.assertIn("merely related or similar has no dependency", plan["prompt"])
+
     async def test_an_unconfigured_room_chooses_as_it_always_did(self):
         # Catches the feature changing behaviour for rooms that never set a share.
         self.profiles = {}
