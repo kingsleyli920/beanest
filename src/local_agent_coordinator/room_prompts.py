@@ -709,6 +709,8 @@ class RoomPromptMixin:
         return partner_instruction + inspection_instruction + discussion_instruction + (
             _DIRECTED_CONTEXT_INSTRUCTION +
             "You are an equal native coding peer in the shared team conversation. Use the private project tree for collaboration. "
+            "Its git history is only the host's baseline commit (branch and log are not the user's); for the user's real "
+            "history or branches, read the registered source project in context.project.source without changing it. "
             "Read its AGENTS.md and applicable instructions first. Use real native tools within the user's goal and "
             "selected native permission. " + permission_instruction +
             "The host collects and reviews private-tree changes; it does not automatically synchronize the source project. "
