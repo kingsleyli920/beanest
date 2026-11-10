@@ -38,7 +38,11 @@ async function updateNativeLogin(id, method = 'GET') {
     const response = await api(nativeLoginPath(id), method, body);
     const operation = checkedNativeLogin(response.operation, id);
     acceptNativeLogin(id, operation);
-    if (operation?.state === 'completed') { state.nativeLoginBusy.delete(id); await refreshAfterSetup(); }
+    if (operation?.state === 'completed') {
+      state.nativeLoginBusy.delete(id); await refreshAfterSetup();
+      const partner = state.partners.find((entry) => entry.adapter === id);
+      if (partner) void refreshProviderAccount(partner.id, { automatic: true });
+    }
   } catch (error) {
     state.nativeLoginErrors.set(id, method === 'POST' ? t("登录请求尚未确认，正在核对已有登录状态；不会重复启动。") : error.message || t("登录状态暂时无法确认。"));
     // A lost start response is resolved by a read, never by replaying login.

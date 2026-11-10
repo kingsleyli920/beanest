@@ -1968,7 +1968,9 @@ function memberAvailabilityLine(info) {
 // The card says only whether the partner is signed in; who it is shows under 账号与额度.
 function memberLoginCaption(account, id) {
   const partner = state.partners.find((entry) => entry.id === id);
-  if (state.adapters.find((adapter) => adapter.id === partner?.adapter)?.setup?.state === 'login_required') return t("还差登录");
+  const setupState = state.adapters.find((adapter) => adapter.id === partner?.adapter)?.setup?.state;
+  if (setupState === 'login_required') return t("还差登录");
+  if (setupState === 'ready' && account?.stale) return t("已登录");  // the tool has confirmed it; only the account details are old
   if (!account || account.state === 'not_checked') return t("登录未检查");
   if (account.stale) return t("登录待刷新");
   if (account.state === 'error') return t("登录检查未成功");
