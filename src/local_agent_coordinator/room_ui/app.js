@@ -2126,7 +2126,14 @@ function validRuntimeSettings(value) {
 }
 function naturalRuntimeConfiguration(snapshot = state.snapshot) {
   if (!state.naturalRuntimeSupported || !snapshot?.room) return null;
-  const value = snapshot.runtime_configuration;
+  let value = snapshot.runtime_configuration;
+  // A reply-only room started without choosing models records no settings;
+  // its calls already use each tool's default, so that is what the user edits.
+  if (value?.desired && value.desired.runtime_settings == null && snapshot.room.mode && snapshot.room.mode !== 'native_project') {
+    const members = Object.fromEntries((snapshot.members || []).filter((member) => agentPattern.test(member?.id || ''))
+      .map((member) => [member.id, { model: null, effort: null }]));
+    value = { ...value, desired: { ...value.desired, runtime_settings: { permission: 'workspace_write', members } } };
+  }
   if (!value || typeof value.can_edit !== 'boolean' || !['plan', 'build'].includes(value.desired?.work_mode)
       || !validRuntimeSettings(value.desired?.runtime_settings) || typeof value.pending !== 'boolean') return null;
   return value;
