@@ -961,6 +961,20 @@ test('all-disabled catalogs keep management available and uncertain additions ar
   assert.equal(ui.posts().length, 1);
 });
 
+test('adding a single file as a project says to choose a folder instead of reporting an unknown result', async () => {
+  // Catches: project_unsafe_path missing from the request labels, so the page said
+  // "result not confirmed, do not add again" for a plain wrong-path mistake.
+  const ui = await browser({ route(request) {
+    if (request.path === '/api/projects' && request.method === 'POST') return { error: 'project_unsafe_path' };
+  } });
+  await ui.click('open-projects');
+  ui.get('project-name').value = '虚构项目';
+  ui.get('project-path').value = '/fictional/notes.txt';
+  ui.get('project-form').fire('submit'); await settle();
+  assert.match(ui.get('manager-notice').textContent, /项目必须是一个普通文件夹/);
+  assert.doesNotMatch(ui.get('manager-notice').textContent, /尚未确认/);
+});
+
 test('global monitors describe historical attention states without pretending that an empty task list is active work', async () => {
   const partners = catalog.slice(0, 2).map((agent, index) => ({ ...agent, adapter: agent.id,
     monitor: { status: index === 0 ? 'needs_user' : 'unknown', current_tasks: [] } }));

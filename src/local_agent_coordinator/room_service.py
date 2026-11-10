@@ -1585,7 +1585,16 @@ class RoomService(RoomPromptMixin):
         if candidate != "auto":
             return candidate
         cached = self._stop_kinds.get(snapshot["room"]["id"])
-        return cached[1] if cached and cached[0] == self._stop_kind_key(snapshot) else None
+        if cached and cached[0] == self._stop_kind_key(snapshot):
+            return cached[1]
+        # The host has already scheduled its own continue for exactly this stop.
+        scheduled = getattr(self, "_auto_continues", {}).get(snapshot["room"]["id"])
+        team = snapshot.get("team") or {}
+        if (scheduled and snapshot.get("current_run") and scheduled["key"] == (snapshot["current_run"]["id"], team.get("stop_reason"))
+                and (scheduled["task"] is None or not scheduled["task"].done())
+                and not self.store.auto_continue_state(snapshot["room"]["id"])[1]):
+            return "auto"
+        return None
 
     @staticmethod
     def _stop_kind_candidate(snapshot):

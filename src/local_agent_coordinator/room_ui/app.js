@@ -202,6 +202,7 @@ const errorLabels = localizedLabels({
   invalid_participants: '请选择 1–8 位已启用且不重复的伙伴；接收者须属于本次成员。',
   invalid_project_request: '项目登记信息不完整，请检查名称、目录和文件列表。',
   invalid_project_path: '项目目录不符合要求，请填写可访问的完整本机目录路径。',
+  project_unsafe_path: '这个路径不能用：项目必须是一个普通文件夹，不能是单个文件或替身。',
   invalid_project_files: '请列出允许处理的相对文本文件路径，不要包含重复路径或上级目录。',
   project_file_unavailable: '选定文件不存在或无法安全读取，请核对路径、文件类型和访问权限。',
   project_sensitive_content: '选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。',

@@ -78,3 +78,24 @@ class StopKindTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListedStopKindTests(unittest.TestCase):
+    def listed(self, *, scheduled, repeated=False, stop_reason="cli_nonzero_exit"):
+        value = service(repeated)
+        value._auto_continues = {"room": scheduled} if scheduled else {}
+        value._quota_handoff_waiting = lambda snapshot: False
+        value._stop_kind_candidate = lambda snapshot: "auto"
+        value._stop_kind_key = lambda snapshot: "key"
+        listed = {"room": {"id": "room"}, "current_run": {"id": "run"}, "team": {"stop_reason": stop_reason}}
+        return value._listed_stop_kind(listed)
+
+    def test_the_list_shows_a_continue_the_host_has_already_scheduled(self):
+        # Catches: the sidebar calling an auto-continuing room "stopped" until it is opened.
+        self.assertEqual(self.listed(scheduled={"key": ("run", "cli_nonzero_exit"), "task": None}), "auto")
+
+    def test_the_list_does_not_promise_a_continue_the_host_will_not_make(self):
+        # Catches: a stale schedule for another stop, or a repeated stop that is the user's turn.
+        self.assertIsNone(self.listed(scheduled=None))
+        self.assertIsNone(self.listed(scheduled={"key": ("run", "other_stop"), "task": None}))
+        self.assertIsNone(self.listed(scheduled={"key": ("run", "cli_nonzero_exit"), "task": None}, repeated=True))

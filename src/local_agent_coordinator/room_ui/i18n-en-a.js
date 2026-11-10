@@ -199,6 +199,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "请选择 1–8 位已启用且不重复的伙伴；接收者须属于本次成员。": "Select 1–8 distinct, enabled partners. The recipient must be one of this task's members.",
   "项目登记信息不完整，请检查名称、目录和文件列表。": "Project registration is incomplete. Check its name, folder, and file list.",
   "项目目录不符合要求，请填写可访问的完整本机目录路径。": "Invalid project folder. Enter an accessible, absolute local folder path.",
+  "这个路径不能用：项目必须是一个普通文件夹，不能是单个文件或替身。": "This path cannot be used. A project must be an ordinary folder, not a single file or an alias.",
   "请列出允许处理的相对文本文件路径，不要包含重复路径或上级目录。": "List permitted relative text-file paths without duplicates or parent-directory references.",
   "选定文件不存在或无法安全读取，请核对路径、文件类型和访问权限。": "A selected file is missing or cannot be read safely. Check its path, type, and permissions.",
   "选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。": "A selected file may contain sensitive content and was not included. Remove credentials or private records before adding it.",
