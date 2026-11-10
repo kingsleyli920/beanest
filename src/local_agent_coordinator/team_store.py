@@ -2509,7 +2509,9 @@ class TeamStore:
             elif open_tasks:
                 text += ("Claim only useful unclaimed task IDs listed above, including text-only tasks with dependencies. "
                          "Do not repeat a claim for an already owned task or claim another member's task. "
-                         "The host arranges independent review; do not claim tasks merely to review them. ")
+                         "The host arranges independent review of every delivered task, so do not claim another "
+                         "member's task just to review it. An unclaimed task listed above is real work even when the work "
+                         "is reviewing something; if it fits you, claim it so the plan can start. ")
             else:
                 text += "There are no unclaimed tasks. Do not issue claim commands or repeat existing claims. "
             if provider in unconfirmed:

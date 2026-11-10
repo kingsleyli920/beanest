@@ -201,3 +201,4 @@ class AnsweredInDiscussionTests(RestartCase):
         await self.settle()
         final = await self.service.read_room(room_id)
         self.assertEqual(final["team"]["stop_reason"], "team_plan_missing")
+
