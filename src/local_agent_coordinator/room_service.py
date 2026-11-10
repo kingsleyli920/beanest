@@ -1903,10 +1903,6 @@ class RoomService(RoomPromptMixin):
         objective = snapshot.get("objective")
         if not objective or objective["status"] in {"paused", "stopped", "interrupted", "complete", "needs_user"}:
             return
-        if read_only(snapshot["room"]["work_mode"], snapshot["room"].get("runtime_settings")):
-            # Discussion can finish without claiming implementation completion
-            # or starting another autonomous assessment/implementation stage.
-            return
         if any(job["status"] in {"queued", "working"} for job in snapshot["jobs"]):
             return
         if any(run["status"] in {"queued", "working"} for run in snapshot["executions"]):
@@ -1919,6 +1915,10 @@ class RoomService(RoomPromptMixin):
         binding = {"run_id": current["id"], "revision": current["revision"], "digest": current["digest"]}
         if objective["status"] == "running" and any(task["status"] == "blocked" for task in snapshot["team"]["tasks"]):
             self.store.require_task_decision(room_id, binding)
+            return
+        if read_only(snapshot["room"]["work_mode"], snapshot["room"].get("runtime_settings")):
+            # Discussion can finish without claiming implementation completion
+            # or starting another autonomous assessment/implementation stage.
             return
         if objective["status"] == "running" and snapshot["team"]["phase"] == "ready_for_user":
             if (snapshot["room"]["mode"] == "python_sandbox"

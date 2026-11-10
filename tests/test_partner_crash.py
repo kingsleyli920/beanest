@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from local_agent_coordinator import room_service
 from local_agent_coordinator.room_service import RoomService
+from test_folder_service import response
 from test_preflight_failures import ALL_PARTNERS, Fault, FolderFaults, ServiceCase, folder_handler, registry
 
 
@@ -110,6 +111,21 @@ class ReplyOnlyCrashes(ServiceCase):
         # Catches: carried tasks staying "unknown", so nobody works and the room waits forever.
         self.assertEqual(final["objective"]["status"], "complete")
         self.assertFalse(any(task["status"] == "unknown" for task in final["team"]["tasks"]), final["team"]["tasks"])
+
+    async def test_a_blocked_task_in_a_read_only_room_asks_the_user(self):
+        # Catches: a read-only room with only a blocked task left reading “partners are working” forever.
+        def blocking(agent, context):
+            if context["job"]["job_phase"] == "work" and agent == "claude":
+                return response(context, commands=[{"type": "block", "task_id": context["task"]["id"],
+                    "cause": "permission_required", "reason": "Needs a command the current permission refuses."}])
+            return folder_handler(agent, context)
+        self.provider.handler = blocking
+        created = await self.service.create_room("Update the project.", "claude", str(uuid4()),
+            mode="project_folder", project_id=self.registration["project"]["id"], participants=ALL_PARTNERS,
+            collaboration=True, work_mode="plan", execution_policy={"mode": "autonomous", "quota_failover": True})
+        final = await self.final(created["room"]["id"])
+        self.assertEqual(final["objective"]["status"], "needs_user", final["objective"])
+        self.assertEqual(final["objective"]["next_step"]["origin"], "task_block")
 
     async def test_a_dead_call_that_ran_a_tool_is_not_replayed(self):
         # Catches: re-running a call that may really have done something.
