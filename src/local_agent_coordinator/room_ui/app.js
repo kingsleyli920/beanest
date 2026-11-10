@@ -2179,7 +2179,9 @@ function runtimeSubmissionError() {
 }
 function runtimePermissionName(permission) {
   const name = ({ plan: 'Plan', read_only: t("只读"), workspace_write: t("副本内修改"), full_access: 'Full Access' })[permission] || t("未记录");
-  return nativePermissionAvailable() && ['read_only', 'workspace_write'].includes(permission) ? t("历史设置：{p0}", { p0: name }) : name;
+  // Only native rooms moved to Plan and Full Access; these names are current elsewhere.
+  const room = state.snapshot?.room; const native = room ? room.mode === 'native_project' : state.mode === 'native_project';
+  return native && nativePermissionAvailable() && ['read_only', 'workspace_write'].includes(permission) ? t("历史设置：{p0}", { p0: name }) : name;
 }
 function nativePlanPermissionsAvailable() {
   return nativePermissionAvailable() && state.runtimeOptions?.permissions?.some((permission) => permission.id === 'plan' && permission.legacy !== true);
