@@ -106,6 +106,8 @@ FAKE_ACP = textwrap.dedent(r'''
         final = "[]" if case == "array_final" else json.dumps({"answer": "Fictional completed response"})
         final = scenario.get("final", final)
         message(final)
+        for record in scenario.get("wire_usage", []):
+            append_wire(record)
         terminal = {"type": "turn.ended", "turnId": 23, "durationMs": 12,
                     "reason": "failed" if case == "wire_failed" else "completed"}
         if case == "wire_failed":
@@ -294,6 +296,23 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
                 proof = self.receipt(result)["proof"]
                 self.assertEqual((proof["turn_id"], proof["reason"]), (23, "completed"))
                 self.assertGreater(proof["wire_through"], proof["wire_offset"])
+
+    async def test_wire_counts_become_the_result_usage_without_touching_the_outcome(self):
+        # Catches usage staying None on the real call path, or a bad usage record failing an otherwise good turn.
+        used = {"inputOther": 120, "output": 30, "inputCacheRead": 4000, "inputCacheCreation": 0}
+        record = {"type": "usage.record", "usage": used, "usageScope": "turn"}
+        step = {"type": "context.append_loop_event", "event": {"type": "step.end", "messageId": "fictional-1", "usage": used}}
+        for name, rows, expected in (
+                ("reported", [record, step], {"input_tokens": 120, "output_tokens": 30, "cache_read_input_tokens": 4000,
+                                              "cache_creation_input_tokens": 0}),
+                ("nothing reported", [], None),
+                ("unusable counters", [{"type": "usage.record", "usage": {"inputOther": "lots"}}], None)):
+            with self.subTest(name):
+                self.scenario(wire_usage=rows)
+                self.wire_path().unlink(missing_ok=True)
+                result = await self.invoke()
+                self.assertEqual(result["status"], "completed", result.get("failure_code"))
+                self.assertEqual(result["usage"], expected)
 
     async def test_streamed_tool_content_emits_only_distinct_activity_states(self):
         self.scenario("streamed_activity")

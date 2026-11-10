@@ -238,6 +238,10 @@ async def status(cwd, *, timeout=15):
     return {"ready": True, "version": version}
 
 
+_USAGE_FIELDS = {"inputOther": "input_tokens", "output": "output_tokens",
+                 "inputCacheRead": "cache_read_input_tokens", "inputCacheCreation": "cache_creation_input_tokens"}
+
+
 def session_wire(cwd, session_id, *, home=None):
     """The wire of one session under the profile's Kimi home (bound or explicit)."""
     if not isinstance(session_id, str) or _SESSION.fullmatch(session_id) is None:
@@ -359,6 +363,57 @@ def failed_turn_diagnostic(path, initial):
             result["reason"] = "provider_auth_error"
         return result
     except (OSError, ValueError, UnicodeError, RecursionError):
+        return None
+
+
+def turn_usage(path, initial):
+    """Token counts of this call's newly appended records, or None when unknown.
+
+    Every model call is written up to three times with the same counts, so one
+    kind of record is read: the usage ledger, else the step end, else the
+    appended message. Best effort: a miss never touches the turn's result.
+    """
+    identity, offset = initial
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or identity is not None and identity != (info.st_dev, info.st_ino)
+                    or info.st_size < offset or info.st_size - offset > 64 * 1024 * 1024):
+                return None
+            stream.seek(offset)
+            sources = ([], {}, {})
+            while raw := stream.readline(adapters.MAX_OUTPUT + 1):
+                if len(raw) > adapters.MAX_OUTPUT or not raw.endswith(b"\n"):
+                    return None
+                row = adapters._strict_json(raw)
+                if not isinstance(row, dict):
+                    return None
+                if row.get("agentId") not in {None, "main"}:
+                    continue
+                event, message = row.get("event"), row.get("message")
+                meta = message.get("meta") if isinstance(message, dict) else None
+                if row.get("type") == "usage.record":
+                    sources[0].append(row.get("usage"))
+                elif row.get("type") == "context.append_loop_event" and isinstance(event, dict) and event.get("type") == "step.end":
+                    if "usage" in event:
+                        sources[1][event.get("messageId") or event.get("uuid") or len(sources[1])] = event["usage"]
+                elif row.get("type") == "agent.message.appended" and isinstance(meta, dict) and "usage" in meta:
+                    sources[2][meta.get("messageId") or len(sources[2])] = meta["usage"]
+        calls = next((list(source.values() if isinstance(source, dict) else source) for source in sources if source), None)
+        if calls is None:
+            return None
+        totals = dict.fromkeys(_USAGE_FIELDS.values(), 0)
+        for usage in calls:
+            if not isinstance(usage, dict) or not any(key in usage for key in _USAGE_FIELDS):
+                return None
+            for wire_name, field in _USAGE_FIELDS.items():
+                value = usage.get(wire_name, 0)
+                if type(value) is not int or value < 0:
+                    return None
+                totals[field] += value
+        return totals
+    except Exception:
         return None
 
 
@@ -655,6 +710,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     started = time.monotonic()
     proof, receipt_path, cancelled = None, None, None
     path, before, prompt_sent, diagnostic = None, None, False, None
+    usage = None
     async def turn():
         nonlocal process, connection, session_id, proof, path, before, prompt_sent
         process, connection = await start(cwd, on_update=updates, permission=permission, progress_file=progress_file)
@@ -745,6 +801,8 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
             wire_failure = failed_turn_diagnostic(path, before)
             if wire_failure is not None:
                 diagnostic = safe_failure_diagnostic({**diagnostic, **wire_failure})
+        if prompt_sent and path is not None and before is not None:
+            usage = turn_usage(path, before)
         if diagnostic is not None and diagnostic.get("reason") == "provider_quota_exhausted" and result["status"] == "failed":
             result["failure_code"] = "subscription_limit_reached"
         if receipt_dir is not None:
@@ -770,7 +828,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
             cancelled.native_execution = observation
             raise cancelled
     result.update(session_id=session_id, text=updates.text, events=updates.events,
-                  cleanup_confirmed=clean, native_execution=observation)
+                  cleanup_confirmed=clean, native_execution=observation, usage=usage)
     if updates.permission_required and updates.question is not None:
         result["native_question"] = updates.question
     if not clean:
