@@ -97,8 +97,9 @@ class ACPError(RuntimeError):
 
 class ACPConnection:
     """One owned stdio peer; reverse requests never execute host file tools."""
-    def __init__(self, process, *, on_update=None, permission="plan"):
+    def __init__(self, process, *, on_update=None, permission="plan", sandboxed=False):
         self.process, self.on_update, self.permission = process, on_update, permission
+        self.sandboxed = sandboxed
         self.pending, self.sequence = {}, 0
         self.reader = asyncio.create_task(self._read())
         self.stderr = asyncio.create_task(self._drain_stderr())
@@ -107,12 +108,18 @@ class ACPConnection:
         while await self.process.stderr.read(65536):
             pass
 
-    def _read_only_refusal(self, params):
-        """The option id that refuses this one tool, when the call is read-only."""
-        if self.permission not in {"plan", "read_only"} or not isinstance(params, dict) or not isinstance(params.get("options"), list):
+    def _read_only_answer(self, params):
+        """The option id that settles this one tool request in a read-only call.
+
+        Inside the write-denying sandbox the tool may run: the operating
+        system, not the partner, keeps the project unchanged. Without it the
+        tool is refused and the partner carries on without it.
+        """
+        if self.permission not in READ_ONLY_PERMISSIONS or not isinstance(params, dict) or not isinstance(params.get("options"), list):
             return None
         options = [item for item in params["options"] if isinstance(item, dict) and isinstance(item.get("optionId"), str)]
-        return next((item["optionId"] for kind in ("reject_once", "reject_always")
+        kinds = ("allow_once",) if self.sandboxed else ()
+        return next((item["optionId"] for kind in (*kinds, "reject_once", "reject_always")
                      for item in options if item.get("kind") == kind), None)
 
     async def send(self, value):
@@ -153,11 +160,9 @@ class ACPConnection:
                     elif "id" in row:
                         # A native permission question remains a real question.
                         # The coordinator cannot silently approve it for a user.
-                        refusal = self._read_only_refusal(params) if method == "session/request_permission" else None
-                        if refusal is not None:
-                            # A read-only call has already been told it cannot
-                            # act; the partner carries on without this tool.
-                            await self.send({"jsonrpc": "2.0", "id": row["id"], "result": {"outcome": {"outcome": "selected", "optionId": refusal}}})
+                        answer = self._read_only_answer(params) if method == "session/request_permission" else None
+                        if answer is not None:
+                            await self.send({"jsonrpc": "2.0", "id": row["id"], "result": {"outcome": {"outcome": "selected", "optionId": answer}}})
                         elif method == "session/request_permission" and isinstance(params, dict):
                             if self.on_update is not None:
                                 tool = params.get("toolCall", {})
@@ -203,15 +208,53 @@ class ACPConnection:
         await asyncio.gather(self.reader, self.stderr, return_exceptions=True)
 
 
-async def start(cwd, *, on_update=None, permission="plan", progress_file=None):
+READ_ONLY_PERMISSIONS = frozenset({"plan", "read_only"})
+SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
+
+
+def _resolved(path):
+    return os.path.realpath(os.path.expanduser(str(path)))
+
+
+def write_sandbox(environment, cwd, progress_file=None):
+    """sandbox-exec arguments that let Kimi and its commands write only outside the user's files.
+
+    Writable: Kimi's own home (sessions, logs), temporary directories, user
+    caches and the job's progress channel. Every other write fails in the
+    operating system for Kimi and every command it starts, and the working
+    folder stays read-only even when it lies under a temporary directory.
+    Paths travel as parameters, never inside the profile text.
+    """
+    home = environment.get(adapters.ACCOUNT_HOME_VARIABLES["kimi"]) or adapters.native_home("kimi")
+    writable = [home, Path.home() / ".cache", Path.home() / "Library" / "Caches"]
+    temporary = environment.get("TMPDIR")
+    if temporary:
+        writable.append(temporary)
+    if progress_file is not None:
+        writable.append(Path(progress_file).parent)
+    writable = list(dict.fromkeys(_resolved(path) for path in writable))
+    rules = " ".join(f'(subpath (param "W{index}"))' for index in range(len(writable)))
+    profile = ("(version 1) (allow default) (deny file-write*) "
+               f'(allow file-write* (subpath "/dev") (subpath "/private/tmp") (subpath "/private/var/folders") {rules}) '
+               '(deny file-write* (subpath (param "PROJECT")))')
+    arguments = [str(SANDBOX_EXEC), "-D", f"PROJECT={_resolved(cwd)}"]
+    for index, path in enumerate(writable):
+        arguments += ["-D", f"W{index}={path}"]
+    return arguments + ["-p", profile]
+
+
+async def start(cwd, *, on_update=None, permission="plan", progress_file=None, sandbox=False):
+    """sandbox: run read-only calls under the write-denying sandbox so their tools may run."""
     environment = adapters._environment()
     if progress_file is not None:
         environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
+    sandboxed = sandbox and permission in READ_ONLY_PERMISSIONS and SANDBOX_EXEC.is_file()
+    prefix = write_sandbox(environment, cwd, progress_file) if sandboxed else []
     process = await asyncio.create_subprocess_exec(
-        adapters.find_kimi(), "acp", cwd=cwd, env=environment,
+        *prefix, adapters.find_kimi(), "acp", cwd=cwd, env=environment,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=adapters.MAX_OUTPUT + 1)
-    connection = ACPConnection(process, on_update=on_update, permission=permission)
+    connection = ACPConnection(process, on_update=on_update, permission=permission, sandboxed=sandboxed)
     return process, connection
 
 
@@ -700,7 +743,7 @@ class TurnUpdates:
 
 async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permission="plan",
                         response_schema=None, runtime_settings=None, on_activity=None,
-                        receipt_dir=None, progress_fingerprint=None, progress_file=None):
+                        receipt_dir=None, progress_fingerprint=None, progress_file=None, sandbox=False):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     from .message_capacity import MAX_PROMPT_BYTES
     if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
@@ -742,7 +785,8 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     usage = None
     async def turn():
         nonlocal process, connection, session_id, proof, path, before, prompt_sent
-        process, connection = await start(cwd, on_update=updates, permission=permission, progress_file=progress_file)
+        process, connection = await start(cwd, on_update=updates, permission=permission,
+                                          progress_file=progress_file, sandbox=sandbox)
         _remember(process.pid, owned, await asyncio.to_thread(_processes))
         initialized = await initialize(connection)
         resumed = session_id is not None

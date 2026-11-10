@@ -123,6 +123,17 @@ FAKE_ACP = textwrap.dedent(r'''
         params = row.get("params", {})
         if method is None:
             trace({"reverse_id": row.get("id"), "result": row.get("result")})
+            if row.get("id") == 9001 and case == "permission_refusable":
+                # What an approved command could change: the project, or temp.
+                probes = {}
+                for name, target in (("project", Path.cwd() / "made-by-command.txt"),
+                                     ("temporary", root / "temporary-scratch.txt")):
+                    try:
+                        target.write_text("probe")
+                        probes[name] = "written"
+                    except OSError:
+                        probes[name] = "denied"
+                trace({"write_probe": probes})
             if row.get("id") == 9001:
                 finish_prompt(pending_prompt)
             continue
@@ -258,12 +269,12 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
     def trace(self):
         return [json.loads(line) for line in (self.root / "trace.jsonl").read_text().splitlines()]
 
-    async def invoke(self, *, session_id=None, permission="plan", progress_fingerprint=None):
+    async def invoke(self, *, session_id=None, permission="plan", progress_fingerprint=None, sandbox=False):
         return await kimi_acp.invoke_native("Return the fictional answer.", self.cwd,
             session_id=session_id, permission=permission, timeout=8, response_schema=SCHEMA,
             runtime_settings={"model": MODEL, "effort": "high"},
             on_activity=self.activities.append, receipt_dir=self.receipts,
-            progress_fingerprint=progress_fingerprint)
+            progress_fingerprint=progress_fingerprint, sandbox=sandbox)
 
     def receipt(self, result):
         path = Path(result["native_execution"]["receipt_path"])
@@ -528,6 +539,63 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed", result)
         reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
         self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
+
+    @unittest.skipUnless(kimi_acp.SANDBOX_EXEC.is_file(), "macOS sandbox-exec")
+    async def test_a_sandboxed_read_only_call_lets_the_tool_run_without_writing_the_project(self):
+        # Catches: read-only Kimi unable to run commands that Codex's read-only sandbox allows,
+        # and approval without the operating system keeping the project unchanged.
+        self.scenario("permission_refusable")
+        result = await self.invoke(permission="plan", sandbox=True)
+        self.assertEqual(result["status"], "completed", result)
+        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "approve-once"}})
+        probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
+        self.assertEqual(probe, {"project": "denied", "temporary": "written"})
+        self.assertEqual(list(self.cwd.iterdir()), [])
+
+    async def test_an_unsandboxed_read_only_call_still_refuses_and_can_write_nothing_new(self):
+        # Catches: approving a read-only tool when no sandbox guards the project.
+        self.scenario("permission_refusable")
+        result = await self.invoke(permission="plan", sandbox=False)
+        self.assertEqual(result["status"], "completed", result)
+        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
+        probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
+        self.assertEqual(probe, {"project": "written", "temporary": "written"})
+
+    async def test_full_access_is_never_sandboxed_or_answered_for_the_user(self):
+        # Catches: the sandbox or its approval leaking into a mode where the question is real.
+        self.scenario("permission_refusable")
+        result = await self.invoke(permission="full_access", sandbox=True)
+        self.assert_failed(result, "native_permission_required")
+        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "cancelled"}})
+        probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
+        self.assertEqual(probe, {"project": "written", "temporary": "written"})
+
+    async def test_native_room_calls_ask_for_the_sandbox_and_text_rooms_do_not(self):
+        # Catches: the native path dropping the sandbox (read-only Kimi back to refusing every
+        # command), or the tools-disabled text path starting to approve tools.
+        calls = []
+        async def recorded(prompt, cwd, session_id=None, timeout=None, **kwargs):
+            calls.append(kwargs.get("sandbox", False))
+            return {"status": "completed", "text": "{}", "events": [], "native_execution": {"tool_calls": 0}}
+        with patch.object(kimi_acp, "invoke_native", recorded):
+            await native_adapters.invoke_native("kimi", "Fictional prompt.", self.cwd, permission="plan")
+            await adapters.invoke("kimi", "Fictional prompt.", self.cwd)
+        self.assertEqual(calls, [True, False])
+
+    def test_the_sandbox_keeps_the_working_folder_read_only_even_under_temp(self):
+        # Catches: a project copy under a writable temporary directory staying writable.
+        arguments = kimi_acp.write_sandbox({"TMPDIR": str(self.root)}, self.cwd, self.root / "progress" / "line")
+        self.assertEqual(arguments[:3], ["/usr/bin/sandbox-exec", "-D", f"PROJECT={self.cwd}"])
+        self.assertIn(f"W0={self.home / '.kimi-code'}", arguments)
+        self.assertIn(f"W{arguments.count('-D') - 2}={self.root / 'progress'}", arguments)
+        profile = arguments[-1]
+        # Everything not listed stays unwritable: the user's home, other projects.
+        self.assertTrue(profile.startswith("(version 1) (allow default) (deny file-write*) (allow file-write* "), profile)
+        self.assertTrue(profile.endswith('(deny file-write* (subpath (param "PROJECT")))'), profile)
+        self.assertNotIn(str(self.cwd), profile)
 
     async def test_full_access_never_answers_a_tool_request_for_the_user(self):
         # Catches: the read-only refusal leaking into a mode where the question is real.
