@@ -2828,6 +2828,42 @@ class RoomStore:
         with self._connection() as db:
             return self._native_partial_recovery_candidates(db, room_id)
 
+    def _native_cut_off_work(self, db, room_id):
+        """Each owner's last work call that a stop or the service's shutdown cut
+        off cleanly, every tool it started having returned.
+
+        Its edits stay unimported in the owner's private tree. Any other call
+        to that partner would find them and fail, so a restart first has them
+        inspected read-only, exactly as recovery does after a killed call. A
+        call that failed or whose outcome is unknown is recovery's, not this.
+        """
+        rows = db.execute("SELECT j.id,j.provider,j.status,t.phase,t.task_id,t.result_version,n.metadata_json "
+            "FROM jobs j JOIN team_jobs t ON t.job_id=j.id JOIN native_executions n ON n.job_id=j.id "
+            "WHERE j.room_id=? AND t.run_id=(SELECT current_run_id FROM teams WHERE room_id=?) "
+            "ORDER BY j.rowid DESC", (room_id, room_id)).fetchall()
+        latest = {}
+        for row in rows:
+            latest.setdefault(row["provider"], row)
+        found = []
+        for row in latest.values():
+            observation = json.loads(row["metadata_json"])
+            if (row["phase"] != "work" or row["task_id"] is None or row["status"] not in {"interrupted", "cancelled"}
+                    or observation.get("cleanup_confirmed") is not True
+                    or any(type(observation.get(key)) is not int for key in ("tool_calls", "tool_results"))
+                    or observation["tool_calls"] != observation["tool_results"]):
+                continue
+            task = self._team.task(db, room_id, row["task_id"])
+            if (task is None or task["owner"] != row["provider"] or task_settled(task)
+                    or task["result_version"] != row["result_version"] or not json.loads(task["write_paths_json"])):
+                continue
+            found.append({"job_id": row["id"], "provider": row["provider"], "task_id": task["id"],
+                          "write_paths": sorted(json.loads(task["write_paths_json"]))})
+        return sorted(found, key=lambda item: item["provider"])
+
+    def native_cut_off_work(self, room_id):
+        with self._connection() as db:
+            return self._native_cut_off_work(db, room_id)
+
     def native_partial_inspection(self, job_id):
         with self._connection() as db:
             row = db.execute("SELECT value_json FROM events WHERE json_extract(value_json,'$.kind')='native_partial_inspection_queued' "
@@ -4659,7 +4695,7 @@ class RoomStore:
 
     def objective_action(self, room_id, action, request_id, parameters, *, binding=None, policy=None, objective_id=None,
                          baseline=None, answer=None, user_message=None, request_identity=None, quota_recovered=(), runtime_change=None,
-                         message_target="all", scope_retry=None, waiting=False):
+                         message_target="all", scope_retry=None, retained_work=None, waiting=False):
         """User actions and automatic stages share one transactional ledger.
 
         No client supplies a continuation goal; it comes only from the frozen
@@ -4716,6 +4752,10 @@ class RoomStore:
                         include_provenance=True, include_retry_review=True)
                     if baseline.get("files") != expected_files:
                         raise RoomError("objective_binding_changed")
+                cut_off = self._native_cut_off_work(db, room_id) if room["mode"] == "native_project" else []
+                if any({key: value for key, value in item.items() if key != "observation"} not in cut_off
+                       for item in retained_work or ()):
+                    raise RoomError("native_recovery_binding_changed")
                 previous = self._team.objectives.current(db, room_id)
                 goal = previous["original_goal"] if previous else room["goal"]
                 target_run = self._team.start_next(db, room_id, goal, team["plan_author"], **binding,
@@ -4728,6 +4768,17 @@ class RoomStore:
                     self._event(db, room_id, "native_scope_retry_approved", sender="user",
                         source_run_id=binding["run_id"], source_jobs=[item["job_id"] for item in candidates],
                         task_ids=sorted(scope_errors), old_commands_replayed=False)
+                # Install every read-only inspection and its group before
+                # ordinary calls can reach a partner whose tree still holds them.
+                inspections = []
+                for item in retained_work or ():
+                    task = self._team.task(db, room_id, item["task_id"])
+                    if task is None or task["owner"] != item["provider"] or task["status"] not in {"assigned", "review"}:
+                        continue
+                    inspections.append(self._team.inspect_native_partial_after_recovery(db, room_id, item, item["observation"]))
+                if inspections:
+                    self._event(db, room_id, "native_partial_inspection_group", sender="system", run_id=target_run,
+                                inspection_job_ids=inspections, canonical_imported=False)
                 self._team.reconcile(db, room_id)
                 self._team.redeliver_unanswered(db, room_id, binding["run_id"])
             elif action == "objective":

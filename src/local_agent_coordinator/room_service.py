@@ -1811,6 +1811,28 @@ class RoomService(RoomPromptMixin):
                 raise RoomError("native_recovery_unpublished_changes")
         return {"candidates": candidates, "workspaces": fingerprints}
 
+    def _audit_cut_off_work(self, room_id):
+        """Unimported edits a cleanly cut-off work call left in its owner's tree.
+
+        Only edits wholly inside that task's own paths are retained for the
+        read-only inspection the next round starts with; the inspection's own
+        finish re-checks the same bytes. Anything else is left as it was.
+        """
+        retained = []
+        for candidate in self.store.native_cut_off_work(room_id):
+            state = self.store.native_workspace(room_id, candidate["provider"])
+            if state is None or state.get("conflicts"):
+                continue
+            try:
+                changes = native_workspace.collect_changes(state["project"], state, candidate["write_paths"], resolved_conflicts=[])
+            except (native_workspace.NativeWorkspaceError, OSError):
+                continue
+            if changes["blocked"] or not changes["files"]:
+                continue
+            retained.append({**candidate, "observation": self._native_metadata_observation(
+                state, changes, candidate["write_paths"], [])})
+        return retained
+
     async def objective_action(self, room_id, action, request_id, *, run_id=None, revision=None, digest=None,
                                execution_policy=None, objective_id=None, text=None, source="user", user_message=None,
                                _request_identity=None, _runtime_update=None, _message_target="all"):
@@ -1903,12 +1925,14 @@ class RoomService(RoomPromptMixin):
                     and any(task["status"] == "blocked" and task["blocked_reason"] == "team_scope_conflict"
                             for task in snapshot["team"]["tasks"])):
                 scope_retry = self._audit_native_scope_retry(snapshot, self.store.native_scope_retry_candidates(room_id))
+            retained_work = (self._audit_cut_off_work(room_id)
+                             if action == "restart-objective" and snapshot["room"]["mode"] == "native_project" else None)
             self.store.objective_action(room_id, action, request_id, parameters, binding=binding,
                                         policy=execution_policy, objective_id=objective_id, baseline=baseline, answer=text,
                                         user_message=user_message, request_identity=_request_identity,
                                         quota_recovered=self._recovered_quota_members(snapshot) if _request_identity is not None else [],
                                         runtime_change=runtime_change, message_target=_message_target, scope_retry=scope_retry,
-                                        waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"})
+                                        retained_work=retained_work, waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"})
             for member in quota_blocked:
                 self._retire_quota(room_id, member, "agent_quota_exhausted")
             self._wake(room_id)
