@@ -4,13 +4,14 @@
 
 const progressChipLabels = localizedLabels({
   open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '伙伴检查中', accepted: '伙伴看过',
-  self_checked: '只做了自查', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
+  self_checked: '只做了自查', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续', withdrawn: '已撤掉',
 });
 // Only the user's own stop really cancels unfinished tasks; any other stop carries them into the next attempt.
 const userCancelCodes = new Set(['cancel_requested', 'lifecycle_requested']);
 // One color per meaning, shared by the bar, the row icon and the legend.
-const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '伙伴检查中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始' });
+const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '伙伴检查中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始', wd: '已撤掉' });
 function progressTone(task) {
+  if (task.status === 'withdrawn') return 'wd';
   if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
   if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : taskQuotaHeld(task) ? 'st' : 'wait';
   return ({ self_checked: 'self', review: 'rev', working: 'wk', waiting_peer: 'wk', interrupted: 'st', cancelled: 'st', unknown: 'st' })[task.status] || 'todo';
@@ -74,6 +75,7 @@ function renderProgressPane() {
   const stLabel = cancelled ? t("已取消") : progressToneLabels.st;
   const earlier = earlierRunProgress(snapshot);
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
+    state.taskWithdrawalSupported, lifecycleState(snapshot.room), snapshot.current_run?.id, state.connected,
     snapshot.team?.phase, summary, resumes, cancelled, snapshot.members.map((member) => [member.id, member.name, member.avatar]),
     earlier && [earlier.key, earlier.state, earlier.tasks.length]]);
   if (pane.dataset.fingerprint === fingerprint) return;
@@ -85,13 +87,14 @@ function renderProgressPane() {
     const head = element('div', '', 'stage-head');
     const phase = Object.hasOwn(teamStageLabels, snapshot.team?.phase) ? teamStageLabels[snapshot.team.phase] : '';
     head.append(element('b', [Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : t("本轮分工"), phase].filter(Boolean).join(' · ')),
-      element('span', [t("{p0} / {p1} 完成", { p0: count('ok'), p1: tasks.length }), count('ask') ? t("{p0} 项等你决定", { p0: count('ask') }) : '',
-        count('wait') ? t("{p0} 项待重新安排", { p0: count('wait') }) : '', count('st') ? cancelled ? t("{p0} 项已取消", { p0: count('st') }) : t("{p0} 项待继续", { p0: count('st') }) : ''].filter(Boolean).join(' · ')));
+      element('span', [t("{p0} / {p1} 完成", { p0: count('ok'), p1: tasks.length - count('wd') }), count('ask') ? t("{p0} 项等你决定", { p0: count('ask') }) : '',
+        count('wait') ? t("{p0} 项待重新安排", { p0: count('wait') }) : '', count('st') ? cancelled ? t("{p0} 项已取消", { p0: count('st') }) : t("{p0} 项待继续", { p0: count('st') }) : '',
+        count('wd') ? t("{p0} 项已撤掉", { p0: count('wd') }) : ''].filter(Boolean).join(' · ')));
     const segments = element('span', '', 'stage-seg'); segments.setAttribute('aria-hidden', 'true');
     for (const tone of tones) segments.append(element('i', '', tone));
     head.append(segments); nodes.push(head);
     const legend = element('div', '', 'stage-legend');
-    for (const tone of ['ok', 'wk', 'rev', 'ask', 'wait', 'st', 'todo']) {
+    for (const tone of ['ok', 'wk', 'rev', 'ask', 'wait', 'st', 'todo', 'wd']) {
       if (!count(tone)) continue;
       const item = element('span', '', 'legend-item'); item.append(element('i', '', tone), element('span', `${tone === 'st' ? stLabel : progressToneLabels[tone]} ${count(tone)}`));
       legend.append(item);
@@ -110,7 +113,7 @@ function renderProgressPane() {
     for (const task of tasks) {
       const tone = progressTone(task);
       const row = element('li', '', `task-row tone-${tone}${taskNeedsUser(task) ? ' open' : ''}`);
-      row.append(element('span', ({ ok: '✓', self: '✓', ask: '!', wait: '↻', st: 'Ⅱ' })[tone] || '', `si ${tone}`));
+      row.append(element('span', ({ ok: '✓', self: '✓', ask: '!', wait: '↻', st: 'Ⅱ', wd: '–' })[tone] || '', `si ${tone}`));
       const name = element('span', taskDisplayTitle(task.title), 'task-name'); name.title = task.title;
       if (typeof task.waiting_for === 'string' && task.waiting_for) name.append(element('small', t("等：{p0}", { p0: task.waiting_for })));
       const who = element('span', '', 'task-who');
@@ -122,6 +125,8 @@ function renderProgressPane() {
         who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
       }
       row.append(name, who, element('span', progressChip(task, cancelled), `chip ${tone}`));
+      const withdraw = taskWithdrawControl(snapshot, task);
+      if (withdraw) { row.classList.toggle('has-action', true); row.append(...withdraw); }
       if (task.status === 'blocked' && !taskQuotaHeld(task)) row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
       list.append(row);
     }
@@ -133,6 +138,83 @@ function renderProgressPane() {
   if (earlierNode) nodes.push(earlierNode);
   pane.replaceChildren(...nodes);
 }
+
+// The user may take an unfinished task out of the current round. A running call is never cut off:
+// the button waits until that step ends, and the service checks the same rule again.
+function taskWithdrawControl(snapshot, task) {
+  if (!state.taskWithdrawalSupported || !activeEntry(snapshot.room) || !uuidPattern.test(snapshot.current_run?.id || '')
+      || typeof task.id !== 'string' || ['accepted', 'self_checked', 'withdrawn'].includes(task.status)) return null;
+  const reason = task.call_running === true ? t("伙伴正在处理，这一步结束后才能撤")
+    : snapshot.team?.phase === 'unknown' ? t("上一步的结果还没核对完，核对后才能撤") : '';
+  const button = element('button', t("撤掉"), 'quiet-button task-withdraw'); button.type = 'button';
+  button.dataset.withdrawTask = task.id;
+  button.setAttribute('aria-label', t("撤掉「{p0}」", { p0: taskDisplayTitle(task.title) }));
+  button.disabled = Boolean(reason) || !state.connected || Boolean(state.taskWithdraw);
+  if (reason) button.title = reason;
+  const roomId = snapshot.room.id; const runId = snapshot.current_run.id;
+  button.addEventListener('click', () => openTaskWithdraw(roomId, runId, task, button));
+  return reason ? [button, element('small', reason, 'task-withdraw-note')] : [button];
+}
+function openTaskWithdraw(roomId, runId, task, trigger) {
+  if (state.taskWithdraw) return;
+  state.taskWithdraw = { roomId, runId, taskId: task.id, title: task.title, dependents: null, busy: false, error: '', trigger };
+  $('task-withdraw-confirm').hidden = false; syncModalInert();
+  renderTaskWithdraw(); $('task-withdraw-cancel').focus({ preventScroll: true });
+}
+function renderTaskWithdraw() {
+  const operation = state.taskWithdraw; if (!operation) return;
+  const together = Array.isArray(operation.dependents) && operation.dependents.length > 0;
+  $('task-withdraw-title').textContent = t("撤掉「{p0}」？", { p0: taskDisplayTitle(operation.title) });
+  $('task-withdraw-description').textContent = together
+    ? t("下面这些任务要用到它，会跟它一起撤掉：")
+    : t("撤掉后伙伴不再做这一项，它也不算交付。排队中的调用会一起取消，还没验收的改动会从项目里拿掉。");
+  $('task-withdraw-dependents').replaceChildren(...(together ? operation.dependents : [])
+    .map((item) => element('li', t("{p0}「{p1}」", { p0: item.id, p1: taskDisplayTitle(item.title) }))));
+  $('task-withdraw-dependents').hidden = !together;
+  $('task-withdraw-error').textContent = operation.error; $('task-withdraw-error').hidden = !operation.error;
+  $('task-withdraw-submit').textContent = together ? t("一起撤掉这 {p0} 项", { p0: operation.dependents.length + 1 }) : t("撤掉");
+  $('task-withdraw-submit').disabled = operation.busy; $('task-withdraw-cancel').disabled = operation.busy;
+}
+function closeTaskWithdraw() {
+  const operation = state.taskWithdraw; if (!operation || operation.busy) return;
+  state.taskWithdraw = null; $('task-withdraw-confirm').hidden = true; syncModalInert();
+  renderProgressPane();
+  const again = [...document.querySelectorAll('button')].find((node) => node.dataset?.withdrawTask === operation.taskId && !node.disabled);
+  (again || (nodeContains(document.body, operation.trigger) ? operation.trigger : $('tab-progress'))).focus({ preventScroll: true });
+}
+async function submitTaskWithdraw() {
+  const operation = state.taskWithdraw; if (!operation || operation.busy) return;
+  operation.busy = true; operation.error = ''; renderTaskWithdraw();
+  const body = { request_id: crypto.randomUUID(), run_id: operation.runId, task_id: operation.taskId };
+  if (operation.dependents?.length) body.include_dependents = true;
+  try {
+    let result = await api(`${roomPath(operation.roomId)}/withdraw-task${state.roomPagingSupported ? '?response=ack' : ''}`, 'POST', body);
+    if (result?.acknowledged === true && result.room_id === operation.roomId) result = await readRoomSnapshot(operation.roomId);
+    operation.busy = false; closeTaskWithdraw();
+    if (state.selected === operation.roomId && result?.room?.id === operation.roomId) applySnapshot(result);
+    showNotice(operation.dependents?.length ? t("已撤掉「{p0}」和依赖它的 {p1} 项。", { p0: taskDisplayTitle(operation.title), p1: operation.dependents.length })
+      : t("已撤掉「{p0}」。", { p0: taskDisplayTitle(operation.title) }));
+  } catch (error) {
+    operation.busy = false;
+    const listed = error.code === 'task_withdraw_dependents' && !operation.dependents && Array.isArray(error.details?.dependents)
+      ? error.details.dependents.filter((item) => typeof item?.id === 'string' && typeof item.title === 'string') : [];
+    if (listed.length) operation.dependents = listed;
+    else operation.error = error.uncertain ? t("结果还没确认，先看看最新进展；不会自动重试。") : error.message;
+    renderTaskWithdraw();
+  }
+}
+$('task-withdraw-cancel').addEventListener('click', closeTaskWithdraw);
+$('task-withdraw-submit').addEventListener('click', () => void submitTaskWithdraw());
+$('task-withdraw-confirm').addEventListener('pointerdown', (event) => { if (event.target === $('task-withdraw-confirm')) closeTaskWithdraw(); });
+document.addEventListener('keydown', (event) => {
+  if (!state.taskWithdraw) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeTaskWithdraw(); }
+  else if (event.key === 'Tab') {
+    event.preventDefault();
+    const cancel = $('task-withdraw-cancel'); const submit = $('task-withdraw-submit');
+    (document.activeElement === cancel && !submit.disabled ? submit : cancel).focus({ preventScroll: true });
+  }
+});
 
 function jobKind(event, jobs) {
   return event.job_kind || jobs.find((job) => job.id === event.job_id)?.kind;
@@ -168,6 +250,12 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'team_help_finished') return t("{p0} 已回复协助请求", { p0: displayName(event.sender) });
   if (event.kind === 'task_taken_over') return t("{p0} 已接过 {p1} 的子任务，继续处理。", { p0: displayName(event.owner), p1: displayName(event.previous_owner) });
   if (event.kind === 'task_rebalanced') return t("为均衡工作量，{p0}已从 {p1} 改由 {p2} 负责。", { p0: taskTitle, p1: displayName(event.previous_owner), p2: displayName(event.owner) });
+  if (event.kind === 'task_withdrawn') {
+    const named = (Array.isArray(event.tasks) ? event.tasks : []).filter((item) => typeof item?.id === 'string' && typeof item.title === 'string')
+      .map((item) => t("{p0}「{p1}」", { p0: item.id, p1: taskDisplayTitle(item.title) }));
+    if (!named.length) return t("你撤掉了一项任务");
+    return named.length > 1 ? t("你撤掉了 {p0}，以及依赖它的 {p1}", { p0: named[0], p1: interfaceList(named.slice(1)) }) : t("你撤掉了 {p0}", { p0: named[0] });
+  }
   if (event.kind === 'source_advanced_externally') {
     const repository = typeof event.repository === 'string' && event.repository ? event.repository : t("交付仓库");
     const count = Number.isSafeInteger(event.external_count) && event.external_count > 0 ? event.external_count : 0;
@@ -276,7 +364,7 @@ function eventNode(event, jobs, sourceMembers = null) {
       || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
-      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'source_advanced_externally'
+      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
       || executionNeedsAttention
       || typeof event.cancellation_confirmed === 'boolean'
       || (event.kind === 'job_created' && jobKind(event, jobs) === 'feedback');
@@ -483,6 +571,7 @@ const roomHistories = new Map();
 function pagedRoom(snapshot) { return snapshot?.projection === 'room_state_v1'; }
 function configurePaging(status) {
   state.memberInvitationSupported = status?.capabilities?.room_member_invitation_v1 === true;
+  state.taskWithdrawalSupported = status?.capabilities?.task_withdrawal_v1 === true;
   state.mediaSupported = status?.capabilities?.room_media_v1 === true;
   state.codeStatusSupported = status?.capabilities?.room_code_status_v1 === true;
   state.hostOutboxSupported = status?.capabilities?.user_outbox_v1 === true && uuidPattern.test(status.user_outbox_scope || '');

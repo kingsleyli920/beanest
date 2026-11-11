@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 from . import job_progress, roles
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
-from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
+from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached, task_settled
 from .room_contract import RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
@@ -530,7 +530,7 @@ class RoomStore:
                       (room_id, provider)).fetchone():
             return False
         if db.execute("SELECT 1 FROM shared_tasks WHERE room_id=? AND run_id=(SELECT current_run_id FROM teams WHERE room_id=?) "
-                      "AND owner=? AND status NOT IN ('accepted','self_checked')", (room_id, room_id, provider)).fetchone():
+                      "AND owner=? AND status NOT IN ('accepted','self_checked','withdrawn')", (room_id, room_id, provider)).fetchone():
             return False
         for job_id in target["jobs"]:
             receipt = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='job_cleanup' "
@@ -675,7 +675,7 @@ class RoomStore:
                     team = self._team.team(db, room_id)
                     tasks = ([] if team is None else [dict(task) for task in db.execute(
                         "SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND owner=? "
-                        "AND status NOT IN ('accepted','self_checked')", (room_id, team["current_run_id"], provider))])
+                        "AND status NOT IN ('accepted','self_checked','withdrawn')", (room_id, team["current_run_id"], provider))])
                     jobs = [row[0] for row in db.execute("SELECT id FROM jobs WHERE room_id=? AND provider=? AND status='working'",
                                                        (room_id, provider))]
                     targets.append({"room_id": room_id, "run_id": team["current_run_id"] if team else None,
@@ -816,7 +816,7 @@ class RoomStore:
                 raise RoomError("partner_cleanup_unconfirmed")
         for old in target["tasks"]:
             task = self._team.task(db, target["room_id"], old["id"])
-            if task["status"] in {"accepted", "self_checked"}:
+            if task_settled(task):
                 continue
             if any(task[key] != old[key] for key in ("owner", "assignment_epoch", "result_version")):
                 raise RoomError("partner_handoff_binding_changed")
@@ -3185,7 +3185,7 @@ class RoomStore:
                 or objective["status"] == "paused" or not self._stage_cleanup_confirmed(db, room_id)):
             return None
         tasks = db.execute("SELECT * FROM shared_tasks WHERE run_id=? ORDER BY id", (team["current_run_id"],)).fetchall()
-        if not tasks or any(task["status"] not in {"accepted", "self_checked"} for task in tasks):
+        if not tasks or not all(task_settled(task) for task in tasks):
             return None
         checkpoint = json.loads(objective["checkpoint_json"] or "{}")
         if not checkpoint or checkpoint.get("reviewed"):
@@ -3257,7 +3257,7 @@ class RoomStore:
                 or team["stop_reason"] not in {"native_auth_unconfirmed", "native_provider_error", "native_turn_unconfirmed"}):
             return None
         tasks = db.execute("SELECT status FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])).fetchall()
-        if any(task[0] not in {"accepted", "self_checked"} for task in tasks):
+        if not all(task_settled(task) for task in tasks):
             return None
         jobs = db.execute("SELECT j.*,t.phase,t.plan_revision,t.assignment_epoch,t.result_version,t.task_id FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE t.run_id=? ORDER BY j.id",
                           (team["current_run_id"],)).fetchall()
@@ -3362,7 +3362,7 @@ class RoomStore:
         # owner's. Anything else is refused by the private-tree audit.
         paths, retained = {}, set()
         for task in db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])):
-            if not task["owner"] or task["status"] in {"accepted", "self_checked"}:
+            if not task["owner"] or task_settled(task):
                 continue
             job = db.execute("SELECT j.*,t.assignment_epoch,t.result_version,n.metadata_json FROM jobs j "
                 "JOIN team_jobs t ON t.job_id=j.id JOIN native_executions n ON n.job_id=j.id "
@@ -4504,6 +4504,71 @@ class RoomStore:
             self._team.accept(db,room_id,run_id,revision,digest)
             self._remember_request(db, key, fingerprint, room_id)
             return True
+
+    def withdraw_task(self, room_id, request_id, *, run_id, task_id, include_dependents):
+        """Record the user's withdrawal once per request; a repeated request changes nothing."""
+        parameters = ["withdraw_task", room_id, run_id, task_id, bool(include_dependents)]
+        with self._connection(write=True) as db:
+            self._require_active(self._room(db, room_id))
+            key, fingerprint, previous = self._request(db, request_id, parameters)
+            if previous is not None:
+                return None
+            result = self._team.withdraw(db, room_id, checked_id(run_id), task_id,
+                                         include_dependents=bool(include_dependents), withdrawal_id=str(uuid4()))
+            self._remember_request(db, key, fingerprint, room_id)
+            self._settle(db, room_id)
+            return result
+
+    @staticmethod
+    def _withdrawals(db, room_id):
+        return [json.loads(row[0]) for row in db.execute(
+            "SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawn' ORDER BY seq",
+            (room_id,))]
+
+    def pending_withdrawal_restores(self, room_id):
+        """Withdrawals whose files the shared project may still hold."""
+        with self._connection() as db:
+            done = {row[0] for row in db.execute(
+                "SELECT json_extract(value_json,'$.withdrawal_id') FROM events WHERE room_id=? "
+                "AND json_extract(value_json,'$.kind')='task_withdrawal_restored'", (room_id,))}
+            return [event for event in self._withdrawals(db, room_id)
+                    if event.get("restore") and event["withdrawal_id"] not in done]
+
+    def record_withdrawal_restored(self, room_id, withdrawal_id, *, revision, paths):
+        with self._connection(write=True) as db:
+            if db.execute("SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawal_restored' "
+                          "AND json_extract(value_json,'$.withdrawal_id')=?", (room_id, withdrawal_id)).fetchone():
+                return
+            self._event(db, room_id, "task_withdrawal_restored", sender="system", withdrawal_id=withdrawal_id,
+                        revision=revision, paths=paths)
+
+    def pending_withdrawal_discards(self, room_id, provider):
+        """Paths of withdrawn tasks whose unsubmitted bytes may remain in this partner's private tree."""
+        with self._connection() as db:
+            done = {row[0] for row in db.execute(
+                "SELECT json_extract(value_json,'$.withdrawal_id') FROM events WHERE room_id=? "
+                "AND json_extract(value_json,'$.kind')='task_withdrawal_discarded' "
+                "AND json_extract(value_json,'$.provider')=?", (room_id, provider))}
+            return [{"withdrawal_id": event["withdrawal_id"], "paths": entry["paths"]}
+                    for event in self._withdrawals(db, room_id) if event["withdrawal_id"] not in done
+                    for entry in event.get("private") or [] if entry["provider"] == provider]
+
+    def withdrawal_discard_providers(self, room_id):
+        with self._connection() as db:
+            if not db.execute("SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawn' LIMIT 1",
+                              (room_id,)).fetchone():
+                return set()
+            done = {(row[0], row[1]) for row in db.execute(
+                "SELECT json_extract(value_json,'$.withdrawal_id'),json_extract(value_json,'$.provider') FROM events "
+                "WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawal_discarded'", (room_id,))}
+            return {entry["provider"] for event in self._withdrawals(db, room_id)
+                    for entry in event.get("private") or [] if (event["withdrawal_id"], entry["provider"]) not in done}
+
+    def record_withdrawal_discarded(self, room_id, provider, withdrawal_ids, paths):
+        with self._connection(write=True) as db:
+            for withdrawal_id in withdrawal_ids:
+                self._event(db, room_id, "task_withdrawal_discarded", sender="system", provider=provider,
+                            withdrawal_id=withdrawal_id, paths=paths)
 
     def objective_action_seen(self, room_id, action, request_id, parameters):
         with self._connection() as db:
