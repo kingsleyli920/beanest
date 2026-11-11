@@ -77,7 +77,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "任务文件状态未能确认，已暂停，避免重复操作。": "Task file state could not be confirmed. Work is paused to avoid duplicate operations.",
   "当前记录尚不能安排下一步，请核对任务状态。": "The current records cannot yet support a next step. Check task status.",
   "任务设置与当前服务不兼容，请更新本地服务后继续。": "Task settings are incompatible with this service. Update the local service before continuing.",
-  "会话身份尚未确认，不会自动续接或重新派发。": "Session identity is unconfirmed. No automatic continuation or dispatch will occur.",
+  "会话身份尚未确认，旧会话不会再续用；能安全恢复时会换新会话接着做。": "Session identity is unconfirmed. The old session will not be resumed; when recovery is safe, work continues in a new session.",
   "返回的会话身份发生变化，已停止自动续接。": "The returned session identity changed. Automatic continuation has stopped.",
   "伙伴回复不符合协作协议，本轮需要核对。": "The partner response does not follow the collaboration protocol. This round needs checking.",
   "伙伴提出了无法接受的协作动作，本轮需要核对。": "A partner proposed an unsupported collaboration action. This round needs checking.",

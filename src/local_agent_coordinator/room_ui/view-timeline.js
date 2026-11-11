@@ -232,6 +232,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'round_handoff_recorded') return t("{p0} 写好了本轮交接", { p0: displayName(event.sender) });
   if (event.kind === 'task_handoff_recorded') return t("{p0} 写好了任务交接", { p0: displayName(event.sender) });
   if (event.kind === 'partner_session_rotated') return t("{p0} 换了新会话，只带这份交接", { p0: displayName(event.provider) });
+  if (event.kind === 'user_message_redelivered') return t("{p0} 上次没回完你的消息，已重新发给它。", { p0: displayName(event.recipient) });
   if (event.kind === 'native_readonly_discussion') return t("{p0} 正在只读讨论，已有改动保持。", { p0: displayName(event.sender) });
   if (event.kind === 'run_accepted') return t("你已接受本轮交付；这项记录不会启动模型。");
   const taskTitle = typeof event.title === 'string' && event.title ? interfaceQuote(taskDisplayTitle(event.title)) : t("子任务");
@@ -361,7 +362,7 @@ function eventNode(event, jobs, sourceMembers = null) {
     const executionNeedsAttention = event.kind === 'execution_finished' && (event.cleanup_confirmed !== true
       || event.status !== 'completed' || !!event.error || Number.isInteger(event.exit_code) && event.exit_code !== 0);
     const show = event.kind === 'warning'
-      || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated'].includes(event.kind)
+      || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated', 'user_message_redelivered'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
       || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'

@@ -61,6 +61,18 @@ class StopPolicyTests(unittest.TestCase):
         self.assertTrue(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": "invalid_team_commands"}))
         self.assertFalse(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": "native_cleanup_unconfirmed"}))
 
+    def test_an_audited_kept_scene_never_reopens_a_board_in_place(self):
+        # Catches: a session of unknown identity resumed by the generic continue or
+        # an in-place block reopen, instead of only the audited fresh-session recovery.
+        self.assertEqual(stop_policy.AUDITED_RECOVERY, {"session_identity_unknown"})
+        for code in stop_policy.AUDITED_RECOVERY:
+            self.assertIn(code, stop_policy.KEEP_SCENE)
+            self.assertFalse(stop_policy.continues_automatically(code))
+            self.assertTrue(stop_policy.continues_after_recovery_audit(code))
+            self.assertFalse(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": code}))
+            self.assertEqual(room_service.RoomService._auto_continue_actions(code), {"recover-native"})
+        self.assertFalse(stop_policy.continues_after_recovery_audit("native_side_effects_unconfirmed"))
+
 
 class AutoContinueGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_quitting_the_app_is_continued_but_the_users_own_stop_is_not(self):

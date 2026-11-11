@@ -523,6 +523,65 @@ class TeamStore:
             self.store._event(db, room_id, "host_text_failure_resumed", sender="user", run_id=target_run_id,
                               source=text_failure, old_commands_replayed=False)
 
+    def redeliver_unanswered(self, db, room_id, source_run_id):
+        """A user's message whose reply call ended without a reply (its process
+        was killed, crashed or was cancelled when a peer failed) goes to the same
+        partner again. The board is carried; a message is not a task, so
+        without this nobody would answer it. Only the message is sent again,
+        never the old call or anything it may have done. Called after a
+        restart has queued its own calls: a partner they already occupy reads
+        the message among the user's recent updates in that call instead.
+        Retained private work is inspected first; the message follows once
+        that inspection is done (resume_deferred_redelivery)."""
+        # The user's own call carries their words; a host correction of its reply
+        # carries the host's, and a completed correction answered the message.
+        # A read-only discussion bound to retained work is resumed by that
+        # work's own read-only inspection, not sent again.
+        rows = db.execute(
+            "SELECT j.id,j.provider,j.text FROM jobs j JOIN team_jobs t ON t.job_id=j.id "
+            "WHERE j.room_id=? AND t.run_id=? AND t.phase='user' AND t.correction_of IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.room_id=j.room_id "
+            "AND json_extract(e.value_json,'$.kind') IN ('partner_handoff_inspection','native_readonly_discussion') "
+            "AND json_extract(e.value_json,'$.job_id')=j.id) ORDER BY j.rowid", (room_id, source_run_id)).fetchall()
+        pending, seen = [], set()
+        for row in rows:
+            chain, answered = [row["id"]], False
+            while chain and not answered:
+                answered = db.execute("SELECT 1 FROM jobs WHERE id IN (SELECT value FROM json_each(?)) AND status='completed'",
+                                      (json.dumps(chain),)).fetchone() is not None
+                chain = [item[0] for item in db.execute("SELECT job_id FROM team_jobs WHERE correction_of IN "
+                                                        "(SELECT value FROM json_each(?))", (json.dumps(chain),))]
+            if not answered and (row["provider"], row["text"]) not in seen:
+                seen.add((row["provider"], row["text"]))
+                pending.append(row)
+        if not pending:
+            return
+        if self.partial_inspection_group_pending(db, room_id):
+            self.store._event(db, room_id, "user_message_redelivery_deferred", sender="system",
+                              run_id=self.team(db, room_id)["current_run_id"], source_run_id=source_run_id)
+            return
+        for row in pending:
+            if self._queue(db, room_id, row["provider"], "user", text=row["text"]):
+                self.store._event(db, room_id, "user_message_redelivered", sender="system", recipient=row["provider"],
+                                  source_job_id=row["id"], source_run_id=source_run_id)
+
+    def resume_deferred_redelivery(self, db, room_id):
+        """Send the messages a restart deferred behind its inspection, once."""
+        team = self.team(db, room_id)
+        row = db.execute("SELECT seq,value_json FROM events WHERE room_id=? "
+                         "AND json_extract(value_json,'$.kind')='user_message_redelivery_deferred' "
+                         "AND json_extract(value_json,'$.run_id')=? ORDER BY seq DESC LIMIT 1",
+                         (room_id, team["current_run_id"])).fetchone()
+        if (row is None or self.partial_inspection_group_pending(db, room_id)
+                or db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
+                              "AND json_extract(value_json,'$.kind')='user_message_redelivery_resumed' LIMIT 1",
+                              (room_id, row[0])).fetchone()):
+            return
+        source_run_id = json.loads(row[1])["source_run_id"]
+        self.store._event(db, room_id, "user_message_redelivery_resumed", sender="system",
+                          run_id=team["current_run_id"], source_run_id=source_run_id)
+        self.redeliver_unanswered(db, room_id, source_run_id)
+
     def _obsolete_native_review_rejection(self, db, room_id, failure, task):
         """Identify the removed tool-count heuristic, not a real binding error.
 
@@ -2543,6 +2602,7 @@ class TeamStore:
             return False
         if not self.objectives.can_dispatch(db, room_id):
             return False
+        self.resume_deferred_redelivery(db, room_id)
         if team["phase"] in {"checkpoint", "checkpoint_review"}:
             checkpoint = json.loads(objective["checkpoint_json"])
             if self.pending(db, room_id):

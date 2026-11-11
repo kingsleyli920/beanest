@@ -72,7 +72,7 @@ const executionLabels = localizedLabels({
   native_progress_unconfirmed: '任务文件状态未能确认，已暂停，避免重复操作。',
   objective_unavailable: '当前记录尚不能安排下一步，请核对任务状态。',
   invalid_execution_policy: '任务设置与当前服务不兼容，请更新本地服务后继续。',
-  session_identity_unknown: '会话身份尚未确认，不会自动续接或重新派发。',
+  session_identity_unknown: '会话身份尚未确认，旧会话不会再续用；能安全恢复时会换新会话接着做。',
   session_identity_changed: '返回的会话身份发生变化，已停止自动续接。',
   partner_account_home_changed: '这位伙伴已换了登录方式，原会话留在之前的登录里，不能用新账号接着跑。改回原登录方式，或开新任务。',
   invalid_agent_response: '伙伴回复不符合协作协议，本轮需要核对。',
