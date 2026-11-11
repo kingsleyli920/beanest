@@ -186,6 +186,16 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             work_mode="build", runtime_settings={"permission": permission, "members": {}},
             execution_policy={"mode": "autonomous"}, **extra)
 
+    async def test_a_partner_that_cannot_run_commands_is_told_not_to_wait_for_checks(self):
+        # Catches a file-tools-only partner stopping the room to ask the user to run its tests.
+        sentence = "a check you cannot run is not a reason to stop or to wait for someone else to run it"
+        for permission, expected in (("workspace_write", True), ("full_access", False)):
+            self.fake.calls.clear()
+            await self.create(permission=permission)
+            await self.settle()
+            self.assertTrue(self.fake.calls)
+            self.assertTrue(all((sentence in call["prompt"]) is expected for call in self.fake.calls), permission)
+
     async def test_checkpoint_keeps_direct_execution_correction_after_peer_traffic(self):
         working, release = asyncio.Event(), asyncio.Event()
         original = self.handler

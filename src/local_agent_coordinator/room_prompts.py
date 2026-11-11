@@ -756,7 +756,9 @@ class RoomPromptMixin:
             "before changing it; a private-copy SHA does not establish the current source bytes. "
             if permission == "full_access" else
             "Use the selected provider's actual workspace-write or read-only/plan capabilities. Do not infer Full Access "
-            "from the presence of a registered source path. ")
+            "from the presence of a registered source path. If these capabilities give you no way to run a command, "
+            "a check you cannot run is not a reason to stop or to wait for someone else to run it: judge by reading, "
+            "complete or decide on that basis, and say plainly which checks were not run so the user can run them later. ")
         discussion_instruction = ""
         if job["team"]["job_phase"] == "help":
             discussion_instruction = ("This is peer advice for another owner's task, not a file-repair work assignment. "
