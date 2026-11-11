@@ -191,10 +191,16 @@ $('project-form').addEventListener('submit', (event) => {
   const files = $('project-files-input').value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const explicit = $('project-explicit-files').checked;
   const body = { name: $('project-name').value.trim(), path: $('project-path').value.trim(), ...(explicit ? { files } : { selection_kind: 'folder' }) };
-  if (!body.name || !body.path.startsWith('/') || (explicit && (!files.length || files.length > 12 || new Set(files).size !== files.length
-      || files.some((file) => file.startsWith('/') || file.split('/').some((part) => !part || part === '.' || part === '..'))))) {
-    managerNotice(explicit ? t("请填写名称、完整目录路径和 1–12 个不重复的相对文件路径。") : t("请填写项目名称和完整目录路径。"), true); return;
-  }
+  if (!body.name || !body.path.startsWith('/')) { managerNotice(t("请填写项目名称和完整目录路径。"), true); return; }
+  if (/^\/+$/.test(body.path)) { managerNotice(t("不能登记整个磁盘的根目录，请选项目所在的文件夹。"), true); return; }
+  const filesProblem = explicit ? explicitFilesProblem(files) : '';
+  if (filesProblem) { managerNotice(filesProblem, true); return; }
+  const duplicate = registeredProjectAt(body.path, explicit ? files : null);
+  if (duplicate) { managerNotice(duplicate, true); return; }
+  // A whole home folder or a disk is allowed, but only after a second, deliberate click.
+  const broad = broadFolderWarning(body.path);
+  if (broad && state.broadFolderConfirmed !== body.path) { state.broadFolderConfirmed = body.path; managerNotice(broad, true); return; }
+  state.broadFolderConfirmed = null;
   void manageMutation(workspaceApi.projects, body, t("项目已登记。选择项目和本次伙伴后再开始任务，没有启动模型。"));
 });
 $('partner-form').addEventListener('submit', (event) => {

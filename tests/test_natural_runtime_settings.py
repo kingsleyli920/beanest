@@ -476,7 +476,8 @@ class NaturalRuntimeSettingsTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         final = await self.service.read_room(room)
         self.assertNotEqual(final["objective"]["id"], before["objective"]["id"])
-        self.assertEqual(final["objective"]["status"], "running")
+        # A delivered read-only discussion ends its objective; it no longer stays running.
+        self.assertEqual(final["objective"]["status"], "complete")
         self.assertEqual(len(self.fake.calls) - count, 2)
         self.assertEqual(final["project"]["revision"], before["project"]["revision"])
         self.assertFalse(any(job["status"] in {"queued", "working"} for job in final["jobs"]))
@@ -496,7 +497,8 @@ class NaturalRuntimeSettingsTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await self.settle()
         final = await self.service.read_room(room)
-        self.assertEqual(final["objective"]["status"], "running")
+        # The resumed plan discussion was delivered, which ends its objective.
+        self.assertEqual(final["objective"]["status"], "complete")
         self.assertFalse(final["runtime_configuration"]["pending"])
         user_calls = [call for call in self.fake.calls[count:] if call["context"]["job"]["job_phase"] == "user"]
         self.assertEqual(len(user_calls), 2)

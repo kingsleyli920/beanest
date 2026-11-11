@@ -85,11 +85,11 @@ const executionLabels = localizedLabels({
   context_too_large: '当前上下文超出本次协作范围，未继续调用。',
   invoke_interrupted: '本轮调用已中断，结果尚需核对。',
   invoke_failed: '本轮调用未取得可确认的结果。',
-  provider_failed: '供应商调用未完成，请在工具与状态中核对异常。',
+  provider_failed: '供应商调用未完成，请在伙伴与额度中核对异常。',
   native_preflight_failed: '伙伴的模型服务连接失败，提示词没有发出。',
   subscription_limit_reached: '订阅额度已用完，请在对应工具查看恢复时间。',
-  cli_nonzero_exit: '本地 CLI 未正常完成，请在工具与状态中核对异常。',
-  unknown_provider_error: '供应商返回未知异常，请在工具与状态中核对记录。',
+  cli_nonzero_exit: '本地 CLI 未正常完成，请在伙伴与额度中核对异常。',
+  unknown_provider_error: '供应商返回未知异常，请在伙伴与额度中核对记录。',
   process_or_output_failure: '本地调用或输出中断，结果尚需核对。',
   cancel_requested: '已请求停止，正在核对本服务登记的执行。',
   service_shutdown: '本地服务正在关闭，执行结果仍需核对。',
@@ -167,7 +167,7 @@ const errorLabels = localizedLabels({
   invalid_partner_lifecycle: '这个伙伴管理操作不符合要求，请刷新后再试。',
   invalid_room_lifecycle: '这个任务管理操作不符合要求，请刷新后再试。',
   project_inactive: '项目已归档或移除。请在项目管理中恢复后再选入新任务。',
-  partner_inactive: '伙伴已归档或移除。请在工具与状态中恢复后再选入新任务。',
+  partner_inactive: '伙伴已归档或移除。请在伙伴与额度中恢复后再选入新任务。',
   room_archived: '任务已归档，仍可阅读。恢复后才能继续。',
   room_removed: '任务已移除，仍可阅读。恢复后才能继续。',
   room_lifecycle_busy: '任务仍在处理或等待清理，结束后再归档或移除。',
@@ -181,7 +181,7 @@ const errorLabels = localizedLabels({
   partner_unavailable: '这个伙伴暂时不可用。', partner_lifecycle_pending: '正在处理这个伙伴的操作。',
   user_lifecycle_required: '归档、恢复与移除请在豆窝界面中操作。',
   invalid_work_mode: '请选择“方案”或“动手”，再发送任务。',
-  plan_read_only: '本轮选择了方案模式，不能修改文件；方案完成后可选择“按方案开始”。',
+  plan_read_only: '这一轮是方案模式，不能修改文件。要改文件，切到“动手”再发一句话。',
   permission_read_only: '本轮统一权限为只读，不能修改隔离副本。可在下一轮调整权限。',
   invalid_arguments: '这次输入不符合要求，请检查目标和接收者。',
   invalid_goal: '请填写目标。',
@@ -202,8 +202,9 @@ const errorLabels = localizedLabels({
   invalid_participants: '请选择 1–8 位已启用且不重复的伙伴；接收者须属于本次成员。',
   invalid_project_request: '项目登记信息不完整，请检查名称、目录和文件列表。',
   invalid_project_path: '项目目录不符合要求，请填写可访问的完整本机目录路径。',
-  invalid_project_files: '请列出允许处理的相对文本文件路径，不要包含重复路径或上级目录。',
-  project_file_unavailable: '选定文件不存在或无法安全读取，请核对路径、文件类型和访问权限。',
+  project_unsafe_path: '这个路径不能用：项目必须是一个普通文件夹，不能是单个文件或替身。',
+  invalid_project_files: '有文件不能用。只能选项目里的文本文件（源码、文档、配置），图片、压缩包这类二进制文件不行。',
+  project_file_unavailable: '有文件或文件夹找不到、读不了，请核对路径和访问权限。',
   project_sensitive_content: '选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。',
   project_limit_exceeded: '选定文件超出当前范围：最多 12 个，每个 16 KiB，总计 48 KiB。',
   project_capture_limit: '项目超出当前隔离副本的容量范围，尚未开始处理；请缩小项目目录后重试。',
@@ -315,7 +316,7 @@ const state = {
   deliveryLimit: 256, deliveryScope: '',
   drafts: new Map(), roomNodes: new Map(), eventNodes: new Map(), progressNodes: new Map(),
   renderedRoom: null, jobsFingerprint: '', collaborationFingerprint: '', unseen: 0,
-  roomTabs: new Map(), deliveryPending: 0,
+  roomTabs: new Map(), deliveryPending: 0, earlierRuns: new Map(),
 };
 $('task-mode').value = 'text';
 
@@ -406,6 +407,11 @@ function blockedTaskReason(task) {
   }
   if (task?.block_cause === 'external_dependency') return t("在等外部条件，满足后点“继续”接着做。");
   return t("这项需要重新安排，豆窝会接着处理，不用你选。");
+}
+// Once the service confirms the stop, the "checking" wording of cancel_requested no longer applies.
+function stoppedReasonMessage(snapshot, code) {
+  if (['cancel_requested', 'lifecycle_requested'].includes(code) && snapshot?.cancellation_confirmed === true) return t("已按你的要求停下。");
+  return executionMessage(code);
 }
 function stopReasonMessage(code) {
   return selfCorrectedCodes.has(code) ? t("有任务需要重新安排，点“继续推进”后会自动处理。") : executionMessage(code);
@@ -505,13 +511,21 @@ function nowSummary(snapshot) {
   if (status === 'complete' || ['ready_for_user', 'accepted'].includes(outcome)) {
     const selfOnly = tasks.filter((task) => task.status === 'self_checked' || task.status === 'accepted' && task.review_kind === 'self_check').length;
     const reviewed = tasks.filter((task) => task.status === 'accepted' && task.review_kind !== 'self_check').length;
-    const parts = [tasks.length ? selfOnly ? t("{p0} 项里 {p1} 项互审通过，{p2} 项仅自检。", { p0: tasks.length, p1: reviewed, p2: selfOnly })
-      : t("{p0} 项都已互审通过。", { p0: reviewed }) : '', state.deliveryPending ? t("代码还有改动没交付，见“交付”。") : ''].filter(Boolean);
+    // Peer review here means a partner read the work; say so when nothing was run.
+    const readOnlyReview = ['not_run', 'static_review'].includes(snapshot.collaboration?.outcome?.validation?.scope);
+    const parts = [tasks.length ? selfOnly ? reviewed ? t("{p0} 项做完了：{p1} 项有另一位伙伴看过，{p2} 项只做了自查。", { p0: tasks.length, p1: reviewed, p2: selfOnly })
+      : t("{p0} 项做完了，都只做了自查，没有别的伙伴看过。", { p0: tasks.length })
+      : reviewed === 1 ? t("这 1 项有另一位伙伴看过并认可。") : t("{p0} 项都有另一位伙伴看过并认可。", { p0: reviewed }) : '',
+      tasks.length && reviewed && readOnlyReview ? t("检查是读内容，没有运行测试或程序。") : '', state.deliveryPending ? t("代码还有改动没交付，见“交付”。") : ''].filter(Boolean);
     const accepted = Number.isFinite(run?.accepted_at) || outcome === 'accepted';
+    // Chinese sentences join without a space; English ones with one.
+    const joined = (items) => items.join(interfaceWordSpace());
+    if (status === 'complete' && isReadOnlyDiscussion(snapshot) && !accepted) return { tone: 'done', label: label(t("已完成")), title: readOnlyLabel(snapshot, true),
+      text: joined([...parts, readOnlyBuild(snapshot) ? t("要改文件，在“设置”里把权限换成 {p0}。", { p0: writablePermissionName(snapshot) }) : t("要开工，切到“动手”再发一句话。")]) };
     if (status === 'complete') return { tone: 'done', label: label(t("已完成")), title: accepted ? t("你已确认完成") : t("目标已完成"),
-      text: parts.join(' ') || t("有新要求可以直接在下面说。") };
+      text: joined(parts) || t("有新要求可以直接在下面说。") };
     return { tone: 'done', label: label(accepted ? t("已接受") : t("已交付")), title: accepted ? t("这一轮你已经接受") : t("伙伴说做完了，等你验收"),
-      text: parts.join(' ') || t("看看成果，不满意直接在下面说哪里不对。") };
+      text: joined(parts) || t("看看成果，不满意直接在下面说哪里不对。") };
   }
   const stopReason = typeof objective?.stop_reason === 'string' ? objective.stop_reason : '';
   const doneNote = done ? t("已完成的 {p0} 项成果都在。", { p0: done }) : t("已有成果和记录都在。");
@@ -541,7 +555,7 @@ function nowSummary(snapshot) {
         : reason === 'all_partners_quota_exhausted' ? t("伙伴额度都用完了，推进停在这里") : status === 'interrupted' ? t("推进中断了") : t("推进已停止"),
       text: hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot)
         // A restart title already says what happened; the shutdown message would read as still closing.
-        : [reason && !selfCorrectedCodes.has(reason) && !restarted ? executionMessage(reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。"), autoNote].filter(Boolean).join(' ') };
+        : [reason && !selfCorrectedCodes.has(reason) && !restarted ? stoppedReasonMessage(snapshot, reason) : '', done ? t("已完成的 {p0} 项成果都在，不会自动重跑。", { p0: done }) : t("已有成果和记录都在，不会自动重跑。"), autoNote].filter(Boolean).join(' ') };
   }
   const working = $('work-indicator').hidden ? '' : $('work-indicator-text').textContent;
   if (['running', 'checkpoint'].includes(status) || working || ['running', 'queued'].includes(room.status) || outcome === 'in_progress') {
@@ -856,6 +870,8 @@ function taskDeliveryMessage(delivery, gitState, active = false) {
   if (gitState === 'confirmed') return t("已提交代码已合入并同步 GitHub");
   if (main === 'confirmed') {
     if (remote === 'confirmed') return privateState === 'unknown' || delivery.workspace?.state === 'unknown' ? t("已提交代码已同步，工作区成果尚未核齐") : t("已提交代码已合入并同步 GitHub");
+    // No GitHub remote means nothing will be pushed or checked later; say so instead of "not checked yet".
+    if (delivery.remote?.reason === 'github_remote_unavailable') return t("主分支已合入。这个仓库没有 GitHub 远端，不会推送，也不用核对。");
     return remote === 'pending' ? t("主分支已合入，GitHub 还有内容待同步") : t("主分支已合入，GitHub 尚未核对");
   }
   return remote === 'confirmed' ? t("GitHub 当前主分支已同步，任务成果尚未核齐")
@@ -875,7 +891,7 @@ function taskDeliveryStatus(part, kind) {
     retained_work_changed: t("保留成果已变化，需要重新核对"), retained_work_unconfirmed: t("保留成果缺少共享项目核对记录"),
     retained_work_unavailable: t("暂时无法读取保留的任务成果"), no_linked_repository: t("尚未找到本任务关联的 Git 仓库"),
     local_mainline_not_on_remote: t("当前主分支还有提交未同步"), not_checked: t("尚未检查远端，点击刷新核对"),
-    github_remote_unavailable: t("未找到可核对的 GitHub 远端"), github_remote_rewrite: t("远端地址有重写配置，暂无法核对"),
+    github_remote_unavailable: t("没有 GitHub 远端，不会推送"), github_remote_rewrite: t("远端地址有重写配置，暂无法核对"),
     remote_mainline_unknown: t("暂未找到远端主分支"), remote_ancestry_unknown: t("远端与本地主分支的关系尚未确认"),
     workspace_unavailable: t("关联项目的 Git 状态暂不可用"), directory_unavailable: t("关联项目目录暂不可用"),
     mainline_unknown: t("尚未识别项目主分支"), mainline_ambiguous: t("存在多个主分支候选，尚未确定目标"),
@@ -951,10 +967,17 @@ function codeStateMessage(data) {
 }
 function renderCodeStatus() {
   const roomId = state.snapshot?.room.id; const card = $('code-status-card');
-  card.hidden = !state.codeStatusSupported || !roomId;
+  // A room without a linked project has no repository to check (the service answers no_project_workspace
+  // with nothing to choose); the delivery tab then says where its results are instead.
+  const room = state.snapshot?.room; const known = roomId ? state.codeStatusEntries.get(roomId) : null;
+  const noProject = !!room && !room.project_id && room.mode !== 'native_project' && !known?.error && !known?.repositorySaving && (known?.repository?.state || 'unbound') === 'unbound'
+    && (!known?.data || known.data.state === 'unbound' && !(known.data.workspaces || []).length && !(known.data.delivery_repository?.candidates || []).length);
+  card.hidden = !state.codeStatusSupported || !roomId || noProject;
+  $('delivery-empty').textContent = noProject ? t("这个任务没有关联项目，没有代码要交付。伙伴的回复在“讨论”里，整理好的成果和文件在“资料”里。")
+    : t("这次任务没有可核对的代码仓库。交付的文档和文件在“讨论”最后的交付卡片和“资料”里。");
   if (card.hidden) { state.codeStatusRendered = null; state.deliveryPending = 0; return; }
   const entry = codeStatusEntry(roomId); const data = entry.data;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), codeStatusOldMinutes(data?.observed_at, codeRunActive()), [roomId, entry.workspaceId, data, entry.loading, entry.error, entry.repository, entry.repositoryEditing, entry.repositoryDraft, entry.repositorySaving, entry.repositoryError, state.connected, codeRunActive(), state.busy, !!state.pending, $('code-merge-target').value, naturalContinuation(state.snapshot, $('code-merge-target').value)?.canSend, state.snapshot?.members?.map((member) => member.id)]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), codeStatusOldMinutes(data?.observed_at, codeRunActive()), [roomId, entry.workspaceId, data, entry.loading, entry.error, entry.repository, entry.repositoryEditing, entry.repositoryDraft, entry.repositorySaving, entry.repositoryError, state.connected, codeRunActive(), state.busy, !!state.pending, $('code-merge-target').value, naturalContinuation(state.snapshot, $('code-merge-target').value)?.canSend, state.snapshot?.members?.map((member) => member.id), roomReadOnlyNow(state.snapshot)]]);
   if (fingerprint === state.codeStatusRendered) return;
   state.codeStatusRendered = fingerprint;
   renderCodeRepository(entry);
@@ -1097,6 +1120,13 @@ function codeDeliveryRequest(data, available) {
   return data.state === 'ready' && typeof root === 'string' && root
     ? { available: true, repository_roots: [root] } : null;
 }
+// Read-only as the room's next work will run: the saved next-work settings when the host
+// reports them, else the room's own mode and permission.
+function roomReadOnlyNow(snapshot) {
+  const desired = naturalRuntimeConfiguration(snapshot)?.desired;
+  if (desired) return desired.work_mode === 'plan' || ['plan', 'read_only'].includes(desired.runtime_settings?.permission);
+  return isReadOnlyDiscussion(snapshot);
+}
 function renderCodeMerge(data, available, stale) {
   const mainline = available && data.state === 'ready' ? data.mainline : null;
   const label = $('code-mainline'); label.hidden = !available || data.state !== 'ready';
@@ -1109,7 +1139,8 @@ function renderCodeMerge(data, available, stale) {
   const panel = $('code-merge-panel');
   const identity = JSON.stringify([state.selected, data?.workspace_id, request]);
   if (panel.dataset.identity !== identity) { panel.open = false; panel.dataset.identity = identity; $('code-merge-status').hidden = true; }
-  panel.hidden = request?.available !== true;
+  // In a read-only room partners cannot commit or push; the request would spend a whole round for nothing.
+  panel.hidden = request?.available !== true || roomReadOnlyNow(state.snapshot);
   if (panel.hidden) return;
   $('code-merge-description').textContent = t("本任务关联仓库：\n{p0}", { p0: (request.repository_roots || []).join('\n') });
   const options = $('code-merge-target'); const members = state.snapshot?.members || [];
@@ -1489,7 +1520,7 @@ function deliveryDocuments(snapshot) {
   for (const doc of documents) {
     const provenance = objectiveDeliveredFile(snapshot, doc);
     if (!provenance) continue;
-    doc.deliveryReview = provenance.review_kind === 'self_check' ? t("仅自检") : provenance.review_kind === 'independent_review' ? t("经独立审核") : t("审核方式待核对");
+    doc.deliveryReview = provenance.review_kind === 'self_check' ? t("只做了自查") : provenance.review_kind === 'independent_review' ? t("伙伴看过") : t("审核方式待核对");
     doc.meta = t("本目标成果 · 文件版本 {p0} · {p1}", { p0: doc.revision, p1: doc.deliveryReview });
   }
   const tasks = Array.isArray(snapshot.collaboration?.tasks) ? snapshot.collaboration.tasks : [];
@@ -1556,7 +1587,7 @@ function baselineDocuments(snapshot) {
     objectiveId: objective.id, sourceRoomId, binding: { ...binding, path: file.path, sha256: file.sha256 },
     sha256: file.sha256, revision: binding.revision, markdown: /\.(?:md|markdown)$/i.test(file.path),
     reviewKind: file.review_kind,
-    deliveryReview: file.review_kind === 'self_check' ? t("仅自检") : file.review_kind === 'independent_review' ? t("经独立审核") : t("审核方式待核对"),
+    deliveryReview: file.review_kind === 'self_check' ? t("只做了自查") : file.review_kind === 'independent_review' ? t("伙伴看过") : t("审核方式待核对"),
     meta: t("沿用的交付（上一轮） · 文件版本 {p0}", { p0: binding.revision }),
   }));
 }
@@ -1830,6 +1861,11 @@ function setCatalog(agents) {
   renderParticipantPicker();
 }
 
+// Every effort level a tool may report; an unknown one is shown as the tool wrote it.
+function effortLabels() {
+  return { none: t("不思考"), minimal: t("极低"), low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), ultra: t("极高"), max: t("最高"), auto: t("自动") };
+}
+
 function isAdditionalSession(agent) {
   return ['claude', 'codex'].includes(agent.adapter) && agent.id !== agent.adapter;
 }
@@ -1846,7 +1882,6 @@ function renderParticipantPicker() {
       label.dataset.agent = agent.id;
       const input = element('input');
       input.type = 'checkbox'; input.dataset.participant = agent.id;
-      input.setAttribute('aria-label', t("邀请 {p0}", { p0: agent.name }));
       input.addEventListener('change', () => {
         if (state.selected || state.busy || state.managementBusy || state.pending || !selectableAgent(agent, { retainBlocked: !input.checked })) {
           input.checked = (state.selectedParticipants || []).includes(agent.id); return;
@@ -1862,12 +1897,17 @@ function renderParticipantPicker() {
       if (isAdditionalSession(agent)) label.append(element('small', t("{p0} 的独立会话", { p0: agent.adapter === 'codex' ? 'Codex' : 'Claude Code' }), 'session-caption'));
     }
     label.firstChild.checked = (state.selectedParticipants || []).includes(agent.id);
+    // Set on every render so a language switch also renames the screen-reader label.
+    label.firstChild.setAttribute('aria-label', t("邀请 {p0}", { p0: agent.name }));
     label.firstChild.disabled = state.busy || state.managementBusy || !!state.pending || !selectableAgent(agent, { retainBlocked: label.firstChild.checked });
     const availability = availabilityInfo(agent.id);
     let availabilityNote = [...label.children].find((node) => node.classList.contains('participant-availability'));
     if (!availabilityNote) { availabilityNote = element('small', '', 'participant-availability'); label.append(availabilityNote); }
-    availabilityNote.hidden = !availability.value; availabilityNote.textContent = availability.value ? availability.summary : '';
-    label.classList.toggle('quota-blocked', availability.blocked);
+    // A tool that is not installed or signed in says so here, the same words as its partner card.
+    const setupNote = notSetUp(agent) ? memberLoginCaption(null, agent.id) : '';
+    const note = setupNote || (availability.value ? availability.summary : '');
+    availabilityNote.hidden = !note; availabilityNote.textContent = note;
+    label.classList.toggle('quota-blocked', availability.blocked || !!setupNote);
     const portrait = label.children[1];
     const styleClass = `bean-style-${beanStyle(agent.id, agent)}`;
     if (!portrait.classList.contains(styleClass)) portrait.replaceWith(avatar(agent.id, agent));
@@ -1883,6 +1923,16 @@ function renderParticipantPicker() {
   const selectedExtras = (state.selectedParticipants || []).filter((id) => extras.has(id)).length;
   $('extra-session-choice-label').textContent = t("更多会话（高级）{p0}", { p0: selectedExtras ? t(" · 已选 {p0}", { p0: selectedExtras }) : '' });
   $('participant-count').textContent = t("{p0} 已选", { p0: (state.selectedParticipants || []).length });
+  // A disabled partner is left out of the picker and the home page; name it and say where to turn it back on.
+  const note = disabledPartnersNote();
+  for (const id of ['participant-disabled-note', 'home-disabled-note']) {
+    if ($(id).textContent !== note) $(id).textContent = note;
+    $(id).hidden = !note;
+  }
+}
+function disabledPartnersNote() {
+  const disabled = state.partners.filter((partner) => partner.enabled === false && activeEntry(partner)).map((partner) => partner.name || displayName(partner.id));
+  return disabled.length ? t("已停用：{p0}。要用的话，到“伙伴与额度”里点“启用”。", { p0: interfaceList(disabled) }) : '';
 }
 
 function memberCard(id, descriptor = {}) {
@@ -1946,7 +1996,7 @@ function availabilityInfo(id) {
   const observed = !blocked && ['quota_unknown', 'adapter_unsupported'].includes(value?.reason) ? observedQuotaLabel(id) : null;
   const knownExhausted = ['subscription_limit_reached', 'quota_exhausted'].includes(value?.reason);
   const summary = blocked ? knownExhausted ? t("额度已用完 · 暂不能开始") : value?.reason === 'account_identity_unknown' ? t("当前登录待确认 · 暂不能开始") : t("可用状态待确认 · 暂不能开始")
-    : observed ? observed.text : value?.state === 'available' ? t("最近检查未见额度阻塞") : quotaPendingLabel(id);
+    : observed ? observed.text : value?.state === 'available' ? t("额度够用") : quotaPendingLabel(id);
   const detail = observed ? t("{p0} · 额度更新：{p1}{p2}", { p0: observed.text, p1: Number.isFinite(observed.quota.checked_at) ? timeLabel(observed.quota.checked_at, true) : t("时间未提供"), p2: observed.quota.stale ? t(" · 旧快照") : '' }) : value ? [reasons[value.reason] || (blocked ? t("暂不能开始新任务") : summary),
     Number.isFinite(value.observed_at) ? t("上次检查 {p0}", { p0: timeLabel(value.observed_at, true) }) : t("检查时间未提供"),
     stale ? t("旧快照，等待更新") : '',
@@ -1965,15 +2015,20 @@ function memberAvailabilityLine(info) {
   if (reason === 'account_identity_unknown') return { tone: 'ask', text: t("登录待确认 · 点“账号与额度”刷新") };
   return { tone: 'ask', text: t("状态待确认 · 点“账号与额度”刷新") };
 }
-// The card says only whether the partner is signed in; who it is shows under 账号与额度.
+function partnerSetupState(id) {
+  const partner = state.partners.find((entry) => entry.id === id) || state.catalog.find((entry) => entry.id === id);
+  return state.adapters.find((adapter) => adapter.id === (partner?.adapter || id))?.setup?.state || null;
+}
+// One sign-in wording for every place that shows it (partner card, management list, task options).
+// A failed or old account or quota check never reads as signed out: only the tool's own
+// setup check says "还差登录".
 function memberLoginCaption(account, id) {
-  const partner = state.partners.find((entry) => entry.id === id);
-  const setupState = state.adapters.find((adapter) => adapter.id === partner?.adapter)?.setup?.state;
+  const setupState = partnerSetupState(id);
+  if (setupState === 'not_installed') return t("还没安装");
   if (setupState === 'login_required') return t("还差登录");
-  if (setupState === 'ready' && account?.stale) return t("已登录");  // the tool has confirmed it; only the account details are old
-  if (!account || account.state === 'not_checked') return t("登录未检查");
-  if (account.stale) return t("登录待刷新");
-  if (account.state === 'error') return t("登录检查未成功");
+  if (!account || account.state === 'not_checked') return setupState === 'ready' ? t("已登录") : t("登录未检查");
+  const known = !!accountEmail(account) || typeof account.plan === 'string' && !!account.plan || setupState === 'ready';
+  if (account.stale || account.state === 'error') return known ? t("已登录 · 待刷新") : t("登录状态没查到");
   return t("已登录");
 }
 function availabilityText(info) {
@@ -2208,7 +2263,36 @@ function runtimePayload() {
 function acceptRuntimeOptions(value) {
   if (value?.scope !== 'coordinator_owned_only' || !value.partners || !Array.isArray(value.permissions)) return false;
   state.runtimeOptions = value; applyNativePermissionDefault();
+  rememberModelNames(value.partners);
   return true;
+}
+// Model names come with the model options, which a reload does not fetch. The last names
+// seen are kept on this device so a saved choice still reads "Opus 5.5", not "default".
+const modelNamesKey = 'beanest:model-names-v1';
+function savedModelNames() {
+  try { const value = JSON.parse(localStorage.getItem(modelNamesKey) || '{}'); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch (_) { return {}; }
+}
+function rememberModelNames(partners) {
+  const names = savedModelNames();
+  for (const [id, entry] of Object.entries(partners || {})) {
+    const models = Array.isArray(entry?.models) ? entry.models.filter((model) => model && typeof model.id === 'string' && model.id.length <= 200) : [];
+    if (!models.length) continue;
+    names[id] = Object.fromEntries(models.slice(0, 100).map((model) => [model.id, { name: typeof model.name === 'string' ? model.name.slice(0, 120) : '',
+      resolved_model: typeof model.resolved_model === 'string' ? model.resolved_model.slice(0, 200) : null }]));
+  }
+  try { localStorage.setItem(modelNamesKey, JSON.stringify(names)); } catch (_) { /* Names are a display convenience only. */ }
+}
+// The model list as last seen, for labels before (or without) loading the live options.
+function knownModels(id) {
+  const live = state.runtimeOptions?.partners?.[id]?.models;
+  if (Array.isArray(live) && live.length) return live;
+  const saved = savedModelNames()[id];
+  return saved && typeof saved === 'object' ? Object.entries(saved).map(([model, value]) => ({ id: model, name: value?.name || '', resolved_model: value?.resolved_model || null })) : [];
+}
+// Without any list, still avoid raw ids: "default" reads as the tool's default, a path keeps its last part.
+function fallbackModelLabel(id) {
+  if (id === 'default') return t("默认推荐");
+  return id.split('/').filter(Boolean).at(-1) || id;
 }
 async function loadRuntimeOptions() {
   if (state.runtimeLoading) return;
@@ -2341,11 +2425,11 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     const historical = runtimePartnerReadOnly(id);
     const partnerCaption = historical ? t("原有设置 · 仅查看 · ") : caption;
     const choice = historical ? recorded?.members?.[id] : choices.members[id];
-    const models = state.runtimeOptions?.partners?.[id]?.models || [];
+    const models = knownModels(id);
     const model = models.find((entry) => entry.id === choice?.model);
-    const fullModelLabel = unrecorded ? t("未记录模型") : choice?.model ? model ? runtimeModelLabel(model, models) : choice.model : t("跟随工具");
+    const fullModelLabel = unrecorded ? t("未记录模型") : choice?.model ? model ? runtimeModelLabel(model, models) : fallbackModelLabel(choice.model) : t("跟随工具");
     const modelLabel = model ? runtimeShortcutModelLabel(model, models) : fullModelLabel;
-    const effort = unrecorded ? t("未记录强度") : ({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[choice?.effort] || choice?.effort || t("默认强度");
+    const effort = unrecorded ? t("未记录强度") : effortLabels()[choice?.effort] || choice?.effort || t("默认强度");
     const shortEffort = effort === t("默认强度") ? t("默认") : effort;
     const text = `${displayName(id)} · ${modelLabel} · ${shortEffort}${historical ? t(" · 仅查看") : ''} ⌄`;
     if (button.dataset.label !== text) {
@@ -2359,7 +2443,8 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     button.setAttribute('aria-expanded', String(state.runtimePopoverOpen && state.runtimePartner === id));
     const cardModel = document.getElementById(`member-model-${id}`);
     if (cardModel) {
-      cardModel.textContent = `${modelLabel} · ${shortEffort} ⌄`; cardModel.title = button.title;
+      // A default effort adds nothing to the narrow card button, so it shows only the model there.
+      cardModel.textContent = shortEffort === t("默认") ? `${modelLabel} ⌄` : `${modelLabel} · ${shortEffort} ⌄`; cardModel.title = button.title;
       cardModel.setAttribute('aria-label', button.getAttribute('aria-label'));
       cardModel.setAttribute('aria-expanded', button.getAttribute('aria-expanded'));
     }
@@ -2400,7 +2485,8 @@ function renderRuntimeSettings() {
       const actual = activeJob?.runtime_settings || room?.runtime_settings;
       const choice = actual?.members?.[state.runtimePartner];
       const actualLabel = state.runtimePartner ? choice
-        ? `${choice.model || t("工具默认")} · ${({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[choice.effort] || choice.effort || t("默认强度")}`
+        ? `${choice.model ? (() => { const models = knownModels(state.runtimePartner); const model = models.find((entry) => entry.id === choice.model);
+          return model ? runtimeModelLabel(model, models) : fallbackModelLabel(choice.model); })() : t("工具默认")} · ${effortLabels()[choice.effort] || choice.effort || t("默认强度")}`
         : t("未记录") : (activeJob?.work_mode || room?.work_mode) === 'plan' ? t("方案只读") : runtimePermissionName(activeJob?.permission || actual?.permission);
       $('runtime-settings-note').textContent += t(" 当前设置：{p0}。", { p0: actualLabel });
     }
@@ -2465,7 +2551,7 @@ function renderRuntimeSettings() {
     const efforts = Array.isArray(selectedModel?.efforts) ? selectedModel.efforts.filter((effort) => typeof effort === 'string' && effort) : [];
     const effortLabel = element('label', t("思考强度 ")); const effortSelect = element('select'); effortSelect.id = `runtime-effort-${id}`;
     const defaultEffort = element('option', t("工具默认")); defaultEffort.value = ''; effortSelect.append(defaultEffort);
-    for (const effort of efforts) { const option = element('option', ({ low: t("低"), medium: t("中"), high: t("高"), xhigh: t("很高"), max: t("最高"), auto: t("自动") })[effort] || effort); option.value = effort; effortSelect.append(option); }
+    for (const effort of efforts) { const option = element('option', effortLabels()[effort] || effort); option.value = effort; effortSelect.append(option); }
     if (choice.effort && !efforts.includes(choice.effort)) { const option = element('option', `${choice.effort}${interfaceParen(historical ? t("原有设置") : t("已设置，尚未核对"))}`); option.value = choice.effort; effortSelect.append(option); }
     effortSelect.value = choice.effort || ''; effortSelect.disabled = historical || locked || !supported || !selectedModel || !efforts.length;
     effortSelect.addEventListener('change', () => {
@@ -2814,6 +2900,39 @@ function displayName(id) {
   return Object.hasOwn(names, id) ? names[id] : t("来源待确认");
 }
 
+// Mirrors project_catalog._file_list so a typed list gets a message about its actual problem.
+const projectTextExtensions = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.json', '.md', '.txt', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.css', '.html',
+  '.xml', '.sql', '.rs', '.go', '.java', '.kt', '.swift', '.c', '.h', '.cpp', '.hpp', '.sh', '.bash', '.gd', '.tscn', '.tres', '.vue', '.svelte',
+  '.properties', '.csv', '.rst', '.cmake', '.svg']);
+function explicitFilesProblem(files) {
+  if (!files.length) return t("请至少填写一个文件路径，每行一个。");
+  if (files.length > 12) return t("最多 12 个文件，现在填了 {p0} 个。", { p0: files.length });
+  const absolute = files.find((file) => file.startsWith('/') || file.startsWith('~') || /^[A-Za-z]:[\\/]/.test(file));
+  if (absolute) return t("请写相对项目文件夹的路径，例如 src/main.py，不要写完整路径：{p0}", { p0: absolute });
+  const outside = files.find((file) => file.includes('\\') || file.split('/').some((part) => !part || part === '.' || part === '..'));
+  if (outside) return t("路径里不能有 ..、. 或空的一段，文件要在项目文件夹里面：{p0}", { p0: outside });
+  const seen = new Set(); const repeated = files.find((file) => { const key = file.toLowerCase(); if (seen.has(key)) return true; seen.add(key); return false; });
+  if (repeated) return t("这个文件填了两次：{p0}", { p0: repeated });
+  const binary = files.find((file) => { const name = file.split('/').at(-1); const dot = name.lastIndexOf('.');
+    return !['LICENSE', 'Makefile', 'Dockerfile'].includes(name) && !(dot > 0 && projectTextExtensions.has(name.slice(dot).toLowerCase())); });
+  if (binary) return t("{p0} 不是能处理的文本文件。只能选源码、文档、配置这类文本文件。", { p0: binary });
+  return '';
+}
+function sameFolder(a, b) { return a.replace(/\/+$/, '') === b.replace(/\/+$/, ''); }
+// The same folder (and, for chosen files, the same files) is registered once; say under which name.
+function registeredProjectAt(path, files) {
+  const existing = state.projects.find((project) => lifecycleState(project) !== 'removed' && sameFolder(project.path, path)
+    && (files ? project.selection_kind !== 'folder' && [...project.files].sort().join('\n') === [...files].sort().join('\n') : project.selection_kind === 'folder'));
+  if (!existing) return '';
+  return activeEntry(existing) ? t("这个文件夹已登记为「{p0}」，直接选它就行。", { p0: existing.name })
+    : t("这个文件夹已登记为「{p0}」，现在在“已归档”里，恢复后就能用。", { p0: existing.name });
+}
+function broadFolderWarning(path) {
+  const clean = path.replace(/\/+$/, '') || '/';
+  if (/^\/(?:Users|home)\/[^/]+$/.test(clean)) return t("这是整个用户文件夹，里面有很多和项目无关的私人文件。建议只选项目所在的文件夹。确定要登记，就再点一次“添加项目”。");
+  if (/^\/(?:Users|home|Volumes\/[^/]+)?$/.test(clean)) return t("这是整块磁盘或系统文件夹，范围太大。建议只选项目所在的文件夹。确定要登记，就再点一次“添加项目”。");
+  return '';
+}
 function projectLimitMessage(folder) {
   return folder ? t("项目或这批修改超过本机处理上限；未保存这批修改，已有成果保留。") : errorLabels.project_limit_exceeded;
 }
@@ -2829,6 +2948,14 @@ function timeLabel(seconds, full = false) {
   return new Date(seconds * 1000).toLocaleString(window.BeanestI18n.getLocale(), options);
 }
 
+// The one name a task goes by in menus and confirmations is the sidebar's, from the room list.
+// The open room's own goal field can hold the latest round's text, which the sidebar never shows.
+function roomDisplayTitle(room) {
+  const listed = state.rooms.find((entry) => entry.id === room?.id);
+  if (listed) return roomTitle(listed);
+  const objective = room?.id && state.snapshot?.room.id === room.id ? currentObjective() : null;
+  return roomTitle(objective ? { ...room, objective_goal: objective.original_goal } : room);
+}
 function roomTitle(room) {
   const goalText = room?.goal ?? room?.goal_preview;
   const objectiveText = room?.objective_goal ?? room?.objective_goal_preview;
@@ -2887,7 +3014,10 @@ async function api(path, method = 'GET', body) {
       const code = typeof result.error === 'string' ? result.error : '';
       const folder = path === workspaceApi.projects ? body?.selection_kind === 'folder'
         : (body?.mode || state.snapshot?.room.mode || state.mode) === 'project_folder';
-      const message = code === 'project_limit_exceeded' ? projectLimitMessage(folder) : errorLabels[code];
+      const message = code === 'project_limit_exceeded' ? projectLimitMessage(folder)
+        // Registering a folder that is missing or unreadable is about the folder, not "selected files".
+        : code === 'project_file_unavailable' && path === workspaceApi.projects && body?.selection_kind === 'folder' ? t("找不到这个文件夹，或者没有权限读取。请核对路径。")
+        : errorLabels[code];
       throw new RequestError(message || t("请求未完成，请核对本地服务与任务状态。"), {
         code, uncertain: method !== 'GET' && !workspaceRejections.has(code)
           && (response.status >= 500 || !Object.hasOwn(errorLabels, code)),
@@ -2930,7 +3060,8 @@ function selectableAgent(agent, { retainBlocked = false } = {}) {
 function quotaPendingLabel(id) {
   const agent = state.catalog.find((entry) => entry.id === id);
   const registered = state.partners.find((entry) => entry.id === id);
-  const usable = agent && eligibleAgent(agent) && registered?.selectable === true && registered.installation?.state !== 'missing';
+  // "Still usable" only when the checkbox beside it can actually be ticked.
+  const usable = agent && selectableAgent(agent, { retainBlocked: true }) && registered?.selectable === true && registered.installation?.state !== 'missing';
   return t("当前未取得额度{p0}", { p0: usable ? t(" · 仍可使用") : '' });
 }
 function visibleEntries(kind, items) { return items.filter((item) => lifecycleState(item) === state.lifecycleViews[kind]); }
@@ -3007,7 +3138,7 @@ function openContextMenu(kind, id, target, event) {
   state.contextMenu = { kind, id, target, itemFingerprint: contextItemFingerprint(item) };
   target.classList.toggle('entry-context-anchor', true);
   target.setAttribute('aria-expanded', 'true');
-  $('entry-context-title').textContent = `${kind === 'rooms' ? t("管理任务") : kind === 'projects' ? t("管理项目") : t("管理伙伴")} · ${item.name || roomTitle(item)}`;
+  $('entry-context-title').textContent = `${kind === 'rooms' ? t("管理任务") : kind === 'projects' ? t("管理项目") : t("管理伙伴")} · ${kind === 'rooms' ? roomDisplayTitle(item) : item.name}`;
   const actions = lifecycleActions(kind, item, { beforeAction: () => closeContextMenu({ restoreFocus: true }) });
   for (const button of actions.children) if (button.tagName === 'BUTTON') {
     button.setAttribute('role', 'menuitem'); button.setAttribute('tabindex', '-1');
@@ -3061,7 +3192,8 @@ function lifecycleActions(kind, item, { beforeAction = () => {} } = {}) {
     const button = element('button', label, `quiet-button${action === 'remove' ? ' danger' : ''}`); button.type = 'button';
     button.dataset.lifecycleAction = action; button.dataset.lifecycleKind = kind; button.dataset.lifecycleId = item.id;
     button.disabled = state.managementBusy || (!permanent && (state.busy || !!state.pending)) || (permanent ? busy : action !== 'restore' && busy);
-    button.setAttribute('aria-label', `${label}${kind === 'rooms' ? t("任务") : kind === 'projects' ? t("项目") : t("伙伴")}${interfaceColon()}${item.name || roomTitle(item)}`);
+    const noun = kind === 'rooms' ? t("任务") : kind === 'projects' ? t("项目") : t("伙伴");
+    button.setAttribute('aria-label', `${label}${interfaceWordSpace()}${englishInterface() ? noun.toLowerCase() : noun}${interfaceColon()}${kind === 'rooms' ? roomDisplayTitle(item) : item.name}`);
     if (permanent && busy) button.title = kind === 'partners' ? t("正在处理这个伙伴的操作。") : kind === 'projects' ? t("正在核对项目登记删除结果。") : t("正在停止任务并处理记录，请稍候。");
     else if (busy && action !== 'restore') button.title = item.lifecycle_blocked_reason === 'team_cleanup_unconfirmed'
       ? t("执行清理尚未确认，暂时不能归档或移除。") : t("任务仍在处理或等待清理，结束后可整理。");
@@ -3487,6 +3619,9 @@ const partnerOperationSentences = {
   remove: { failed: "移除配置未完成。{p0}", unknown: "正在核对移除结果，原请求已保留。", pending: "移除尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴配置已移除。{p0}" },
   other: { failed: "伙伴操作未完成。{p0}", unknown: "正在核对伙伴操作结果，原请求已保留。", pending: "伙伴操作尚未完成，正在保留改动并确认停止。{p0}", done: "伙伴操作已完成。{p0}" },
 };
+function partnerOperationSettled(operation) {
+  return operation?.status === 'completed' && !operation.error && !operation.targets?.some((target) => !['done', 'superseded'].includes(target.state));
+}
 function partnerOperationText(operation) {
   const sentences = partnerOperationSentences[operation.action] || partnerOperationSentences.other;
   if (operation.status === 'failed') return t(sentences.failed, { p0: errorLabels[operation.error] || executionMessage(operation.error) });
@@ -3553,7 +3688,7 @@ async function mutatePartnerOperation(provider, action) {
 
 function confirmLifecycle(kind, item) {
   state.lifecycleConfirm = { kind, id: item.id, previousFocus: document.activeElement };
-  const removing = item.name || roomTitle(item);
+  const removing = kind === 'rooms' ? roomDisplayTitle(item) : item.name;
   $('lifecycle-confirm-title').textContent = kind === 'projects' ? t("移除项目“{p0}”？", { p0: removing }) : kind === 'partners' ? t("移除伙伴“{p0}”？", { p0: removing }) : t("移除任务“{p0}”？", { p0: removing });
   $('lifecycle-confirm-description').textContent = kind === 'projects'
     ? t("只移除豆窝里的项目登记。磁盘上的项目文件和已有聊天都会保留。")
@@ -3567,7 +3702,7 @@ function confirmLifecycle(kind, item) {
     $('lifecycle-confirm-title').textContent = t("移除伙伴配置“{p0}”？", { p0: item.name });
     $('lifecycle-confirm-description').textContent = t("移除豆窝中的这个伙伴配置；已有聊天和成果保留，正在进行的工作会先停下并保住改动。");
   } else if (permanent) {
-    $('lifecycle-confirm-title').textContent = t("永久删除任务“{p0}”？", { p0: roomTitle(item) });
+    $('lifecycle-confirm-title').textContent = t("永久删除任务“{p0}”？", { p0: roomDisplayTitle(item) });
     $('lifecycle-confirm-description').textContent = state.roomNativeSessionCleanupSupported
       ? t("将停止这项任务，永久删除豆窝聊天、成果、专用工作副本和专用本机会话，无法恢复。其它聊天、原项目文件和账号不受影响；供应商云端记录不在清理范围。")
       : t("将停止这项任务，永久删除豆窝中的聊天、交付文件和专用工作副本，无法恢复。原项目文件、原终端和模型供应商保存的会话不会删除。");
@@ -3717,7 +3852,7 @@ function renderRooms() {
 
 const taskStatusLabels = localizedLabels({
   open: '待认领', assigned: '已分配，等待开始', working: '正在处理', waiting_peer: '等待伙伴',
-  review: '等待互审', accepted: '已交付并互审', self_checked: '已交付 · 仅自检', blocked: '遇到阻塞', unknown: '结果待确认',
+  review: '等伙伴检查', accepted: '已完成 · 伙伴看过', self_checked: '已完成 · 只做了自查', blocked: '遇到阻塞', unknown: '结果待确认',
   interrupted: '已中断', cancelled: '已取消',
 });
 const objectiveLabels = localizedLabels({
@@ -3729,7 +3864,10 @@ const objectiveRoomLabels = localizedLabels({
   complete: '目标已交付', paused: '已暂停推进', stopped: '目标已停止', interrupted: '推进中断，待核对',
 });
 function sidebarObjectiveLabel(room) {
-  if (state.snapshot?.room.id === room.id && idleReadOnlyDiscussion(state.snapshot)) return t("方案讨论");
+  const open = state.snapshot?.room.id === room.id ? state.snapshot : null;
+  if (open && idleReadOnlyDiscussion(open)) return readOnlyLabel(open);
+  // A finished read-only discussion is "讨论已结束" in the list too, as on its card and partner cards.
+  if (room.objective_status === 'complete' && (open ? isReadOnlyDiscussion(open) : room.work_mode === 'plan')) return open ? readOnlyLabel(open, true) : t("讨论已结束");
   const stop = roomStopKind(room);
   if (stop) return stop === 'quota_wait' ? t("等额度恢复") : t("马上自动继续");
   if (room.objective_status !== 'paused') return objectiveRoomLabels[room.objective_status];
@@ -3749,6 +3887,27 @@ function isReadOnlyDiscussion(snapshot = state.snapshot, job = null) {
   const mode = claim?.work_mode || snapshot.room.work_mode;
   const runtime = claim?.runtime_settings || snapshot.room.runtime_settings;
   return mode === 'plan' || ['read_only', 'plan'].includes(runtime?.effective_permission);
+}
+// Build mode under a read-only permission (Plan in a development room) is not a plan
+// discussion: the work mode is build, only the permission keeps partners from editing.
+function readOnlyBuild(snapshot = state.snapshot) {
+  return isReadOnlyDiscussion(snapshot) && actualWorkMode(snapshot) === 'build';
+}
+function writablePermissionName(snapshot = state.snapshot) {
+  return snapshot?.room?.mode === 'native_project' ? 'Full Access' : t("副本内修改");
+}
+// What starts the work after a plan. The "按方案开始" button exists only for a room without an
+// objective; with one (autonomous, the default), the user switches to build and sends a message.
+function planNextStepText() {
+  const room = state.snapshot && state.selected === state.snapshot.room.id ? state.snapshot.room : null;
+  if (room ? !currentObjective() : !state.executionPolicySupported) return t("聊清楚后，可以点“按方案开始”。");
+  const native = room ? room.mode === 'native_project' : state.mode === 'native_project';
+  const planPermission = (state.runtimeSettings?.permission || room?.runtime_settings?.permission) === 'plan';
+  return [t("聊清楚后，切到“动手”再发一句话就会开工。"),
+    native && planPermission ? t("开发任务还要在“设置”里把权限从 Plan 换成 Full Access，不然伙伴只能看不能改。") : ''].filter(Boolean).join(interfaceWordSpace());
+}
+function readOnlyLabel(snapshot = state.snapshot, ended = false) {
+  return readOnlyBuild(snapshot) ? ended ? t("已回复 · 只读权限") : t("只读权限") : ended ? t("讨论已结束") : t("方案讨论");
 }
 function idleReadOnlyDiscussion(snapshot = state.snapshot) {
   if (!isReadOnlyDiscussion(snapshot) || !activeEntry(snapshot.room)) return false;
@@ -3778,7 +3937,7 @@ function objectiveLabel(objective) {
   const resume = state.snapshot && Object.hasOwn(state.snapshot, 'stop_kind') ? state.snapshot.stop_kind : null;
   if (['stopped', 'interrupted', 'needs_user'].includes(objective.status) && resume === 'quota_wait') return t("等额度恢复");
   if (['stopped', 'interrupted', 'needs_user'].includes(objective.status) && resume === 'auto') return t("马上自动继续");
-  if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return t("方案讨论"); if (objective.status === 'complete' && isReadOnlyDiscussion()) return t("讨论已结束"); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
+  if (hostResultInterruption(objective)) return t("处理遇到技术问题"); if (idleReadOnlyDiscussion()) return readOnlyLabel(); if (objective.status === 'complete' && isReadOnlyDiscussion()) return readOnlyLabel(state.snapshot, true); return objective.status === 'paused' && objective.pause_requested === true ? t("正在暂停，等待当前处理结束") : objectiveLabels[objective.status]; }
 function currentObjective(snapshot = state.snapshot) {
   const objective = snapshot?.objective;
   return state.executionPolicySupported && objective && uuidPattern.test(objective.id)
@@ -4022,16 +4181,16 @@ function renderObjectiveNextStep(result, snapshot, objective, summaryTarget = re
   const tasks = snapshot.team?.tasks || [];
   const selfChecked = tasks.filter((task) => task.status === 'self_checked' || task.review_kind === 'self_check');
   if (objective.status === 'complete' && (next?.review_kind === 'self_check' || selfChecked.length)) {
-    result.append(element('p', selfChecked.length ? t("{p0} 项任务仅自检，未独立互审。", { p0: selfChecked.length })
+    result.append(element('p', selfChecked.length ? t("{p0} 项只做了自查，没有别的伙伴看过。", { p0: selfChecked.length })
       : t("本次完成评估由单个伙伴核对；成果的审核范围见文件与任务记录。"), 'review-scope-note'));
     const details = element('details', '', 'review-scope-details'); details.dataset.outcomeDetail = 'review-scope';
     details.append(element('summary', t("查看审核详情")));
     if (next?.review_kind === 'self_check') details.append(element('p', t("完成评估由单个伙伴核对，不代表所有成果都未经互审。"), 'detail-caption'));
-    for (const task of selfChecked) details.append(element('p', t("{p0}：仅自检，未独立互审。", { p0: task.title || task.id }), 'detail-caption'));
+    for (const task of selfChecked) details.append(element('p', t("{p0}：只做了自查，没有别的伙伴看过。", { p0: task.title || task.id }), 'detail-caption'));
     result.append(details);
   } else {
     if (next?.review_kind === 'self_check') result.append(element('p', t("本次完成评估由单个伙伴核对；各项成果的审核范围见文件与任务记录。"), 'review-scope-note'));
-    if (selfChecked.length) result.append(element('p', t("{p0} 项任务仅自检，未独立互审：{p1}。", { p0: selfChecked.length, p1: interfaceList(selfChecked.map((task) => task.title || task.id)) }), 'review-scope-note'));
+    if (selfChecked.length) result.append(element('p', t("{p0} 项只做了自查，没有别的伙伴看过：{p1}。", { p0: selfChecked.length, p1: interfaceList(selfChecked.map((task) => task.title || task.id)) }), 'review-scope-note'));
   }
 }
 
@@ -4049,7 +4208,7 @@ function renderObjectiveTakeovers(result, snapshot, objective) {
     const task = event.run_id === snapshot.current_run?.id ? snapshot.team?.tasks?.find((entry) => entry.id === event.task_id) : null;
     box.append(element('p', t("{p0} 接手 {p1} 的{p2}。", { p0: displayName(event.owner), p1: displayName(event.previous_owner), p2: task?.title ? interfaceQuote(taskDisplayTitle(task.title)) : t("子任务") }), 'detail-caption'));
   }
-  box.append(element('p', t("接手者沿用本目标冻结的权限与自身模型设置；单人完成会注明仅自检。"), 'detail-caption'));
+  box.append(element('p', t("接手的伙伴沿用这个目标定好的权限和自己的模型设置；一个人做完的会注明只做了自查。"), 'detail-caption'));
   result.append(box);
 }
 const outcomeLabels = localizedLabels({
@@ -4062,7 +4221,7 @@ function legacyCollaboration(snapshot) {
   const finished = snapshot.room.status === 'completed';
   const warning = [...snapshot.events].reverse().find((event) => event.kind === 'warning' && typeof event.code === 'string');
   const failed = [...snapshot.jobs].reverse().find((job) => typeof job.error === 'string' && job.error);
-  const reason = closed ? (warning ? executionMessage(warning.code) : failed ? executionMessage(failed.error) : t("记录状态：{p0}。", { p0: statusLabels[statusClass(snapshot.room.status)] }))
+  const reason = closed ? (warning ? stoppedReasonMessage(snapshot, warning.code) : failed ? executionMessage(failed.error) : t("记录状态：{p0}。", { p0: statusLabels[statusClass(snapshot.room.status)] }))
     : finished ? t("这是历史协作记录。本轮回复已结束；没有记录整个目标的验收结果。") : t("这是旧版协作记录，尚未记录可追踪的任务拆分。");
   const mode = snapshot.room.mode;
   return {
@@ -4172,7 +4331,7 @@ function renderCollaboration(snapshot) {
     board.open = keepExpanded;
     const accepted = tasks.filter((task) => task?.status === 'accepted' && task.review_kind !== 'self_check').length;
     const selfChecked = tasks.filter((task) => task?.status === 'self_checked' || task.status === 'accepted' && task.review_kind === 'self_check').length;
-    board.append(element('summary', tasks.length ? selfChecked ? t("任务分工 · {p0}/{p1} 已交付 · {p2}项仅自检", { p0: accepted + selfChecked, p1: tasks.length, p2: selfChecked }) : t("任务分工 · {p0}/{p1} 已交付并互审", { p0: accepted, p1: tasks.length }) : t("任务分工 · 正在规划")));
+    board.append(element('summary', tasks.length ? selfChecked ? t("任务分工 · {p0}/{p1} 已完成 · {p2} 项只做了自查", { p0: accepted + selfChecked, p1: tasks.length, p2: selfChecked }) : t("任务分工 · {p0}/{p1} 已完成，伙伴看过", { p0: accepted, p1: tasks.length }) : t("任务分工 · 正在规划")));
     if (typeof collaboration.summary === 'string' && collaboration.summary) board.append(element('p', collaboration.summary, 'collaboration-summary'));
     if (!tasks.length) board.append(element('p', t("正在整理分工，伙伴随后可认领任务。"), 'detail-caption'));
     const list = element('ol', '', 'collaboration-tasks');
@@ -4183,7 +4342,7 @@ function renderCollaboration(snapshot) {
       const taskLabel = Object.hasOwn(taskStatusLabels, task.status) ? taskStatusLabels[task.status] : t("状态待确认");
       const title = element('strong', taskDisplayTitle(task.title)); title.title = task.title;
       heading.append(title, element('span', task.review_kind === 'self_check'
-        ? ['accepted', 'self_checked'].includes(task.status) ? taskStatusLabels.self_checked : t("{p0} · 完成后仅自检", { p0: taskLabel }) : taskLabel, 'task-state'));
+        ? ['accepted', 'self_checked'].includes(task.status) ? taskStatusLabels.self_checked : t("{p0} · 完成后只做自查", { p0: taskLabel }) : taskLabel, 'task-state'));
       item.append(heading, element('p', task.owner ? t("负责人：{p0}", { p0: displayName(task.owner) }) : t("负责人：等待伙伴认领"), 'task-owner'));
       const reviewTask = task.status === 'review' ? snapshot.team?.tasks?.find((entry) => entry.id === task.id && entry.status === 'review') : null;
       if (typeof reviewTask?.reviewer === 'string' && agentPattern.test(reviewTask.reviewer)) {
@@ -4241,7 +4400,8 @@ function renderCollaboration(snapshot) {
     round_finished: t("本轮回复已结束，请阅读回复及交付内容。"), needs_user: t("请查看伙伴的回复，补充它需要的信息。") };
   const resumeKind = Object.hasOwn(snapshot, 'stop_kind') && ['auto', 'quota_wait'].includes(snapshot.stop_kind) ? snapshot.stop_kind : null;
   // The stop line under the title already says why and what happens next; the generic stop text would contradict it.
-  const reason = discussionIdle ? t("暂无在途工作，可继续讨论或切到动手。已有成果和改动保留。") : resumeKind ? resumeKind === 'auto' ? t("几秒后自动继续，不用你操作。") : ''
+  const reason = discussionIdle ? readOnlyBuild(snapshot) ? t("现在是只读权限，伙伴只能看不能改。要改文件，在“设置”里把权限换成 {p0}。", { p0: writablePermissionName(snapshot) })
+    : t("现在没在做事。可以接着讨论，或切到“动手”开工。已有成果和改动都在。") : resumeKind ? resumeKind === 'auto' ? t("几秒后自动继续，不用你操作。") : ''
     : singlePartner && Object.hasOwn(singlePartnerReasons, outcomeState) ? singlePartnerReasons[outcomeState] : outcome.reason;
   const accepted = Number.isFinite(snapshot.current_run?.accepted_at);
   const technicalInterruption = hostResultInterruption(objective);
@@ -4250,7 +4410,7 @@ function renderCollaboration(snapshot) {
   const foldedResult = completed || technicalInterruption;
   const report = foldedResult ? element('details', '', technicalInterruption ? 'technical-interruption-history' : 'completion-report') : result;
   if (foldedResult) { const key = technicalInterruption ? 'technical-history' : 'report'; report.dataset.outcomeDetail = key; report.open = preservedDetails.get(key) || false; report.append(element('summary', technicalInterruption ? t("此前问题与记录") : t("查看完整总结"))); }
-  result.append(element('h2', discussionIdle ? t("方案讨论") : objective ? objective.status === 'complete' ? t("本轮已交付") : objectiveLabel(objective)
+  result.append(element('h2', discussionIdle ? readOnlyLabel(snapshot) : objective ? objective.status === 'complete' ? t("本轮已交付") : objectiveLabel(objective)
     : accepted && ['accepted', 'ready_for_user'].includes(outcomeState) ? t("本轮已接受") : singlePartner && outcomeState === 'round_finished' ? t("本轮已回复") : outcomeLabels[outcomeState]));
   if (collaboration.mode === 'legacy') result.append(element('p', singlePartner ? t("单伙伴任务") : t("历史记录 · 旧版协作流程"), 'collaboration-context'));
   if (technicalInterruption) result.append(element('p', hostResultInterruptionMessage(snapshot), 'outcome-reason'));
@@ -4438,8 +4598,8 @@ function renderCollaboration(snapshot) {
   }
   if (actions.children.length) result.append(actions);
   const validation = outcome.validation;
-  const validationLabels = { not_run: t("未执行验证"), static_review: t("静态互审，未运行项目或测试"), native_review: t("本机工具协作与审核；具体执行范围见记录"), sandbox_execution: t("隔离执行记录，仍需核对验收范围"),
-    self_check: t("仅自检，未经独立审核"), mixed_review: t("包含自检，独立审核范围见详情") };
+  const validationLabels = { not_run: t("没有运行测试或程序"), static_review: t("伙伴读过内容，没有运行项目或测试"), native_review: t("本机工具协作与审核；具体执行范围见记录"), sandbox_execution: t("隔离执行记录，仍需核对验收范围"),
+    self_check: t("只做了自查，没有别的伙伴看过"), mixed_review: t("有的只做了自查，见详情") };
   const artifacts = Array.isArray(outcome.artifacts) ? outcome.artifacts : [];
   const remaining = Array.isArray(outcome.remaining) ? outcome.remaining.filter((item) => typeof item === 'string' && item) : [];
   const details = element('details', '', 'delivery-details');
@@ -4485,6 +4645,12 @@ const usageNames = localizedLabels({
   model: '模型', cost: '供应商费用字段', cost_usd: '供应商费用（USD）',
 });
 
+// usage.source is an internal id such as "claude_cli"; name the tool that reported the numbers.
+function usageSourceLabel(source) {
+  const tools = { claude: 'Claude Code', codex: 'Codex', kimi: 'Kimi Code' };
+  const tool = source.match(/^(claude|codex|kimi)[._]/)?.[1];
+  return tool ? t("{p0} 回传的用量", { p0: tools[tool] }) : t("工具回传的用量");
+}
 function renderUsage(fields, usage) {
   fields.replaceChildren();
   if (!usage || typeof usage !== 'object') {
@@ -4492,7 +4658,7 @@ function renderUsage(fields, usage) {
     return;
   }
   const row = (label, value) => fields.append(element('dt', label), element('dd', value));
-  row(t("来源"), typeof usage.source === 'string' ? usage.source : t("不可用"));
+  row(t("数据来自"), typeof usage.source === 'string' ? usageSourceLabel(usage.source) : t("不可用"));
   row(t("统计方式"), usage.scope === 'provider_reported_latest_result' ? t("供应商最新一次结果快照") : t("历史快照，统计方式未确认"));
   // Current snapshots wrap provider fields in values; older local records may
   // contain the fields directly. Neither form is summed into a session total.
@@ -4645,8 +4811,8 @@ function renderRoomMemberInvitation() {
   const status = $('member-invitation-status');
   status.hidden = !request && invitation?.can_invite === true && candidates.length > 0;
   status.textContent = busy ? t("正在提交邀请…") : request ? request.invitationError || t("邀请结果正在核对，不会重复提交。")
-    : invitation?.reason ? ({ agent_unavailable: t("当前没有其他可邀请的伙伴，可在“工具与状态”查看已接入工具。"), room_archived: t("聊天已归档，恢复后可邀请。"), room_removed: t("这份聊天已移除。"), member_limit_reached: t("当前聊天已达到可接入的伙伴数量。"), invitation_mode_unsupported: t("这份旧记录暂不支持邀请。") })[invitation.reason] || t("当前暂时无法邀请，原聊天仍保留。")
-      : candidates.length ? '' : t("当前没有其他可邀请的伙伴，可在“工具与状态”查看已接入工具。");
+    : invitation?.reason ? ({ agent_unavailable: t("当前没有其他可邀请的伙伴，可在“伙伴与额度”查看已接入工具。"), room_archived: t("聊天已归档，恢复后可邀请。"), room_removed: t("这份聊天已移除。"), member_limit_reached: t("当前聊天已达到可接入的伙伴数量。"), invitation_mode_unsupported: t("这份旧记录暂不支持邀请。") })[invitation.reason] || t("当前暂时无法邀请，原聊天仍保留。")
+      : candidates.length ? '' : t("当前没有其他可邀请的伙伴，可在“伙伴与额度”查看已接入工具。");
   const check = $('member-invitation-check'); check.hidden = !request; check.disabled = busy || !state.connected;
   check.textContent = request && state.hostOutboxRows.get(request.body.request_id)?.delivery.can_send === true ? t("继续邀请") : t("核对邀请状态");
 }
@@ -4717,7 +4883,7 @@ function memberActivity(snapshot, member) {
   const objective = currentObjective(snapshot);
   const retired = objective?.retired_partners?.[id];
   const outcome = snapshot?.current_run?.status === 'stopped' ? 'stopped' : terminalTeamState(snapshot) || snapshot?.collaboration?.outcome?.state;
-  let status = 'idle'; let label = t("空闲"); let task = t("暂无在途任务");
+  let status = 'idle'; let label = t("空闲"); let task = t("现在没在做事");
   if (!snapshot) return { status: 'idle', label: state.selected ? t("正在读取记录") : t("未开始"), task: state.selected ? t("正在读取本次任务状态。") : t("发出目标后，在这里看进展。"), last: null, claim: null, job: null };
   const configuration = configurationMemberActivity(member, job);
   if (configuration) { ({ status, label, task } = configuration); }
@@ -4738,7 +4904,9 @@ function memberActivity(snapshot, member) {
     status = objective.status === 'needs_user' ? 'needs_user' : objective.status;
     label = objectiveLabel(objective); task = hostResultInterruption(objective) ? hostResultInterruptionMessage(snapshot) : objective.stop_reason ? stopReasonMessage(objective.stop_reason)
       : objective.next_step?.question || t("当前进度已保留，请查看下一步与任务记录。");
-  } else if (!job && objective?.status === 'complete') { label = isReadOnlyDiscussion(snapshot) ? t("讨论已结束") : Number.isFinite(snapshot.current_run?.accepted_at) ? t("目标已确认完成") : t("目标已交付"); task = isReadOnlyDiscussion(snapshot) ? t("回复与建议已保留；已有改动未发布。可继续讨论，或切到动手后接着做。") : t("查看本目标成果；仅自检的部分会单独注明。"); }
+  } else if (!job && objective?.status === 'complete') { label = isReadOnlyDiscussion(snapshot) ? readOnlyLabel(snapshot, true) : Number.isFinite(snapshot.current_run?.accepted_at) ? t("目标已确认完成") : t("目标已交付"); task = readOnlyBuild(snapshot)
+    ? t("现在是只读权限，伙伴只能看不能改。要改文件，在“设置”里把权限换成 {p0}。", { p0: writablePermissionName(snapshot) })
+    : isReadOnlyDiscussion(snapshot) ? t("回复和建议都在聊天里。要开工，切到“动手”再发一句话。") : t("查看这个目标的成果；只做了自查的部分会单独注明。"); }
   else if (!job && retired?.cleanup_confirmed === true) {
     status = 'needs_user'; label = t("本轮暂不参与");
     const takeover = [...(snapshot.events || [])].reverse().find((event) => event.kind === 'task_taken_over' && event.previous_owner === id
@@ -4748,7 +4916,9 @@ function memberActivity(snapshot, member) {
   }
   else if (!job && objective?.status === 'awaiting_continue') { label = t("阶段已交付"); task = t("下一步已列在交付卡；无需逐阶段接受。"); }
   else if (objective?.status === 'paused' && !job) { label = objectiveLabel(objective); task = objective.pause_requested ? t("等当前处理结束后，不再派发下一项。") : t("当前进度保留，继续后接着处理原目标。"); }
-  else if (!job && idleReadOnlyDiscussion(snapshot)) { label = t("方案讨论"); task = t("暂无在途工作，可继续讨论或切到动手。"); }
+  else if (!job && idleReadOnlyDiscussion(snapshot)) { label = readOnlyLabel(snapshot); task = readOnlyBuild(snapshot)
+    ? t("现在是只读权限，伙伴只能看不能改。要改文件，在“设置”里把权限换成 {p0}。", { p0: writablePermissionName(snapshot) })
+    : t("现在没在做事。可以接着讨论，或切到“动手”开工。"); }
   else if (!objective && outcome !== 'stopped' && outcome !== 'unknown' && (outcome === 'accepted' || Number.isFinite(snapshot.current_run?.accepted_at))) { label = t("本轮已接受"); task = t("已有交付已接受，可补充下一项要求。"); }
   else if (outcome === 'ready_for_user' && !objective) { label = t("本轮已交付"); task = t("等你验收，或补充下一项要求。"); }
   else if (!objective && outcome === 'unknown') { status = 'unknown'; label = t("状态待核对"); task = t("执行状态尚未确认，请查看具体记录。"); }
@@ -4757,7 +4927,7 @@ function memberActivity(snapshot, member) {
     const reason = ownError || snapshot.team?.stop_reason;
     status = ownError ? 'failed' : 'stopped';
     label = reason === 'budget_exhausted' || snapshot.room.status === 'budget_exhausted' ? t("调用上限已到") : ownError ? t("本次处理未完成") : t("本轮已停止");
-    task = reason ? `${ownError ? '' : t("协作已停止：")}${executionMessage(reason)}` : t("保留已完成内容，请查看剩余项。");
+    task = reason ? `${ownError ? '' : t("协作已停止：")}${ownError ? executionMessage(reason) : stoppedReasonMessage(snapshot, reason)}` : t("保留已完成内容，请查看剩余项。");
   } else if (!objective && (outcome === 'needs_user' || member.status === 'needs_user')) { status = 'needs_user'; label = t("等你处理"); task = teamMemberTask({ ...snapshot, jobs: [] }, member) || t("需要你补充信息或作出决定。"); }
   else if (job) {
     status = job.status;
@@ -4791,8 +4961,8 @@ function memberActivity(snapshot, member) {
     else if (assigned) { status = 'waiting_peer'; label = t("等待接手或依赖"); }
     else if (member.status === 'working' || member.status === 'queued') { status = 'unknown'; label = t("阶段待核对"); }
     else if (['failed', 'unknown', 'interrupted'].includes(member.status)) { status = member.status; label = statusLabels[member.status]; }
-    task = snapshot.team ? teamMemberTask({ ...snapshot, jobs: [] }, member) : t("没有已确认的在途阶段。");
-    if (objective?.status === 'checkpoint') { status = 'waiting_peer'; label = t("安排下一步"); task = t("正在核对本目标的下一阶段安排，没有确认中的在途处理。"); }
+    task = snapshot.team ? teamMemberTask({ ...snapshot, jobs: [] }, member) : t("现在没有在进行的阶段。");
+    if (objective?.status === 'checkpoint') { status = 'waiting_peer'; label = t("安排下一步"); task = t("正在安排下一阶段，暂时没有在做的事。"); }
   }
   return { status, label, task: task || t("具体阶段待核对。"), historyWarning: configuration?.historyWarning, last, claim: status === 'working' ? claim : null,
     job: ['working', 'queued'].includes(status) ? job : null,
@@ -4909,7 +5079,7 @@ function teamMemberTask(snapshot, member) {
   const userCancelled = userCancelCodes.has(currentObjective(snapshot)?.stop_reason) || userCancelCodes.has(snapshot?.team?.stop_reason);
   if (blocked && (['interrupted', 'cancelled'].includes(blocked.status) && !userCancelled || taskQuotaHeld(blocked))) return t("「{p0}」待继续", { p0: taskDisplayTitle(blocked.title) });
   if (blocked) return t("「{p0}」{p1}，具体原因见“进展”", { p0: taskDisplayTitle(blocked.title), p1: taskStatusLabels[blocked.status] });
-  return t("暂无在途任务；交付与验收状态见群聊");
+  return t("现在没在做事。做完的内容在“交付”里看。");
 }
 
 function livenessMinutes(seconds) {
@@ -4969,7 +5139,7 @@ function renderMemberPublicProgress(snapshot, member) {
   if (progressStatus) { const line = element('p', progressStatus, 'partner-progress-status'); line.id = `partner-progress-status-${member.id}`; holder.append(line); }
   if (!publicMessage) {
     const text = tool ? `${['started', 'running'].includes(tool.state) ? nativeActionSentence(tool, true) : `${tool.state === 'failed' ? t("最近返回异常：") : t("最近返回：")}${nativeActionName(tool)}`} · ${timeLabel(tool.created_at)}`
-      : active ? t("还没收到这次工作的进展消息。") : t("暂无在途工作，可在聊天中查看此前进展。");
+      : active ? t("还没收到这次工作的进展消息。") : t("现在没在做事，之前的进展在聊天里。");
     // The idle line repeats the member's task line, so the card hides it.
     // Without a progress message the line only repeats the status above it (idle, or the latest tool action).
     holder.append(element('p', text, `public-progress-fallback${!active || tool ? ' idle' : ''}`)); return;
@@ -5081,7 +5251,7 @@ function renderMembers(snapshot) {
     $(`status-${provider}`).className = `member-status ${preferredActivity ? statusClass(preferredActivity.status) : paused ? paused === t("正在暂停") ? 'working' : 'idle' : notStarted || loading ? '' : statusClass(preferredActivity?.status || taskActivity?.status || displayStatus)}`;
     $(`task-${provider}`).textContent = quotaWaiting ? teamMemberTask(snapshot, member) || t("额度恢复后接着做。") : preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
       : teamMemberTask(snapshot, member) || (typeof member?.current_task === 'string' && member.current_task ? member.current_task
-        : loading ? t("正在读取本次任务的实际分工…") : notStarted ? t("开始任务后，在这里查看分工。") : t("暂无在途任务"));
+        : loading ? t("正在读取本次任务的实际分工…") : notStarted ? t("开始任务后，在这里查看分工。") : t("现在没在做事"));
     const historicalWarning = configurationActivity?.historyWarning;
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
@@ -5113,7 +5283,7 @@ function renderMembers(snapshot) {
   renderNavQuota();
   renderPartnerActivity(snapshot);
   const jobs = snapshot?.jobs || [];
-  $('job-count').textContent = pagedRoom(snapshot) && Number.isSafeInteger(snapshot.job_count) && snapshot.job_count > jobs.length ? t("共 {p0} · 当前与最近 {p1}", { p0: snapshot.job_count, p1: jobs.length }) : String(jobs.length);
+  $('job-count').textContent = pagedRoom(snapshot) && Number.isSafeInteger(snapshot.job_count) && snapshot.job_count > jobs.length ? t("近 {p1} / 共 {p0}", { p0: snapshot.job_count, p1: jobs.length }) : String(jobs.length);
   $('jobs-empty').hidden = jobs.length > 0;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), jobs]);
   if (fingerprint !== state.jobsFingerprint) {
@@ -5245,7 +5415,9 @@ async function submitRunAction(kind, { retry = false, text, workMode = state.wor
 function renderProject(project) {
   $('project-details').hidden = !project;
   if (!project) { $('project-files').replaceChildren(); state.projectFingerprint = ''; return; }
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), project]);
+  // The room state sends file names only (content_available); a delivered file opens in the reader instead.
+  const readable = state.snapshot ? deliveryDocuments(state.snapshot).filter((doc) => doc.file) : [];
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), project, readable.map((doc) => doc.key)]);
   if (fingerprint === state.projectFingerprint) return;
   state.projectFingerprint = fingerprint;
   $('project-files').replaceChildren();
@@ -5279,8 +5451,17 @@ function renderProject(project) {
   for (const file of project.files) {
     const details = element('details', '', 'project-file');
     details.append(element('summary', `${file.path} · ${!file.owner || file.owner === 'source' ? t("项目原稿") : displayName(file.owner)}`),
-      element('p', t("版本 {p0} · SHA256 {p1}", { p0: project.revision, p1: file.sha256 }), 'detail-caption'),
-      element('pre', typeof file.content === 'string' ? file.content : t("内容不可用"), 'file-content'));
+      element('p', t("版本 {p0} · SHA256 {p1}", { p0: project.revision, p1: file.sha256 }), 'detail-caption'));
+    if (typeof file.content === 'string') details.append(element('pre', file.content, 'file-content'));
+    else {
+      const doc = readable.find((entry) => entry.path === file.path && entry.sha256 === file.sha256);
+      if (doc) {
+        const open = element('button', t("打开阅读"), 'quiet-button'); open.type = 'button'; open.dataset.openProjectFile = file.path;
+        open.addEventListener('click', () => openDelivery(doc.key, open));
+        details.append(open);
+      } else details.append(element('p', !exportableProject(state.snapshot) ? t("这里不直接显示正文。")
+        : t("这里不直接显示正文，点上面的“{p0}”可以拿到全部文件。", { p0: $('download-artifacts').textContent }), 'detail-caption'));
+    }
     if (file.path.endsWith('.svg') && typeof file.sha256 === 'string') {
       const preview = element('button', t("预览矢量图"), 'quiet-button'); preview.type = 'button';
       const holder = element('div', '', 'svg-preview');
@@ -5513,7 +5694,7 @@ function renderControls() {
   const loading = !!state.selected && !room;
   const inactive = !!room && !activeEntry(room);
   const blocked = state.busy || !!state.pending || state.managementBusy;
-  const title = room ? roomTitle(objective ? { ...room, objective_goal: objective.original_goal } : room) : (loading ? roomTitle(state.rooms.find((entry) => entry.id === state.selected)) : t("新任务"));
+  const title = room ? roomDisplayTitle(room) : (loading ? roomTitle(state.rooms.find((entry) => entry.id === state.selected)) : t("新任务"));
   const headerGoal = typeof (objective?.original_goal ?? room?.goal) === 'string' ? (objective?.original_goal ?? room.goal).trim().replace(/\s+/g, ' ') : '';
   const headerSentence = headerGoal.split(/[。！？\n]/u)[0] || headerGoal;
   $('room-title').textContent = room && headerSentence ? headerSentence.length > 200 ? `${headerSentence.slice(0, 200)}…` : headerSentence : title;
@@ -5546,7 +5727,7 @@ function renderControls() {
   const currentRun = state.snapshot?.current_run;
   const canAnswer = objective?.status === 'needs_user' && objective.can_answer === true;
   if (objective) $('room-subtitle').textContent = `${Number.isSafeInteger(objective.stage) ? t("第 {p0} 阶段 · ", { p0: objective.stage }) : ''}${objective.mode === 'autonomous' ? t("自主推进") : t("逐步推进")} · ${workModeCaption}`;
-  if (idleReadOnlyDiscussion()) $('room-subtitle').textContent = t("方案讨论 · 原目标与进度保留");
+  if (idleReadOnlyDiscussion()) $('room-subtitle').textContent = t("{p0} · 原目标与进度保留", { p0: readOnlyLabel() });
   $('source-plan-note').hidden = !currentRun?.source_plan;
   $('source-plan-note').textContent = currentRun?.source_plan?.truncated
     ? t("方案较长，这轮带上了部分内容。完整方案仍在上一轮，遇到未带入的细节需要再核对。")
@@ -5566,7 +5747,7 @@ function renderControls() {
   }
   $('work-mode-note').textContent = teamStopped ? t("本轮已停止，已有内容保留。") : room && !modeEditable
     ? currentWorkMode === 'plan' ? t("正在先聊方案，这轮不会修改文件。") : currentWorkMode === 'build' ? t("正在按目标推进，完成后给你看成果。") : t("这份旧记录没有区分方案与动手模式。")
-    : state.workMode === 'plan' ? t("先讨论和查资料，不修改文件。聊清楚后，可以点“按方案开始”。")
+    : state.workMode === 'plan' ? `${t("先讨论和查资料，不修改文件。")}${interfaceWordSpace()}${planNextStepText()}`
       : t("直接分工并制作成果，遇到需要你决定的事再问你。");
   if (room && canContinue) $('work-mode-note').textContent += t(" 选择只影响下一轮。");
   if (objective?.status === 'paused') $('work-mode-note').textContent = sidebarObjectiveLabel({ ...room, objective_status: 'paused', objective_pause_requested: objective.pause_requested }) === t("正在暂停")
@@ -5578,7 +5759,7 @@ function renderControls() {
     ? t("点“继续”接着做，已有成果和记录保留。") : t("本目标已停下，记录与成果保留；不会自动重新开始。");
   $('room-status').textContent = room ? (inactive ? lifecycleLabels[lifecycleState(room)] : !teamStopped && Number.isFinite(currentRun?.accepted_at) ? t("本轮已接受") : Object.hasOwn(outcomeLabels, outcomeState) ? outcomeLabels[outcomeState] : statusLabels[statusClass(room.status)]) : '';
   if (objective && !inactive) $('room-status').textContent = objective.status === 'complete' && Number.isFinite(currentRun?.accepted_at) ? t("你已确认完成") : objectiveLabel(objective);
-  if (!inactive && idleReadOnlyDiscussion()) $('room-status').textContent = t("方案讨论");
+  if (!inactive && idleReadOnlyDiscussion()) $('room-status').textContent = readOnlyLabel();
   $('room-status').className = `status-badge ${statusClass(room?.status)}`;
   $('new-room').disabled = blocked && !canDetachPendingRequest();
   $('refresh').disabled = state.busy || state.refreshing;
@@ -5593,7 +5774,7 @@ function renderControls() {
   $('pause-objective').disabled = blocked || !state.connected || objective?.pause_requested === true;
   if (natural && objective?.status !== 'paused') $('work-mode-note').textContent = objective?.status === 'complete' ? isReadOnlyDiscussion() ? t("讨论已结束，可以接着聊；切到动手并发送后继续开发。已有改动保持。") : t("本目标已交付，有修改或新要求可以直接在这里说。") : t("可随时补充要求，伙伴会接着处理。");
   else if (continuation) $('work-mode-note').textContent = t("接着完成原任务，已有成果和记录保留。");
-  if (idleReadOnlyDiscussion()) $('work-mode-note').textContent = t("暂无在途工作，可继续讨论或切到动手。");
+  if (idleReadOnlyDiscussion()) $('work-mode-note').textContent = t("现在没在做事。可以接着讨论，或切到“动手”开工。");
   if (configuration && (configuration.pending || Object.keys(pendingRuntimeChanges()).length)) $('work-mode-note').textContent = configuration.pending && !Object.keys(pendingRuntimeChanges()).length
     ? t("设置已保存，后续工作开始生效。当前调用不变。") : t("新设置随下一条消息提交，当前调用不变。");
   const canCompose = !inactive && !blocked && !loading && state.connected && state.participantIds.length > 0
@@ -5619,13 +5800,22 @@ function renderControls() {
   renderRoomMemberInvitation();
   $('task-options-partners').textContent = t("伙伴 · {p0}", { p0: state.participantIds.length });
   const linkedProject = room ? state.projects.find((project) => project.id === room.project_id) : selectedProject;
-  $('task-options-project').textContent = linkedProject ? linkedProject.name : room?.project_id ? t("关联项目") : t("项目");
+  // A permanently deleted project leaves the room's own copy; use the name the room recorded and say it was deleted.
+  const recordedName = typeof state.snapshot?.project?.source?.name === 'string' && state.snapshot.project.source.name.trim() ? state.snapshot.project.source.name.trim() : '';
+  const projectDeleted = !!room?.project_id && !linkedProject && state.projectsAccepted === true;
+  const roomProjectName = linkedProject?.name || recordedName;
+  const deletedLabel = roomProjectName ? t("{p0}（已删除）", { p0: roomProjectName }) : t("项目已删除");
+  $('task-options-project').textContent = linkedProject ? linkedProject.name : room?.project_id ? projectDeleted ? deletedLabel : roomProjectName || t("关联项目") : t("项目");
   $('room-project-chip').hidden = !room?.project_id;
-  $('room-project-chip').textContent = room?.project_id ? linkedProject?.name || t("关联项目") : '';
-  $('task-options-project').title = room ? room.project_id ? t("本任务关联项目：{p0}（固定）", { p0: linkedProject?.name || t("记录未找到") }) : t("本任务没有关联项目")
+  $('room-project-chip').textContent = room?.project_id ? linkedProject?.name || (projectDeleted ? deletedLabel : roomProjectName || t("关联项目")) : '';
+  $('task-options-project').title = room ? room.project_id ? projectDeleted
+    ? t("关联的项目“{p0}”已从豆窝删除。原项目文件不受影响，这个任务里的副本和成果还在。", { p0: roomProjectName || t("未记录名称") })
+    : t("本任务关联项目：{p0}（固定）", { p0: roomProjectName || t("记录未找到") }) : t("本任务没有关联项目")
     : selectedProject ? t("关联项目：{p0}", { p0: selectedProject.name }) : t("选择关联项目");
   $('frozen-project').hidden = !room;
-  $('frozen-project').textContent = room?.project_id ? t("关联项目：{p0} · 本任务项目固定。", { p0: linkedProject?.name || t("项目记录未找到") }) : t("本任务没有关联项目。");
+  $('frozen-project').textContent = !room?.project_id ? t("本任务没有关联项目。") : projectDeleted
+    ? t("关联的项目“{p0}”已从豆窝删除。原项目文件不受影响，这个任务里的副本和成果还在。", { p0: roomProjectName || t("未记录名称") })
+    : t("关联项目：{p0} · 本任务项目固定。", { p0: roomProjectName || t("项目记录未找到") });
   for (const id of ['task-options-partners', 'task-options-project', 'task-options-more']) $(id).disabled = blocked || loading;
   $('project-picker').disabled = blocked || !state.connected;
   $('composer-projects').disabled = blocked;
@@ -5653,8 +5843,8 @@ function renderControls() {
   if (prospectiveMode === 'plan') {
     $('scope-summary').textContent = t("先聊方案 · 不修改文件");
     $('scope-description').textContent = projectMode
-      ? t("伙伴可以在隔离副本中按需查找和阅读项目，所读内容会发送给对应模型服务供应商。这轮只讨论方案，不修改文件、不运行项目。方案结束后，你可以明确选择“按方案开始”。")
-      : t("这轮只讨论方案，不创建或修改文件，也不运行代码。方案结束后，可以选择“按方案开始”；接受本轮只记录你的验收，不会自动开工。");
+      ? `${t("伙伴可以在隔离副本中按需查找和阅读项目，所读内容会发送给对应模型服务供应商。这轮只讨论方案，不修改文件、不运行项目。")}${interfaceWordSpace()}${planNextStepText()}`
+      : `${t("这轮只讨论方案，不创建或修改文件，也不运行代码。")}${interfaceWordSpace()}${planNextStepText()}`;
   }
   $('message').disabled = !canCompose;
   $('message').placeholder = natural ? !natural.canSend ? t("当前无法发送，原因见下方") : objective?.status === 'complete' ? t("哪里还要调整？直接告诉伙伴") : t("补充要求，或说继续") : continuation === 'native_recovery' ? t("继续，或补充要求后接着做") : continuation ? t("说“继续”，接着完成原任务") : room ? t("补充要求，或告诉伙伴要调整什么") : t("说说这次想做什么");

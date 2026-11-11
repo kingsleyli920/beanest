@@ -107,7 +107,7 @@ function nativeSetupCard(adapter) {
   const busy = !state.connected || state.nativeLoginBusy.has(adapter.id);
   const card = element('section', '', 'manager-card native-setup-card'); card.dataset.adapterSetup = adapter.id;
   const stage = setup.state === 'not_installed' && activeNativeInstall(install) ? t("正在安装") : activeNativeLogin(operation) ? t("等待登录")
-    : ({ not_installed: t("还没安装"), login_required: t("还差登录"), ready: t("可以用了"), unknown: t("正在确认") })[setup.state];
+    : ({ not_installed: t("还没安装"), login_required: t("还差登录"), ready: t("可以用了"), unknown: t("登录状态没查到") })[setup.state];
   card.append(element('h3', adapter.name || adapter.id), element('p', stage, `native-setup-stage ${setup.state}`));
   const actions = element('div', '', 'manager-card-actions');
   if (setup.state === 'not_installed') {
@@ -128,7 +128,10 @@ function nativeSetupCard(adapter) {
       if (operation.id) actions.append(setupButton(t("取消登录"), false, () => void updateNativeLogin(adapter.id, 'DELETE'), busy, { nativeLoginCancel: adapter.id }));
     } else {
       if (['failed', 'cancelled'].includes(operation?.state)) card.append(element('p', operation.state === 'cancelled' ? t("本次登录已取消，可以重新登录。") : t("登录没有完成，可以重新登录。"), 'detail-caption'));
-      if (setup.state !== 'ready' || operation?.state === 'failed') actions.append(setupButton(t("登录"), true, () => void updateNativeLogin(adapter.id, 'POST'), busy, { nativeLoginStart: adapter.id }));
+      // An unread status is not a signed-out one: say so and keep sign-in as a quiet choice.
+      const unread = setup.state === 'unknown' && operation?.state !== 'failed';
+      if (unread) card.append(element('p', t("这次没查到登录状态，可能只是暂时查不到。已经登录的不用重新登录，稍后会自动再查。"), 'detail-caption'));
+      if (setup.state !== 'ready' || operation?.state === 'failed') actions.append(setupButton(unread ? t("重新登录") : t("登录"), !unread, () => void updateNativeLogin(adapter.id, 'POST'), busy, { nativeLoginStart: adapter.id }));
     }
   }
   if (state.nativeLoginErrors.has(adapter.id)) card.append(element('p', state.nativeLoginErrors.get(adapter.id), 'notice error'));
@@ -162,6 +165,7 @@ function renderNativeSetup() {
   const adapters = state.adapters.filter((adapter) => adapter.setup
     && ['not_installed', 'login_required', 'ready', 'unknown'].includes(adapter.setup.state)
     && (adapter.setup.login_supported === true || adapter.setup.state === 'not_installed' && adapter.setup.install_url)
+    && !(adapter.setup.state === 'unknown' && state.partners.some((partner) => partner.adapter === adapter.id && partner.account?.state === 'available' && !partner.account.stale))
     && (adapter.setup.state !== 'ready' || state.nativeLoginBusy.has(adapter.id) || state.nativeLoginErrors.has(adapter.id)
       || activeNativeLogin(nativeLoginOf(adapter)) || nativeLoginOf(adapter)?.state === 'failed'));
   const container = $('native-tool-setup');
@@ -192,12 +196,19 @@ function renderDiscovery() {
   const found = discovery.tools.filter((tool) => tool.installed === true).map((tool) => tool.name);
   let message;
   if (discovery.state === 'unavailable') message = t("这次启动还没确认本机工具，现有设置保持不变。");
-  else if (found.length) message = t("已找到 {p0}。选好工具就可以开始。", { p0: interfaceList(found) });
-  else if (discovery.tools.length && discovery.tools.every((tool) => tool.installed === false)) message = t("还没在本机找到已支持的工具，可以到工具与状态中查看。");
-  else message = t("还没确认本机有哪些支持的工具，可以到工具与状态中查看。");
+  else if (found.length) {
+    // Say which found tools still need a sign-in, so this line agrees with the cards below.
+    const setupOf = (tool) => state.adapters.find((adapter) => adapter.id === tool.adapter)?.setup?.state;
+    const needLogin = discovery.tools.filter((tool) => tool.installed === true && setupOf(tool) === 'login_required').map((tool) => tool.name);
+    message = !needLogin.length ? t("已找到 {p0}。选好工具就可以开始。", { p0: interfaceList(found) })
+      : needLogin.length === found.length ? t("已找到 {p0}，还差登录。登录后就可以开始。", { p0: interfaceList(found) })
+        : t("已找到 {p0}。其中 {p1} 还差登录，其他的选好就可以开始。", { p0: interfaceList(found), p1: interfaceList(needLogin) });
+  }
+  else if (discovery.tools.length && discovery.tools.every((tool) => tool.installed === false)) message = t("还没在本机找到已支持的工具，可以到伙伴与额度中查看。");
+  else message = t("还没确认本机有哪些支持的工具，可以到伙伴与额度中查看。");
   const hasDisabled = state.partners.some((partner) => partner.enabled === false
     && discovery.tools.some((tool) => tool.adapter === partner.adapter && tool.installed === true));
-  if (discovery.state === 'completed' && found.length && hasDisabled) message += t(" 停用设置保持不变。");
+  if (discovery.state === 'completed' && found.length && hasDisabled) message += `${interfaceWordSpace()}${disabledPartnersNote()}`;
   const hasHidden = state.partners.some((partner) => !activeEntry(partner));
   if (hasHidden) message += t(" 已归档或移除的伙伴不会自动恢复。");
   for (const id of ['discovery-hint-text', 'partner-discovery-text']) {

@@ -24,7 +24,7 @@ function acceptProjects(result) {
       || typeof project.name !== 'string' || typeof project.path !== 'string' || !Array.isArray(project.files))) {
     throw new RequestError(t("项目记录格式尚未确认，请刷新后核对。"));
   }
-  state.projects = result.projects;
+  state.projects = result.projects; state.projectsAccepted = true;
   if (state.selectedProject && !state.projects.some((project) => project.id === state.selectedProject && activeEntry(project))) {
     state.selectedProject = ''; state.mode = 'text'; chooseDefaultArtifactMode();
     const draft = state.drafts.get('new');
@@ -174,22 +174,23 @@ function renderGlobalPartners() {
       identity.append(element('h3', partner.name), element('p', lifecycleLabels[lifecycleState(partner)], 'detail-caption'));
       heading.append(avatar(partner.id, partner), identity); card.append(heading, lifecycleActions('partners', partner));
       const operation = latestPartnerOperation(partner.id);
-      if (state.partnerLifecycleSupported && operation) card.append(element('p', partnerOperationText(operation), 'detail-caption'));
+      if (state.partnerLifecycleSupported && operation && !partnerOperationSettled(operation)) card.append(element('p', partnerOperationText(operation), 'detail-caption'));
       $('partners-list').append(card); continue;
     }
     const installation = ['found', 'missing', 'unknown'].includes(partner.installation?.state) ? partner.installation.state : 'unknown';
     const availability = availabilityInfo(partner.id);
     const invitation = !activeEntry(partner) ? lifecycleLabels[lifecycleState(partner)] : partner.enabled === false ? state.partnerLifecycleSupported ? t("已停用，不再派发新工作") : t("新任务中已停用")
+      : notSetUp(partner) ? partnerSetupState(partner.id) === 'not_installed' ? t("还没安装，装好后才能选入新任务") : t("还差登录，登录后才能选入新任务")
       : availability.blocked ? availability.summary : (state.catalog.some((agent) => agent.id === partner.id) ? t("可选入新任务") : t("暂不能加入新任务"));
     const toolName = ({ claude: 'Claude Code', codex: 'Codex' })[partner.adapter]
       || state.adapters.find((adapter) => adapter.id === partner.adapter)?.name || t("工具待确认");
-    identity.append(element('h3', partner.name), element('p', accountLoginCaption(partner.account), 'account-email'), element('p', `${toolName}${isAdditionalSession(partner) ? t(" 的独立会话") : ''} · ${invitation}`, 'detail-caption'));
+    identity.append(element('h3', partner.name), element('p', notSetUp(partner) ? memberLoginCaption(partner.account, partner.id) : accountLoginCaption(partner.account), 'account-email'), element('p', `${toolName}${isAdditionalSession(partner) ? t(" 的独立会话") : ''} · ${invitation}`, 'detail-caption'));
     heading.append(avatar(partner.id, partner), identity, appearanceButton(partner.id));
     const health = partner.health || {};
     const healthLabels = { ready: t("接入检查就绪"), unavailable: t("接入不可用"),
       unknown: Number.isFinite(health.checked_at) ? t("接入尚未确认") : t("尚未检查接入") };
     card.append(heading, element('p', { found: t("本机已找到"), missing: t("本机未找到"), unknown: t("本机未检测") }[installation], 'installation-state'),
-      element('p', t("连接检查：{p0}", { p0: healthLabels[health.state] || healthLabels.unknown }), `health-state ${health.state === 'ready' ? 'ready' : 'unknown'}`));
+      element('p', t("连接检查：{p0}", { p0: healthLabels[health.state] || healthLabels.unknown }), `health-state ${health.state === 'ready' ? 'ready' : health.state === 'unavailable' ? 'unavailable' : 'unknown'}`));
     if (availability.value) card.append(element('p', availabilityText(availability), `availability-note${availability.blocked ? ' blocked' : ''}`));
     const skippedReasons = {
       config_unreadable: t("读不了本机配置文件，通常是较旧的 CLI 遇到新版配置；升级或移除这个安装即可。"),
@@ -249,8 +250,8 @@ function renderGlobalPartners() {
       tasks.append(line);
     }
     if (!tasks.children.length) tasks.append(element('li', recordOnly
-      ? (monitor.status === 'needs_user' ? t("当前没有在途任务；请查看任务记录中的待处理事项。")
-        : t("当前未列出在途任务；请查看任务记录核对历史状态。"))
+      ? (monitor.status === 'needs_user' ? t("现在没有在做的任务；等你处理的事在任务记录里。")
+        : t("现在没有在做的任务；以往情况可以在任务记录里看。"))
       : t("现在没有在处理的目标")));
     const usage = element('details', '', 'member-details');
     usage.dataset.detailKind = 'usage'; usage.open = expanded.get(partner.id)?.get('usage') || false;
@@ -271,7 +272,7 @@ function renderGlobalPartners() {
     if (activeEntry(partner)) actions.append(check, toggle);
     actions.append(lifecycleActions('partners', partner));
     const operation = latestPartnerOperation(partner.id);
-    if (state.partnerLifecycleSupported && operation) card.append(element('p', partnerOperationText(operation), 'detail-caption'));
+    if (state.partnerLifecycleSupported && operation && !partnerOperationSettled(operation)) card.append(element('p', partnerOperationText(operation), 'detail-caption'));
     if (activeEntry(partner) && partner.connection_state === 'not_configured') {
       const configure = element('button', t("配置本机连接器"), 'quiet-button'); configure.type = 'button'; configure.dataset.focusKey = 'configure';
       configure.disabled = state.managementBusy || !!state.pendingPartner;
@@ -339,7 +340,7 @@ async function discoverOnOpen({ reopen = false, manual = false } = {}) {
     return null;
   } catch (_error) {
     if (manual) $('discovery-feedback').textContent = t("这次检测未完成，已保存设置保持不变。可以稍后重新检测。");
-    return t("这次打开未能更新工具发现；已保存设置保持不变，可在工具与状态中查看。");
+    return t("这次打开未能更新工具发现；已保存设置保持不变，可在伙伴与额度中查看。");
   } finally {
     state.discoveryInFlight = false; state.discoveryLastOpened = Date.now();
     renderDiscoveryControls();
@@ -356,7 +357,7 @@ function openManager(view, trigger = document.activeElement) {
   $('workspace-manager').hidden = false; syncModalInert();
   $('projects-view').hidden = view !== 'projects'; $('partners-view').hidden = view !== 'partners';
   $(`${view}-view`).scrollTop = 0;
-  $('manager-title').textContent = view === 'projects' ? t("带项目进小窝") : t("工具与会话");
+  $('manager-title').textContent = view === 'projects' ? t("带项目进小窝") : t("伙伴与额度");
   $('manager-projects-tab').setAttribute('aria-pressed', String(view === 'projects'));
   $('manager-partners-tab').setAttribute('aria-pressed', String(view === 'partners'));
   managerNotice(); renderNativeSetup();

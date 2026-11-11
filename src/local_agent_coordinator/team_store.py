@@ -344,8 +344,10 @@ class TeamStore:
         resumable.update(recovery_errors)
         reply_only = self.store._room(db, room_id)["mode"] != "native_project"
         if reply_only:
-            # A dead reply-only call applied nothing. Native work has its own audit.
+            # A dead reply-only call applied nothing, nor did one a killed service
+            # cut off. Native work has its own audit.
             resumable.update(CALL_DIED)
+            resumable.add("service_restarted")
         text_failure = self._host_text_failure_source(db, room_id, source_run_id)
         if text_failure:
             resumable.update({"invalid_text", "message_too_large"})
@@ -1215,7 +1217,11 @@ class TeamStore:
             "team_plan_locked": " Only the plan author proposes, and only while planning; omit propose commands now.",
             "invalid_target": (" request_help.to must name a different available peer; with repair_paths it may be null. "
                                "If no peer is available, finish with a self-checked result or block with a concrete reason."),
-            "team_files_forbidden": " Only a work call for its own task may submit files, edits or project requests.",
+            "team_files_forbidden": (" This room is read-only: files must be [] and edits [] or null; put any proposed "
+                                     "change or document in your text result instead."
+                                     if read_only(self.store._room(db, job["room_id"])["work_mode"],
+                                                  json.loads(self.store._room(db, job["room_id"])["runtime_settings_json"] or "null"))
+                                     else " Only a work call for its own task may submit files, edits or project requests."),
             "team_capability_unavailable": " The requested capability is unavailable in this room; use text.",
             "native_json_files_forbidden": (" Native calls write files directly in the private project tree; leave "
                                             "files and edits empty in the JSON reply."),
@@ -2388,6 +2394,11 @@ class TeamStore:
             if not db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?", (room_id,)).fetchone():
                 if objective is not None and json.loads(objective["retired_json"]):
                     return self._coordinate(db, room_id, planning_members)
+                if read_only(room["work_mode"], json.loads(room["runtime_settings_json"] or "null")):
+                    # Every member has spoken and the author saw nothing to do:
+                    # a read-only question was answered in the discussion itself.
+                    db.execute("UPDATE teams SET phase='ready_for_user' WHERE room_id=?", (room_id,))
+                    return True
                 self.stop(db, room_id, "team_plan_missing")
                 return False
             unready = db.execute("SELECT provider FROM team_members WHERE room_id=? AND plan_ready_revision!=?",
@@ -2498,7 +2509,9 @@ class TeamStore:
             elif open_tasks:
                 text += ("Claim only useful unclaimed task IDs listed above, including text-only tasks with dependencies. "
                          "Do not repeat a claim for an already owned task or claim another member's task. "
-                         "The host arranges independent review; do not claim tasks merely to review them. ")
+                         "The host arranges independent review of every delivered task, so do not claim another "
+                         "member's task just to review it. An unclaimed task listed above is real work even when the work "
+                         "is reviewing something; if it fits you, claim it so the plan can start. ")
             else:
                 text += "There are no unclaimed tasks. Do not issue claim commands or repeat existing claims. "
             if provider in unconfirmed:

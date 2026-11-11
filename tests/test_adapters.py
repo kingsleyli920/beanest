@@ -391,6 +391,23 @@ class ProtocolTests(unittest.TestCase):
         events.append({'type': 'turn.failed', 'error': {'message': 'unrelated error'}})
         self.assertEqual(adapters.parse_events('codex', [json.dumps(x).encode() for x in events])['status'], 'failed')
 
+    def test_resume_with_a_changed_default_model_is_a_warning_not_a_failure(self):
+        # Catches: Codex's "recorded with model X but resuming with Y" notice, emitted when its
+        # default model changes between calls, failing a turn that completed normally.
+        notice = ('This session was recorded with model `gpt-6-luna` but is resuming with `gpt-6.1-sol`. '
+                  'Consider switching back to `gpt-6-luna` as it may affect Codex performance.')
+        events = [{'type': 'thread.started', 'thread_id': '00000000-0000-4000-8000-000000000060'},
+                  {'type': 'item.completed', 'item': {'type': 'error', 'message': notice}},
+                  {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'ok'}},
+                  {'type': 'turn.completed', 'usage': {}}]
+        result = adapters.parse_events('codex', [json.dumps(x).encode() for x in events])
+        self.assertEqual((result['status'], result['text']), ('completed', 'ok'))
+        self.assertIn({'type': 'warning', 'code': 'model_resume_notice'}, result['events'])
+        for changed in (notice + ' extra', notice.replace('Consider', 'You must'), 'Fatal: ' + notice):
+            events[1]['item']['message'] = changed
+            rejected = adapters.parse_events('codex', [json.dumps(x).encode() for x in events])
+            self.assertEqual(rejected['failure_code'], 'unknown_provider_error')
+
     def test_near_match_disabled_code_mode_notice_fails(self):
         for message in (adapters.CODE_MODE_DISABLED_NOTICE + ' extra',
                         adapters.CODE_MODE_DISABLED_NOTICE.lower()):

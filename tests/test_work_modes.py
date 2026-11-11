@@ -149,7 +149,9 @@ class WorkModeServiceTests(unittest.IsolatedAsyncioTestCase):
                     mode="text_artifacts", collaboration=True, work_mode="plan")
                 await self.settle()
                 snapshot = await self.service.read_room(room["room"]["id"])
-                self.assertTrue(any(job["error"] == "plan_read_only" for job in snapshot["jobs"]))
+                # Files or edits are a reply mistake the partner corrects; a write scope is refused outright.
+                expected = "team_files_forbidden" if "files" in attempt or "edits" in attempt else "plan_read_only"
+                self.assertTrue(any(job["error"] == expected for job in snapshot["jobs"]), [job["error"] for job in snapshot["jobs"]])
                 self.assertEqual(snapshot["project"]["revision"], 0)
                 self.assertEqual(snapshot["project"]["files"], [])
                 self.assertEqual(snapshot["team"]["tasks"], [])

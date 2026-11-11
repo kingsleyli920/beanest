@@ -574,8 +574,8 @@ test('unknown CLI and provider failures never claim subscription exhaustion', as
   const partners = catalog.map((agent, index) => ({ ...agent, monitor: saved.members[index]?.monitor || {} }));
   const ui = await browser({ rooms: [saved.room], saved, partners });
   const monitoring = ui.get('partners-list').textContent;
-  assert.match(monitoring, /本地 CLI 未正常完成，请在工具与状态中核对异常。/);
-  assert.match(monitoring, /供应商返回未知异常，请在工具与状态中核对记录。/);
+  assert.match(monitoring, /本地 CLI 未正常完成，请在伙伴与额度中核对异常。/);
+  assert.match(monitoring, /供应商返回未知异常，请在伙伴与额度中核对记录。/);
   assert.doesNotMatch(monitoring, /额度已用完|恢复时间|检查登录、额度/);
 });
 
@@ -961,6 +961,20 @@ test('all-disabled catalogs keep management available and uncertain additions ar
   assert.equal(ui.posts().length, 1);
 });
 
+test('adding a single file as a project says to choose a folder instead of reporting an unknown result', async () => {
+  // Catches: project_unsafe_path missing from the request labels, so the page said
+  // "result not confirmed, do not add again" for a plain wrong-path mistake.
+  const ui = await browser({ route(request) {
+    if (request.path === '/api/projects' && request.method === 'POST') return { error: 'project_unsafe_path' };
+  } });
+  await ui.click('open-projects');
+  ui.get('project-name').value = '虚构项目';
+  ui.get('project-path').value = '/fictional/notes.txt';
+  ui.get('project-form').fire('submit'); await settle();
+  assert.match(ui.get('manager-notice').textContent, /项目必须是一个普通文件夹/);
+  assert.doesNotMatch(ui.get('manager-notice').textContent, /尚未确认/);
+});
+
 test('global monitors describe historical attention states without pretending that an empty task list is active work', async () => {
   const partners = catalog.slice(0, 2).map((agent, index) => ({ ...agent, adapter: agent.id,
     monitor: { status: index === 0 ? 'needs_user' : 'unknown', current_tasks: [] } }));
@@ -970,8 +984,8 @@ test('global monitors describe historical attention states without pretending th
   } });
   await ui.click('open-partners');
   const cards = ui.get('partners-list').children;
-  assert.match(cards[0].textContent, /豆窝内：有历史任务待查看.*当前没有在途任务；请查看任务记录中的待处理事项/);
-  assert.match(cards[1].textContent, /豆窝内：有任务记录状态待核对.*当前未列出在途任务；请查看任务记录核对历史状态/);
+  assert.match(cards[0].textContent, /豆窝内：有历史任务待查看.*现在没有在做的任务；等你处理的事在任务记录里/);
+  assert.match(cards[1].textContent, /豆窝内：有任务记录状态待核对.*现在没有在做的任务；以往情况可以在任务记录里看/);
   assert.doesNotMatch(ui.get('partners-list').textContent, /豆窝内：等你处理|现在没有在处理的目标/);
   assert.deepEqual(partners, original, 'contextual wording does not rewrite monitor status or historical records');
   for (const partner of partners) partner.monitor.current_tasks.push({ room_id: roomId,
@@ -1573,17 +1587,17 @@ test('task boards start folded, preserve an intentional expansion during updates
   assert.equal(plan.firstChild.tagName, 'DETAILS');
   assert.equal(plan.firstChild.open, false);
   assert.equal(plan.firstChild.firstChild.tagName, 'SUMMARY');
-  assert.equal(plan.firstChild.firstChild.textContent, '任务分工 · 1/2 已交付并互审');
+  assert.equal(plan.firstChild.firstChild.textContent, '任务分工 · 1/2 已完成，伙伴看过');
   assert.match(plan.textContent, /实现计分规则.*负责人：Claude Code.*检查边界条件.*负责人：Codex/);
   plan.firstChild.open = true;
   saved.collaboration.tasks[0].status = 'accepted';
   await ui.poll();
   assert.equal(plan.firstChild.open, true, 'a changed projection preserves the user expansion in the same room');
-  assert.equal(plan.firstChild.firstChild.textContent, '任务分工 · 2/2 已交付并互审');
+  assert.equal(plan.firstChild.firstChild.textContent, '任务分工 · 2/2 已完成，伙伴看过');
   const otherCard = ui.get('rooms').children.find((card) => card.firstChild.textContent === '另一个房间');
   otherCard.fire('click'); await settle();
   assert.equal(plan.firstChild.open, false, 'a different room does not inherit the expansion');
-  assert.equal(plan.firstChild.firstChild.textContent, '任务分工 · 1/2 已交付并互审');
+  assert.equal(plan.firstChild.firstChild.textContent, '任务分工 · 1/2 已完成，伙伴看过');
   plan.firstChild.open = true;
   await ui.click('new-room');
   assert.equal(plan.hidden, true);
@@ -1630,7 +1644,7 @@ test('team delivery stays pending user acceptance and names the exact checked ve
   const result = ui.get('collaboration-outcome').textContent;
   assert.match(result, /已交付，待你验收/);
   assert.match(result, /是否达到你的目标仍由你验收/);
-  assert.match(result, /检查范围：静态互审，未运行项目或测试 · 文件版本 2/);
+  assert.match(result, /检查范围：伙伴读过内容，没有运行项目或测试 · 文件版本 2/);
   assert.match(result, /score.js · 版本 3SHA256 b{64}/);
   assert.match(result, /尚未完成版本 3 尚未运行测试/);
   assert.match(result, /接下来需要调整时，直接在下方补充要求.*已有交付与聊天保留/);
@@ -1662,7 +1676,7 @@ test('delivery cards keep hashes and long evidence folded while preserving delib
   assert.equal(details.open, false);
   assert.match(details.firstChild.textContent, /查看检查与交付详情 · 5 个文件 · 1 项待处理/);
   const visible = result.children.filter((node) => node !== details).map((node) => node.textContent).join('');
-  assert.match(visible, /已保留改稿.*检查：静态互审/);
+  assert.match(visible, /已保留改稿.*检查：伙伴读过内容/);
   assert.doesNotMatch(visible, /SHA256|draft[0-4]\.py|较长的检查说明/);
   assert.match(details.textContent, /SHA256 a{64}/);
   assert.match(details.textContent, /平局规则待确认/);
@@ -1790,7 +1804,7 @@ test('recorded team_command events show only useful collaboration actions and te
   const ui = await browser({ rooms: [saved.room], saved });
   const chat = ui.get('events').textContent;
   assert.match(chat, /Claude Code 已认领子任务/);
-  assert.match(chat, /Codex 已提交子任务，等待互审/);
+  assert.match(chat, /Codex 已提交子任务，等伙伴检查/);
   assert.match(chat, /Claude Code 请求伙伴协助，具体问题见其消息/);
   assert.match(chat, /Codex 已提交审核结果/);
   assert.match(chat, /Claude Code 说明了当前阻碍，待处理项见任务清单/);
@@ -1865,7 +1879,7 @@ test('idle team members name pending help and dependencies while legacy current 
   assert.equal(ui.get('task-codex').textContent, '「整理使用说明」等待依赖：整理计分规则');
   saved.team.tasks.forEach((task) => { task.status = 'accepted'; });
   await ui.poll();
-  assert.equal(ui.get('task-claude').textContent, '暂无在途任务；交付与验收状态见群聊');
+  assert.equal(ui.get('task-claude').textContent, '现在没在做事。做完的内容在“交付”里看。');
   assert.equal(ui.get('status-claude').textContent, '空闲');
   assert.doesNotMatch(ui.get('task-claude').textContent, /目标完成|目标已验收|工作已完成/);
   delete saved.team;
@@ -2033,7 +2047,7 @@ test('startup discovery reports installation separately from login and keeps man
   } });
   assert.equal(ui.get('discovery-hint').hidden, false);
   assert.match(ui.get('discovery-hint-text').textContent, /已找到 Claude Code、Codex/);
-  assert.match(ui.get('discovery-hint-text').textContent, /停用设置保持不变/);
+  assert.match(ui.get('discovery-hint-text').textContent, /已停用：Codex。要用的话，到“伙伴与额度”里点“启用”。/);
   assert.deepEqual(ui.targets(), ['all', 'claude']);
   await ui.click('open-partners');
   assert.match(ui.get('partners-list').textContent, /本机已找到/);
@@ -2132,8 +2146,9 @@ test('same-tool aliases stay in advanced sessions while history keeps their reco
 
 test('default project registration accepts a folder without an explicit file list and starts folder mode', async () => {
   const project = { id: '33333333-3333-4333-8333-333333333333', name: '完整项目', path: '/fictional/whole', files: [], selection_kind: 'folder' };
+  let registered = false;  // the folder is listed only once it has been added
   const ui = await browser({ route(request) {
-    if (request.path === '/api/projects') return { projects: [project] };
+    if (request.path === '/api/projects') { registered ||= request.method === 'POST'; return { projects: registered ? [project] : [] }; }
   } });
   ui.get('project-name').value = project.name;
   ui.get('project-path').value = project.path;
@@ -2732,7 +2747,7 @@ test('unavailable provider quota and malformed percentages stay unknown despite 
     ] } }) }));
   const ui = await browser({ rooms: [saved.room], saved, partners });
   const claude = ui.get('provider-account-claude');
-  assert.equal(ui.get('account-email-claude').textContent, '登录待刷新');
+  assert.equal(ui.get('account-email-claude').textContent, '已登录 · 待刷新');
   assert.match(claude.textContent, /claude-reader@example.com/);
   assert.match(claude.textContent, /当前接入尚未取得订阅额度/);
   assert.equal(descendants(claude).some((node) => node.tagName === 'PROGRESS'), false);
@@ -2803,7 +2818,7 @@ test('a failed account check labels retained email and quota as last observation
   account.quota = { ...account.quota, state: 'error', stale: true, reason: 'provider_usage_unavailable' };
   const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, account: agent.id === 'codex' ? account : null }));
   const ui = await browser({ partners });
-  assert.equal(ui.get('account-email-codex').textContent, '登录待刷新');
+  assert.equal(ui.get('account-email-codex').textContent, '已登录 · 待刷新');
   const footer = ui.get('provider-account-codex');
   assert.match(footer.textContent, /上次确认登录.*reader@example.com/);
   assert.match(footer.textContent, /旧快照/);
@@ -3025,7 +3040,7 @@ test('composer quota popup queries explicitly, shares the sidebar watcher and pr
   const sidebar = ui.get('provider-account-codex'); sidebar.open = true; sidebar.fire('toggle'); await settle();
   assert.equal(ui.posts().length, 1, 'two visible views of the same login never duplicate an in-flight native query');
   waiting.resolve(); await settle();
-  assert.match(ui.get('composer-usage-popover').textContent, /reader@example.com.*plus/);
+  assert.match(ui.get('composer-usage-popover').textContent, /reader@example.com.*Plus/);
   assert.match(ui.get('composer-usage-token-fields').textContent, /actually-reported-model/);
   assert.match(ui.get('composer-usage-token-fields').textContent, /供应商最新一次结果快照/);
   assert.equal(ui.get('reader-body').firstChild, readerHeading); assert.equal(ui.get('reader-body').scrollTop, 219);
@@ -3967,8 +3982,8 @@ test('single-partner self-check completion names its scope without a redundant a
   saved.collaboration.tasks = [{ id: 'solo', title: '完成内容', owner: 'codex', status: 'self_checked', review_kind: 'self_check' }];
   saved.objective.next_step.review_kind = 'self_check';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
-  assert.match(ui.get('collaboration-outcome').textContent, /本轮已交付.*1 项任务仅自检，未独立互审.*完成评估由单个伙伴/);
-  assert.match(ui.get('collaboration-plan').textContent, /仅自检/); assert.doesNotMatch(ui.get('collaboration-plan').textContent, /已交付并互审/);
+  assert.match(ui.get('collaboration-outcome').textContent, /本轮已交付.*1 项只做了自查，没有别的伙伴看过.*完成评估由单个伙伴/);
+  assert.match(ui.get('collaboration-plan').textContent, /只做了自查/); assert.doesNotMatch(ui.get('collaboration-plan').textContent, /已完成，伙伴看过/);
   assert.equal(ui.document.getElementById('accept-run'), null); assert.equal(ui.document.getElementById('continue-objective'), null);
   assert.equal(ui.posts().length, 0);
 });
@@ -4030,7 +4045,7 @@ test('objective delivery aggregates verified stages at a checkpoint without prom
   const saved = objectiveDeliveryFixture();
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
   const current = ui.get('document-shortcuts');
-  assert.match(current.textContent, /第一阶段成果.*经独立审核.*第二阶段成果.*仅自检/);
+  assert.match(current.textContent, /第一阶段成果.*伙伴看过.*第二阶段成果.*只做了自查/);
   assert.doesNotMatch(current.textContent, /旧库存|inventory.md/);
   assert.match(ui.get('document-more-items').textContent, /旧库存/);
   saved.objective.delivery.files[1].verified = false;
@@ -4114,7 +4129,7 @@ test('quota retirement and recorded task takeover stay visible without inventing
   assert.match(ui.get('partner-activity-claude').textContent, /本轮暂不参与.*此前额度受限.*Codex 正在接着做/);
   assert.match(ui.get('partner-activity-codex').textContent, /正在处理.*补齐小工具说明/);
   assert.match(ui.get('events').textContent, /Codex 已接过 Claude Code 的子任务/);
-  assert.match(ui.get('collaboration-plan').textContent, /仅自检/);
+  assert.match(ui.get('collaboration-plan').textContent, /只做自查/);
   assert.deepEqual(ui.members(), ['member-claude', 'member-codex']); assert.equal(ui.posts().length, 0);
   saved.objective.status = 'complete'; saved.objective.next_step = { decision: 'complete', review_kind: 'self_check' };
   saved.jobs.forEach(job => { job.status = 'completed'; }); saved.team.tasks[0].status = 'self_checked'; await ui.poll();
@@ -4208,12 +4223,12 @@ test('self-check and mixed validation scopes are explicit instead of implying in
   saved.collaboration.outcome.validation.summary = '本次由作者自检，尚未进行独立审核。';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
   const checkLabel = () => ui.document.querySelector('.delivery-details').textContent;
-  assert.match(checkLabel(), /检查范围：仅自检，未经独立审核/);
+  assert.match(checkLabel(), /检查范围：只做了自查，没有别的伙伴看过/);
   assert.match(ui.get('collaboration-outcome').textContent, /本轮已结束，无需回复或确认/);
   assert.equal(ui.get('message').disabled, true); assert.equal(ui.get('new-room').disabled, false);
   saved.collaboration.outcome.validation.scope = 'mixed_review';
   saved.collaboration.outcome.validation.summary = '部分成果由作者自检，其余独立审核范围见任务记录。'; await ui.poll();
-  assert.match(checkLabel(), /检查范围：包含自检，独立审核范围见详情/);
+  assert.match(checkLabel(), /检查范围：有的只做了自查，见详情/);
   assert.equal(ui.posts().length, 0);
 });
 
@@ -4812,7 +4827,7 @@ test('an unchanged verified goal file is lazy-readable by its exact source versi
     }
   } });
   const current = ui.get('document-shortcuts');
-  assert.match(current.textContent, /notes.md.*经独立审核/); assert.doesNotMatch(current.textContent, /inventory.md/);
+  assert.match(current.textContent, /notes.md.*伙伴看过/); assert.doesNotMatch(current.textContent, /inventory.md/);
   assert.equal(ui.requests.filter((request) => request.path.includes('/file?')).length, 0, 'metadata is not fetched until the user opens it');
   const open = () => descendants(ui.get('room-documents')).find((node) => node.dataset.documentPath === 'notes.md').fire('click');
   open(); await waitUntil(() => ui.get('reader-body').textContent.includes('没有改写源文件'), 'exact notes body passes SHA verification');
@@ -5004,12 +5019,12 @@ test('availability surfaces deduplicate the same observation and keep current me
   partners[0].monitor = { status: 'working', current_tasks: [{ room_id: roomId, room_goal: longGoal, status: 'working', current_task: '核对已有实现' }] };
   const ui = await browser({ partners, rooms: [saved.room], saved, executionPolicySupport: true });
   assert.equal(ui.get('availability-claude').hidden, true, 'an unblocked partner card carries no status box');
-  assert.equal((ui.get('provider-account-claude').textContent.match(/最近检查未见额度阻塞/g) || []).length, 1);
+  assert.equal((ui.get('provider-account-claude').textContent.match(/额度够用/g) || []).length, 1);
   assert.match(ui.get('provider-account-claude').textContent, /上次检查/);
   await ui.click('open-partners');
   const card = ui.get('partners-list').children.find((node) => node.dataset.partner === 'claude');
   const note = card.children.find((node) => node.classList.contains('availability-note'));
-  assert.equal((note.textContent.match(/最近检查未见额度阻塞/g) || []).length, 1);
+  assert.equal((note.textContent.match(/额度够用/g) || []).length, 1);
   const link = descendants(card).find((node) => node.classList.contains('task-room-link'));
   assert.ok(link.textContent.length < 100); assert.equal(link.title, longGoal);
   assert.ok(ui.posts().every((request) => request.path === '/api/availability/refresh' || request.path.endsWith('/account/refresh')), 'opening metadata may refresh accounts but never starts a task');
@@ -5212,7 +5227,7 @@ test('native public commentary displays original messages with truthful truncati
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
   const messages = ui.get('events').children;
   assert.equal(messages.length, 5, 'same text from distinct real items stays visible');
-  assert.equal(descendants(messages[0]).find((node) => node.className === 'event-text').textContent, original);
+  assert.equal(descendants(messages[0]).find((node) => node.classList.contains('event-text')).textContent, original);
   assert.match(messages[0].textContent, /Codex/); assert.doesNotMatch(messages[0].textContent, /伙伴答复|任务目标与补充|草案答复/);
   assert.match(messages[2].textContent, /仅显示前 3 字，原文 100 字/);
   assert.doesNotMatch(messages[3].textContent + messages[4].textContent, /仅显示前/);
@@ -5583,7 +5598,7 @@ test('paused partner summaries match the real pause state and display task title
   saved.events = [{ seq: 1, kind: 'message', sender: 'codex', text: publicText, created_at: 1000 }];
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
   assert.equal(ui.get('status-codex').textContent, '已暂停'); assert.equal(ui.get('task-codex').textContent, '继续后接着做。'); assert.doesNotMatch(ui.get('status-codex').textContent, /等你处理/);
-  assert.doesNotMatch(ui.get('collaboration-plan').textContent, /\[0%\]/); assert.match(ui.get('collaboration-plan').textContent, /实现恢复链.*已交付|实现恢复链.*审核/);
+  assert.doesNotMatch(ui.get('collaboration-plan').textContent, /\[0%\]/); assert.match(ui.get('collaboration-plan').textContent, /实现恢复链.*已完成|实现恢复链.*审核/);
   assert.match(ui.get('events').textContent, /\[0%\] 我说的原文保持这样/);
   assert.equal(saved.team.tasks[0].title, '[0%] 实现恢复链'); assert.equal(saved.events[0].text, publicText);
   saved.objective.pause_requested = true; saved.jobs = [{ id: jobId, provider: 'codex', status: 'working', kind: 'team_work' }]; saved.team.tasks[1].status = 'working';
@@ -6236,11 +6251,12 @@ test('an actual idle read-only discussion keeps the running goal and earlier bui
   saved.runtime_configuration.desired.work_mode = 'plan';
   const ui = await browser({ rooms: [saved.room], saved, naturalRuntimeSupport: true, naturalContinuationSupport: true, executionPolicySupport: true });
   assert.match(ui.get('room-subtitle').textContent, /方案讨论/); assert.doesNotMatch(ui.get('room-subtitle').textContent, /直接动手/);
-  assert.equal(ui.get('room-status').textContent, '方案讨论'); assert.match(ui.get('collaboration-outcome').textContent, /暂无在途工作，可继续讨论或切到动手/);
+  assert.equal(ui.get('room-status').textContent, '方案讨论'); assert.match(ui.get('collaboration-outcome').textContent, /现在没在做事。可以接着讨论，或切到“动手”开工/);
   assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /等待你验收|正在推进目标/);
-  for (const provider of ['claude', 'codex']) { assert.equal(ui.get(`status-${provider}`).textContent, '方案讨论'); assert.match(ui.get(`task-${provider}`).textContent, /暂无在途工作/); }
+  for (const provider of ['claude', 'codex']) { assert.equal(ui.get(`status-${provider}`).textContent, '方案讨论'); assert.match(ui.get(`task-${provider}`).textContent, /现在没在做事/); }
   assert.equal(saved.objective.status, 'running');
-  saved.room.work_mode = 'build'; await ui.poll(); assert.equal(ui.get('room-status').textContent, '方案讨论');
+  // B17: build mode under a still read-only permission is named by the permission, not as a plan discussion.
+  saved.room.work_mode = 'build'; await ui.poll(); assert.equal(ui.get('room-status').textContent, '只读权限');
   saved.jobs = [{ id: 'held-build', provider: 'codex', status: 'working', kind: 'team_work' }];
   saved.events.push({ seq: 60, kind: 'job_claimed', job_id: 'held-build', sender: 'codex', run_id: saved.current_run.id, work_mode: 'build', runtime_settings: { effective_permission: 'workspace_write' }, created_at: 60 });
   await ui.poll(); assert.match(ui.get('room-subtitle').textContent, /直接动手/); assert.notEqual(ui.get('status-codex').textContent, '方案讨论');
@@ -6315,7 +6331,7 @@ test('baseline is omitted only when verified current objective delivery has the 
     assert.equal(baselineButtons.length > 0, variant !== 'identical', variant);
     const buttons = descendants(ui.get('room-documents')).filter((button) => button.dataset.documentPath === file.path);
     assert.equal(buttons.length, variant === 'identical' ? 1 : 2, variant);
-    if (variant === 'identical') assert.match(buttons[0].textContent, /经独立审核/);
+    if (variant === 'identical') assert.match(buttons[0].textContent, /伙伴看过/);
     if (variant === 'unverified' || variant === 'drift') assert.match(ui.get('document-more-items').textContent, /第一阶段成果/);
     assert.equal(ui.posts().length, 0);
   }
@@ -6815,7 +6831,7 @@ test('idle paged history fallback never claims that a current checkpoint with no
     if (request.path.endsWith('/state')) return saved;
     return eventPageRoute(request, []);
   } });
-  assert.equal(ui.get('public-progress-claude').textContent, '暂无在途工作，可在聊天中查看此前进展。');
+  assert.equal(ui.get('public-progress-claude').textContent, '现在没在做事，之前的进展在聊天里。');
   assert.doesNotMatch(ui.get('public-progress-claude').textContent, /没有.*公开进展/); assert.equal(ui.posts().length, 0);
 });
 
@@ -7063,7 +7079,7 @@ test('completed work folds its full report and files while showing the exact bou
   assert.equal(ui.document.querySelector('.completion-summary-preview').textContent, saved.objective.next_step.summary);
   assert.match(ui.document.querySelector('.completion-guidance').textContent, /无需回复或确认/);
   assert.equal(ui.document.getElementById('continue-current'), null); assert.equal(ui.document.getElementById('accept-run'), null);
-  assert.match(files.textContent, /经独立审核|仅自检/);
+  assert.match(files.textContent, /伙伴看过|只做了自查/);
   report.open = true; files.open = true; saved.collaboration.outcome.validation.summary = '新增检查说明'; await ui.poll();
   assert.equal(ui.document.querySelector('.completion-report').open, true); assert.equal(ui.document.querySelector('.delivery-content').open, true);
   await ui.click('add-completion-suggestion');
@@ -7117,7 +7133,7 @@ test('completed review scope keeps original task titles in closed details after 
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
   const outcome = ui.get('collaboration-outcome'); const details = ui.document.querySelector('.review-scope-details');
   assert.equal(details.open, false); assert.match(details.textContent, /\[0%\] 原始任务甲/);
-  assert.equal(ui.document.querySelector('.review-scope-note').textContent, '3 项任务仅自检，未独立互审。');
+  assert.equal(ui.document.querySelector('.review-scope-note').textContent, '3 项只做了自查，没有别的伙伴看过。');
   assert.equal(outcome.children.filter((node) => node.classList.contains('review-scope-note')).length, 1);
   const visibleParagraphs = outcome.children.filter((node) => node.tagName === 'P');
   assert.doesNotMatch(visibleParagraphs.map((node) => node.textContent).join(''), /\[0%\]|原始任务/);
@@ -7131,7 +7147,7 @@ test('checkpoint self-check never relabels independently reviewed work as unrevi
   saved.team.tasks = [{ id: 'A', owner: 'claude', title: '已审核任务', status: 'accepted', review_kind: 'independent_review' }];
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
   assert.match(ui.get('collaboration-outcome').textContent, /完成评估由单个伙伴核对/);
-  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /项任务仅自检|尚有内容未经独立互审/);
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /项只做了自查|尚有内容未经独立互审/);
 });
 
 test('the compact work indicator animates only actual live work and names the real checkpoint or inspection phase', async () => {
@@ -8349,7 +8365,7 @@ test('documents expose bound current delivery titles directly while previous and
     route(request) { if (request.path.includes('/file?')) return { ...previous.binding, content: previous.content }; } });
   assert.equal(ui.get('room-documents').hidden, false);
   assert.match(ui.get('document-shortcuts').textContent, /第一阶段成果/);
-  assert.match(ui.get('document-shortcuts').textContent, /经独立审核/);
+  assert.match(ui.get('document-shortcuts').textContent, /伙伴看过/);
   assert.doesNotMatch(ui.get('document-shortcuts').textContent, /旧库存|沿用/);
   assert.equal(ui.get('document-more').open, false); assert.match(ui.get('document-more-items').textContent, /旧库存/);
   descendants(ui.get('document-shortcuts')).find((node) => node.dataset.documentPath === 'first.md').fire('click'); await settle();
@@ -8414,7 +8430,7 @@ test('Kimi quota windows show supplied remaining values and an explicit official
   assert.match(footer.textContent, /Kimi Code · 5小时额度/); assert.match(footer.textContent, /剩余 99%/);
   assert.match(footer.textContent, /Kimi Code 本机会员登录额度查询/);
   assert.match(footer.textContent, /月度总额度：本次查询未提供/);
-  assert.match(ui.get('composer-usage-items').textContent, /5小时剩余 99%/); assert.match(footer.textContent, /会员档位/); assert.doesNotMatch(footer.textContent, /订阅未提供/);
+  assert.match(ui.get('composer-usage-items').textContent, /5小时剩余 99%/); assert.match(footer.textContent, /订阅/); assert.doesNotMatch(footer.textContent, /订阅未提供/);
   const link = descendants(footer).find((node) => node.dataset.usageLink === 'kimi');
   assert.equal(link.href, 'https://www.kimi.com/code/console'); assert.equal(link.target, '_blank');
   assert.doesNotMatch(footer.textContent, /Plus|剩余 0%/);
@@ -9376,7 +9392,7 @@ test('reviewing task lists name the exact reviewer separately from its owner wit
   saved.collaboration = teamCollaboration({ tasks: [{ id: 'T1', title: '[0%] 核对结果', owner: 'claude', status: 'review', result: '', waiting_for: '等待独立审核' }] });
   const ui = await browser({ rooms: [saved.room], saved });
   const plan = ui.get('collaboration-plan');
-  assert.match(plan.textContent, /核对结果等待互审负责人：Claude Code本次审核：Codex/);
+  assert.match(plan.textContent, /核对结果等伙伴检查负责人：Claude Code本次审核：Codex/);
   assert.doesNotMatch(plan.textContent, /\[0%\]/);
   delete saved.team.tasks[0].reviewer; await ui.poll(); assert.doesNotMatch(plan.textContent, /本次审核：/);
   saved.team.tasks[0].reviewer = 'codex'; saved.team.tasks[0].status = 'accepted'; await ui.poll();
@@ -9724,8 +9740,8 @@ test('Kimi account details display the real membership and distinguish absent pr
     const ui = await browser({ agents: [agent], partners: [{ ...agent, adapter: 'kimi', enabled: true, account }] });
     const footer = ui.get('provider-account-kimi');
     assert.match(footer.textContent, reason === 'provider_not_provided' ? /供应商未提供邮箱/ : /本次未取得邮箱/);
-    assert.match(footer.textContent, reason === 'provider_not_provided' ? /Plus/ : /本次未取得会员档位/);
-    assert.doesNotMatch(footer.textContent, /邮箱未获取|会员档位未取得/);
+    assert.match(footer.textContent, reason === 'provider_not_provided' ? /Plus/ : /本次未取得订阅/);
+    assert.doesNotMatch(footer.textContent, /邮箱未获取|订阅未取得/);
     assert.equal(ui.posts().length, 0);
   }
 });
@@ -9985,7 +10001,7 @@ test('official Kimi display identity prefers actual email then masked phone then
     const account = accountFixture({ source: 'kimi_managed_oauth', email, plan: 'Plus', display_identity: display, stale,
       field_reasons: { email: email ? null : 'provider_not_provided', plan: null } });
     const ui = await browser({ agents: [agent], partners: [{ ...agent, adapter: 'kimi', enabled: true, account }] });
-    assert.equal(ui.get('account-email-kimi').textContent, stale ? '登录待刷新' : '已登录', 'no phone, nickname or email fragment on the card');
+    assert.equal(ui.get('account-email-kimi').textContent, stale ? '已登录 · 待刷新' : '已登录', 'no phone, nickname or email fragment on the card');
     const footer = ui.get('provider-account-kimi');
     if (!stale) assert.match(footer.textContent, expected);
     else assert.match(footer.textContent, /上次确认登录/);
@@ -10487,4 +10503,448 @@ test('account popover names the login source, shows a copyable login command for
   assert.equal(switchButton().textContent, '改用独立登录');
   assert.ok(ui.posts().every((request) => /\/api\/partners\/claude\/(account-source|account\/refresh)/.test(request.path)),
     'no login, room or model request is ever sent');
+});
+
+// ---- 0.3.0 sweep: interface and copy fixes (A3–A23, B6–B17) ----
+
+test('a confirmed stop no longer says the stop is still being checked', async () => {
+  // Catches B7: after the service confirmed the user's stop (and after a reload) the card kept "已请求停止，正在核对本服务登记的执行".
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'cancel_requested'; saved.stop_kind = null;
+  saved.cancellation_confirmed = true;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(ui.get('now-title').textContent, '推进已停止');
+  assert.match(ui.get('now-text').textContent, /^已按你的要求停下。/);
+  assert.doesNotMatch(ui.get('now-card').textContent, /正在核对/);
+  const pending = restartSnapshot(); pending.objective.stop_reason = 'cancel_requested'; pending.stop_kind = null;
+  pending.cancellation_confirmed = false;
+  const waiting = await browser({ rooms: [pending.room], saved: pending, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.match(waiting.get('now-text').textContent, /^已请求停止，正在核对本服务登记的执行。/, 'an unconfirmed stop still says it is being checked');
+});
+
+test('after a restart that resumes by itself the first screen says it continues, not that nothing reruns', async () => {
+  // Catches B6: "…不会自动重跑" with a resume button while the service was about to continue on its own.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'service_restarted'; saved.objective.status = 'interrupted';
+  saved.stop_kind = 'auto'; saved.room.objective_status = 'interrupted'; saved.room.stop_kind = 'auto';
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true, naturalContinuationSupport: true });
+  assert.match(ui.get('now-label').textContent, /^马上自动继续/);
+  assert.equal(ui.get('now-title').textContent, '豆窝服务重启过，马上自动接着做');
+  assert.doesNotMatch(ui.get('now-card').textContent, /不会自动重跑/);
+  assert.match(ui.get('rooms').children[0].textContent, /马上自动继续/);
+});
+
+test('the delete confirmation and lifecycle labels use the sidebar name, not the latest round goal', async () => {
+  // Catches B9: the sidebar showed the first goal while the confirm box named the last round's goal.
+  const saved = restartSnapshot();
+  saved.room.goal = '第三轮：把颜色改成蓝色'; saved.room.objective_goal = '完成这份虚构的小工具';
+  const listed = { ...saved.room };
+  delete saved.room.objective_goal;  // the open room's own record carries only the latest round
+  const ui = await browser({ rooms: [listed], saved, executionPolicySupport: true, roomLifecycleSupport: true });
+  ui.get('rooms').children[0].fire('click'); await settle();
+  assert.equal(ui.get('rooms').children[0].firstChild.textContent, '完成这份虚构的小工具');
+  const remove = descendants(ui.get('room-lifecycle-actions')).find((node) => node.dataset.lifecycleAction === 'remove');
+  assert.equal(remove.getAttribute('aria-label'), '永久删除任务：完成这份虚构的小工具');
+  remove.fire('click'); await settle();
+  assert.equal(ui.get('lifecycle-confirm-title').textContent, '永久删除任务“完成这份虚构的小工具”？');
+  const english = await browser({ language: 'en', rooms: [listed], saved, executionPolicySupport: true, roomLifecycleSupport: true });
+  english.get('rooms').children[0].fire('click'); await settle();
+  const archive = descendants(english.get('room-lifecycle-actions')).find((node) => node.dataset.lifecycleAction === 'archive');
+  assert.equal(archive.getAttribute('aria-label'), 'Archive task: 完成这份虚构的小工具', 'A19: the English label has its space');
+});
+
+test('the files panel opens a delivered file in the reader instead of saying its content is unavailable', async () => {
+  // Catches B8: the state sends content_available, not content, so every file read "内容不可用".
+  const sha = 'a'.repeat(64);
+  const saved = objectiveSnapshot({ status: 'complete' });
+  saved.room.mode = 'project_files';
+  saved.project = { available: true, revision: 2, snapshot_sha256: 'b'.repeat(64), files: [
+    { path: 'notes.md', sha256: sha, owner: 'codex', content_available: true },
+    { path: 'other.txt', sha256: 'c'.repeat(64), owner: 'claude', content_available: true }] };
+  saved.objective.delivery = { revision: 2, digest: 'b'.repeat(64), files: [{ path: 'notes.md', sha256: sha, verified: true,
+    run_id: saved.current_run.id, revision: 2, digest: 'b'.repeat(64) }] };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, route(request) {
+    if (request.path.startsWith(`/api/rooms/${roomId}/file?`)) return { run_id: saved.current_run.id, revision: 2, digest: 'b'.repeat(64), path: 'notes.md', sha256: sha, content: '# 笔记' };
+  } });
+  const files = ui.get('project-files');
+  assert.doesNotMatch(files.textContent, /内容不可用/);
+  const open = descendants(files).find((node) => node.dataset.openProjectFile === 'notes.md');
+  assert.ok(open, 'a delivered file has an open button');
+  assert.equal(open.textContent, '打开阅读');
+  assert.match(files.textContent, /other\.txt[\s\S]*这里不直接显示正文，点上面的“下载成果”可以拿到全部文件。/);
+  open.fire('click'); await settle();
+  assert.equal(ui.get('delivery-reader').hidden, false);
+});
+
+test('names, labels and pickers stay in the chosen language', async () => {
+  // Catches A19: an English sidebar tooltip "Claude Code：剩余 47%", a Chinese checkbox label and an untranslated "ultra" effort.
+  const languageStorage = new Map();
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, account: accountFixture() }));
+  const ui = await browser({ partners, languageStorage });
+  assert.equal(participantInput(ui, 'claude').getAttribute('aria-label'), '邀请 Claude Code');
+  const meter = ui.get('nav-quota').children[0];
+  assert.equal(meter.title, 'Claude Code：剩余 0%');
+  ui.get('interface-language').fire('click'); await settle();
+  assert.equal(participantInput(ui, 'claude').getAttribute('aria-label'), 'Invite Claude Code');
+  assert.equal(ui.get('nav-quota').children[0].title, 'Claude Code: 0% left');
+});
+
+test('Codex ultra effort is named in both languages and not repeated with another level', async () => {
+  // Catches A19: the ultra option showing the raw id "ultra" in the Chinese interface.
+  const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
+  saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'gpt-x', effort: 'ultra' };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
+  assert.match(ui.get('member-model-codex').textContent, /· 极高 ⌄$/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
+  assert.match(english.get('member-model-codex').textContent, /· Ultra ⌄$/);
+});
+
+test('a saved model choice keeps its friendly name after a reload without the model list', async () => {
+  // Catches B11: after a refresh the labels showed raw ids such as "default" and "kimi-code/kimi-for-coding".
+  const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
+  saved.runtime_configuration.desired.runtime_settings.members.claude = { model: 'default', effort: 'low' };
+  saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'kimi-code/kimi-for-coding', effort: null };
+  const fresh = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
+  assert.equal(fresh.get('member-model-claude').textContent, '默认推荐 · 低 ⌄', 'without any saved names, default reads as the tool default');
+  assert.equal(fresh.get('member-model-codex').textContent, 'kimi-for-coding ⌄', 'a path id keeps its last part, and a default effort is left off the card');
+  const languageStorage = new Map([['beanest:model-names-v1', JSON.stringify({ claude: {
+    default: { name: '', resolved_model: 'claude-opus-5-5' }, opus: { name: 'Opus 5.5', resolved_model: 'claude-opus-5-5' } } })]]);
+  const reloaded = await browser({ languageStorage, rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
+  assert.equal(reloaded.get('member-model-claude').textContent, 'Opus 5.5（默认） · 低 ⌄');
+});
+
+test('the progress pane still lists what earlier rounds finished after the objective moves to a new run', async () => {
+  // Catches B10: after a continuation only the new run's task was shown ("0/1 完成") and the finished work vanished.
+  const saved = objectiveSnapshot({ status: 'running' });
+  const first = { ...saved.current_run, id: '77777777-7777-4777-8777-777777777777', number: 1, finished_at: 1100 };
+  saved.current_run = { ...saved.current_run, number: 2 };
+  saved.runs = [first, { ...saved.current_run }];
+  saved.team = { phase: 'working', tasks: [{ id: 'review', title: 'Kimi 复核 colors.md', owner: 'codex', status: 'open' }] };
+  saved.collaboration.tasks = saved.team.tasks;
+  const reads = [];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, route(request) {
+    if (request.path.startsWith(`/api/rooms/${roomId}/runs?run_id=`)) {
+      reads.push(request.path);
+      return { run: first, team: { tasks: [{ id: 'make', title: '创建 colors.md', owner: 'claude', status: 'accepted' },
+        { id: 'skip', title: '没做完的一项', owner: 'codex', status: 'cancelled' }] } };
+    }
+  } });
+  await settle();
+  const pane = ui.get('progress-pane');
+  assert.deepEqual(reads, [`/api/rooms/${roomId}/runs?run_id=${first.id}`]);
+  assert.match(pane.textContent, /前几轮已完成 1 项/);
+  assert.match(pane.textContent, /✓ 创建 colors\.md/);
+  assert.doesNotMatch(pane.textContent, /没做完的一项/);
+  await ui.poll();
+  assert.equal(reads.length, 1, 'earlier runs are read once, not on every poll');
+  assert.equal(ui.posts().length, 0);
+});
+
+test('a room without a project shows where its results are instead of repository controls', async () => {
+  // Catches A7: a Q&A task's delivery tab showed 代码交付 / 选择仓库 / GitHub 同步.
+  // Shaped like the real code-status answer for a room with no project (no_project_workspace, nothing to choose).
+  const saved = objectiveSnapshot({ status: 'complete' }); saved.room.mode = 'text_artifacts'; saved.room.project_id = null;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, codeStatusSupport: true, route(request) {
+    if (request.path.startsWith(`/api/rooms/${roomId}/code-status`)) return { state: 'unbound', reason: 'no_project_workspace', workspace_id: null, workspaces: [],
+      files: [], uncommitted: { total: null }, delivery_repository: { state: 'unbound', reason: 'delivery_repository_unbound', workspace_id: null, source: null, candidates: [] } };
+  } });
+  assert.equal(ui.get('code-status-card').hidden, true);
+  assert.equal(ui.get('delivery-empty').hidden, false);
+  assert.equal(ui.get('delivery-empty').textContent, '这个任务没有关联项目，没有代码要交付。伙伴的回复在“讨论”里，整理好的成果和文件在“资料”里。');
+});
+
+test('a deleted project is shown by the name the room recorded and said to be deleted', async () => {
+  // Catches A10: after a permanent delete the room said only "关联项目" and the options "项目记录未找到".
+  const saved = objectiveSnapshot({ status: 'complete' }); saved.room.mode = 'project_files';
+  saved.room.project_id = '88888888-8888-4888-8888-888888888888';
+  saved.project = { available: true, revision: 1, files: [], source: { id: saved.room.project_id, name: '记账小工具', path: '/fictional/ledger' } };
+  const ui = await browser({ rooms: [saved.room], saved, projects: [], executionPolicySupport: true });
+  assert.equal(ui.get('task-options-project').textContent, '记账小工具（已删除）');
+  assert.equal(ui.get('room-project-chip').textContent, '记账小工具（已删除）');
+  assert.equal(ui.get('frozen-project').textContent, '关联的项目“记账小工具”已从豆窝删除。原项目文件不受影响，这个任务里的副本和成果还在。');
+  const kept = await browser({ rooms: [saved.room], saved, projects: [{ id: saved.room.project_id, name: '记账小工具', path: '/fictional/ledger', files: [] }], executionPolicySupport: true });
+  assert.equal(kept.get('frozen-project').textContent, '关联项目：记账小工具 · 本任务项目固定。');
+});
+
+test('explicit file lists get a message about their actual problem', async () => {
+  // Catches A9: every rejected list said "不要包含重复路径或上级目录", even for a binary file or too many files.
+  const ui = await browser();
+  await ui.click('open-projects');
+  const submit = async (files) => {
+    ui.get('project-name').value = '虚构项目'; ui.get('project-path').value = '/fictional/project';
+    ui.get('project-explicit-files').checked = true; ui.get('project-files-input').value = files.join('\n');
+    ui.get('project-form').fire('submit'); await settle();
+    return ui.get('manager-notice').textContent;
+  };
+  assert.equal(await submit(Array.from({ length: 13 }, (_, index) => `n${index}.md`)), '最多 12 个文件，现在填了 13 个。');
+  assert.equal(await submit(['/Users/me/a.md']), '请写相对项目文件夹的路径，例如 src/main.py，不要写完整路径：/Users/me/a.md');
+  assert.equal(await submit(['src/../a.md']), '路径里不能有 ..、. 或空的一段，文件要在项目文件夹里面：src/../a.md');
+  assert.equal(await submit(['a.md', 'A.md']), '这个文件填了两次：A.md');
+  assert.equal(await submit(['logo.png']), 'logo.png 不是能处理的文本文件。只能选源码、文档、配置这类文本文件。');
+  assert.equal(ui.posts().length, 0, 'nothing is sent for a list the service would reject');
+  const missing = await browser({ route(request) { if (request.path === '/api/projects' && request.method === 'POST') return { error: 'project_file_unavailable' }; } });
+  await missing.click('open-projects');
+  missing.get('project-name').value = '虚构项目'; missing.get('project-path').value = '/fictional/missing';
+  missing.get('project-form').fire('submit'); await settle();
+  assert.equal(missing.get('manager-notice').textContent, '找不到这个文件夹，或者没有权限读取。请核对路径。');
+});
+
+test('registering a folder twice names the existing project, and a home folder needs a second click', async () => {
+  // Catches A11: the same path registered again silently, and the whole home folder registered without a word.
+  const projects = [registeredProject('99999999-9999-4999-8999-999999999999', 'ledger')];
+  const ui = await browser({ projects, route(request) { if (request.path === '/api/projects' && request.method === 'POST') return { projects }; } });
+  await ui.click('open-projects');
+  ui.get('project-name').value = '再加一次'; ui.get('project-path').value = '/fictional/ledger/';
+  ui.get('project-form').fire('submit'); await settle();
+  assert.equal(ui.get('manager-notice').textContent, '这个文件夹已登记为「ledger」，直接选它就行。');
+  assert.equal(ui.posts().length, 0);
+  ui.get('project-name').value = '整个家目录'; ui.get('project-path').value = '/Users/someone';
+  ui.get('project-form').fire('submit'); await settle();
+  assert.equal(ui.get('manager-notice').textContent, '这是整个用户文件夹，里面有很多和项目无关的私人文件。建议只选项目所在的文件夹。确定要登记，就再点一次“添加项目”。');
+  assert.equal(ui.posts().length, 0, 'the first click only warns');
+  ui.get('project-form').fire('submit'); await settle();
+  assert.equal(ui.posts().length, 1, 'the second click registers it');
+  ui.get('project-path').value = '/'; ui.get('project-form').fire('submit'); await settle();
+  assert.equal(ui.get('manager-notice').textContent, '不能登记整个磁盘的根目录，请选项目所在的文件夹。');
+});
+
+test('sign-in wording agrees everywhere and a failed quota check never reads as signed out', async () => {
+  // Catches A4: the top line said a tool was ready while its card said 还差登录, a disabled checkbox sat next to
+  // "仍可使用", and an old or failed account check made one view say 登录待刷新 while another said 已登录.
+  const adapters = firstRunAdapters({ claude: { state: 'login_required' }, codex: { state: 'ready' } });
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, selectable: true, installation: { state: 'found' },
+    account: agent.id === 'codex' ? accountFixture({ state: 'error', stale: true, reason: 'account_check_timeout' }) : null }));
+  const listing = setupRoute(() => ({ partners, supported_adapters: adapters }));
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, route: listing });
+  await ui.poll();
+  assert.equal(ui.get('discovery-hint-text').textContent, '已找到 claude、codex。其中 claude 还差登录，其他的选好就可以开始。');
+  assert.equal(ui.get('account-email-codex').textContent, '已登录 · 待刷新', 'an old account check is not a sign-out');
+  const claudeOption = participantInput(ui, 'claude').parentNode;
+  assert.equal(participantInput(ui, 'claude').disabled, true);
+  const note = claudeOption.children.find((node) => node.classList.contains('participant-availability'));
+  assert.equal(note.textContent, '还差登录');
+  assert.doesNotMatch(claudeOption.textContent, /仍可使用/);
+  await ui.click('open-partners');
+  assert.match(ui.get('partners-list').textContent, /还差登录，登录后才能选入新任务/);
+  assert.doesNotMatch(ui.get('partners-list').textContent, /claude · 可选入新任务/i);
+});
+
+test('a setup status that could not be read is not offered as a sign-in step', async () => {
+  // Catches A4: a passing failure of the status check showed "正在确认" with a big 登录 button.
+  const adapters = firstRunAdapters({ codex: { state: 'unknown' } });
+  const partners = catalog.slice(1, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, selectable: true, installation: { state: 'found' }, account: null }));
+  const ui = await browser({ agents: catalog.slice(1, 2), partners, route: setupRoute(() => ({ partners, supported_adapters: adapters })) });
+  await ui.poll(); await ui.click('open-partners');
+  const card = ui.get('native-tool-setup');
+  assert.match(card.textContent, /登录状态没查到/);
+  assert.match(card.textContent, /已经登录的不用重新登录/);
+  const button = descendants(card).find((node) => node.dataset.nativeLoginStart === 'codex');
+  assert.equal(button.textContent, '重新登录');
+  assert.equal(button.classList.contains('setup-primary'), false, 'sign-in is a quiet choice here, not the main step');
+  partners[0].account = accountFixture({ state: 'available' });
+  await ui.poll(); await ui.click('open-partners');
+  assert.equal(ui.get('native-tool-setup').hidden, true, 'a just-confirmed account hides the unread setup card');
+});
+
+test('a disabled partner is named with where to turn it back on, and a finished enable message goes away', async () => {
+  // Catches A5: a disabled partner vanished from the home page and task options with only "停用设置保持不变",
+  // and "伙伴已启用。已有聊天和成果保留。" stayed on its card forever.
+  const partners = managedPartnersFixture(); partners[1].enabled = false; partners.forEach((partner) => { partner.lifecycle_busy = false; partner.lifecycle_can_change = true; });
+  let operation = partnerOperationFixture('codex', 'enable', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { status: 'completed' });
+  const envelope = () => ({ partners, supported_adapters: catalog.slice(0, 2), partner_lifecycle_operations: [operation] });
+  const ui = await browser({ agents: catalog.slice(0, 1), partners, partnerLifecycleSupport: true, route(request) { if (request.path === '/api/partners') return envelope(); } });
+  operation = partnerOperationFixture('codex', 'disable', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { status: 'completed' });
+  await ui.poll();
+  const expected = '已停用：Codex。要用的话，到“伙伴与额度”里点“启用”。';
+  assert.equal(ui.get('home-disabled-note').textContent, expected); assert.equal(ui.get('home-disabled-note').hidden, false);
+  assert.equal(ui.get('participant-disabled-note').textContent, expected);
+  await ui.click('open-partners');
+  assert.doesNotMatch(ui.get('partners-list').textContent, /伙伴已停用。已有聊天和成果保留。/, 'a settled operation is not repeated on the card');
+  operation = partnerOperationFixture('codex', 'disable', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { status: 'completed', targets: [{ room_id: roomId, state: 'waiting_receiver' }] });
+  await ui.poll(); await ui.click('open-partners');
+  assert.match(ui.get('partners-list').textContent, /伙伴已停用。已有工作的改动已保留/, 'work still being handed on stays visible');
+  partners[1].enabled = true;
+  operation = partnerOperationFixture('codex', 'enable', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', { status: 'completed' });
+  await ui.poll();
+  assert.equal(ui.get('home-disabled-note').hidden, true);
+});
+
+test('partner replies render Markdown safely while the user text stays as typed', async () => {
+  // Catches A6: tables and code blocks shown as raw Markdown in chat; and guards against HTML or unsafe links getting through.
+  const reply = ['结论如下：', '', '| 名字 | 说明 |', '| --- | --- |', '| Tilly | 短 |', '', '```python', 'print("<b>hi</b>")', '```',
+    '', '<img src=x onerror=alert(1)> [坏链接](javascript:alert(1)) [好链接](https://example.com/a) ![远程](https://example.com/x.png)'].join('\n');
+  const saved = snapshot({ events: [message(1, 'user', '**我写的星号**'), message(2, 'codex', reply)] });
+  const ui = await browser({ rooms: [saved.room], saved });
+  const items = ui.get('events').children;
+  const userText = descendants(items[0]).find((node) => node.classList.contains('event-text'));
+  assert.equal(userText.textContent, '**我写的星号**');
+  assert.equal(userText.children.length, 0);
+  const text = descendants(items[1]).find((node) => node.classList.contains('event-text'));
+  assert.ok(text.classList.contains('chat-markdown'));
+  const nodes = descendants(text);
+  assert.deepEqual(nodes.filter((node) => node.tagName === 'TH').map((node) => node.textContent), ['名字', '说明']);
+  assert.equal(nodes.find((node) => node.tagName === 'PRE').textContent, 'print("<b>hi</b>")');
+  assert.equal(nodes.some((node) => ['IMG', 'SCRIPT', 'B'].includes(node.tagName)), false, 'no raw HTML becomes an element');
+  const links = nodes.filter((node) => node.tagName === 'A');
+  assert.deepEqual(links.map((node) => node.href), ['https://example.com/a']);
+  assert.equal(links[0].rel, 'noopener noreferrer');
+  assert.match(text.textContent, /\[坏链接\]\(javascript:alert\(1\)\)/, 'an unsafe link stays visible as plain text');
+  assert.match(text.textContent, /<img src=x onerror=alert\(1\)>/, 'HTML stays visible as text');
+  assert.match(text.textContent, /图片：远程（不自动加载）/);
+});
+
+test('the read-only room hides the commit and push request, and a missing GitHub remote is final', async () => {
+  // Catches B12: a plan room offered "请伙伴提交、合入主分支并推送", which would spend a round doing nothing;
+  // and B13: "未找到可核对的 GitHub 远端" beside "主分支已合入，GitHub 尚未核对", as if a check were still coming.
+  const data = taskCodeDeliveryFixture('unknown');
+  data.delivery_summary.remote = { state: 'unknown', reason: 'github_remote_unavailable', checked_at: null };
+  const open = async (workMode) => {
+    const saved = withNaturalContinuation(completedSuggestionFixture()); saved.room.work_mode = workMode;
+    return browser({ rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true,
+      route(request) { if (request.path.includes('/code-status')) return data; } });
+  };
+  const build = await open('build');
+  assert.equal(build.get('code-merge-panel').hidden, false, 'a build room keeps the request');
+  assert.equal(build.get('code-status-summary').textContent, '主分支已合入。这个仓库没有 GitHub 远端，不会推送，也不用核对。');
+  assert.equal(build.get('code-delivery-remote').textContent, 'GitHub：没有 GitHub 远端，不会推送');
+  const plan = await open('plan');
+  assert.equal(plan.get('code-merge-panel').hidden, true);
+  assert.equal(plan.posts().length, 0);
+});
+
+test('changing the workload shows a short saved note that clears itself', async () => {
+  // Catches A23: switching 少/中/多 gave no sign it was saved.
+  let clock = 1_000_000;
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, workload_level: 'normal', account: claudeUsageAccount([]) },
+    { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'normal' }];
+  const ui = await browser({ now: () => clock, agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
+    route(request) { if (request.path === '/api/partners/claude/workload') { partners[0].workload_level = request.body.level; return { partners, supported_adapters: [] }; } } });
+  const footer = () => ui.get('provider-account-claude');
+  const status = () => descendants(footer()).find((node) => node.classList.contains('workload-status'));
+  assert.equal(status().hidden, true);
+  const select = descendants(footer()).find((node) => node.dataset?.focusKey === 'account-workload');
+  select.value = 'high'; select.fire('change'); await settle();
+  assert.equal(status().textContent, '已保存'); assert.equal(status().hidden, false);
+  clock += 3500; await ui.runTimers();
+  assert.equal(status().hidden, true, 'the note goes away by itself');
+});
+
+test('peer review wording is plain and says when nothing was run', async () => {
+  // Catches A14/B14: "1 项里 0 项互审通过，1 项仅自检" and "检查：未执行验证" next to "2 项都已互审通过".
+  const saved = objectiveSnapshot({ status: 'complete' });
+  saved.team = { phase: 'ready_for_user', tasks: [{ id: 'a', title: '一', owner: 'claude', reviewer: 'codex', status: 'accepted', review_kind: 'independent_review' },
+    { id: 'b', title: '二', owner: 'codex', reviewer: 'claude', status: 'accepted', review_kind: 'independent_review' }] };
+  saved.collaboration = teamCollaboration({ state: 'ready_for_user', tasks: saved.team.tasks });
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.equal(ui.get('now-text').textContent, '2 项都有另一位伙伴看过并认可。检查是读内容，没有运行测试或程序。');
+  assert.match(ui.get('collaboration-outcome').textContent, /检查范围：没有运行测试或程序/);
+  saved.team.tasks = [{ id: 'c', title: '三', owner: 'claude', status: 'self_checked' }];
+  saved.collaboration.tasks = saved.team.tasks;
+  const single = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.equal(single.get('now-text').textContent, '1 项做完了，都只做了自查，没有别的伙伴看过。');
+  assert.doesNotMatch(single.get('now-card').textContent, /互审|仅自检/);
+});
+
+test('account and usage facts use names people know', async () => {
+  // Catches A14: "会员档位 max" and "来源 claude_cli" in the account and token panels.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.members[0].usage = { source: 'claude_cli', scope: 'provider_reported_latest_result', values: { input_tokens: 12 } };
+  const partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true, account: accountFixture({ plan: 'max' }) }));
+  const ui = await browser({ rooms: [saved.room], saved, partners });
+  assert.match(ui.get('provider-account-claude').textContent, /订阅Max/);
+  assert.doesNotMatch(ui.get('provider-account-claude').textContent, /会员档位/);
+  assert.match(ui.get('usage-claude').textContent, /数据来自Claude Code 回传的用量/);
+  assert.doesNotMatch(ui.get('usage-claude').textContent, /claude_cli/);
+});
+
+test('a partner checking its own work is marked as a self-check, not addressed to itself', async () => {
+  // Catches B15: "Kimi Code → Kimi Code" on a self-check message.
+  const saved = snapshot({ events: [message(1, 'codex', '我自己核对了一遍。', 'codex'), message(2, 'codex', '给大家的说明。', 'all')] });
+  const ui = await browser({ rooms: [saved.room], saved });
+  const recipients = descendants(ui.get('events')).filter((node) => node.classList.contains('event-recipient')).map((node) => node.textContent);
+  assert.deepEqual(recipients, ['自查', '→ 全体']);
+  const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8');
+  assert.match(css, /\.public-progress-source \{ display: inline;/, 'the summary title stays on the line of its disclosure triangle');
+});
+
+test('after a plan the hint names the action that really exists', async () => {
+  // Catches B16: an autonomous room told people to click "按方案开始", a button that only exists without an objective.
+  const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
+  saved.runtime_configuration.desired.work_mode = 'plan'; saved.room.work_mode = 'plan';
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
+  ui.get('work-mode-plan').fire('click'); await settle();
+  assert.match(ui.get('scope-description').textContent, /聊清楚后，切到“动手”再发一句话就会开工。$/);
+  assert.doesNotMatch(ui.get('scope-description').textContent, /按方案开始/);
+  saved.room.mode = 'native_project';
+  saved.runtime_configuration.desired.runtime_settings.permission = 'plan'; saved.room.runtime_settings.permission = 'plan';
+  const native = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true, nativeProjectSupport: true });
+  native.get('work-mode-plan').fire('click'); await settle();
+  assert.match(native.get('scope-description').textContent, /把权限从 Plan 换成 Full Access/);
+  const fresh = await browser();
+  fresh.get('work-mode-plan').fire('click'); await settle();
+  assert.match(fresh.get('work-mode-note').textContent, /可以点“按方案开始”/, 'a host without objectives still has the button');
+});
+
+test('build mode under a read-only permission is not called a plan discussion', async () => {
+  // Catches B17: after switching to 动手 the header and partner cards still said 方案讨论.
+  const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'running' }));
+  saved.room.mode = 'native_project'; saved.room.work_mode = 'build';
+  saved.room.runtime_settings = { ...saved.room.runtime_settings, permission: 'plan', effective_permission: 'plan' };
+  saved.collaboration = teamCollaboration({ state: 'in_progress' });
+  for (const member of saved.members) member.session_id = '55555555-5555-4555-8555-555555555555';
+  saved.team = { phase: 'working', tasks: [] };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true, nativeProjectSupport: true });
+  assert.equal(ui.get('room-status').textContent, '只读权限');
+  assert.equal(ui.get('status-claude').textContent, '只读权限');
+  assert.equal(ui.get('task-claude').textContent, '现在是只读权限，伙伴只能看不能改。要改文件，在“设置”里把权限换成 Full Access。');
+  saved.room.work_mode = 'plan';
+  const plan = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true, nativeProjectSupport: true });
+  assert.equal(plan.get('room-status').textContent, '方案讨论');
+});
+
+test('management naming is one phrase, and room sub-records are not called task records', async () => {
+  // Catches A8: 伙伴与额度 / 工具与状态 / 工具与会话 for one page, and 任务记录 used for both rooms and a room's processing log.
+  const ui = await browser();
+  await ui.click('open-partners');
+  assert.equal(ui.get('manager-title').textContent, '伙伴与额度');
+  assert.doesNotMatch(html, /工具与状态|工具与会话/);
+  assert.doesNotMatch(script, /工具与状态|工具与会话/);
+  assert.match(html, /<summary><span data-i18n="处理明细">处理明细<\/span> <span id="job-count">/);
+});
+
+test('layout fixes stay in the stylesheet', async () => {
+  // Catches A15 (task options backdrop painted opaque), A16 (18px "添加项目"), A17 (quota label wrapping),
+  // A20 (10px dropdowns and captions bigger than titles), A21 (light plates in dark mode) and A22 (empty note at the sidebar foot).
+  const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8');
+  const rule = (selector) => css.split('\n').filter((line) => line.startsWith(`${selector} {`) || line.includes(`, ${selector} {`) || line.startsWith(`${selector},`));
+  assert.doesNotMatch(css, /\.task-options-popover \{ background/);
+  assert.doesNotMatch(css, /\.entry-context-menu, \.task-options-popover \{/);
+  assert.doesNotMatch(css, /\.send-button > span:last-child/);
+  assert.match(css, /\.send-button > span\[aria-hidden="true"\] \{ font-size: 18px;/);
+  assert.match(css, /\.quota-row \{ display: grid; grid-template-columns: 4\.2em /);
+  assert.match(css, /\.quota-row > span:first-child \{ white-space: nowrap;/);
+  assert.match(css, /\.runtime-settings-popover select \{[^}]*font-size: 12px;/);
+  assert.match(css, /\.quota-window-heading \{[^}]*font-size: 13px;/);
+  assert.match(css, /\.quota-window \.detail-caption \{[^}]*font-size: 11\.5px;/);
+  assert.match(css, /\.jobs-details, \.project-details, \.activity-details \{[^}]*font-size: 12\.5px;/);
+  assert.match(css, /\.empty-avatars::before \{[^}]*background: var\(--art-plate\);/);
+  assert.match(css, /\.bean-style-card \{[^}]*background: var\(--pick-bg\);/);
+  assert.equal((css.match(/--art-plate: #1f251c;/g) || []).length, 2, 'both dark theme blocks set the plate');
+  assert.match(css, /\.sidebar:has\(#room-list-empty:not\(\[hidden\]\)\) \.room-list \{ flex: 0 0 auto; \}/);
+  assert.ok(rule('.participant-availability').some((line) => /color: var\(--muted\)/.test(line)), 'an ordinary quota line is not orange');
+});
+
+test('a finished plan discussion has one name on the card, in the list and on partner cards', async () => {
+  // Catches A3: after a read-only plan was delivered the card said 目标已完成, the list 目标已交付 and the partner card 讨论已结束.
+  const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
+  saved.room.work_mode = 'plan'; saved.runtime_configuration.desired.work_mode = 'plan'; saved.room.runtime_settings.effective_permission = 'read_only';
+  saved.room.objective_status = 'complete'; saved.team = { phase: 'ready_for_user', tasks: [] };
+  for (const member of saved.members) member.session_id = '55555555-5555-4555-8555-555555555555';
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
+  assert.equal(ui.get('now-title').textContent, '讨论已结束');
+  assert.match(ui.get('now-text').textContent, /要开工，切到“动手”再发一句话。$/);
+  assert.match(ui.get('rooms').children[0].textContent, /讨论已结束/);
+  assert.equal(ui.get('status-claude').textContent, '讨论已结束');
+  assert.equal(ui.document.getElementById('pause-objective')?.hidden ?? true, true, 'nothing to pause after the discussion ended');
+  await ui.click('new-room');
+  assert.match(ui.get('rooms').children[0].textContent, /讨论已结束/, 'the list keeps the name when the room is not open');
 });
