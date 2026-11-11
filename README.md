@@ -80,6 +80,8 @@ The sidebar language button shows the language you can switch to: **English** in
 
 Autonomous work continues toward the stated goal until it completes, needs your decision, or you stop it. If a call fails in a way that clicking **Continue** would fix, Beanest continues by itself, once per state of the task list; if the same stop comes back with no new progress, it waits for you. It also stops and waits when it cannot confirm what a call did, for example whether a process was cleaned up or a commit landed, so nothing is silently replayed. There is no default round or call-count limit. Long-running stability and every provider/version combination are not guaranteed.
 
+From a partner's model button you can also give it a role and a workload for this task. The role decides which steps it takes part in: **Builder** takes implementation tasks, **Reviewer** only reviews others' changes, **Planner** writes the plan and runs checkpoints, and no role means **All-round**, as before. You can also create your own role with a one-line duty and the steps it joins; custom roles are saved on this computer. A partner that does not plan is not called into planning discussions, which saves quota. When no partner's role fits a step, someone else takes it, so an incomplete set of roles never stalls the task. The task shows what each step of the current round cost.
+
 A partner's current quota and the task's token usage are separate observations. Unknown quota is shown as unknown; it is not zero. Several partner profiles using the same CLI sign-in do not create separate accounts or quota pools.
 
 ## Permissions and privacy

@@ -100,15 +100,29 @@ class TeamContextBudgetTests(unittest.TestCase):
         prompt = self.prompt()
         self.assertLess(len(prompt.encode()), adapters.MAX_TEXT)
         context = self.context(prompt)
-        self.assertEqual(context["context_compaction"], {"previous_run_goal_excerpt_characters": 240})
+        # Old goals are bounded before any overflow handling is needed.
+        self.assertNotIn("context_compaction", context)
+        self.assertNotIn("earlier_runs_omitted", context)
         self.assertEqual(len(context["previous_runs"]), 5)
         for source, excerpt in zip(previous, context["previous_runs"]):
-            self.assertEqual(excerpt["goal"], {"text": source["goal"][:240], "truncated": True,
-                                             "omitted_characters": len(source["goal"]) - 240})
+            self.assertEqual(excerpt["goal"], {"text": source["goal"][:600], "truncated": True,
+                                             "omitted_characters": len(source["goal"]) - 600})
             self.assertEqual({key: value for key, value in excerpt.items() if key != "goal"},
                              {key: value for key, value in source.items() if key not in {"goal", "work_mode"}})
         self.assert_authoritative_content(context)
         self.assertEqual((self.snapshot, self.project), original)
+
+    def test_long_history_lists_only_the_latest_runs_and_counts_the_rest(self):
+        # Catches every call re-sending the whole run history to every partner.
+        previous = [{"id": f"old-{i}", "number": i, "goal": f"第{i}轮", "status": "accepted",
+                     "revision": i, "digest": str(i % 10) * 64, "work_mode": "legacy"} for i in range(1, 48)]
+        self.snapshot["runs"] = previous + self.snapshot["runs"]
+        context = self.context(self.prompt())
+        self.assertEqual([item["id"] for item in context["previous_runs"]],
+                         ["old-43", "old-44", "old-45", "old-46", "old-47"])
+        self.assertEqual(context["previous_runs"][-1]["goal"], "第47轮")
+        self.assertEqual(context["earlier_runs_omitted"], 42)
+        self.assert_authoritative_content(context)
 
     def test_remaining_overflow_references_duplicate_result_and_excerpts_old_chat_only(self):
         self.snapshot["events"] = [{"kind": "message", "sender": "claude", "text": "🙂" * 1500} for _ in range(12)]

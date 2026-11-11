@@ -15,6 +15,7 @@ from .message_capacity import MAX_PROMPT_BYTES
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, project_digest as _project_digest
 from .room_contract import RoomError
 from .room_store import PROJECT_MODES, RoomStore
+from .roles import prompt_role
 from .runtime_settings import read_only, read_only_capabilities
 
 
@@ -94,6 +95,36 @@ def _prompt_context(context):
 def _excerpt(text: str, maximum: int) -> dict:
     return {"text": text[:maximum], "truncated": len(text) > maximum,
             "omitted_characters": max(0, len(text) - maximum)}
+
+
+ROLE_INSTRUCTION = (
+    " context.self_role is the user's division of labour for this room: its duty and abilities "
+    "(plan, work, review, checkpoint). The host already routes planning, reviews and checkpoints by role. "
+    "In planning, claim only tasks that fit your abilities and leave the rest to members whose role fits. "
+    "When the host gives you a step outside your role, nobody better was available: do it fully. "
+    "Read only what your current step needs; do not re-read project material another role covers. ")
+
+RECENT_RUNS = 5
+RUN_GOAL_CHARACTERS = 600
+
+
+def _previous_runs(runs, current_run_id, *, goal_characters=None):
+    """The last few earlier runs, newest last.
+
+    Every call to every partner carried the whole run history, and a long room
+    reached dozens of runs whose full goals rarely change between two calls.
+    Older runs are counted, not listed; a long goal is an explicit excerpt.
+    """
+    earlier = [item for item in runs if item["id"] != current_run_id]
+    limit = RUN_GOAL_CHARACTERS if goal_characters is None else goal_characters
+    recent = [{key: item[key] for key in ("id", "number", "goal", "status", "revision", "digest")}
+              | ({"goal": _excerpt(item["goal"], limit)} if goal_characters is not None or len(item["goal"]) > limit else {})
+              for item in earlier[-RECENT_RUNS:]]
+    return recent
+
+
+def _earlier_runs_omitted(runs, current_run_id):
+    return max(0, sum(item["id"] != current_run_id for item in runs) - RECENT_RUNS)
 
 
 def _direct_updates(events):
@@ -314,8 +345,8 @@ class RoomPromptMixin:
                 # Reserve a small bounded closing window: two deliveries,
                 # two review reads/replies, peer help and the owner's resume.
                 "conserve": (available is not None and available <= 8) or (seconds_remaining is not None and seconds_remaining <= 120)},
-            "previous_runs": [{key:item[key] for key in ("id","number","goal","status","revision","digest")}
-                              for item in snapshot["runs"] if item["id"] != job["team"]["run_id"]],
+            "previous_runs": _previous_runs(snapshot["runs"], job["team"]["run_id"]),
+            **({"earlier_runs_omitted": omitted} if (omitted := _earlier_runs_omitted(snapshot["runs"], job["team"]["run_id"])) else {}),
             "members": [{"id": member["id"], "name": member["name"], "status": member["status"],
                          "current_task": member["current_task"],
                          "available": member["configuration_dispatchable"] and self.registry.get(member["id"]) is not None and member["id"] not in
@@ -511,7 +542,7 @@ class RoomPromptMixin:
             "A second execution requires actual changed file hashes; unchanged responses stop. "
             "Without an objective, the current run is a new explicit user iteration. Within an objective, "
             "current_stage_goal is only its current stage; original_goal remains the total business scope. "
-            "Previous runs are immutable delivered context. "
+            "Previous runs are immutable delivered context; only the latest few are listed. "
             "When source_plan is present, use its host-bound task results as the shared implementation baseline. "
             "It contains delivered results, not the whole prior discussion. If truncated, do not invent omitted "
             "requirements or claim full receipt; ask a specific question when the missing portion affects work. "
@@ -632,13 +663,16 @@ class RoomPromptMixin:
         if job.get("handoff_requested"):
             context["handoff_requested"] = True
             protocol += TASK_HANDOFF_INSTRUCTION
+        role = prompt_role(job.get("runtime_settings"), job["provider"])
+        if role:
+            context["self_role"] = role
+            protocol += ROLE_INSTRUCTION
         prefix = protocol + project_instruction + "\nCONTEXT DATA:\n"
         prompt = prefix + json.dumps(_prompt_context(context), ensure_ascii=False)
         if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             # Old goals are background, not authority for this run. Keep the
             # current goal, bound task and inspected files complete and exact.
-            context["previous_runs"] = [{**previous, "goal": _excerpt(previous["goal"], 240)}
-                                        for previous in context["previous_runs"]]
+            context["previous_runs"] = _previous_runs(snapshot["runs"], job["team"]["run_id"], goal_characters=240)
             context["context_compaction"] = {"previous_run_goal_excerpt_characters": 240}
             prompt = prefix + json.dumps(_prompt_context(context), ensure_ascii=False)
         if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:

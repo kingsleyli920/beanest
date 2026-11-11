@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from .native_setup import NATIVE_IDS
+from .roles import RoleError, normalized_role, normalized_workload
 
 
 PERMISSIONS = (
@@ -38,7 +39,7 @@ def normalized_settings(value, members, work_mode):
     choices = {}
     for identifier in members:
         choice = value["members"].get(identifier, {})
-        if not isinstance(choice, dict) or set(choice) - {"model", "effort"}:
+        if not isinstance(choice, dict) or set(choice) - {"model", "effort", "role", "workload"}:
             raise RuntimeSettingsError("invalid_runtime_settings")
         model, effort = choice.get("model"), choice.get("effort")
         if (model is not None and (not isinstance(model, str) or not _MODEL.fullmatch(model))
@@ -46,6 +47,15 @@ def normalized_settings(value, members, work_mode):
                 or effort is not None and model is None):
             raise RuntimeSettingsError("invalid_runtime_settings")
         choices[identifier] = {"model": model, "effort": effort}
+        try:
+            role, workload = normalized_role(choice.get("role")), normalized_workload(choice.get("workload"))
+        except RoleError as error:
+            raise RuntimeSettingsError(str(error)) from None
+        # Only chosen extras are stored, so a room without them keeps its old shape.
+        if role is not None:
+            choices[identifier]["role"] = role
+        if workload is not None:
+            choices[identifier]["workload"] = workload
     permission = value["permission"]
     effective = ("read_only" if permission in {"read_only", "workspace_write"} else "plan") if work_mode == "plan" else permission
     return {"permission": permission,
@@ -87,6 +97,11 @@ def configuration_update(current, members, *, work_mode=None, runtime_settings=N
     mode = current["work_mode"] if work_mode is None else work_mode
     settings = current["runtime_settings"] if runtime_settings is None else runtime_settings
     return {"work_mode": mode, "runtime_settings": normalized_settings(settings, members, mode)}
+
+
+def model_choice(choice):
+    """The part of a member's choice a provider tool understands."""
+    return {"model": choice.get("model"), "effort": choice.get("effort")} if choice else None
 
 
 def validate_choices(settings, specs, catalogs):
