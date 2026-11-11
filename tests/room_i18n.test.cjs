@@ -89,7 +89,7 @@ test('English counts agree in number: one call, two calls', () => {
   const {api, dictionary} = runtime();
   assert.equal(api.t('{p0} 次', { p0: 1 }), '1 call'); assert.equal(api.t('{p0} 次', { p0: 2 }), '2 calls');
   assert.equal(api.t('最近更新 {p0}秒前', { p0: 1 }), 'Updated 1 second ago');
-  assert.equal(api.t('{p0} 项任务仅自检，未独立互审。', { p0: 1 }), '1 task was self-checked only, without independent peer review.');
+  assert.equal(api.t('{p0} 项只做了自查，没有别的伙伴看过。', { p0: 1 }), '1 task was only self-checked, with no check by another partner.');
   assert.equal(api.t('{p0} / {p1} 项已完成。', { p0: 1, p1: 3 }), '1 / 3 tasks done.');
   const bare = Object.entries(dictionary).filter(([, value]) => /\{p\d+\}\)? (?:[a-z-]+ )?(items|files|calls|seconds|minutes|hours|days|tasks|records|changes|commits|windows|characters|rounds)\b/.test(value));
   assert.deepEqual(bare.map(([key]) => key), [], 'a count before a noun picks its form with {pN:one|many}');

@@ -3,13 +3,13 @@
 // Progress pane, the message timeline, and history paging.
 
 const progressChipLabels = localizedLabels({
-  open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '互审中', accepted: '互审通过',
-  self_checked: '仅自检', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
+  open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '伙伴检查中', accepted: '伙伴看过',
+  self_checked: '只做了自查', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续',
 });
 // Only the user's own stop really cancels unfinished tasks; any other stop carries them into the next attempt.
 const userCancelCodes = new Set(['cancel_requested', 'lifecycle_requested']);
 // One color per meaning, shared by the bar, the row icon and the legend.
-const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '互审中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始' });
+const progressToneLabels = localizedLabels({ ok: '已完成', wk: '进行中', rev: '伙伴检查中', ask: '等你决定', wait: '待重新安排', st: '待继续', todo: '未开始' });
 function progressTone(task) {
   if (task.status === 'accepted') return task.review_kind === 'self_check' ? 'self' : 'ok';
   if (task.status === 'blocked') return taskNeedsUser(task) ? 'ask' : taskQuotaHeld(task) ? 'st' : 'wait';
@@ -22,6 +22,45 @@ function progressChip(task, cancelled = false) {
   if (task.status === 'blocked') return taskNeedsUser(task) ? task.block_cause === 'permission_required' ? t("要你同意") : t("等你决定") : t("待重新安排");
   return Object.hasOwn(progressChipLabels, task.status) ? progressChipLabels[task.status] : t("结果待确认");
 }
+// The room state lists only the current run's tasks. When the room carries on into a new run
+// (same goal or a follow-up), the tasks finished in earlier runs are read once from the run records
+// (GET /runs?run_id=), so the progress pane still shows what is already done.
+function earlierRunsOf(snapshot) {
+  const current = snapshot.current_run;
+  if (!current || !Number.isSafeInteger(current.number) || current.number < 2 || !Array.isArray(snapshot.runs)) return [];
+  return snapshot.runs.filter((run) => run && uuidPattern.test(run.id) && run.id !== current.id && Number.isSafeInteger(run.number)
+    && run.number < current.number && Number.isFinite(run.finished_at));  // a finished run has its own archived task list
+}
+function earlierRunProgress(snapshot) {
+  const runs = earlierRunsOf(snapshot);
+  if (!runs.length) return null;
+  const key = `${snapshot.room.id}:${runs.map((run) => run.id).join(',')}`;
+  let entry = state.earlierRuns.get(snapshot.room.id);
+  if (entry?.key !== key) {
+    entry = { key, state: 'loading', tasks: [] };
+    state.earlierRuns.set(snapshot.room.id, entry);
+    const roomId = snapshot.room.id;
+    void Promise.all(runs.map((run) => api(`${roomPath(roomId)}/runs?run_id=${encodeURIComponent(run.id)}`))).then((records) => {
+      entry.tasks = records.flatMap((record) => (Array.isArray(record?.team?.tasks) ? record.team.tasks : [])
+        .filter((task) => task && typeof task.title === 'string' && ['accepted', 'self_checked'].includes(task.status)));
+      entry.state = 'ready';
+    }).catch(() => { entry.state = 'failed'; }).finally(() => {
+      if (state.earlierRuns.get(roomId) === entry && state.snapshot?.room.id === roomId) renderProgressPane();
+    });
+  }
+  return entry;
+}
+function earlierRunNode(entry) {
+  if (!entry || entry.state === 'loading') return null;
+  if (entry.state === 'failed') return element('p', t("前几轮做完的成果都还在，可以在“交付”里看。"), 'progress-note');
+  if (!entry.tasks.length) return null;
+  const box = element('details', '', 'earlier-runs');
+  box.append(element('summary', t("前几轮已完成 {p0} 项", { p0: entry.tasks.length })));
+  const list = element('ul', '', 'earlier-run-tasks');
+  for (const task of entry.tasks) list.append(element('li', `✓ ${taskDisplayTitle(task.title)}`));
+  box.append(list);
+  return box;
+}
 function renderProgressPane() {
   const pane = $('progress-pane'); const snapshot = state.snapshot;
   if (!snapshot || state.selected !== snapshot.room.id) { pane.replaceChildren(); pane.dataset.fingerprint = ''; return; }
@@ -33,8 +72,10 @@ function renderProgressPane() {
   const resumes = ['auto', 'quota_wait'].includes(stopKind(snapshot, objective?.stop_reason));
   const cancelled = userCancelCodes.has(objective?.stop_reason) || userCancelCodes.has(snapshot.team?.stop_reason);
   const stLabel = cancelled ? t("已取消") : progressToneLabels.st;
+  const earlier = earlierRunProgress(snapshot);
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
-    snapshot.team?.phase, summary, resumes, cancelled, snapshot.members.map((member) => [member.id, member.name, member.avatar])]);
+    snapshot.team?.phase, summary, resumes, cancelled, snapshot.members.map((member) => [member.id, member.name, member.avatar]),
+    earlier && [earlier.key, earlier.state, earlier.tasks.length]]);
   if (pane.dataset.fingerprint === fingerprint) return;
   pane.dataset.fingerprint = fingerprint;
   const nodes = [];
@@ -88,6 +129,8 @@ function renderProgressPane() {
   } else {
     nodes.push(element('p', snapshot.team?.phase === 'team_plan' ? t("伙伴正在分工，分好后会列在这里。") : t("这次没有拆分成任务，进展都在“讨论”里。"), 'pane-empty'));
   }
+  const earlierNode = earlierRunNode(earlier);
+  if (earlierNode) nodes.push(earlierNode);
   pane.replaceChildren(...nodes);
 }
 
@@ -111,7 +154,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'run_accepted') return t("你已接受本轮交付；这项记录不会启动模型。");
   const taskTitle = typeof event.title === 'string' && event.title ? interfaceQuote(taskDisplayTitle(event.title)) : t("子任务");
   if (event.kind === 'team_command') {
-    const action = { claim: t("已认领子任务"), complete: t("已提交子任务，等待互审"),
+    const action = { claim: t("已认领子任务"), complete: t("已提交子任务，等伙伴检查"),
       request_help: t("请求伙伴协助，具体问题见其消息"), review: t("已提交审核结果"),
       block: t("说明了当前阻碍，待处理项见任务清单") }[event.command];
     return `${displayName(event.sender)} ${action || t("已更新任务清单")}`;
@@ -119,7 +162,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'team_plan') return t("伙伴已整理任务分工，认领与进展见上方任务清单。");
   if (event.kind === 'team_task_created') return t("已登记{p0}，等待伙伴认领", { p0: taskTitle });
   if (event.kind === 'team_task_claimed') return t("{p0} 已认领{p1}", { p0: displayName(event.sender), p1: taskTitle });
-  if (event.kind === 'team_task_completed') return t("{p0} 已提交{p1}，等待互审", { p0: displayName(event.sender), p1: taskTitle });
+  if (event.kind === 'team_task_completed') return t("{p0} 已提交{p1}，等伙伴检查", { p0: displayName(event.sender), p1: taskTitle });
   if (event.kind === 'team_task_reviewed') return t("{p0} 已提交{p1}的审核结果", { p0: displayName(event.sender), p1: taskTitle });
   if (event.kind === 'team_help_requested') return t("{p0} 向 {p1} 请求协助", { p0: displayName(event.sender), p1: displayName(event.recipient) });
   if (event.kind === 'team_help_finished') return t("{p0} 已回复协助请求", { p0: displayName(event.sender) });
@@ -211,6 +254,18 @@ function isChatMessageEvent(event) {
   return checkpointQuestionEvent(event, null).checkpoint_question === true || event.kind === 'message' || event.kind === 'objective_decision' && event.sender === 'user'
     && (typeof event.text === 'string' || typeof event.text_preview === 'string');
 }
+// Partners write Markdown; their replies use the reader's safe renderer (known elements only,
+// text set as text, only http(s) links). The user's own words stay exactly as typed, and an
+// overlong reply stays plain rather than half formatted.
+function messageTextNode(event, body) {
+  const limits = window.BeanestMarkdown?.limits;
+  const markdown = event.sender !== 'user' && limits && body.length <= limits.characters && body.split('\n').length <= limits.lines
+    && /[*`#|>\[_-]|^\s*\d+\.\s/m.test(body);
+  if (!markdown) return element('div', body, 'event-text');
+  const node = element('div', '', 'event-text markdown-document chat-markdown');
+  window.BeanestMarkdown.render(body, node);
+  return node;
+}
 function eventNode(event, jobs, sourceMembers = null) {
   event = checkpointQuestionEvent(event, null);
   const request = peerRequest(event, jobs);
@@ -237,11 +292,13 @@ function eventNode(event, jobs, sourceMembers = null) {
   const content = element('div', '', 'event-content');
   const heading = element('div', '', 'event-heading');
   heading.append(element('span', authorName, 'event-author'));
-  heading.append(element('span', `→ ${event.recipient ? recipientName : t("房间")}`, 'event-recipient'));
+  // A partner checking its own work addresses itself; "Kimi Code → Kimi Code" reads like a mistake.
+  heading.append(event.recipient && event.recipient === event.sender ? element('span', t("自查"), 'event-recipient self-check')
+    : element('span', `→ ${event.recipient ? recipientName : t("房间")}`, 'event-recipient'));
   if (request) heading.append(element('span', jobKind(event, jobs) === 'review' ? t("审核请求") : t("求助"), 'request-label'));
   heading.append(element('time', timeLabel(event.created_at, !!sourceMembers), 'event-time'));
   const body = typeof event.text === 'string' ? event.text : typeof event.text_preview === 'string' ? event.text_preview : t("消息正文暂不可用");
-  content.append(heading, element('div', body, 'event-text'));
+  content.append(heading, messageTextNode(event, body));
   appendMediaReferences(content, body);
   if (event.text_truncated === true) appendBoundText(content, t("读取完整原文"), event.text_text_ref || event.text_ref);
   const shownCharacters = [...body].length;

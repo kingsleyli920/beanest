@@ -457,7 +457,9 @@ class RoomStore:
         event = {"kind": kind, "created_at": self.clock(), **fields}
         db.execute("INSERT INTO events(room_id,value_json) VALUES (?,?)",
                    (room_id, json.dumps(event, ensure_ascii=True, allow_nan=False)))
-        db.execute("UPDATE rooms SET updated_at=? WHERE id=?", (self.clock(), room_id))
+        # The task list is ordered by last activity; archiving or restoring a task is not activity.
+        if kind != "room_lifecycle":
+            db.execute("UPDATE rooms SET updated_at=? WHERE id=?", (self.clock(), room_id))
 
     def _record_native_cache_miss(self, db, job, session_id, usage, team_context):
         """Note a resumed Claude call that rewrote its whole context with nothing read.
