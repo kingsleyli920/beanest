@@ -204,8 +204,11 @@ class ProjectInspectionStoreTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(job))
         snapshot = self.store.snapshot(room_id)
         # The completed inspection queues the same task's next call, moving
-        # working back to assigned without changing its owner or result.
-        expected = [{**task, "status": "assigned"} for task in before]
+        # working back to assigned without changing its owner or result; the
+        # finished call no longer marks the task as being worked on.
+        expected = [{**{key: value for key, value in task.items() if key != "call_running"}, "status": "assigned"}
+                    for task in before]
+        self.assertTrue(all(task.get("call_running") for task in before))
         self.assertEqual(snapshot["team"]["tasks"], expected)
         self.assertEqual(snapshot["room"]["status"], "running")
         self.assertIsNone(snapshot["budget"]["limit"])
