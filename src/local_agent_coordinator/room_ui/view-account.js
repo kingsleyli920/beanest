@@ -47,7 +47,10 @@ function renderMemberQuota(id) {
     const reset = Number.isFinite(window.resets_at) && remaining < 20 ? t(" · {p0} 重置", { p0: timeLabel(window.resets_at, true) }) : '';
     const value = element('span', `${stale ? t("上次 ") : ''}${remaining}%${reset}`, 'quota-value');
     if (Number.isFinite(window.resets_at)) value.title = t("重置：{p0}", { p0: timeLabel(window.resets_at, true) });
-    row.append(element('span', label), meter, value);
+    const name = element('span', label);
+    const full = ({ 'kimi:monthTotal': t("Kimi Code · 月度总额度"), 'kimi:monthCode': t("Kimi Code · 月度代码额度") })[window.name];
+    if (full) name.title = full;
+    row.append(name, meter, value);
     return row;
   }));
 }
@@ -58,7 +61,7 @@ function renderNavQuota() {
     const blocked = availabilityInfo(id).blocked; const entries = memberQuotaWindows(id);
     return [id, blocked ? 0 : entries.length ? Math.min(...entries.map((entry) => entry.remaining)) : null];
   }).filter(([, value]) => value !== null);
-  const fingerprint = JSON.stringify(values);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), values.map(([id, value]) => [id, displayName(id), value])]);
   if (holder.dataset.fingerprint === fingerprint) return;
   holder.dataset.fingerprint = fingerprint;
   holder.replaceChildren(...values.map(([id, value]) => {
@@ -79,11 +82,17 @@ function canRefreshAccount(partner, account) {
 function accountEmail(account) {
   return typeof account?.email === 'string' && account.email.trim() ? account.email.trim().slice(0, 254) : null;
 }
+// Tools report plans as lower-case ids such as "max"; show them as the product names people know.
+function planName(plan) {
+  const known = { free: t("免费版"), pro: 'Pro', plus: 'Plus', max: 'Max', team: 'Team', enterprise: 'Enterprise', business: 'Business' };
+  const key = plan.trim().toLowerCase();
+  return Object.hasOwn(known, key) ? known[key] : /^[a-z]/.test(plan) ? plan[0].toUpperCase() + plan.slice(1) : plan;
+}
 function accountFieldText(account, field) {
-  const value = field === 'email' ? accountEmail(account) : typeof account?.plan === 'string' && account.plan ? account.plan : null;
+  const value = field === 'email' ? accountEmail(account) : typeof account?.plan === 'string' && account.plan ? planName(account.plan) : null;
   if (value) return value;
   const reason = account?.field_reasons?.[field];
-  const label = field === 'email' ? t("邮箱") : t("会员档位");
+  const label = field === 'email' ? t("邮箱") : t("订阅");
   if (reason === 'provider_not_provided') return t("供应商未提供{p0}", { p0: label });
   if (reason === 'profile_query_unavailable') return t("本次未取得{p0}", { p0: label });
   if (reason === 'account_changed') return t("账号已变化，请重新查询");
@@ -178,7 +187,7 @@ function updateAccountFooter(details, id) {
   const facts = element('dl', '', 'monitor-facts');
   const fact = (label, value) => facts.append(element('dt', label), element('dd', value));
   fact(account?.stale ? t("上次确认登录") : t("当前登录"), accountLoginText(account));
-  fact(t("会员档位"), accountFieldText(account, 'plan'));
+  fact(t("订阅"), accountFieldText(account, 'plan'));
   fact(t("认证"), typeof account?.auth_method === 'string' && account.auth_method ? account.auth_method : t("未提供"));
   fact(t("额度范围"), quota?.scope === 'provider_account' ? t("账号共享额度，未按单模型拆分")
     : quota?.scope === 'provider_account_and_model' ? t("账号共享与模型专属额度分别列示，不能相加")
@@ -282,6 +291,11 @@ function workloadControl(id, partner) {
   select.setAttribute('aria-label', t("{p0}所用账号的工作量", { p0: displayName(id) }));
   select.addEventListener('change', () => void saveWorkload(id, select.value));
   row.append(element('span', t("工作量")), select);
+  // A light confirmation next to the choice; it clears itself a few seconds later.
+  const saving = state.workloadSavingId === id; const saved = state.workloadSaved?.id === id;
+  const status = element('span', saving ? t("正在保存…") : saved ? t("已保存") : '', `workload-status${saved ? ' saved' : ''}`);
+  status.setAttribute('role', 'status'); status.hidden = !saving && !saved;
+  row.append(status);
   const holder = element('div', '', 'account-workload-setting');
   holder.append(row, element('p', t("额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。现在先用于分配审查。"), 'detail-caption'));
   return holder;
@@ -290,7 +304,14 @@ async function saveWorkload(id, level) {
   state.workloadSavingId = id; renderMembers(state.snapshot); renderGlobalPartners();
   try {
     acceptPartners(await api(workspaceApi.partner(id, 'workload'), 'POST', { level }));
+    const saved = { id }; state.workloadSaved = saved;
+    setTimeout(() => {
+      if (state.workloadSaved !== saved) return;
+      state.workloadSaved = null; state.workloadRevision = (state.workloadRevision || 0) + 1;
+      renderMembers(state.snapshot); renderGlobalPartners();
+    }, 3000);
   } catch (error) {
+    state.workloadSaved = null;
     showNotice(error.message || t("工作量未确认保存，请重试。"), 'error');
   } finally {
     state.workloadSavingId = null; state.workloadRevision = (state.workloadRevision || 0) + 1;
