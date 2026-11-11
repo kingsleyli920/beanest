@@ -6207,6 +6207,41 @@ test('a local-development room with no recorded settings stays view-only', async
   assert.match(ui.get('runtime-settings-note').textContent, /已固定/);
 });
 
+function agentStartedRoom(workMode) {
+  // The read shape of a room an agent started over MCP: no objective, no recorded models.
+  const saved = withCurrentRun(snapshot({ agents: catalog.slice(0, 2), status: 'ready_for_user', events: [message(1, 'mcp', '完全虚构的文字目标')] }),
+    { work_mode: workMode, runtime_settings: null });
+  saved.collaboration = teamCollaboration({ state: 'ready_for_user' });
+  saved.room.mode = 'text'; saved.room.work_mode = workMode; saved.room.runtime_settings = null;
+  saved.runtime_configuration = { can_edit: true, reason: null, desired: { work_mode: workMode, runtime_settings: null }, pending: false, pending_reason: null };
+  return saved;
+}
+
+test('a room an agent started without a work mode reads as a normal room whose models can change', async () => {
+  // Catches: an agent-started room shown as an old history record with every model locked.
+  const saved = agentStartedRoom('build'); const options = runtimeOptionsFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return options;
+  } });
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /历史任务/);
+  assert.equal(ui.get('work-mode-plan').disabled, false);
+  await ui.click('runtime-shortcut-claude');
+  assert.equal(ui.get('runtime-model-claude').disabled, false);
+  assert.doesNotMatch(ui.get('runtime-shortcut-claude').getAttribute('aria-label'), /已固定/);
+});
+
+test('a real old record without a work mode still reads as history with its models fixed', async () => {
+  // Catches: the agent-room change unlocking settings or dropping the history note on genuinely old records.
+  const saved = agentStartedRoom('legacy'); const options = runtimeOptionsFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return options;
+  } });
+  assert.match(ui.get('collaboration-outcome').textContent, /这是历史任务/);
+  assert.equal(ui.get('work-mode-plan').disabled, true);
+  await ui.click('runtime-shortcut-claude');
+  assert.equal(ui.get('runtime-model-claude').disabled, true);
+});
+
 test('natural runtime edits stay local until one atomic message and show desired pending settings while the actual run stays frozen', async () => {
   const saved = withRuntimeConfiguration(withNaturalContinuation(objectiveSnapshot({ status: 'running' })));
   const actual = structuredClone(saved.room.runtime_settings); const options = runtimeOptionsFixture();

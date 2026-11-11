@@ -67,14 +67,27 @@ class DirectedFollowupHTTPTests(unittest.TestCase):
         self.doCleanups()
 
     def read(self):
+        idle = self.workers_idle()
         code, value = self.request("GET", f"/api/rooms/{self.room_id}")
         self.assertEqual(code, 200, {"error": value.get("error")})
+        self.last_read = (value, idle)
         return value
 
+    def workers_idle(self):
+        execution = self.service._executions.get(self.room_id)
+        return (not any(room == self.room_id and not worker.done()
+                        for (room, _), worker in list(self.service._workers.items()))
+                and (execution is None or execution.done()))
+
     def quiescent(self, snapshot):
-        return (not any(job["status"] in {"queued", "working"} for job in snapshot["jobs"])
-                and not any(room == self.room_id and not worker.done()
-                            for (room, _), worker in list(self.service._workers.items())))
+        # A worker stays alive briefly after its last job is recorded, and the
+        # host's read reports the room busy meanwhile (a whole-room continuation
+        # says team_cleanup_unconfirmed). The workers must already have been idle
+        # when this snapshot was read, not merely by the time it is judged.
+        read, idle_before_read = self.last_read
+        return (read is snapshot and idle_before_read
+                and not any(job["status"] in {"queued", "working"} for job in snapshot["jobs"])
+                and self.workers_idle())
 
     def wait(self, predicate):
         return poll(self.read, predicate, timeout=5, describe=lambda snapshot: "Synthetic directed fixture did not settle: " + json.dumps({
