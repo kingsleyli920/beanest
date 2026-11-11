@@ -53,6 +53,25 @@ class LifecycleStoreTests(unittest.TestCase):
             self.assertEqual(self.store.list_rooms()["rooms"][0]["lifecycle_state"], state)
         self.assertEqual(sum(event["kind"] == "room_lifecycle" for event in after["events"]), 3)
 
+    def test_archive_and_restore_keep_the_last_activity_time(self):
+        # Catches archiving or restoring moving a task to the top of the list: the list is
+        # ordered by updated_at, and a lifecycle change is not activity.
+        now = [1000]
+        self.store.close()
+        self.store = RoomStore(self.path, clock=lambda: now[0])
+        room_id = self.room()
+        self.complete(room_id)
+        self.assertEqual(self.store.snapshot(room_id)["room"]["updated_at"], 1000)
+        for action, moment in (("archive", 2000), ("restore", 3000)):
+            now[0] = moment
+            self.store.set_lifecycle(room_id, action)
+            self.assertEqual(self.store.snapshot(room_id)["room"]["updated_at"], 1000)
+            self.assertEqual(self.store.list_rooms()["rooms"][0]["updated_at"], 1000)
+        now[0] = 4000
+        with self.store._connection(write=True) as db:
+            self.store._event(db, room_id, "warning", code="team_plan_changed")
+        self.assertEqual(self.store.snapshot(room_id)["room"]["updated_at"], 4000, "real activity still moves the time")
+
     def test_old_database_adds_active_column_without_rewriting_history(self):
         room_id = self.room()
         self.complete(room_id)
