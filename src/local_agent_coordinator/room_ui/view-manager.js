@@ -36,10 +36,14 @@ function acceptProjects(result) {
 function renderProjects() {
   renderLifecycleFilter('projects', state.projects);
   const projects = visibleEntries('projects', state.projects);
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [projects, [...state.projectDeletions.values()], state.projectDeletionSupported, state.nativeProjectSupported, state.lifecycleViews.projects, state.managementBusy, state.busy, !!state.pending]]);
+  if (state.projectRename && !projects.some((project) => project.id === state.projectRename.id)) state.projectRename = null;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [projects, [...state.projectDeletions.values()], state.projectDeletionSupported, state.nativeProjectSupported, state.lifecycleViews.projects, state.managementBusy, state.busy, !!state.pending, state.projectRename?.id || null]]);
   if (state.projectListFingerprint === fingerprint) return;
   state.projectListFingerprint = fingerprint;
   if (state.contextMenu?.kind === 'projects') closeContextMenu({ restoreFocus: true });
+  // A re-render while renaming keeps the typed text, the caret and the focus.
+  const previousInput = state.projectRename?.input;
+  const caret = previousInput && document.activeElement === previousInput ? [previousInput.selectionStart, previousInput.selectionEnd] : null;
   $('projects-list').replaceChildren();
   if (!projects.length) $('projects-list').append(element('p', state.lifecycleViews.projects === 'active' ? t("还没有项目。选择项目文件夹，就能和伙伴一起处理任务。") : t("这里没有{p0}的项目。", { p0: lifecycleLabels[state.lifecycleViews.projects] }), 'manager-empty'));
   if (state.projectDeletionSupported) {
@@ -55,8 +59,9 @@ function renderProjects() {
   }
   for (const project of projects) {
     const card = element('article', '', 'manager-card');
+    card.dataset.projectId = project.id;
     bindContextTarget(card, 'projects', project.id);
-    card.append(element('h3', project.name), element('p', project.path, 'project-directory'));
+    card.append(state.projectRename?.id === project.id ? projectRenameForm(project) : element('h3', project.name), element('p', project.path, 'project-directory'));
     const files = element('ul', '', 'project-file-list');
     if (project.selection_kind === 'folder') files.append(element('li', t("完整项目 · 伙伴按需查找文件")));
     else for (const file of project.files) files.append(element('li', file));
@@ -75,6 +80,99 @@ function renderProjects() {
     if (activeEntry(project)) card.append(choose);
     card.append(lifecycleActions('projects', project));
     $('projects-list').append(card);
+  }
+  const input = state.projectRename?.input;
+  if (caret && input) { input.focus({ preventScroll: true }); input.setSelectionRange(caret[0] ?? input.value.length, caret[1] ?? input.value.length); }
+}
+
+function projectRenameForm(project) {
+  const edit = state.projectRename;
+  const form = element('div', '', 'project-rename');
+  const row = element('div', '', 'project-rename-row');
+  const input = element('input', '', 'project-rename-input');
+  input.type = 'text'; input.value = edit.value; input.disabled = state.managementBusy;
+  input.dataset.projectRenameInput = project.id;
+  input.setAttribute('aria-label', t("{p0} 的新名字", { p0: project.name }));
+  input.setAttribute('autocomplete', 'off');
+  input.addEventListener('input', () => {
+    edit.value = input.value;
+    if (edit.error) { edit.error = ''; edit.errorNode?.remove(); edit.errorNode = null; input.removeAttribute('aria-invalid'); }
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.isComposing) return;
+    if (event.key === 'Enter') { event.preventDefault(); void submitProjectRename(); }
+    else if (event.key === 'Escape') { event.preventDefault(); cancelProjectRename(); }
+  });
+  const save = element('button', t("保存"), 'quiet-button'); save.type = 'button';
+  save.dataset.projectRenameAction = 'save'; save.disabled = state.managementBusy;
+  save.addEventListener('click', () => void submitProjectRename());
+  const cancel = element('button', t("取消"), 'quiet-button'); cancel.type = 'button';
+  cancel.dataset.projectRenameAction = 'cancel'; cancel.disabled = state.managementBusy;
+  cancel.addEventListener('click', () => cancelProjectRename());
+  row.append(input, save, cancel); form.append(row);
+  edit.input = input; edit.errorNode = null;
+  if (edit.error) {
+    const error = element('p', edit.error, 'project-rename-error'); error.setAttribute('role', 'alert');
+    input.setAttribute('aria-invalid', 'true'); form.append(error); edit.errorNode = error;
+  }
+  return form;
+}
+
+function rerenderProjectRename({ focus = false, selectAll = false } = {}) {
+  state.projectListFingerprint = ''; renderProjects();
+  const input = state.projectRename?.input;
+  if (!focus || !input) return;
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(selectAll ? 0 : input.value.length, input.value.length);
+}
+
+function startProjectRename(id) {
+  const project = state.projects.find((entry) => entry.id === id);
+  if (!project || state.managementBusy) return;
+  state.projectRename = { id, value: project.name, error: '' };
+  managerNotice();
+  rerenderProjectRename({ focus: true, selectAll: true });
+}
+
+function cancelProjectRename() {
+  const id = state.projectRename?.id;
+  if (!id || state.managementBusy) return;
+  state.projectRename = null;
+  rerenderProjectRename();
+  [...$('projects-list').children].find((node) => node.dataset?.projectId === id)?.focus({ preventScroll: true });
+}
+
+function projectRenameProblem(name) {
+  if (!name) return t("名字不能为空。");
+  if ([...name].length > 80) return t("名字太长了，最多 80 个字。");
+  return '';
+}
+
+async function submitProjectRename() {
+  const edit = state.projectRename;
+  if (!edit || state.managementBusy) return;
+  const project = state.projects.find((entry) => entry.id === edit.id);
+  const name = edit.value.trim();
+  const problem = projectRenameProblem(name);
+  if (problem) { edit.error = problem; rerenderProjectRename({ focus: true }); return; }
+  if (!project || name === project.name) { cancelProjectRename(); return; }
+  state.managementBusy = true; edit.error = '';
+  renderControls(); rerenderProjectRename(); renderGlobalPartners(); renderRooms();
+  let renamed = false;
+  try {
+    acceptProjects(await api(`/api/projects/${encodeURIComponent(edit.id)}/name`, 'POST', { name }));
+    renamed = true;
+    if (state.projectRename === edit) state.projectRename = null;
+    managerNotice(t("已改名为「{p0}」。", { p0: name }));
+  } catch (error) {
+    if (state.projectRename === edit) edit.error = error.code === 'invalid_project_request'
+      ? t("这个名字不能用。名字里不能有换行这类控制字符，也不能像密钥或令牌。")
+      : error.uncertain ? t("改名结果还没确认，请刷新列表核对。") : error.message;
+    if (error.uncertain) await refresh().catch(() => {});
+  } finally {
+    state.managementBusy = false;
+    renderControls(); rerenderProjectRename({ focus: !renamed && state.projectRename === edit }); renderGlobalPartners(); renderRooms();
+    if (renamed) [...$('projects-list').children].find((node) => node.dataset?.projectId === edit.id)?.focus({ preventScroll: true });
   }
 }
 
@@ -370,6 +468,7 @@ function closeManager() {
   if (!state.manager) return;
   const trigger = state.managerReturnFocus; const fallback = $(state.manager === 'partners' ? 'open-partners' : 'open-projects');
   closeContextMenu(); state.manager = null; state.managerReturnFocus = null;
+  if (state.projectRename && !state.managementBusy) { state.projectRename = null; state.projectListFingerprint = ''; renderProjects(); }
   $('workspace-manager').hidden = true; syncModalInert(); syncAccountWatchTimer(); syncNativeLoginTimer();
   const visible = trigger?.isConnected !== false && !trigger?.hidden && !trigger?.disabled
     && (typeof trigger?.getClientRects !== 'function' || trigger.getClientRects().length > 0);

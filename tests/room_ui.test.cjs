@@ -10948,3 +10948,154 @@ test('a finished plan discussion has one name on the card, in the list and on pa
   await ui.click('new-room');
   assert.match(ui.get('rooms').children[0].textContent, /讨论已结束/, 'the list keeps the name when the room is not open');
 });
+
+// Project rename: the name is edited in place on the project card.
+function projectCard(ui, id) {
+  const card = ui.get('projects-list').children.find((node) => node.dataset.projectId === id);
+  assert.ok(card, `missing project card ${id}`); return card;
+}
+function renameButton(root, id) {
+  const button = descendants(root).find((node) => node.tagName === 'BUTTON' && node.dataset.projectRename === id);
+  assert.ok(button, `missing rename button ${id}`); return button;
+}
+function renameInput(ui, id) { return descendants(ui.get('projects-list')).find((node) => node.dataset.projectRenameInput === id) || null; }
+function renameAction(ui, action) {
+  const button = descendants(ui.get('projects-list')).find((node) => node.dataset.projectRenameAction === action);
+  assert.ok(button, `missing rename ${action}`); return button;
+}
+function typeRename(ui, id, text) { const input = renameInput(ui, id); input.value = text; input.fire('input'); }
+
+test('rename is offered on the card and in the context menu and edits the name in place', async () => {
+  // Catches a missing rename entry, or one that opens a native prompt instead of editing on the card.
+  // The test window has no prompt/confirm, so calling one would throw here.
+  const project = registeredProject('a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', '原来的名字');
+  const archived = registeredProject('a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2', '归档的项目', 'archived');
+  const ui = await browser({ projects: [project, archived] });
+  await ui.click('open-projects');
+  const card = projectCard(ui, project.id);
+  assert.equal(renameButton(card, project.id).textContent, '改名');
+  assert.equal(renameInput(ui, project.id), null);
+  renameButton(card, project.id).fire('click'); await settle();
+  const input = renameInput(ui, project.id);
+  assert.ok(input, 'the card now holds an input');
+  assert.equal(input.value, '原来的名字');
+  assert.equal(ui.document.activeElement, input);
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [0, 5], 'the old name is selected for typing over');
+  assert.equal(descendants(projectCard(ui, project.id)).some((node) => node.tagName === 'H3'), false);
+  assert.equal(renameButton(projectCard(ui, project.id), project.id).disabled, true, 'no second editor for the same card');
+  assert.equal(renameAction(ui, 'save').textContent, '保存');
+  assert.equal(renameAction(ui, 'cancel').textContent, '取消');
+  renameAction(ui, 'cancel').fire('click'); await settle();
+  // The context menu offers the same entry.
+  projectCard(ui, project.id).fire('contextmenu'); await settle();
+  renameButton(ui.get('entry-context-actions'), project.id).fire('click'); await settle();
+  assert.equal(ui.get('entry-context-menu').hidden, true);
+  assert.equal(renameInput(ui, project.id).value, '原来的名字');
+  assert.equal(ui.posts().length, 0, 'opening the editor sends nothing');
+  // Archived projects can be renamed from the archived view too.
+  renameAction(ui, 'cancel').fire('click'); await settle();
+  selectLifecycleView(ui, 'projects', 'archived');
+  renameButton(projectCard(ui, archived.id), archived.id).fire('click'); await settle();
+  assert.equal(renameInput(ui, archived.id).value, '归档的项目');
+});
+
+test('saving a rename posts only the trimmed name and every place shows the new name', async () => {
+  // Catches a wrong request body, and a list, project picker, task options or room header
+  // that keeps the old name after a successful rename.
+  const id = 'b1b1b1b1-b1b1-4b1b-8b1b-b1b1b1b1b1b1';
+  const saved = objectiveSnapshot({ status: 'complete' }); saved.room.mode = 'project_files'; saved.room.project_id = id;
+  saved.project = { available: true, revision: 1, files: [], source: { id, name: '旧账本', path: '/fictional/旧账本' } };
+  const projects = [registeredProject(id, '旧账本')];
+  const ui = await browser({ rooms: [saved.room], saved, projects, executionPolicySupport: true, route(request) {
+    if (request.path === `/api/projects/${id}/name`) {
+      projects[0] = { ...projects[0], name: request.body.name };
+      return { project: projects[0], projects };
+    }
+    if (request.path === '/api/projects' && request.method === 'POST') return { projects };
+  } });
+  assert.equal(ui.get('room-project-chip').textContent, '旧账本');
+  await ui.click('open-projects');
+  renameButton(projectCard(ui, id), id).fire('click'); await settle();
+  typeRename(ui, id, '  家庭账本  ');
+  let prevented = false;
+  renameInput(ui, id).fire('keydown', { key: 'Enter', preventDefault() { prevented = true; } }); await settle();
+  assert.equal(prevented, true);
+  assert.deepEqual(ui.posts().map((request) => [request.path, request.body]), [[`/api/projects/${id}/name`, { name: '家庭账本' }]]);
+  assert.equal(renameInput(ui, id), null, 'the editor closes after saving');
+  assert.equal(descendants(projectCard(ui, id)).find((node) => node.tagName === 'H3').textContent, '家庭账本');
+  assert.equal(ui.get('manager-notice').textContent, '已改名为「家庭账本」。');
+  assert.deepEqual(ui.get('project-picker').children.map((node) => node.textContent), ['不关联项目 · 自由协作', '家庭账本']);
+  assert.equal(ui.get('room-project-chip').textContent, '家庭账本');
+  assert.equal(ui.get('task-options-project').textContent, '家庭账本');
+  assert.equal(ui.get('frozen-project').textContent, '关联项目：家庭账本 · 本任务项目固定。');
+  // Registering the same folder again names the project by its new name.
+  ui.get('project-name').value = '再加一次'; ui.get('project-path').value = '/fictional/旧账本/';
+  ui.get('project-form').fire('submit'); await settle();
+  assert.equal(ui.get('manager-notice').textContent, '这个文件夹已登记为「家庭账本」，直接选它就行。');
+  // A second rename works the same way.
+  renameButton(projectCard(ui, id), id).fire('click'); await settle();
+  typeRename(ui, id, '账本'); renameAction(ui, 'save').fire('click'); await settle();
+  assert.deepEqual(ui.posts().at(-1).body, { name: '账本' });
+  assert.equal(ui.get('room-project-chip').textContent, '账本');
+  assert.equal(ui.posts().length, 2);
+});
+
+test('an empty or too long name is stopped on the card and a rejected name keeps the editor open', async () => {
+  // Catches sending a blank or over-long name, and losing the typed text when the service refuses it.
+  const id = 'c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1';
+  const projects = [registeredProject(id, '小项目')];
+  const ui = await browser({ projects, route(request) {
+    if (request.path === `/api/projects/${id}/name`) return { error: 'invalid_project_request' };
+  } });
+  await ui.click('open-projects');
+  renameButton(projectCard(ui, id), id).fire('click'); await settle();
+  const error = () => descendants(ui.get('projects-list')).find((node) => node.className === 'project-rename-error')?.textContent || '';
+  typeRename(ui, id, '   '); renameAction(ui, 'save').fire('click'); await settle();
+  assert.equal(error(), '名字不能为空。');
+  assert.equal(renameInput(ui, id).getAttribute('aria-invalid'), 'true');
+  assert.equal(ui.document.activeElement, renameInput(ui, id));
+  typeRename(ui, id, '长'.repeat(81)); assert.equal(error(), '', 'typing clears the hint');
+  renameInput(ui, id).fire('keydown', { key: 'Enter' }); await settle();
+  assert.equal(error(), '名字太长了，最多 80 个字。');
+  assert.equal(ui.posts().length, 0, 'nothing is sent for a name the service would reject');
+  typeRename(ui, id, '含密钥的名字'); renameAction(ui, 'save').fire('click'); await settle();
+  assert.equal(ui.posts().length, 1);
+  assert.equal(error(), '这个名字不能用。名字里不能有换行这类控制字符，也不能像密钥或令牌。');
+  assert.equal(renameInput(ui, id).value, '含密钥的名字', 'the typed text is kept');
+  assert.equal(descendants(ui.get('projects-list')).some((node) => node.tagName === 'H3' && node.textContent === '含密钥的名字'), false);
+});
+
+test('Esc or cancel leaves the name unchanged and sends nothing', async () => {
+  // Catches Esc saving the edit, closing the whole manager, or leaving the typed name on the card.
+  const id = 'd1d1d1d1-d1d1-4d1d-8d1d-d1d1d1d1d1d1';
+  const ui = await browser({ projects: [registeredProject(id, '不变的名字')] });
+  await ui.click('open-projects');
+  renameButton(projectCard(ui, id), id).fire('click'); await settle();
+  typeRename(ui, id, '打了一半');
+  let prevented = false;
+  renameInput(ui, id).fire('keydown', { key: 'Escape', preventDefault() { prevented = true; } }); await settle();
+  assert.equal(prevented, true, 'Esc is consumed so the manager stays open');
+  assert.equal(renameInput(ui, id), null);
+  assert.equal(descendants(projectCard(ui, id)).find((node) => node.tagName === 'H3').textContent, '不变的名字');
+  assert.equal(ui.document.activeElement, projectCard(ui, id));
+  // Reopening starts from the saved name, not the abandoned text.
+  renameButton(projectCard(ui, id), id).fire('click'); await settle();
+  assert.equal(renameInput(ui, id).value, '不变的名字');
+  renameAction(ui, 'save').fire('click'); await settle();
+  assert.equal(renameInput(ui, id), null, 'saving the same name just closes the editor');
+  assert.equal(ui.posts().length, 0);
+});
+
+test('the English interface labels the rename controls in English', async () => {
+  // Catches rename copy missing from the English catalogue.
+  const id = 'e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1';
+  const ui = await browser({ language: 'en-US', projects: [registeredProject(id, 'Ledger')] });
+  await ui.click('open-projects');
+  const button = renameButton(projectCard(ui, id), id);
+  assert.equal(button.textContent, 'Rename');
+  assert.equal(button.getAttribute('aria-label'), 'Rename project: Ledger');
+  button.fire('click'); await settle();
+  assert.equal(renameInput(ui, id).getAttribute('aria-label'), 'New name for Ledger');
+  typeRename(ui, id, ''); renameAction(ui, 'save').fire('click'); await settle();
+  assert.match(ui.get('projects-list').textContent, /The name can't be empty\./);
+});

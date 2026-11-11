@@ -821,6 +821,14 @@ class RoomService(RoomPromptMixin):
         project = self.catalog.set_lifecycle(project_id, action)
         return {"project": project, "projects": self.catalog.list()}
 
+    async def rename_project(self, project_id, name):
+        """Rename a registration. Rooms keep their own copies and recorded source."""
+        self._available()
+        if self.store.project_deletion_pending(project_id):
+            raise RoomError("project_deletion_pending")
+        project = self.catalog.rename(project_id, name)
+        return {"project": project, "projects": self.catalog.list()}
+
     def _resume_project_deletions(self):
         for operation in self.store.pending_project_deletions():
             key = operation["request_key"]

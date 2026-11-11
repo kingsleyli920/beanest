@@ -306,7 +306,7 @@ const state = {
   availabilityTimer: null, availabilityRefreshing: false, availabilityLastStarted: null, availabilityError: '', availabilityRecheck: null,
   accountRefreshId: null, accountTimer: null, accountPanels: new Map(), accountAuto: new Map(), accountRefreshTimes: new Map(), accountRefreshErrors: new Map(),
   accountSourceBusy: null, accountSourceErrors: new Map(),
-  manager: null, managerReturnFocus: null, managementBusy: false, projectListFingerprint: '', partnerListFingerprint: '',
+  manager: null, managerReturnFocus: null, managementBusy: false, projectRename: null, projectListFingerprint: '', partnerListFingerprint: '',
   hostOutboxSupported: false, hostOutboxScope: null, hostOutboxPolling: false, hostOutboxRows: new Map(), hostOutboxRequests: new Map(), hostOutboxRetirements: new Map(), hostOutboxRetiring: new Set(), hostAutomaticAttempts: new Set(),
   actionError: null, busy: false, busyRequest: null, refreshing: false, pending: null, epoch: 0, authScope: null, scopeChanged: false,
   exportBusy: false, exportMessage: '', exportRoom: null,
@@ -3187,6 +3187,19 @@ function lifecycleActions(kind, item, { beforeAction = () => {} } = {}) {
   const permanent = kind === 'rooms' && state.roomLifecycleSupported || kind === 'projects' && state.projectDeletionSupported || kind === 'partners' && state.partnerLifecycleSupported;
   const choices = status === 'active' ? [['archive', t("归档")], ['remove', t("移除")]]
     : [['restore', t("恢复")], ...(status === 'archived' || permanent ? [['remove', t("移除")]] : [])];
+  if (kind === 'projects' && status !== 'removed') {
+    // Renaming changes only the registered display name; it is edited in place on the card.
+    const rename = element('button', t("改名"), 'quiet-button'); rename.type = 'button';
+    rename.dataset.projectRename = item.id;
+    rename.disabled = state.managementBusy || state.projectRename?.id === item.id
+      || (state.projectDeletionSupported && state.projectDeletions.has(item.id));
+    rename.setAttribute('aria-label', `${t("改名")}${interfaceWordSpace()}${englishInterface() ? t("项目").toLowerCase() : t("项目")}${interfaceColon()}${item.name}`);
+    rename.addEventListener('click', () => {
+      if (rename.disabled || state.managementBusy) return;
+      beforeAction(); startProjectRename(item.id);
+    });
+    actions.append(rename);
+  }
   for (const [action, originalLabel] of choices) {
     const label = permanent && action === 'remove' ? kind === 'partners' ? t("移除配置") : t("永久删除") : originalLabel;
     const button = element('button', label, `quiet-button${action === 'remove' ? ' danger' : ''}`); button.type = 'button';

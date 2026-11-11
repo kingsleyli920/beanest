@@ -425,6 +425,24 @@ class ProjectCatalog:
                     return item
         raise ProjectCatalogError("project_not_found")
 
+    def rename(self, project_id, name) -> dict:
+        """Change only the display name; the path, files and room copies stay put.
+
+        Archived and old removed registrations can be renamed too: the name is
+        display metadata and does not make a registration usable again.
+        """
+        self._validate_id(project_id)
+        name = self._name(name)
+        with self._locked() as directory:
+            projects = self._load(directory)
+            for item in projects:
+                if item["id"] == project_id:
+                    if item["name"] != name:
+                        item["name"] = name
+                        self._write(directory, projects)
+                    return item
+        raise ProjectCatalogError("project_not_found")
+
     def remove_registration(self, project_id) -> dict:
         """Forget a registration permanently; never visit its source directory.
 

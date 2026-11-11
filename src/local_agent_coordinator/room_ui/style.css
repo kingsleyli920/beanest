@@ -570,6 +570,11 @@ textarea::placeholder { color: var(--muted); }
 .manager-empty { grid-column: 1 / -1; padding: 22px; border: 1px dashed var(--line-strong); border-radius: 15px; color: var(--muted); font-size: 12px; }
 .manager-card { min-width: 0; padding: 19px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--paper); }
 .manager-card h3 { margin: 0 0 7px; color: var(--ink2); font-size: 14px; }
+.project-rename { margin: 0 0 7px; }
+.project-rename-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.project-rename-input { flex: 1 1 160px; min-width: 0; margin: 0; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit; font-size: 14px; }
+.project-rename-input[aria-invalid="true"] { border-color: var(--bad); }
+.project-rename-error { margin: 6px 0 0; color: var(--bad); font-size: 12px; }
 .project-directory { color: var(--muted); font-family: ui-monospace, monospace; font-size: 10px; overflow-wrap: anywhere; }
 .project-file-list { padding-left: 17px; color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
 .manager-add { margin-top: 20px; padding: 15px 17px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--hover); }
@@ -627,7 +632,7 @@ textarea::placeholder { color: var(--muted); }
   .manager-heading h2 { font-size: 18px; }
   .manager-grid, .form-columns { grid-template-columns: 1fr; }
   .manager-card { padding: 15px; }
-  .manager-form input, .manager-form textarea, .manager-form select { font-size: 16px; }
+  .manager-form input, .manager-form textarea, .manager-form select, .project-rename-input { font-size: 16px; }
 }
 .adapter-identity { margin: 3px 0 0; color: var(--muted); font-size: 9px; }
 

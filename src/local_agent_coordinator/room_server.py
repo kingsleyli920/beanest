@@ -34,6 +34,7 @@ RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runti
 AVAILABILITY_RECHECK_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/availability/recheck")
 ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/account/refresh")
 LIFECYCLE_ROUTE = re.compile(rf"/api/(projects|rooms|partners)/({TASK_ID}|[a-z][a-z0-9_-]{{0,31}})/lifecycle")
+PROJECT_NAME_ROUTE = re.compile(rf"/api/projects/({TASK_ID})/name")
 ERROR_STATUS = {
     "native_login_unsupported":400, "native_install_unsupported":400, "invalid_workload_level":400, "login_operation_changed":409, "user_native_login_required":403,
     "invalid_delivery_repository":409, "delivery_repository_unavailable":409, "user_delivery_repository_required":403,
@@ -568,6 +569,14 @@ class _RoomHandler(_Handler):
                          "partners": service.set_partner_lifecycle,
                          "rooms": service.set_room_lifecycle}[kind]
             return await operation(identifier, body["action"], **({"request_id": body["request_id"]} if "request_id" in body else {}))
+        # A display name is user configuration, like registering the project.
+        project_name = PROJECT_NAME_ROUTE.fullmatch(path)
+        if project_name and self.command != "GET":
+            if mcp:
+                raise _HTTPError(403, "user_lifecycle_required")
+            if not isinstance(body, dict) or set(body) != {"name"} or not isinstance(body["name"], str):
+                raise _HTTPError(400, "invalid_arguments")
+            return await service.rename_project(project_name[1], body["name"])
         if self.command == "GET":
             if path == "/api/status":
                 status = await service.status()
