@@ -233,6 +233,44 @@ class RoomIntegrationTests(unittest.TestCase):
             self.assertEqual(self.request("POST", entry, {**body, "project_path": "/fictional/unapproved"})[0], 400)
         self.assertFalse(list((self.root / "project-artifacts").rglob("*.py")))
 
+    def test_an_unknown_role_or_workload_is_named_as_such(self):
+        # Catches a bad role or workload choice coming back as an unexplained "operation failed".
+        for choice, code in (({"role": "builtin:builder"}, "invalid_role"), ({"workload": "huge"}, "invalid_workload")):
+            status, body = self.request("POST", "/api/rooms", {
+                "goal": "Review a short shared text goal", "target": "claude", "request_id": "bad-" + code,
+                "mode": "text_artifacts", "work_mode": "build",
+                "runtime_settings": {"permission": "workspace_write", "members": {"claude": choice}}})
+            self.assertEqual((status, body), (400, {"error": code}))
+
+    def test_mcp_room_without_work_mode_is_a_configurable_build_room_and_old_user_callers_stay_legacy(self):
+        # Catches: an agent-started room (work_mode is optional over MCP) being stored as an
+        # old legacy record, which the page shows as history with every model locked.
+        body = {"goal": "Review a short shared text goal", "target": "claude", "request_id": "mcp-no-mode"}
+        status, created = self.request("POST", "/api/mcp/rooms", body)
+        self.assertEqual(status, 200, created)
+        room_id = created["room"]["id"]
+        self.settle()
+        status, saved = self.request("GET", "/api/rooms/" + room_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["events"][0]["sender"], "mcp")
+        self.assertEqual(saved["room"]["work_mode"], "build")
+        self.assertEqual(saved["runtime_configuration"]["desired"], {"work_mode": "build", "runtime_settings": None})
+        self.assertTrue(saved["runtime_configuration"]["can_edit"])
+        claims = [event["work_mode"] for event in saved["events"] if event["kind"] == "job_claimed"]
+        self.assertTrue(claims)
+        self.assertEqual(set(claims), {"build"})
+        # The omitted field stays out of the request fingerprint: the same retry is the same room.
+        calls = len(self.fake.snapshot_calls())
+        status, again = self.request("POST", "/api/mcp/rooms", body)
+        self.assertEqual((status, again["room"]["id"]), (200, room_id))
+        self.assertEqual(len(self.fake.snapshot_calls()), calls)
+        # An older user client that never sent the field keeps its recorded legacy behavior.
+        status, older = self.request("POST", "/api/rooms", {**body, "request_id": "user-no-mode"})
+        self.assertEqual(status, 200, older)
+        self.settle()
+        self.assertEqual(older["room"]["work_mode"], "legacy")
+        self.assertEqual(self.request("GET", "/api/rooms/" + older["room"]["id"])[1]["runtime_configuration"]["desired"]["work_mode"], "legacy")
+
     def test_artifact_initialization_failure_is_unknown_and_same_id_does_not_dispatch(self):
         body = {"goal": "A fictional initialization failure", "target": "claude",
                 "request_id": "failed-project-init", "mode": "python_artifacts"}

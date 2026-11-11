@@ -20,7 +20,7 @@ from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached
-from .stop_policy import continues_automatically, host_block_recoverable
+from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
 from .project_catalog import ProjectCatalog, ProjectCatalogError
@@ -1624,7 +1624,7 @@ class RoomService(RoomPromptMixin):
             return "quota_wait" if policy.get("quota_failover") else None
         # Same phases as _schedule_auto_continue: quitting the app leaves it cancelled.
         if (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
-                and continues_automatically(team.get("stop_reason"))):
+                and (continues_automatically(team.get("stop_reason")) or continues_after_recovery_audit(team.get("stop_reason")))):
             return "auto"
         return None
 
@@ -1652,9 +1652,15 @@ class RoomService(RoomPromptMixin):
             return None  # The same stop came back without progress: it is the user's now.
         if (snapshot["objective"]["status"] != "needs_user"
                 and (continuation is None or not continuation["can_send"]
-                     or continuation["action"] not in {"restart-objective", "recover-native"})):
+                     or continuation["action"] not in self._auto_continue_actions(snapshot["team"].get("stop_reason")))):
             return None
         return kind
+
+    @staticmethod
+    def _auto_continue_actions(code):
+        """The continuations the host may press for this stop: a kept scene that
+        an audit can release resumes only through fresh-session native recovery."""
+        return {"recover-native"} if continues_after_recovery_audit(code) else {"restart-objective", "recover-native"}
 
     def _natural_continuation(self, snapshot, *, target="all"):
         run, objective = snapshot.get("current_run"), snapshot.get("objective")
@@ -1805,6 +1811,28 @@ class RoomService(RoomPromptMixin):
                 raise RoomError("native_recovery_unpublished_changes")
         return {"candidates": candidates, "workspaces": fingerprints}
 
+    def _audit_cut_off_work(self, room_id):
+        """Unimported edits a cleanly cut-off work call left in its owner's tree.
+
+        Only edits wholly inside that task's own paths are retained for the
+        read-only inspection the next round starts with; the inspection's own
+        finish re-checks the same bytes. Anything else is left as it was.
+        """
+        retained = []
+        for candidate in self.store.native_cut_off_work(room_id):
+            state = self.store.native_workspace(room_id, candidate["provider"])
+            if state is None or state.get("conflicts"):
+                continue
+            try:
+                changes = native_workspace.collect_changes(state["project"], state, candidate["write_paths"], resolved_conflicts=[])
+            except (native_workspace.NativeWorkspaceError, OSError):
+                continue
+            if changes["blocked"] or not changes["files"]:
+                continue
+            retained.append({**candidate, "observation": self._native_metadata_observation(
+                state, changes, candidate["write_paths"], [])})
+        return retained
+
     async def objective_action(self, room_id, action, request_id, *, run_id=None, revision=None, digest=None,
                                execution_policy=None, objective_id=None, text=None, source="user", user_message=None,
                                _request_identity=None, _runtime_update=None, _message_target="all"):
@@ -1897,12 +1925,14 @@ class RoomService(RoomPromptMixin):
                     and any(task["status"] == "blocked" and task["blocked_reason"] == "team_scope_conflict"
                             for task in snapshot["team"]["tasks"])):
                 scope_retry = self._audit_native_scope_retry(snapshot, self.store.native_scope_retry_candidates(room_id))
+            retained_work = (self._audit_cut_off_work(room_id)
+                             if action == "restart-objective" and snapshot["room"]["mode"] == "native_project" else None)
             self.store.objective_action(room_id, action, request_id, parameters, binding=binding,
                                         policy=execution_policy, objective_id=objective_id, baseline=baseline, answer=text,
                                         user_message=user_message, request_identity=_request_identity,
                                         quota_recovered=self._recovered_quota_members(snapshot) if _request_identity is not None else [],
                                         runtime_change=runtime_change, message_target=_message_target, scope_retry=scope_retry,
-                                        waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"})
+                                        retained_work=retained_work, waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"})
             for member in quota_blocked:
                 self._retire_quota(room_id, member, "agent_quota_exhausted")
             self._wake(room_id)
@@ -1917,6 +1947,8 @@ class RoomService(RoomPromptMixin):
         """Advance once at a known cleanup boundary, after sandbox scheduling."""
         if not self.store.snapshot(room_id).get("objective"):
             return
+        if self.store.pending_withdrawal_restores(room_id):
+            return  # withdrawn bytes are still in the shared project; never assess or deliver them
         snapshot = self._snapshot(room_id)
         objective = snapshot.get("objective")
         if not objective or objective["status"] in {"paused", "stopped", "interrupted", "complete", "needs_user"}:
@@ -1991,7 +2023,7 @@ class RoomService(RoomPromptMixin):
         self._available()
         self._sync_partners()
         execution = await self._execution_ready()
-        return {"app": "local-agent-rooms", "capabilities": {"text_only": True, "tools": False, "execution_policy": True, "continuous_objective": True, "native_project": True, "natural_continuation": True, "natural_runtime_settings": True, "room_lifecycle_operations": True, "room_native_session_cleanup": True, "message_receipts": True, "project_registration_deletion": True, "partner_lifecycle_operations": True, "room_paging_v1": True, "user_outbox_v1": True, "room_media_v1": True, "room_code_status_v1": True, "room_member_invitation_v1": True},
+        return {"app": "local-agent-rooms", "capabilities": {"text_only": True, "tools": False, "execution_policy": True, "continuous_objective": True, "native_project": True, "natural_continuation": True, "natural_runtime_settings": True, "room_lifecycle_operations": True, "room_native_session_cleanup": True, "message_receipts": True, "project_registration_deletion": True, "partner_lifecycle_operations": True, "room_paging_v1": True, "user_outbox_v1": True, "room_media_v1": True, "room_code_status_v1": True, "room_member_invitation_v1": True, "task_withdrawal_v1": True},
                 "user_outbox_scope": self.user_outbox_scope,
                 "transport_limits": room_projection.transport_limits(),
                 "autonomous_work_active": self.store.autonomous_work_active(),
@@ -4206,6 +4238,21 @@ class RoomService(RoomPromptMixin):
                     if intent is not None or update else None)
         if identity is not None and self.store.natural_message_seen(room_id, request_id, identity):
             return self._snapshot(room_id)
+        try:
+            return await self._send_message(room_id, text, target, request_id, source, intent, binding, update, identity)
+        except RoomError:
+            # The user wrote against the state they saw. When the host's own
+            # automatic continue moved the room on in the meantime, the message
+            # is still theirs to deliver: decide again, once, against the
+            # current run. The request keeps its original identity.
+            if intent is None or not self.store.host_continued_from(room_id, binding):
+                raise
+            current = self._natural_continuation(self._snapshot(room_id), target=target)
+            if current is None:
+                raise
+            return await self._send_message(room_id, text, target, request_id, source, intent, current["binding"], update, identity)
+
+    async def _send_message(self, room_id, text, target, request_id, source, intent, binding, update, identity):
         if intent is not None:
             snapshot = self._snapshot(room_id)
             continuation = self._natural_continuation(snapshot, target=target)
@@ -4399,10 +4446,78 @@ class RoomService(RoomPromptMixin):
             self.store.accept_run(room_id,request_id,run_id=run_id,revision=revision,digest=digest)
             return self._snapshot(room_id)
 
+    async def withdraw_task(self, room_id, request_id, *, run_id, task_id, include_dependents=False, source="user"):
+        """The user takes an unfinished task (and what needs it) out of the current round."""
+        self._available()
+        if source != "user":
+            raise RoomError("user_task_withdraw_required")
+        self._require_active_room(room_id)
+        async with self._run_controls.setdefault(room_id, asyncio.Lock()):
+            self._require_active_room(room_id)
+            self.store.withdraw_task(room_id, request_id, run_id=run_id, task_id=task_id,
+                                     include_dependents=include_dependents)
+            self._finish_withdrawals(room_id)
+            self._wake(room_id)
+            return self._snapshot(room_id)
+
+    def _finish_withdrawals(self, room_id):
+        """Take withdrawn, never-accepted bytes out of the shared project and idle private trees.
+
+        Safe to repeat: each step is recorded once and the project restore is
+        idempotent by its proposal id. Returns False while a restore is still owed.
+        """
+        restores = self.store.pending_withdrawal_restores(room_id)
+        discards = self.store.withdrawal_discard_providers(room_id)
+        if not restores and not discards:
+            return True
+        snapshot = self.store.snapshot(room_id)
+        mode = snapshot["room"]["mode"]
+        settled = True
+        for event in restores:
+            if mode not in PROJECT_MODES:
+                break
+            try:
+                result = self._project(room_id).restore_paths("withdraw:" + event["withdrawal_id"],
+                    event["restore"]["paths"], event["restore"]["job_ids"])
+            except (ProjectWorkspaceError, OSError):
+                settled = False
+                continue
+            self.store.record_withdrawal_restored(room_id, event["withdrawal_id"], revision=result["revision"], paths=result["paths"])
+        if mode == "native_project":
+            busy = {job["provider"] for job in snapshot["jobs"] if job["status"] == "working"}
+            for member in snapshot["members"]:
+                if member["id"] not in discards or member["id"] in busy:
+                    continue  # a busy partner's next call discards them first, in _prepare_native_workspace
+                state = self.store.native_workspace(room_id, member["id"])
+                try:
+                    self._discard_withdrawn_private(room_id, member["id"],
+                                                    None if state is None or state.get("partial_archive") else state)
+                except RoomError as error:
+                    # The bytes stay private and unpublished; dispatch stops rather than collect them later.
+                    self.store.block_dispatch(room_id, member["id"], error.code)
+        return settled
+
+    def _discard_withdrawn_private(self, room_id, provider, state=None):
+        """Drop a withdrawn task's unsubmitted bytes before this partner's next call can collect them."""
+        pending = self.store.pending_withdrawal_discards(room_id, provider)
+        if not pending:
+            return state
+        paths = sorted({path for entry in pending for path in entry["paths"]})
+        if state is not None:
+            try:
+                state, _ = native_workspace.discard_paths(state["project"], state, paths)
+            except (native_workspace.NativeWorkspaceError, OSError):
+                raise RoomError("native_recovery_unpublished_changes") from None
+            self.store.save_native_workspace(room_id, provider, state)
+        self.store.record_withdrawal_discarded(room_id, provider, [entry["withdrawal_id"] for entry in pending], paths)
+        return state
+
     async def export_room(self, room_id, revision):
         self._available()
         if self.store.snapshot(room_id)["room"]["mode"] not in PROJECT_MODES:
             raise RoomError("project_unavailable")
+        if self.store.pending_withdrawal_restores(room_id) and not self._finish_withdrawals(room_id):
+            raise RoomError("task_withdrawal_pending")
         from .artifact_export import export_project, ArtifactExportError
         try:
             return export_project(self._project(room_id).snapshot(),expected_revision=revision)
@@ -4534,7 +4649,8 @@ class RoomService(RoomPromptMixin):
         seen_tasks = set()
         for task in [*current_tasks, *(task for task in history["tasks"]
                       if task["run_id"] != run_id and task["status"] in {"accepted", "self_checked"})]:
-            if isinstance(task.get("result"), str):
+            # The user withdrew this task: whatever it reported is not a result to preview.
+            if isinstance(task.get("result"), str) and task["status"] != "withdrawn":
                 source, external = task_source(task, task["run_id"])
                 key = (source["run_id"], task["id"], task["result_version"], task["result"])
                 if key in seen_tasks:
@@ -4886,7 +5002,7 @@ class RoomService(RoomPromptMixin):
         # phase, tells it apart from the user's own stop.
         elif (objective.get("status") in {"stopped", "interrupted"}
               and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
-              and continues_automatically(team.get("stop_reason"))):
+              and (continues_automatically(team.get("stop_reason")) or continues_after_recovery_audit(team.get("stop_reason")))):
             code = team["stop_reason"]
         else:
             self._auto_continues.pop(room_id, None)
@@ -4913,7 +5029,7 @@ class RoomService(RoomPromptMixin):
         snapshot = self._snapshot(room_id)
         continuation = self._natural_continuation(snapshot)
         if (snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]
-                or continuation["action"] not in {"restart-objective", "recover-native"}):
+                or continuation["action"] not in self._auto_continue_actions(code)):
             return
         try:
             await self._send_natural_action(snapshot, continuation["action"], None, "auto-continue-" + str(uuid4()),
@@ -5068,6 +5184,7 @@ class RoomService(RoomPromptMixin):
                     return
         if not self.store.activate_pending_runtime(room_id):
             return
+        self._finish_withdrawals(room_id)
         snapshot = self.store.snapshot(room_id)
         for provider, retired in (snapshot.get("objective") or {}).get("retired_partners", {}).items():
             self._retire_quota(room_id, provider, retired["reason"])
@@ -5279,6 +5396,11 @@ class RoomService(RoomPromptMixin):
             incoming = project.materialize_snapshot(export, job["artifact_inspected_revision"], cancelled=cancelled)
             destination = self.workspace.parent / "native-workspaces" / job["room_id"]
             destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # A withdrawn task's unsubmitted bytes go before this call can see or submit them.
+            discarded = self._discard_withdrawn_private(job["room_id"], job["provider"],
+                                                        None if state is None or state.get("partial_archive") else state)
+            if discarded is not None:
+                state = discarded
             if state is None or state.get("partial_archive"):
                 handoff = self.store.snapshot(job["room_id"]).get("native_handoff")
                 kwargs = {}

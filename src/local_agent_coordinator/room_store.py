@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 from . import job_progress, roles
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
-from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
+from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached, task_settled
 from .room_contract import RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
@@ -530,7 +530,7 @@ class RoomStore:
                       (room_id, provider)).fetchone():
             return False
         if db.execute("SELECT 1 FROM shared_tasks WHERE room_id=? AND run_id=(SELECT current_run_id FROM teams WHERE room_id=?) "
-                      "AND owner=? AND status NOT IN ('accepted','self_checked')", (room_id, room_id, provider)).fetchone():
+                      "AND owner=? AND status NOT IN ('accepted','self_checked','withdrawn')", (room_id, room_id, provider)).fetchone():
             return False
         for job_id in target["jobs"]:
             receipt = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='job_cleanup' "
@@ -675,7 +675,7 @@ class RoomStore:
                     team = self._team.team(db, room_id)
                     tasks = ([] if team is None else [dict(task) for task in db.execute(
                         "SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND owner=? "
-                        "AND status NOT IN ('accepted','self_checked')", (room_id, team["current_run_id"], provider))])
+                        "AND status NOT IN ('accepted','self_checked','withdrawn')", (room_id, team["current_run_id"], provider))])
                     jobs = [row[0] for row in db.execute("SELECT id FROM jobs WHERE room_id=? AND provider=? AND status='working'",
                                                        (room_id, provider))]
                     targets.append({"room_id": room_id, "run_id": team["current_run_id"] if team else None,
@@ -816,7 +816,7 @@ class RoomStore:
                 raise RoomError("partner_cleanup_unconfirmed")
         for old in target["tasks"]:
             task = self._team.task(db, target["room_id"], old["id"])
-            if task["status"] in {"accepted", "self_checked"}:
+            if task_settled(task):
                 continue
             if any(task[key] != old[key] for key in ("owner", "assignment_epoch", "result_version")):
                 raise RoomError("partner_handoff_binding_changed")
@@ -1221,6 +1221,34 @@ class RoomStore:
                                   "AND json_extract(value_json,'$.fingerprint')=? LIMIT 1",
                                   (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()
             return fingerprint, repeated is not None
+
+    def host_continued_from(self, room_id, binding):
+        """Whether only the host's own automatic continues, since the user last
+        spoke, moved the room on from the exact state this binding names: a
+        new run started from it, or a host block reopened in place."""
+        if not isinstance(binding, dict):
+            return False
+        with self._connection() as db:
+            team = self._team.team(db, room_id)
+            if team is None:
+                return False
+            current = team["current_run_id"]
+            for row in db.execute("SELECT value_json FROM events WHERE room_id=? AND seq>? "
+                                  "AND json_extract(value_json,'$.kind')='objective_auto_continued' ORDER BY seq DESC",
+                                  (room_id, self._latest_direct_user_seq(db, room_id))).fetchall():
+                event = json.loads(row[0])
+                if event.get("run_id") != current:
+                    return False
+                source = event.get("source_run_id")
+                if source == binding.get("run_id"):
+                    if source == current:
+                        return True
+                    run = db.execute("SELECT artifact_revision,artifact_digest FROM team_runs WHERE id=? AND room_id=?",
+                                     (source, room_id)).fetchone()
+                    return (run is not None and run["artifact_revision"] == binding.get("revision")
+                            and run["artifact_digest"] == binding.get("digest"))
+                current = source
+            return False
 
     def note_auto_continued(self, room_id, fingerprint, code, source_run_id):
         with self._connection(write=True) as db:
@@ -2707,6 +2735,12 @@ class RoomStore:
                 return ancestor
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         faults = [candidate for candidate in candidates if candidate["source_error"] in NATIVE_RECOVERY_ERRORS]
+        # A reply to the user, a plan or a review owns no task paths, so its
+        # protocol fault leaves nothing to retain of its own; an owner's work
+        # it cut off is retained exactly as when a work call faults.
+        faults += [{"provider": row["provider"], "source_error": row["error"], "job_id": row["id"]}
+                   for row in latest.values() if row["phase"] != "work" and row["error"] in NATIVE_RECOVERY_ERRORS
+                   and row["status"] in {"failed", "unknown"}]
         if room["stop_requested"] or not faults or team["stop_reason"] not in NATIVE_RECOVERY_ERRORS:
             return candidates
         job_ids = [row["id"] for row in latest.values()]
@@ -2793,6 +2827,42 @@ class RoomStore:
     def native_partial_recovery_candidates(self, room_id):
         with self._connection() as db:
             return self._native_partial_recovery_candidates(db, room_id)
+
+    def _native_cut_off_work(self, db, room_id):
+        """Each owner's last work call that a stop or the service's shutdown cut
+        off cleanly, every tool it started having returned.
+
+        Its edits stay unimported in the owner's private tree. Any other call
+        to that partner would find them and fail, so a restart first has them
+        inspected read-only, exactly as recovery does after a killed call. A
+        call that failed or whose outcome is unknown is recovery's, not this.
+        """
+        rows = db.execute("SELECT j.id,j.provider,j.status,t.phase,t.task_id,t.result_version,n.metadata_json "
+            "FROM jobs j JOIN team_jobs t ON t.job_id=j.id JOIN native_executions n ON n.job_id=j.id "
+            "WHERE j.room_id=? AND t.run_id=(SELECT current_run_id FROM teams WHERE room_id=?) "
+            "ORDER BY j.rowid DESC", (room_id, room_id)).fetchall()
+        latest = {}
+        for row in rows:
+            latest.setdefault(row["provider"], row)
+        found = []
+        for row in latest.values():
+            observation = json.loads(row["metadata_json"])
+            if (row["phase"] != "work" or row["task_id"] is None or row["status"] not in {"interrupted", "cancelled"}
+                    or observation.get("cleanup_confirmed") is not True
+                    or any(type(observation.get(key)) is not int for key in ("tool_calls", "tool_results"))
+                    or observation["tool_calls"] != observation["tool_results"]):
+                continue
+            task = self._team.task(db, room_id, row["task_id"])
+            if (task is None or task["owner"] != row["provider"] or task_settled(task)
+                    or task["result_version"] != row["result_version"] or not json.loads(task["write_paths_json"])):
+                continue
+            found.append({"job_id": row["id"], "provider": row["provider"], "task_id": task["id"],
+                          "write_paths": sorted(json.loads(task["write_paths_json"]))})
+        return sorted(found, key=lambda item: item["provider"])
+
+    def native_cut_off_work(self, room_id):
+        with self._connection() as db:
+            return self._native_cut_off_work(db, room_id)
 
     def native_partial_inspection(self, job_id):
         with self._connection() as db:
@@ -3185,7 +3255,7 @@ class RoomStore:
                 or objective["status"] == "paused" or not self._stage_cleanup_confirmed(db, room_id)):
             return None
         tasks = db.execute("SELECT * FROM shared_tasks WHERE run_id=? ORDER BY id", (team["current_run_id"],)).fetchall()
-        if not tasks or any(task["status"] not in {"accepted", "self_checked"} for task in tasks):
+        if not tasks or not all(task_settled(task) for task in tasks):
             return None
         checkpoint = json.loads(objective["checkpoint_json"] or "{}")
         if not checkpoint or checkpoint.get("reviewed"):
@@ -3257,7 +3327,7 @@ class RoomStore:
                 or team["stop_reason"] not in {"native_auth_unconfirmed", "native_provider_error", "native_turn_unconfirmed"}):
             return None
         tasks = db.execute("SELECT status FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])).fetchall()
-        if any(task[0] not in {"accepted", "self_checked"} for task in tasks):
+        if not all(task_settled(task) for task in tasks):
             return None
         jobs = db.execute("SELECT j.*,t.phase,t.plan_revision,t.assignment_epoch,t.result_version,t.task_id FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE t.run_id=? ORDER BY j.id",
                           (team["current_run_id"],)).fetchall()
@@ -3362,7 +3432,7 @@ class RoomStore:
         # owner's. Anything else is refused by the private-tree audit.
         paths, retained = {}, set()
         for task in db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])):
-            if not task["owner"] or task["status"] in {"accepted", "self_checked"}:
+            if not task["owner"] or task_settled(task):
                 continue
             job = db.execute("SELECT j.*,t.assignment_epoch,t.result_version,n.metadata_json FROM jobs j "
                 "JOIN team_jobs t ON t.job_id=j.id JOIN native_executions n ON n.job_id=j.id "
@@ -3381,20 +3451,28 @@ class RoomStore:
             retained.add(job["id"])
             paths.setdefault(task["owner"], set()).update(json.loads(task["write_paths_json"]))
         # Each abandoned call meets an existing recovery standard: a work call
-        # qualifies for owner retention above; any other call returned every
-        # tool and recorded no possible side effect. Otherwise effects outside
-        # the private tree are unknown and this fallback does not apply.
+        # qualifies for owner retention above. Any other call (a reply to the
+        # user, a plan, a review, a check) owns no task paths. Under a
+        # permission that keeps writes inside its private tree, whatever it
+        # changed there is refused by the service's tree audit and its
+        # processes are confirmed gone, so a process killed mid-tool, or one
+        # that merely read files, is no reason to keep the room stopped with
+        # every action refused. With Full Access it could have acted outside
+        # that tree: it must have returned every tool and recorded no
+        # possible side effect.
         for job in unsettled:
             phase = db.execute("SELECT phase FROM team_jobs WHERE job_id=?", (job["id"],)).fetchone()
             native = db.execute("SELECT metadata_json FROM native_executions WHERE job_id=?", (job["id"],)).fetchone()
             native = json.loads(native[0]) if native else None
             if phase is None or native is None or native.get("cleanup_confirmed") is not True:
                 return None
+            confined = native.get("permission") in {"plan", "read_only", "workspace_write"}
             if phase[0] == "work":
                 if job["id"] not in retained:
                     return None
-            elif (native.get("side_effects_possible") is not False or type(native.get("tool_calls")) is not int
-                    or native.get("tool_calls") != native.get("tool_results")
+            elif (type(native.get("tool_calls")) is not int
+                    or not confined and (native.get("side_effects_possible") is not False
+                                         or native["tool_calls"] != native.get("tool_results"))
                     or native["tool_calls"] and not self.native_job_identity_confirmed(db, job)):
                 # A peer cancelled before its first tool did nothing to bind;
                 # any call that ran tools must prove its own session.
@@ -3957,6 +4035,7 @@ class RoomStore:
             if (user_message and not partial_works and not help_repair and not nonwork and metadata_correction is None
                     and read_only(desired["work_mode"], desired["runtime_settings"])):
                 self._team.send_user(db, room_id, recipients, user_message)
+            self._team.redeliver_unanswered(db, room_id, binding["run_id"])
             objective = self._team.objectives.current(db, room_id)
             db.execute("UPDATE objectives SET baseline_json=? WHERE id=?", (json.dumps(baseline), objective["id"]))
             self._remember_request(db, key, fingerprint, room_id)
@@ -4264,10 +4343,17 @@ class RoomStore:
             call_limit = 0
             room_id = str(uuid4())
             now = self.clock()
+            # An agent connected through MCP may omit work_mode (it is optional
+            # there) and cannot send runtime settings; its new room is a normal
+            # build room the user can still configure. Only an omitted mode from
+            # an older user client keeps the legacy record. The request
+            # fingerprint above still holds the omitted field, so a retried
+            # request keeps resolving to the same room.
+            stored_mode = work_mode or ("build" if source == "mcp" else "legacy")
             db.execute("INSERT INTO rooms(id,goal,status,created_at,updated_at,deadline,call_limit,mode,project_id,work_mode) "
                        "VALUES (?,?, 'running',?,?,?,?,?,?,?)",
                        (room_id, goal, now, now, 0, call_limit,
-                        mode, project_id, work_mode or "legacy"))
+                        mode, project_id, stored_mode))
             if settings is not None:
                 db.execute("UPDATE rooms SET runtime_settings_json=? WHERE id=?", (json.dumps(settings), room_id))
             for provider in selected:
@@ -4505,6 +4591,71 @@ class RoomStore:
             self._remember_request(db, key, fingerprint, room_id)
             return True
 
+    def withdraw_task(self, room_id, request_id, *, run_id, task_id, include_dependents):
+        """Record the user's withdrawal once per request; a repeated request changes nothing."""
+        parameters = ["withdraw_task", room_id, run_id, task_id, bool(include_dependents)]
+        with self._connection(write=True) as db:
+            self._require_active(self._room(db, room_id))
+            key, fingerprint, previous = self._request(db, request_id, parameters)
+            if previous is not None:
+                return None
+            result = self._team.withdraw(db, room_id, checked_id(run_id), task_id,
+                                         include_dependents=bool(include_dependents), withdrawal_id=str(uuid4()))
+            self._remember_request(db, key, fingerprint, room_id)
+            self._settle(db, room_id)
+            return result
+
+    @staticmethod
+    def _withdrawals(db, room_id):
+        return [json.loads(row[0]) for row in db.execute(
+            "SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawn' ORDER BY seq",
+            (room_id,))]
+
+    def pending_withdrawal_restores(self, room_id):
+        """Withdrawals whose files the shared project may still hold."""
+        with self._connection() as db:
+            done = {row[0] for row in db.execute(
+                "SELECT json_extract(value_json,'$.withdrawal_id') FROM events WHERE room_id=? "
+                "AND json_extract(value_json,'$.kind')='task_withdrawal_restored'", (room_id,))}
+            return [event for event in self._withdrawals(db, room_id)
+                    if event.get("restore") and event["withdrawal_id"] not in done]
+
+    def record_withdrawal_restored(self, room_id, withdrawal_id, *, revision, paths):
+        with self._connection(write=True) as db:
+            if db.execute("SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawal_restored' "
+                          "AND json_extract(value_json,'$.withdrawal_id')=?", (room_id, withdrawal_id)).fetchone():
+                return
+            self._event(db, room_id, "task_withdrawal_restored", sender="system", withdrawal_id=withdrawal_id,
+                        revision=revision, paths=paths)
+
+    def pending_withdrawal_discards(self, room_id, provider):
+        """Paths of withdrawn tasks whose unsubmitted bytes may remain in this partner's private tree."""
+        with self._connection() as db:
+            done = {row[0] for row in db.execute(
+                "SELECT json_extract(value_json,'$.withdrawal_id') FROM events WHERE room_id=? "
+                "AND json_extract(value_json,'$.kind')='task_withdrawal_discarded' "
+                "AND json_extract(value_json,'$.provider')=?", (room_id, provider))}
+            return [{"withdrawal_id": event["withdrawal_id"], "paths": entry["paths"]}
+                    for event in self._withdrawals(db, room_id) if event["withdrawal_id"] not in done
+                    for entry in event.get("private") or [] if entry["provider"] == provider]
+
+    def withdrawal_discard_providers(self, room_id):
+        with self._connection() as db:
+            if not db.execute("SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawn' LIMIT 1",
+                              (room_id,)).fetchone():
+                return set()
+            done = {(row[0], row[1]) for row in db.execute(
+                "SELECT json_extract(value_json,'$.withdrawal_id'),json_extract(value_json,'$.provider') FROM events "
+                "WHERE room_id=? AND json_extract(value_json,'$.kind')='task_withdrawal_discarded'", (room_id,))}
+            return {entry["provider"] for event in self._withdrawals(db, room_id)
+                    for entry in event.get("private") or [] if (event["withdrawal_id"], entry["provider"]) not in done}
+
+    def record_withdrawal_discarded(self, room_id, provider, withdrawal_ids, paths):
+        with self._connection(write=True) as db:
+            for withdrawal_id in withdrawal_ids:
+                self._event(db, room_id, "task_withdrawal_discarded", sender="system", provider=provider,
+                            withdrawal_id=withdrawal_id, paths=paths)
+
     def objective_action_seen(self, room_id, action, request_id, parameters):
         with self._connection() as db:
             self._room(db, room_id)
@@ -4544,7 +4695,7 @@ class RoomStore:
 
     def objective_action(self, room_id, action, request_id, parameters, *, binding=None, policy=None, objective_id=None,
                          baseline=None, answer=None, user_message=None, request_identity=None, quota_recovered=(), runtime_change=None,
-                         message_target="all", scope_retry=None, waiting=False):
+                         message_target="all", scope_retry=None, retained_work=None, waiting=False):
         """User actions and automatic stages share one transactional ledger.
 
         No client supplies a continuation goal; it comes only from the frozen
@@ -4601,6 +4752,10 @@ class RoomStore:
                         include_provenance=True, include_retry_review=True)
                     if baseline.get("files") != expected_files:
                         raise RoomError("objective_binding_changed")
+                cut_off = self._native_cut_off_work(db, room_id) if room["mode"] == "native_project" else []
+                if any({key: value for key, value in item.items() if key != "observation"} not in cut_off
+                       for item in retained_work or ()):
+                    raise RoomError("native_recovery_binding_changed")
                 previous = self._team.objectives.current(db, room_id)
                 goal = previous["original_goal"] if previous else room["goal"]
                 target_run = self._team.start_next(db, room_id, goal, team["plan_author"], **binding,
@@ -4613,7 +4768,19 @@ class RoomStore:
                     self._event(db, room_id, "native_scope_retry_approved", sender="user",
                         source_run_id=binding["run_id"], source_jobs=[item["job_id"] for item in candidates],
                         task_ids=sorted(scope_errors), old_commands_replayed=False)
+                # Install every read-only inspection and its group before
+                # ordinary calls can reach a partner whose tree still holds them.
+                inspections = []
+                for item in retained_work or ():
+                    task = self._team.task(db, room_id, item["task_id"])
+                    if task is None or task["owner"] != item["provider"] or task["status"] not in {"assigned", "review"}:
+                        continue
+                    inspections.append(self._team.inspect_native_partial_after_recovery(db, room_id, item, item["observation"]))
+                if inspections:
+                    self._event(db, room_id, "native_partial_inspection_group", sender="system", run_id=target_run,
+                                inspection_job_ids=inspections, canonical_imported=False)
                 self._team.reconcile(db, room_id)
+                self._team.redeliver_unanswered(db, room_id, binding["run_id"])
             elif action == "objective":
                 if team["current_run_id"] != binding["run_id"] or team["phase"] != "ready_for_user" or self._team.pending(db, room_id):
                     raise RoomError("team_run_not_ready")

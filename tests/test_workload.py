@@ -163,6 +163,19 @@ class PartnerSetting(unittest.TestCase):
         scopes = self.manager.workload_profiles()
         self.assertEqual(scopes["alias"], scopes["claude"])
 
+    def test_a_low_account_reading_reaches_scheduling_and_the_card(self):
+        # Catches the reserve being computed but dropped before dispatch or the partner card.
+        reading = {"state": "ready", "email": "person@example.test", "plan": "plus", "auth_method": "chatgpt",
+                   "source": "codex_app_server", "scope": "default_cli_login", "reason": None, "checked_at": 40, "stale": False,
+                   "quota": {"state": "available", "source": "codex_app_server_account_rate_limits", "scope": "provider_account",
+                             "reason": None, "checked_at": 40, "stale": False,
+                             "windows": [{"name": "codex:primary", "used_percent": 91, "resets_at": 9000}]}}
+        self.manager._account_cache["codex"] = reading
+        self.assertTrue(self.manager.workload_profiles()["codex"][2])
+        self.assertFalse(self.manager.workload_profiles()["claude"][2])
+        self.assertEqual(self.manager.get("codex")["quota_reserve"], 9)
+        self.assertIsNone(self.manager.get("claude")["quota_reserve"])
+
     def test_invalid_input_changes_nothing(self):
         # Catches a bad level being written and then breaking every later load.
         self.manager.set_workload("claude", "high")
@@ -231,8 +244,14 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
                                            "proposal_digest": context["objective"]["checkpoint_proposal"]["proposal_digest"]}])
         self.fail(phase)
 
-    async def finished(self):
-        created = await self.create(participants=["claude", "codex", "third"])
+    async def finished(self, target="claude"):
+        if target == "claude":
+            created = await self.create(participants=["claude", "codex", "third"])
+        else:
+            created = await self.service.create_room(
+                "Update the existing value and preserve notes.", target, str(native.uuid4()), mode="native_project",
+                project_id=self.registration["project"]["id"], participants=["claude", "codex", "third"], work_mode="build",
+                runtime_settings={"permission": "full_access", "members": {}}, execution_policy={"mode": "autonomous"})
         await self.settle()
         state = await self.service.read_room(created["room"]["id"])
         self.assertEqual(state["objective"]["status"], "complete", state["team"])
@@ -272,3 +291,26 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
         pool = next(row for row in state["workload"]["accounts"] if row["scope"] == "pool")
         self.assertEqual(sorted(pool["members"]), ["codex", "third"])
         self.assertEqual(pool["points"], 4000)
+
+    async def test_an_account_down_to_its_reserve_reviews_only_when_nobody_else_can(self):
+        # Catches the reserve being shown but never reaching the reviewer choice.
+        self.profiles = {"codex": ("codex", "normal", True)}
+        state = await self.finished()
+        self.assertNotIn("codex", self.reviewers(state))
+        self.assertEqual(state["team"]["plan_author"], "claude")
+
+    async def test_a_planner_down_to_its_reserve_hands_the_plan_on(self):
+        # Catches the first member writing the plan from its last few percent while others have plenty.
+        self.profiles = {"claude": ("claude", "normal", True)}
+        state = await self.finished("all")
+        self.assertEqual(state["team"]["plan_author"], "codex")
+        # A partner the user names still writes the plan.
+        state = await self.finished("claude")
+        self.assertEqual(state["team"]["plan_author"], "claude")
+
+    async def test_everyone_down_to_the_reserve_keeps_working_as_before(self):
+        # Catches the protection stopping a room that has nobody better to use.
+        self.profiles = {member: (member, "normal", True) for member in ("claude", "codex", "third")}
+        state = await self.finished()
+        self.assertEqual(set(self.reviewers(state)), {"codex"})
+        self.assertEqual(state["team"]["plan_author"], "claude")

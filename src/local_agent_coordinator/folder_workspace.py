@@ -942,6 +942,59 @@ class FolderWorkspace(ProjectWorkspace):
                     used += size
         return {"revision": revision, "matches": matches, "next_offset": None}
 
+    def restore_paths(self, proposal_id, paths, undone_proposals):
+        """Take back the named proposals' changes to these paths, keeping anyone else's.
+
+        For each path, the newest run of changes made only by undone proposals
+        is reverted to the entry just before it, including removing a file they
+        created. A later change by another proposal stops the walk, so it stays.
+        Returns the new revision and the paths changed, or no revision if nothing differs.
+        """
+        if (not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
+                or not isinstance(paths, list) or not isinstance(undone_proposals, list)):
+            raise ProjectWorkspaceError("invalid_project_request")
+        names = sorted({_path(path) for path in paths})
+        undone = set(undone_proposals)
+        fingerprint = _hash(canonical_json({"restore_paths": names, "undone": sorted(undone)}))
+        with self._locked() as (room, revisions, _):
+            manifest = self._manifest(room)
+            for revision, commit in enumerate(manifest["commits"]):
+                if commit["proposal_id"] == proposal_id:
+                    if commit["fingerprint"] != fingerprint:
+                        raise ProjectWorkspaceError("project_proposal_conflict")
+                    return {"revision": revision, "paths": [], "replayed": True}
+            current = self._index(revisions, manifest)
+            indexes = {manifest["revision"]: current}
+
+            def entry(number, path):
+                if number not in indexes:
+                    indexes[number] = self._index(revisions, manifest, number)
+                return next((item for item in indexes[number]["files"] if item["path"] == path), None)
+
+            merged = {item["path"]: item for item in current["files"]}
+            changed = []
+            for path in names:
+                target = entry(manifest["revision"], path)
+                for number in range(manifest["revision"], 0, -1):
+                    before, after = entry(number - 1, path), entry(number, path)
+                    if before == after:
+                        continue
+                    if manifest["commits"][number]["proposal_id"] not in undone:
+                        break
+                    target = before
+                if target == merged.get(path):
+                    continue
+                changed.append(path)
+                if target is None:
+                    merged.pop(path, None)
+                else:
+                    merged[path] = dict(target)
+            if not changed:
+                return {"revision": None, "paths": [], "replayed": False}
+            result = self._publish_index(room, revisions, manifest, sorted(merged.values(), key=lambda item: item["path"]),
+                                         proposal_id, fingerprint, current["source"], current["excluded"])
+            return {"revision": result["revision"], "paths": changed, "replayed": False}
+
     def apply(self, provider, proposal_id, base_revision, files, *, allow_disjoint=True, ownership_grants=None):
         if (not safe_agent_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
                 or type(base_revision) is not int or base_revision < 0 or type(allow_disjoint) is not bool

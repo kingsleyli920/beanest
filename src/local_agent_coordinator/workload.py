@@ -89,7 +89,9 @@ def fair_order(candidates, members, loads, profile):
     by_member = {member: row for row in accounts(members, loads, profile) for member in row["members"]}
     if len({row["share"] for row in by_member.values()}) <= 1:
         return list(candidates)
-    return sorted(candidates, key=lambda member: (by_member[member]["points"] / by_member[member]["share"], -by_member[member]["share"]))
+    # An account with no share goes last: it takes work only when nobody else can.
+    return sorted(candidates, key=lambda member: (by_member[member]["share"] == 0,
+                                                  by_member[member]["points"] / (by_member[member]["share"] or 1), -by_member[member]["share"]))
 
 
 def rebalance(tasks, members, loads, profile, can_take):
@@ -102,7 +104,7 @@ def rebalance(tasks, members, loads, profile, can_take):
     under it receives, and equal shares balance like any other.
     """
     rows = accounts(members, loads, profile)
-    if len(tasks) < 2 or len(rows) < 2:
+    if len(tasks) < 2 or len(rows) < 2 or not any(row["share"] for row in rows):
         return []
     scope_of = {member: row["scope"] for row in rows for member in row["members"]}
     owners = {task["id"]: task["owner"] for task in tasks}
@@ -162,6 +164,8 @@ def summary(members, loads, profile):
     if len(rows) < 2:
         return None
     points, shares = sum(row["points"] for row in rows), sum(row["share"] for row in rows)
+    if not shares:
+        return None
     return {"configured": len({row["share"] for row in rows}) > 1, "accounts": [
         {**row, "points": round(row["points"]), "target_percent": round(row["share"] * 100 / shares),
          "actual_percent": round(row["points"] * 100 / points) if points else None} for row in rows]}

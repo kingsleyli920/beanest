@@ -472,6 +472,8 @@ class PartnerManager:
         result["account"] = (_unknown_account("configured_cli") if connector else self._account_snapshot(item, data))
         result["availability"] = self.quota_gate.snapshot(_scope(item), result["account"])
         result["workload_level"] = item.get("workload_level", workload.DEFAULT_LEVEL)
+        # Percent left when the account is down to its reserve; it then gets work only when nobody else can.
+        result["quota_reserve"] = None if connector else self._reserve_left(item, data)
         if not connector and item["adapter"] in TRUSTED_ADAPTERS:
             result["account_source"] = self._account_source(item)
         result["configuration_selectable"] = result["selectable"]
@@ -833,7 +835,13 @@ class PartnerManager:
         """Each partner's account and how much that account should take on."""
         with self._locked():
             data = self._load()
-        return {item["id"]: (_scope(item), item.get("workload_level", workload.DEFAULT_LEVEL)) for item in data["profiles"]}
+        return {item["id"]: (_scope(item), item.get("workload_level", workload.DEFAULT_LEVEL), self._reserve_left(item, data) is not None)
+                for item in data["profiles"]}
+
+    def _reserve_left(self, item, data):
+        if item["adapter"] not in TRUSTED_ADAPTERS or _connector(item):
+            return None
+        return self.quota_gate.reserve_left(_scope(item), self._account_snapshot(item, data))
 
     def set_appearance(self, partner_id: str, bean_style: str) -> dict:
         """Change only presentation, preserving the existing partner identity."""

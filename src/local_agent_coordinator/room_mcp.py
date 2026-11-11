@@ -428,7 +428,7 @@ def create_server(client: RoomHTTPClient) -> MCPServer:
         peers; tools remain disabled. Otherwise artifact mode needs one first author.
         work_mode='plan' permits only project inspection and discussion; 'build'
         implements files within the chosen mode's isolated capabilities. Omission
-        preserves legacy behavior. Acceptance never automatically starts work.
+        starts a build room. Acceptance never automatically starts work.
         Reuse request_id for the same intent.
         """
         return await invoke(client.start(goal, target, request_id, mode=mode,

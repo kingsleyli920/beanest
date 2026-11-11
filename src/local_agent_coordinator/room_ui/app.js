@@ -72,7 +72,7 @@ const executionLabels = localizedLabels({
   native_progress_unconfirmed: '任务文件状态未能确认，已暂停，避免重复操作。',
   objective_unavailable: '当前记录尚不能安排下一步，请核对任务状态。',
   invalid_execution_policy: '任务设置与当前服务不兼容，请更新本地服务后继续。',
-  session_identity_unknown: '会话身份尚未确认，不会自动续接或重新派发。',
+  session_identity_unknown: '会话身份尚未确认，旧会话不会再续用；能安全恢复时会换新会话接着做。',
   session_identity_changed: '返回的会话身份发生变化，已停止自动续接。',
   partner_account_home_changed: '这位伙伴已换了登录方式，原会话留在之前的登录里，不能用新账号接着跑。改回原登录方式，或开新任务。',
   invalid_agent_response: '伙伴回复不符合协作协议，本轮需要核对。',
@@ -150,6 +150,8 @@ const errorLabels = localizedLabels({
   all_partners_quota_exhausted: '伙伴的额度都用完了，正在等额度恢复，进度已保留。',
   invalid_execution_policy: '任务设置与当前服务不兼容，请更新本地服务后继续。',
   invalid_runtime_settings: '运行设置不符合要求，请重新选择权限、模型和思考强度。',
+  invalid_role: '有伙伴的角色设置无效，请在它的模型按钮里重新选择角色。',
+  invalid_workload: '有伙伴的工作量设置无效，请在它的模型按钮里重新选择。',
   runtime_settings_unsupported: '这个接入暂不支持指定运行设置，可以选择工具默认。',
   runtime_options_required: '请先在权限与模型中读取这位伙伴的模型选项，再提交任务。',
   runtime_model_unsupported: '这个模型不在工具返回的可选列表中，请刷新模型选项后重选。',
@@ -240,6 +242,14 @@ const errorLabels = localizedLabels({
   project_commit_unconfirmed: '文件提交是否完成尚待核对，请保留原请求。',
   team_run_conflict: '这一轮的版本已经变化，请刷新核对后再操作。',
   team_run_not_ready: '这一轮仍有工作或检查在进行，请先等待当前结果。',
+  team_task_not_found: '这一轮里找不到这一项，刷新后再看看。',
+  task_already_withdrawn: '这一项已经撤掉了。',
+  task_withdraw_finished: '这一项已经做完，不能再撤。',
+  task_withdraw_busy: '伙伴正在处理，这一步结束后才能撤。',
+  task_withdraw_dependents: '还有任务要用到它，需要一起撤掉。',
+  task_withdraw_unconfirmed: '上一步的结果还没核对完，先点“继续推进”让豆窝核对，之后再撤。',
+  task_withdrawal_pending: '撤掉的改动还在从项目里移除，稍后再导出。',
+  user_task_withdraw_required: '撤掉任务要你在豆窝界面里自己操作。',
   team_retry_required: '这次需要明确的新尝试，不会自动重跑原请求。',
   team_cleanup_unconfirmed: '上一轮执行或清理尚未确认，暂不能开始新的尝试。',
   team_run_limit: '这段协作已达到迭代上限，历史和成果仍保留。',
@@ -303,7 +313,7 @@ const state = {
   partnerSaveUncertain: false, partnerVerifying: false, projectChoosing: false,
   contextMenu: null, usagePopover: null, usageButtons: new Map(), partnerControls: new Map(), activityNodes: new Map(), taskOptions: null, handoffHistory: null,
   lifecycleViews: { projects: 'active', partners: 'active', rooms: 'active' }, lifecycleConfirm: null, roomLifecycleSupported: false, roomNativeSessionCleanupSupported: false, messageReceiptsSupported: false, projectDeletionSupported: false, partnerLifecycleSupported: false, partnerOperations: new Map(), partnerIntentEpoch: 0, partnerRequestGeneration: 0, partnerAppliedGeneration: 0, partnerOperationSequence: 0, partnerResponseContexts: new WeakMap(), partnerOperationChecks: new Set(), messageReceiptChecks: new Set(), projectDeletions: new Map(), lifecycleOperations: new Map(), lifecyclePolling: false, roomControlRequests: new Map(), stopRequests: new Set(), sidelinedRequests: new Map(), deletedRooms: new Set(),
-  availabilityTimer: null, availabilityRefreshing: false, availabilityLastStarted: null, availabilityError: '', availabilityRecheck: null,
+  availabilityTimer: null, availabilityRefreshing: false, availabilityLastStarted: null, availabilityError: '', availabilityRecheck: null, taskWithdraw: null, taskWithdrawalSupported: false,
   accountRefreshId: null, accountTimer: null, accountPanels: new Map(), accountAuto: new Map(), accountRefreshTimes: new Map(), accountRefreshErrors: new Map(),
   accountSourceBusy: null, accountSourceErrors: new Map(),
   manager: null, managerReturnFocus: null, managementBusy: false, projectRename: null, projectListFingerprint: '', partnerListFingerprint: '',
@@ -332,6 +342,8 @@ function taskNeedsUser(task) { return task?.status === 'blocked' && decisionBloc
 const quotaBlockCodes = new Set(['all_partners_quota_exhausted', 'subscription_limit_reached', 'agent_quota_exhausted', 'quota_exhausted']);
 function taskQuotaHeld(task) { return task?.status === 'blocked' && task.block_cause == null && quotaBlockCodes.has(task.blocked_reason); }
 function taskAutoBlocked(task) { return task?.status === 'blocked' && !decisionBlockCauses.has(task.block_cause) && !taskQuotaHeld(task); }
+// A task the user withdrew stays listed but is never counted as work to do, done or delivered.
+function taskWithdrawn(task) { return task?.status === 'withdrawn'; }
 const blockCodePattern = /^[a-z][a-z0-9_]{2,80}$/;
 // Mirrors native_outcome.FORMAT_ERRORS (REPLY_MISTAKES included): the service corrects these itself.
 const replyCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked', 'invalid_target', 'team_files_forbidden',
@@ -474,7 +486,7 @@ function controlCaption(node) {
 function nowSummary(snapshot) {
   const room = snapshot.room; const objective = currentObjective(snapshot); const run = snapshot.current_run;
   const status = objective?.status; const outcome = terminalTeamState(snapshot) || snapshot.collaboration?.outcome?.state;
-  const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task === 'object');
+  const tasks = (Array.isArray(snapshot.team?.tasks) ? snapshot.team.tasks : []).filter((task) => task && typeof task === 'object' && !taskWithdrawn(task));
   const stage = Number.isSafeInteger(objective?.stage) ? t("第 {p0} 阶段", { p0: objective.stage }) : Number.isSafeInteger(run?.number) ? t("第 {p0} 轮", { p0: run.number }) : '';
   const label = (text, time) => [text, stage, Number.isFinite(time) ? timeLabel(time) : ''].filter(Boolean).join(' · ');
   const done = tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length;
@@ -648,7 +660,8 @@ function renderTabs() {
   const blocked = tasks.filter(taskNeedsUser).length;
   const progressCount = $('tab-progress-count');
   progressCount.hidden = !tasks.length;
-  progressCount.textContent = blocked ? t("{p0} 项等你", { p0: blocked }) : `${tasks.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length}/${tasks.length}`;
+  const counted = tasks.filter((task) => !taskWithdrawn(task));
+  progressCount.textContent = blocked ? t("{p0} 项等你", { p0: blocked }) : `${counted.filter((task) => ['accepted', 'self_checked'].includes(task.status)).length}/${counted.length}`;
   progressCount.className = `tab-count${blocked ? ' ask' : ''}`;
   $('tab-delivery-count').hidden = !state.deliveryPending;
   $('tab-delivery-count').textContent = String(state.deliveryPending || '');
@@ -687,10 +700,11 @@ function applyTheme(preference = themePreference()) {
 
 
 class RequestError extends Error {
-  constructor(message, { uncertain = false, code = '' } = {}) {
+  constructor(message, { uncertain = false, code = '', details = null } = {}) {
     super(message);
     this.uncertain = uncertain;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -2364,7 +2378,7 @@ async function refreshRuntimeOptions(id) {
   finally { state.runtimeRefreshId = null; renderRuntimeSettings(); }
 }
 function syncModalInert() {
-  document.querySelector('.app-shell').inert = !!(state.manager || state.taskOptions || state.runtimePopoverOpen || state.availabilityRecheck || state.lifecycleConfirm || state.appearance);
+  document.querySelector('.app-shell').inert = !!(state.manager || state.taskOptions || state.runtimePopoverOpen || state.availabilityRecheck || state.lifecycleConfirm || state.appearance || state.taskWithdraw);
   $('workspace-manager').inert = !!(state.lifecycleConfirm || state.availabilityRecheck || state.appearance);
 }
 function dialogControls(container) {
@@ -3154,6 +3168,7 @@ async function api(path, method = 'GET', body) {
       throw new RequestError(message || t("请求未完成，请核对本地服务与任务状态。"), {
         code, uncertain: method !== 'GET' && !workspaceRejections.has(code)
           && (response.status >= 500 || !Object.hasOwn(errorLabels, code)),
+        details: result,
       });
     }
     if (partnerContext) state.partnerResponseContexts.set(result, partnerContext);
@@ -3999,7 +4014,7 @@ function renderRooms() {
 const taskStatusLabels = localizedLabels({
   open: '待认领', assigned: '已分配，等待开始', working: '正在处理', waiting_peer: '等待伙伴',
   review: '等伙伴检查', accepted: '已完成 · 伙伴看过', self_checked: '已完成 · 只做了自查', blocked: '遇到阻塞', unknown: '结果待确认',
-  interrupted: '已中断', cancelled: '已取消',
+  interrupted: '已中断', cancelled: '已取消', withdrawn: '已撤掉',
 });
 const objectiveLabels = localizedLabels({
   running: '正在推进目标', checkpoint: '正在安排下一步', awaiting_continue: '这一阶段已交付', needs_user: '需要你回复',
@@ -4477,7 +4492,8 @@ function renderCollaboration(snapshot) {
     board.open = keepExpanded;
     const accepted = tasks.filter((task) => task?.status === 'accepted' && task.review_kind !== 'self_check').length;
     const selfChecked = tasks.filter((task) => task?.status === 'self_checked' || task.status === 'accepted' && task.review_kind === 'self_check').length;
-    board.append(element('summary', tasks.length ? selfChecked ? t("任务分工 · {p0}/{p1} 已完成 · {p2} 项只做了自查", { p0: accepted + selfChecked, p1: tasks.length, p2: selfChecked }) : t("任务分工 · {p0}/{p1} 已完成，伙伴看过", { p0: accepted, p1: tasks.length }) : t("任务分工 · 正在规划")));
+    const counted = tasks.filter((task) => !taskWithdrawn(task)).length;
+    board.append(element('summary', tasks.length ? selfChecked ? t("任务分工 · {p0}/{p1} 已完成 · {p2} 项只做了自查", { p0: accepted + selfChecked, p1: counted, p2: selfChecked }) : t("任务分工 · {p0}/{p1} 已完成，伙伴看过", { p0: accepted, p1: counted }) : t("任务分工 · 正在规划")));
     if (typeof collaboration.summary === 'string' && collaboration.summary) board.append(element('p', collaboration.summary, 'collaboration-summary'));
     if (!tasks.length) board.append(element('p', t("正在整理分工，伙伴随后可认领任务。"), 'detail-caption'));
     const list = element('ol', '', 'collaboration-tasks');
@@ -5217,7 +5233,7 @@ function teamMemberTask(snapshot, member) {
   const pending = owned.find((task) => task.status === 'assigned');
   if (pending) {
     const dependencies = Array.isArray(pending.dependencies) ? pending.dependencies
-      .map((id) => tasks.find((task) => task.id === id)).filter((task) => task && !['accepted', 'self_checked'].includes(task.status)) : [];
+      .map((id) => tasks.find((task) => task.id === id)).filter((task) => task && !['accepted', 'self_checked', 'withdrawn'].includes(task.status)) : [];
     return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: interfaceList(dependencies.map((task) => taskDisplayTitle(task.title))) }) : t("「{p0}」已认领，等待派发", { p0: taskDisplayTitle(pending.title) });
   }
   const blocked = owned.find((task) => ['blocked', 'unknown', 'interrupted', 'cancelled'].includes(task.status));

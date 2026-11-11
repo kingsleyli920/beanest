@@ -70,6 +70,21 @@ def seconds_available(deadline, now):
     return max(0, deadline - now) if deadline else None
 
 
+DELIVERED = ("accepted", "self_checked")
+# The user removed this task from the round. It ends the task for scheduling,
+# but it is never a delivery: no files, preview, review count or acceptance.
+WITHDRAWN = "withdrawn"
+
+
 def task_finished(task):
     """Self-check can unblock work, but is never an independent acceptance."""
-    return task["status"] in ("accepted", "self_checked")
+    return task["status"] in DELIVERED
+
+
+def task_settled(task):
+    """Nothing more will happen to this task in its round: delivered or withdrawn.
+
+    Use this for "is the round done" and "may a dependent start"; use
+    task_finished for anything that counts or ships a result.
+    """
+    return task["status"] in DELIVERED or task["status"] == WITHDRAWN

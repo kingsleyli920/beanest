@@ -276,7 +276,7 @@ function savedOutbox(storage) {
   const main = entries.find((entry) => entry.request.body.request_id === hint?.request_id) || entries.find((entry) => !entry.request.detached && !entry.request.intervened);
   return { scope: index.scope, request: main?.request || null, sidelined_requests: entries.filter((entry) => entry !== main), deleted_rooms: index.deleted_rooms };
 }
-async function browser({ language = 'zh-CN', languageStorage = new Map(), agents = catalog, rooms = [], projects = [], partners, saved, storage = new Map(), token = 'fictional-test-connection', route, taskModes = ['text'], desktopBridge, selectSaved = true, now = Date.now, selection = '', executionPolicySupport = false, continuousObjectiveSupport = executionPolicySupport, nativeProjectSupport = false, naturalContinuationSupport = false, roomLifecycleSupport = false, roomNativeSessionCleanupSupport = false, messageReceiptsSupport = false, projectDeletionSupport = false, naturalRuntimeSupport = false, partnerLifecycleSupport = false, locationHash = '', idbFailure, pagingSupport = false, hostOutboxScope = null, mediaSupport = false, codeStatusSupport = false, memberInvitationSupport = false, requestIdStart = 0 } = {}) {
+async function browser({ language = 'zh-CN', languageStorage = new Map(), agents = catalog, rooms = [], projects = [], partners, saved, storage = new Map(), token = 'fictional-test-connection', route, taskModes = ['text'], desktopBridge, selectSaved = true, now = Date.now, selection = '', executionPolicySupport = false, continuousObjectiveSupport = executionPolicySupport, nativeProjectSupport = false, naturalContinuationSupport = false, roomLifecycleSupport = false, roomNativeSessionCleanupSupport = false, messageReceiptsSupport = false, projectDeletionSupport = false, naturalRuntimeSupport = false, partnerLifecycleSupport = false, locationHash = '', idbFailure, pagingSupport = false, hostOutboxScope = null, mediaSupport = false, codeStatusSupport = false, memberInvitationSupport = false, taskWithdrawalSupport = false, requestIdStart = 0 } = {}) {
   const document = createDocument();
   const location = { hash: locationHash, pathname: '/', search: '' };
   const history = { replaceState(_state, _title, url) { location.hash = url.includes('#') ? url.slice(url.indexOf('#')) : ''; } };
@@ -309,7 +309,7 @@ async function browser({ language = 'zh-CN', languageStorage = new Map(), agents
       requests.push(request);
       let value = route ? await route(request, document, options) : undefined;
       if (value === undefined) {
-        if (url === '/api/status') value = { app: 'local-agent-rooms', agents, task_modes: taskModes, ...(executionPolicySupport || nativeProjectSupport || naturalContinuationSupport || roomLifecycleSupport || roomNativeSessionCleanupSupport || messageReceiptsSupport || projectDeletionSupport || naturalRuntimeSupport || partnerLifecycleSupport || pagingSupport || hostOutboxScope || mediaSupport || codeStatusSupport || memberInvitationSupport ? { ...(hostOutboxScope ? { user_outbox_scope: hostOutboxScope } : {}), ...(pagingSupport ? { transport_limits: { max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608, event_page_default_limit: 100, event_page_default_bytes: 262144, event_page_max_limit: 500, event_page_max_bytes: 8388608 } } : {}), capabilities: { ...(memberInvitationSupport ? { room_member_invitation_v1: true } : {}), ...(codeStatusSupport ? { room_code_status_v1: true } : {}), ...(mediaSupport ? { room_media_v1: true } : {}), ...(hostOutboxScope ? { user_outbox_v1: true } : {}), ...(pagingSupport ? { room_paging_v1: true } : {}), ...(partnerLifecycleSupport ? { partner_lifecycle_operations: true } : {}), ...(naturalRuntimeSupport ? { natural_runtime_settings: true } : {}), ...(messageReceiptsSupport ? { message_receipts: true } : {}), ...(projectDeletionSupport ? { project_registration_deletion: true } : {}), ...(roomNativeSessionCleanupSupport ? { room_native_session_cleanup: true } : {}), ...(roomLifecycleSupport ? { room_lifecycle_operations: true } : {}), ...(executionPolicySupport ? { execution_policy: true } : {}), ...(continuousObjectiveSupport ? { continuous_objective: true } : {}), ...(nativeProjectSupport ? { native_project: true } : {}), ...(naturalContinuationSupport ? { natural_continuation: true } : {}) } } : {}) };
+        if (url === '/api/status') value = { app: 'local-agent-rooms', agents, task_modes: taskModes, ...(executionPolicySupport || nativeProjectSupport || naturalContinuationSupport || roomLifecycleSupport || roomNativeSessionCleanupSupport || messageReceiptsSupport || projectDeletionSupport || naturalRuntimeSupport || partnerLifecycleSupport || pagingSupport || hostOutboxScope || mediaSupport || codeStatusSupport || memberInvitationSupport || taskWithdrawalSupport ? { ...(hostOutboxScope ? { user_outbox_scope: hostOutboxScope } : {}), ...(pagingSupport ? { transport_limits: { max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608, event_page_default_limit: 100, event_page_default_bytes: 262144, event_page_max_limit: 500, event_page_max_bytes: 8388608 } } : {}), capabilities: { ...(taskWithdrawalSupport ? { task_withdrawal_v1: true } : {}), ...(memberInvitationSupport ? { room_member_invitation_v1: true } : {}), ...(codeStatusSupport ? { room_code_status_v1: true } : {}), ...(mediaSupport ? { room_media_v1: true } : {}), ...(hostOutboxScope ? { user_outbox_v1: true } : {}), ...(pagingSupport ? { room_paging_v1: true } : {}), ...(partnerLifecycleSupport ? { partner_lifecycle_operations: true } : {}), ...(naturalRuntimeSupport ? { natural_runtime_settings: true } : {}), ...(messageReceiptsSupport ? { message_receipts: true } : {}), ...(projectDeletionSupport ? { project_registration_deletion: true } : {}), ...(roomNativeSessionCleanupSupport ? { room_native_session_cleanup: true } : {}), ...(roomLifecycleSupport ? { room_lifecycle_operations: true } : {}), ...(executionPolicySupport ? { execution_policy: true } : {}), ...(continuousObjectiveSupport ? { continuous_objective: true } : {}), ...(nativeProjectSupport ? { native_project: true } : {}), ...(naturalContinuationSupport ? { natural_continuation: true } : {}) } } : {}) };
         else if (['/api/rooms', '/api/rooms?view=compact'].includes(url) && options.method === 'GET') value = { rooms };
         else if (url === '/api/projects' && options.method === 'GET') value = { projects };
         else if (['/api/partners', '/api/partners?view=compact'].includes(url) && options.method === 'GET') value = { partners: partners || agents, supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }] };
@@ -523,6 +523,17 @@ test('a round handoff and session rotation show one line each and the handoff ex
   const betweenTasksEnglish = await browser({ language: 'en', rooms: [saved.room], saved });
   assert.match(betweenTasksEnglish.get('events').textContent, /Claude Code wrote a handoff for the next task/);
   assert.match(english.get('events').textContent, /Settled decisions/);
+});
+
+test('a message sent again after its reply call died shows one line naming the partner', async () => {
+  // Catches: the redelivery hidden from the timeline, shown as a bare "进展", or without English copy.
+  const saved = snapshot({ events: [
+    { seq: 1, kind: 'user_message_redelivered', sender: 'system', recipient: 'claude', source_job_id: jobId, source_run_id: null, created_at: 1800000000 },
+  ] });
+  const ui = await browser({ rooms: [saved.room], saved });
+  assert.match(ui.get('events').textContent, /Claude Code 上次没回完你的消息，已重新发给它。/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.match(english.get('events').textContent, /Claude Code did not finish replying to your message, so it was sent again\./);
 });
 
 test('a cache miss shows one short note for the latest occurrence and stays out of the chat', async () => {
@@ -3679,6 +3690,24 @@ test('quota fallback describes the current integration and promises continued us
   }
 });
 
+test('an account down to its reserve says others go first, on the room line and its account panel', async () => {
+  // Catches: the reserve flag computed on the server but never shown, shown on the wrong partner, or English copy absent.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.workload = { configured: false, accounts: [
+    { scope: 'claude', members: ['claude'], share: 2, level: 'normal', points: 600, calls: 2, target_percent: 50, actual_percent: 60 },
+    { scope: 'codex', members: ['codex'], share: 0, level: 'idle', points: 400, calls: 2, target_percent: 0, actual_percent: 40 },
+  ] };
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, workload_level: 'normal', account: claudeUsageAccount([]), quota_reserve: null },
+    { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'normal', quota_reserve: 9 }];
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 40% · 额度只剩约 9%，先派给别人');
+  assert.equal(ui.get('member-workload-claude').textContent, '本轮工作量 60%');
+  assert.match(ui.get('provider-account-codex').textContent, /额度只剩约 9%，豆窝先把活派给其他伙伴，没人能接时才用它。/);
+  assert.doesNotMatch(ui.get('provider-account-claude').textContent, /额度只剩约/);
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(english.get('member-workload-codex').textContent, 'This round 40% of the work · About 9% quota left, others go first');
+});
+
 test('each account shows its part of the round and its workload level can be changed', async () => {
   // Catches: the percentages missing or attached to the wrong partner, a setting that never reaches the server, or English copy absent.
   const saved = snapshot({ agents: catalog.slice(0, 2) });
@@ -6187,6 +6216,41 @@ test('a local-development room with no recorded settings stays view-only', async
   await ui.click('runtime-shortcut-claude');
   assert.match(ui.get('runtime-shortcut-claude').getAttribute('aria-label'), /未记录模型.*本轮已固定/);
   assert.match(ui.get('runtime-settings-note').textContent, /已固定/);
+});
+
+function agentStartedRoom(workMode) {
+  // The read shape of a room an agent started over MCP: no objective, no recorded models.
+  const saved = withCurrentRun(snapshot({ agents: catalog.slice(0, 2), status: 'ready_for_user', events: [message(1, 'mcp', '完全虚构的文字目标')] }),
+    { work_mode: workMode, runtime_settings: null });
+  saved.collaboration = teamCollaboration({ state: 'ready_for_user' });
+  saved.room.mode = 'text'; saved.room.work_mode = workMode; saved.room.runtime_settings = null;
+  saved.runtime_configuration = { can_edit: true, reason: null, desired: { work_mode: workMode, runtime_settings: null }, pending: false, pending_reason: null };
+  return saved;
+}
+
+test('a room an agent started without a work mode reads as a normal room whose models can change', async () => {
+  // Catches: an agent-started room shown as an old history record with every model locked.
+  const saved = agentStartedRoom('build'); const options = runtimeOptionsFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return options;
+  } });
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /历史任务/);
+  assert.equal(ui.get('work-mode-plan').disabled, false);
+  await ui.click('runtime-shortcut-claude');
+  assert.equal(ui.get('runtime-model-claude').disabled, false);
+  assert.doesNotMatch(ui.get('runtime-shortcut-claude').getAttribute('aria-label'), /已固定/);
+});
+
+test('a real old record without a work mode still reads as history with its models fixed', async () => {
+  // Catches: the agent-room change unlocking settings or dropping the history note on genuinely old records.
+  const saved = agentStartedRoom('legacy'); const options = runtimeOptionsFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return options;
+  } });
+  assert.match(ui.get('collaboration-outcome').textContent, /这是历史任务/);
+  assert.equal(ui.get('work-mode-plan').disabled, true);
+  await ui.click('runtime-shortcut-claude');
+  assert.equal(ui.get('runtime-model-claude').disabled, true);
 });
 
 test('natural runtime edits stay local until one atomic message and show desired pending settings while the actual run stays frozen', async () => {
@@ -11199,4 +11263,116 @@ test('the English interface labels the rename controls in English', async () => 
   assert.equal(renameInput(ui, id).getAttribute('aria-label'), 'New name for Ledger');
   typeRename(ui, id, ''); renameAction(ui, 'save').fire('click'); await settle();
   assert.match(ui.get('projects-list').textContent, /The name can't be empty\./);
+});
+
+function withdrawalFixture() {
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.room.status = 'running';
+  saved.team = { phase: 'working', plan_author: 'claude', revision: 1, run_id: saved.current_run.id, stop_reason: null, members: [], tasks: [
+    { id: 'T1', title: '写入口', owner: 'claude', status: 'working', call_running: true, dependencies: [] },
+    { id: 'T2', title: '写说明', owner: 'codex', status: 'assigned', dependencies: [] },
+    { id: 'T3', title: '补测试', owner: 'codex', status: 'assigned', dependencies: ['T2'] },
+    { id: 'T4', title: '已做完的一项', owner: 'claude', status: 'accepted', review_kind: 'independent_review', dependencies: [] }] };
+  saved.collaboration.tasks = saved.team.tasks.map(({ id, title, owner, status }) => ({ id, title, owner, status, waiting_for: '', result: '' }));
+  return saved;
+}
+const withdrawButtons = (ui) => descendants(ui.get('progress-pane')).filter((node) => node.tagName === 'BUTTON' && node.dataset.withdrawTask);
+
+test('withdrawing a task asks inside the page, lists what depends on it from the service, and sends only after the user agrees', async () => {
+  // Catches a browser confirm() (the fake page has none, so calling it throws), a click that sends at once,
+  // dependents withdrawn without being shown, a running task offered for withdrawal, and finished work offered at all.
+  const saved = withdrawalFixture();
+  const after = structuredClone(saved);
+  for (const task of after.team.tasks) if (['T2', 'T3'].includes(task.id)) task.status = 'withdrawn';
+  after.collaboration.tasks = after.team.tasks.map(({ id, title, owner, status }) => ({ id, title, owner, status, waiting_for: '', result: '' }));
+  after.events = [...after.events, { seq: 91, kind: 'task_withdrawn', sender: 'user', run_id: after.current_run.id, task_id: 'T2', title: '写说明',
+    tasks: [{ id: 'T2', title: '写说明' }, { id: 'T3', title: '补测试' }], created_at: 1091 }];
+  const sent = [];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, taskWithdrawalSupport: true, route(request) {
+    if (!request.path.endsWith('/withdraw-task')) return undefined;
+    sent.push(request.body);
+    if (!request.body.include_dependents) return { error: 'task_withdraw_dependents', task_id: 'T2', dependents: [{ id: 'T3', title: '补测试' }] };
+    Object.assign(saved, structuredClone(after)); return after;
+  } });
+  await ui.click('tab-progress');
+  const buttons = withdrawButtons(ui);
+  assert.deepEqual(buttons.map((node) => node.dataset.withdrawTask), ['T1', 'T2', 'T3'], 'finished work has no withdraw action');
+  const running = buttons[0];
+  assert.equal(running.disabled, true);
+  assert.match(ui.get('progress-pane').textContent, /伙伴正在处理，这一步结束后才能撤/);
+  running.fire('click'); await settle();
+  assert.equal(ui.get('task-withdraw-confirm').hidden, true, 'a running task cannot even open the dialog');
+
+  buttons[1].fire('click'); await settle();
+  assert.equal(ui.get('task-withdraw-confirm').hidden, false);
+  assert.match(ui.get('task-withdraw-title').textContent, /撤掉「写说明」？/);
+  assert.equal(ui.posts().length, 0, 'opening the dialog sends nothing');
+  await ui.click('task-withdraw-cancel');
+  assert.equal(ui.get('task-withdraw-confirm').hidden, true);
+  assert.equal(ui.posts().length, 0, 'keeping the task sends nothing');
+
+  withdrawButtons(ui)[1].fire('click'); await settle();
+  await ui.click('task-withdraw-submit');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(Object.keys(sent[0]).sort(), ['request_id', 'run_id', 'task_id']);
+  assert.equal(sent[0].run_id, saved.current_run.id); assert.equal(sent[0].task_id, 'T2');
+  assert.equal(ui.get('task-withdraw-confirm').hidden, false, 'the dependents are shown before anything more is withdrawn');
+  assert.equal(ui.get('task-withdraw-dependents').hidden, false);
+  assert.equal(ui.get('task-withdraw-dependents').textContent, 'T3「补测试」');
+  assert.equal(ui.get('task-withdraw-submit').textContent, '一起撤掉这 2 项');
+  assert.equal(ui.get('task-withdraw-error').hidden, true);
+
+  await ui.click('task-withdraw-submit');
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].include_dependents, true); assert.equal(sent[1].task_id, 'T2');
+  assert.notEqual(sent[1].request_id, sent[0].request_id);
+  assert.equal(ui.get('task-withdraw-confirm').hidden, true);
+  const pane = ui.get('progress-pane').textContent;
+  assert.match(pane, /1 \/ 2 完成/, 'withdrawn tasks leave the total');
+  assert.match(pane, /2 项已撤掉/);
+  assert.deepEqual(withdrawButtons(ui).map((node) => node.dataset.withdrawTask), ['T1'], 'withdrawn tasks offer nothing more');
+  assert.match(ui.get('notice').textContent, /已撤掉「写说明」和依赖它的 1 项。/);
+  await ui.click('tab-discussion');
+  assert.match(ui.get('events').textContent, /你撤掉了 T2「写说明」，以及依赖它的 T3「补测试」/);
+});
+
+test('a refused withdrawal keeps the dialog open with the service reason, and an older service shows no action', async () => {
+  // Catches a busy/finished refusal closing the dialog silently, and buttons offered by a service that cannot withdraw.
+  const saved = withdrawalFixture();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, taskWithdrawalSupport: true, route(request) {
+    if (request.path.endsWith('/withdraw-task')) return { error: 'task_withdraw_busy' };
+  } });
+  await ui.click('tab-progress');
+  withdrawButtons(ui)[2].fire('click'); await settle();
+  await ui.click('task-withdraw-submit');
+  assert.equal(ui.get('task-withdraw-confirm').hidden, false);
+  assert.equal(ui.get('task-withdraw-error').hidden, false);
+  assert.equal(ui.get('task-withdraw-error').textContent, '伙伴正在处理，这一步结束后才能撤。');
+  assert.equal(ui.get('task-withdraw-submit').disabled, false, 'the user can try again once the step ends');
+  ui.document.root.fire('keydown', { key: 'Escape', preventDefault() {} }); await settle();
+  assert.equal(ui.get('task-withdraw-confirm').hidden, true, 'Esc closes the dialog');
+
+  const old = await browser({ rooms: [saved.room], saved: withdrawalFixture(), executionPolicySupport: true });
+  await old.click('tab-progress');
+  assert.deepEqual(withdrawButtons(old), []);
+});
+
+test('the English interface words withdrawal in English, in the board, the dialog and the timeline', async () => {
+  // Catches withdrawal copy missing from the English catalogue.
+  const saved = withdrawalFixture();
+  saved.team.tasks[3] = { ...saved.team.tasks[3], status: 'withdrawn' };
+  saved.events = [...saved.events, { seq: 91, kind: 'task_withdrawn', sender: 'user', run_id: saved.current_run.id, task_id: 'T4', title: 'Old notes',
+    tasks: [{ id: 'T4', title: 'Old notes' }], created_at: 1091 }];
+  const ui = await browser({ language: 'en-US', rooms: [saved.room], saved, executionPolicySupport: true, taskWithdrawalSupport: true });
+  await ui.click('tab-progress');
+  const pane = ui.get('progress-pane').textContent;
+  assert.match(pane, /1 withdrawn/); assert.match(pane, /Withdrawn/);
+  assert.match(pane, /A partner is working on it; you can withdraw it once this step ends/);
+  const button = withdrawButtons(ui)[1];
+  assert.equal(button.textContent, 'Withdraw');
+  button.fire('click'); await settle();
+  assert.equal(ui.get('task-withdraw-title').textContent, 'Withdraw “写说明”?');
+  assert.doesNotMatch(ui.get('task-withdraw-description').textContent, /[一-龥]/);
+  await ui.click('tab-discussion');
+  assert.match(ui.get('events').textContent, /You withdrew T4 “Old notes”/);
 });

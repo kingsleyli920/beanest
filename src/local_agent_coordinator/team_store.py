@@ -12,7 +12,7 @@ import re
 from uuid import uuid4
 
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, read_only_capabilities
-from .execution_policy import task_finished, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
+from .execution_policy import task_settled, WITHDRAWN, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 from .objective_store import ObjectiveStore
 from .block_contract import BlockContractError, normalize_block_cause
 from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, RoomError, checked_text, checked_message
@@ -233,6 +233,108 @@ class TeamStore:
         self.store._event(db, room_id, "run_accepted", sender="user", run_id=run_id,
                           revision=revision, digest=digest)
 
+    def withdraw(self, db, room_id, run_id, task_id, *, include_dependents, withdrawal_id):
+        """The user removes an unfinished task, and every unfinished task that needs it, from this round.
+
+        Queued calls for them are cancelled; a call already running is never
+        cut off, so a busy task is refused until that step ends. Withdrawn
+        tasks end the round like delivered ones but are never delivered.
+        Returns what the host must still clean outside the database.
+        """
+        team = self.team(db, room_id)
+        if team is None or team["current_run_id"] != run_id:
+            raise RoomError("team_run_conflict")
+        rows = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid", (room_id, run_id)).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        task = by_id.get(task_id)
+        if task is None:
+            raise RoomError("team_task_not_found")
+        if task["status"] == WITHDRAWN:
+            raise RoomError("task_already_withdrawn")
+        if task_settled(task):
+            raise RoomError("task_withdraw_finished")
+        room = self.store._room(db, room_id)
+        if team["phase"] == "unknown" or room["mode"] == "native_project" and self.store._native_continuation_requires_recovery(db, room_id):
+            # A call's outcome is still unconfirmed. Its recovery audits the
+            # task as it stands; removing it first would leave nothing to recover.
+            raise RoomError("task_withdraw_unconfirmed")
+        # Unfinished tasks that wait on this one, directly or through another
+        # unfinished task. A delivered task in between already has its input.
+        chosen = [task_id]
+        changed = True
+        while changed:
+            changed = False
+            for row in rows:
+                if (row["id"] not in chosen and not task_settled(row)
+                        and set(json.loads(row["dependencies_json"])) & set(chosen)):
+                    chosen.append(row["id"])
+                    changed = True
+        busy = db.execute("SELECT 1 FROM team_jobs t JOIN jobs j ON j.id=t.job_id WHERE t.room_id=? AND t.run_id=? "
+                          "AND t.task_id IN (SELECT value FROM json_each(?)) AND j.status='working' LIMIT 1",
+                          (room_id, run_id, json.dumps(chosen))).fetchone()
+        if busy:
+            raise RoomError("task_withdraw_busy")
+        dependents = [{"id": value, "title": by_id[value]["title"]} for value in chosen[1:]]
+        if dependents and not include_dependents:
+            error = RoomError("task_withdraw_dependents")
+            error.details = {"task_id": task_id, "dependents": dependents}
+            raise error
+        cancelled = [row[0] for row in db.execute(
+            "SELECT j.id FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE t.room_id=? AND t.run_id=? "
+            "AND t.task_id IN (SELECT value FROM json_each(?)) AND j.status='queued' ORDER BY j.rowid",
+            (room_id, run_id, json.dumps(chosen)))]
+        for job_id in cancelled:
+            db.execute("UPDATE jobs SET status='cancelled',error='task_withdrawn' WHERE id=?", (job_id,))
+        for provider in {row[0] for row in db.execute("SELECT provider FROM jobs WHERE id IN (SELECT value FROM json_each(?))",
+                                                      (json.dumps(cancelled),))}:
+            if not db.execute("SELECT 1 FROM jobs WHERE room_id=? AND provider=? AND status IN ('queued','working')",
+                              (room_id, provider)).fetchone():
+                db.execute("UPDATE members SET status='idle',current_task=NULL WHERE room_id=? AND provider=? AND status='queued'",
+                           (room_id, provider))
+        db.execute("UPDATE shared_tasks SET status='withdrawn',reviewer=NULL,help_to=NULL,help_text=NULL,blocked_reason=NULL,"
+                   "block_cause=NULL,internal_replan_revision=NULL,ownership_grant_json=NULL "
+                   "WHERE room_id=? AND run_id=? AND id IN (SELECT value FROM json_each(?))", (room_id, run_id, json.dumps(chosen)))
+        # Calls that may have written these tasks' files into the shared project.
+        # A carried task keeps its id, so its earlier unfinished runs count too.
+        job_ids = [row[0] for row in db.execute(
+            "SELECT t.job_id FROM team_jobs t JOIN shared_tasks s ON s.room_id=t.room_id AND s.run_id=t.run_id AND s.id=t.task_id "
+            "WHERE t.room_id=? AND t.phase='work' AND t.task_id IN (SELECT value FROM json_each(?)) "
+            "AND (t.run_id=? OR s.status NOT IN ('accepted','self_checked')) ORDER BY t.rowid",
+            (room_id, json.dumps(chosen), run_id))]
+        withdrawn_paths = sorted({path for value in chosen for path in json.loads(by_id[value]["write_paths_json"])})
+        # Paths an unfinished remaining task may still be writing stay untouched in private trees.
+        live_paths = {path for row in rows if row["id"] not in chosen and not task_settled(row)
+                      for path in json.loads(row["write_paths_json"])}
+        private = {}
+        for value in chosen:
+            owner = by_id[value]["owner"]
+            paths = [path for path in json.loads(by_id[value]["write_paths_json"]) if path not in live_paths]
+            if owner and paths:
+                private.setdefault(owner, set()).update(paths)
+        # Every mode that keeps a shared project (room_store.PROJECT_MODES; imported there, not here).
+        project = room["mode"] in {"python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project"}
+        cleanup = {"restore": {"paths": withdrawn_paths, "job_ids": job_ids} if project and job_ids and withdrawn_paths else None,
+                   "private": [{"provider": provider, "paths": sorted(paths)} for provider, paths in sorted(private.items())]
+                              if room["mode"] == "native_project" else []}
+        self.store._event(db, room_id, "task_withdrawn", sender="user", run_id=run_id, withdrawal_id=withdrawal_id,
+                          task_id=task_id, title=task["title"], tasks=[{"id": task_id, "title": task["title"]}, *dependents],
+                          cancelled_job_ids=cancelled, **cleanup)
+        # A question that only these tasks raised is answered by removing them.
+        objective = self.objectives.current(db, room_id)
+        checkpoint = json.loads(objective["checkpoint_json"] or "{}") if objective else {}
+        if (objective is not None and objective["status"] == "needs_user" and checkpoint.get("origin") == "task_block"
+                and team["phase"] == "working" and not db.execute(
+                    "SELECT 1 FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked'", (room_id, run_id)).fetchone()):
+            db.execute("UPDATE members SET status='idle' WHERE room_id=? AND status='needs_user' AND provider NOT IN "
+                       "(SELECT value FROM json_each(?))", (room_id, json.dumps(list(json.loads(objective["retired_json"])))))
+            db.execute("UPDATE objectives SET status='running',stop_reason=NULL,checkpoint_json=NULL WHERE id=?", (objective["id"],))
+            db.execute("UPDATE team_runs SET status='working' WHERE id=?", (run_id,))
+            db.execute("UPDATE rooms SET blocked_reason=NULL,status='running' WHERE id=?", (room_id,))
+            self.store._event(db, room_id, "task_blocks_resumed", sender="user", run_id=run_id,
+                              task_ids=[], previous_checkpoint=checkpoint, withdrawal_id=withdrawal_id)
+        self.reconcile(db, room_id)
+        return {"withdrawal_id": withdrawal_id, "task_ids": chosen, **cleanup}
+
     @staticmethod
     def pending(db, room_id):
         return db.execute("SELECT 1 FROM jobs WHERE room_id=? AND status IN ('queued','working') "
@@ -307,6 +409,8 @@ class TeamStore:
             abilities = roles.member_abilities(settings)
             if not roles.can(abilities, target, "plan"):
                 target = roles.prefer(self.objectives.available_members(db, room_id) or [target], "plan", abilities)[0]
+            if target in self._reserved(db, room_id):
+                target = self._spare_first(db, room_id, roles.prefer(self.objectives.available_members(db, room_id), "plan", abilities))[0]
         db.execute("UPDATE teams SET phase='planning',revision=0,stop_reason=NULL,plan_author=? WHERE room_id=?", (target,room_id))
         db.execute("UPDATE team_members SET planned=0,plan_ready_revision=-1,coordinated_revision=-1,"
                    "coordinated_signature=NULL,coordination_repair_signature=NULL WHERE room_id=?", (room_id,))
@@ -375,9 +479,9 @@ class TeamStore:
             values = dict(task)
             values.update(room_id=room_id, run_id=target_run_id, ownership_grant_json=None,
                           assignment_epoch=task["assignment_epoch"] + 1,
-                          inherited_from_run=source_run_id if task_finished(task) else None,
+                          inherited_from_run=source_run_id if task_settled(task) else None,
                           repair_execution_id=None, help_to=None, help_text=None)
-            if not task_finished(task):
+            if not task_settled(task):
                 values["reviewer"] = None
                 if (task["status"] in {"assigned", "working", "waiting_peer", "review", "open"}
                         or (task["status"] == "cancelled" and task["blocked_reason"] == "cancel_requested")
@@ -418,6 +522,65 @@ class TeamStore:
         if text_failure:
             self.store._event(db, room_id, "host_text_failure_resumed", sender="user", run_id=target_run_id,
                               source=text_failure, old_commands_replayed=False)
+
+    def redeliver_unanswered(self, db, room_id, source_run_id):
+        """A user's message whose reply call ended without a reply (its process
+        was killed, crashed or was cancelled when a peer failed) goes to the same
+        partner again. The board is carried; a message is not a task, so
+        without this nobody would answer it. Only the message is sent again,
+        never the old call or anything it may have done. Called after a
+        restart has queued its own calls: a partner they already occupy reads
+        the message among the user's recent updates in that call instead.
+        Retained private work is inspected first; the message follows once
+        that inspection is done (resume_deferred_redelivery)."""
+        # The user's own call carries their words; a host correction of its reply
+        # carries the host's, and a completed correction answered the message.
+        # A read-only discussion bound to retained work is resumed by that
+        # work's own read-only inspection, not sent again.
+        rows = db.execute(
+            "SELECT j.id,j.provider,j.text FROM jobs j JOIN team_jobs t ON t.job_id=j.id "
+            "WHERE j.room_id=? AND t.run_id=? AND t.phase='user' AND t.correction_of IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.room_id=j.room_id "
+            "AND json_extract(e.value_json,'$.kind') IN ('partner_handoff_inspection','native_readonly_discussion') "
+            "AND json_extract(e.value_json,'$.job_id')=j.id) ORDER BY j.rowid", (room_id, source_run_id)).fetchall()
+        pending, seen = [], set()
+        for row in rows:
+            chain, answered = [row["id"]], False
+            while chain and not answered:
+                answered = db.execute("SELECT 1 FROM jobs WHERE id IN (SELECT value FROM json_each(?)) AND status='completed'",
+                                      (json.dumps(chain),)).fetchone() is not None
+                chain = [item[0] for item in db.execute("SELECT job_id FROM team_jobs WHERE correction_of IN "
+                                                        "(SELECT value FROM json_each(?))", (json.dumps(chain),))]
+            if not answered and (row["provider"], row["text"]) not in seen:
+                seen.add((row["provider"], row["text"]))
+                pending.append(row)
+        if not pending:
+            return
+        if self.partial_inspection_group_pending(db, room_id):
+            self.store._event(db, room_id, "user_message_redelivery_deferred", sender="system",
+                              run_id=self.team(db, room_id)["current_run_id"], source_run_id=source_run_id)
+            return
+        for row in pending:
+            if self._queue(db, room_id, row["provider"], "user", text=row["text"]):
+                self.store._event(db, room_id, "user_message_redelivered", sender="system", recipient=row["provider"],
+                                  source_job_id=row["id"], source_run_id=source_run_id)
+
+    def resume_deferred_redelivery(self, db, room_id):
+        """Send the messages a restart deferred behind its inspection, once."""
+        team = self.team(db, room_id)
+        row = db.execute("SELECT seq,value_json FROM events WHERE room_id=? "
+                         "AND json_extract(value_json,'$.kind')='user_message_redelivery_deferred' "
+                         "AND json_extract(value_json,'$.run_id')=? ORDER BY seq DESC LIMIT 1",
+                         (room_id, team["current_run_id"])).fetchone()
+        if (row is None or self.partial_inspection_group_pending(db, room_id)
+                or db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
+                              "AND json_extract(value_json,'$.kind')='user_message_redelivery_resumed' LIMIT 1",
+                              (room_id, row[0])).fetchone()):
+            return
+        source_run_id = json.loads(row[1])["source_run_id"]
+        self.store._event(db, room_id, "user_message_redelivery_resumed", sender="system",
+                          run_id=team["current_run_id"], source_run_id=source_run_id)
+        self.redeliver_unanswered(db, room_id, source_run_id)
 
     def _obsolete_native_review_rejection(self, db, room_id, failure, task):
         """Identify the removed tool-count heuristic, not a real binding error.
@@ -534,7 +697,7 @@ class TeamStore:
                 return None
             tasks = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid",
                                (room_id, run_id)).fetchall()
-            blocked = [task for task in tasks if not task_finished(task)]
+            blocked = [task for task in tasks if not task_settled(task)]
             if not blocked or any(task["status"] != "blocked" or task["blocked_reason"] not in
                                   {"invalid_text", "message_too_large", "native_review_unobserved", "team_assignment_changed"}
                                   or task["block_cause"] is not None for task in blocked):
@@ -706,7 +869,8 @@ class TeamStore:
     def create(self, db, room_id, plan_author, members, *, execution_policy=None, directed=True):
         if not directed:
             # A message to everyone lets the room's roles pick who writes the plan.
-            plan_author = roles.prefer(list(members), "plan", self._abilities(db, room_id))[0]
+            plan_author = self._spare_first(db, room_id, roles.prefer(list(members), "plan", self._abilities(db, room_id)),
+                                            members=members)[0]
         db.execute("INSERT INTO teams(room_id,plan_author) VALUES (?,?)", (room_id, plan_author))
         self._create_run(db, room_id, 1)
         if execution_policy is not None:
@@ -982,8 +1146,8 @@ class TeamStore:
         room_id = target["room_id"]
         for old in target["tasks"]:
             task = self.task(db, room_id, old["id"])
-            if task["status"] in {"accepted", "self_checked", "review"}:
-                continue  # Published authorship and actual peer review stay true.
+            if task["status"] in {"accepted", "self_checked", "review", WITHDRAWN}:
+                continue  # Published authorship and actual peer review stay true; withdrawn work moves to nobody.
             epoch = task["assignment_epoch"] + 1
             paths = json.loads(task["write_paths_json"])
             grants = self.make_grant(db, room_id, receiver, paths, files, revision, epoch,
@@ -1074,7 +1238,7 @@ class TeamStore:
                                (room_id, team["current_run_id"])).fetchall():
             if task["id"] == preserve_task_id:
                 continue
-            if task_finished(task):
+            if task_settled(task):
                 continue
             if task["status"] == "blocked":
                 continue
@@ -1458,7 +1622,7 @@ class TeamStore:
             return
         db.execute("UPDATE shared_tasks SET status='assigned' WHERE room_id=? AND run_id=? AND id=?",
                    (job["room_id"], context["run_id"], task["id"]))
-        if all(task_finished(self.task(db, job["room_id"], dependency))
+        if all(task_settled(self.task(db, job["room_id"], dependency))
                for dependency in json.loads(task["dependencies_json"])):
             self._queue(db, job["room_id"], job["provider"], "work", task=task)
 
@@ -1504,7 +1668,7 @@ class TeamStore:
         # reason to fail the whole room. Claims/proposals keep their own gates.
         late_plan_ack = (context["job_phase"] == "coordinate" and context["revision"] == team["revision"]
                          and team["phase"] in {"ready_for_user", "checkpoint", "checkpoint_review"}
-                         and bool(rows) and all(task_finished(task) for task in rows)
+                         and bool(rows) and all(task_settled(task) for task in rows)
                          and bool(commands) and all(isinstance(command, dict) and command.get("type") == "plan_ready"
                                                    for command in commands))
         if (context["job_phase"] == "user" and commands
@@ -1917,10 +2081,26 @@ class TeamStore:
             if any(roles.can(abilities, member, "work") for member in members):
                 idle = {member for member in members if not roles.can(abilities, member, "work")}
 
+        reserved = self._reserved(db, room_id, profiles)
+        if not set(self.objectives.available_members(db, room_id)) <= idle | reserved:
+            idle |= reserved
+
         def profile(member):
-            scope, level = profiles.get(member, (member, workload.DEFAULT_LEVEL))
-            return scope, workload.IDLE if member in idle else levels.get(member, level)
+            entry = profiles.get(member, (member, workload.DEFAULT_LEVEL))
+            return entry[0], workload.IDLE if member in idle else levels.get(member, entry[1])
         return profile
+
+    def _reserved(self, db, room_id, profiles=None, members=None):
+        """Members whose account is down to its reserve, while someone else still has more."""
+        profiles = self.store.account_workloads() if profiles is None else profiles
+        members = self.objectives.available_members(db, room_id) if members is None else list(members)
+        low = {member for member in members if len(profiles.get(member, ())) > 2 and profiles[member][2]}
+        return low if low and len(low) < len(members) else set()
+
+    def _spare_first(self, db, room_id, candidates, members=None):
+        """Candidates in order, those down to their reserve last."""
+        low = self._reserved(db, room_id, members=members)
+        return [member for member in candidates if member not in low] + [member for member in candidates if member in low]
 
     def _fair_order(self, db, room_id, candidates):
         members = self.objectives.available_members(db, room_id)
@@ -1956,8 +2136,8 @@ class TeamStore:
             "WHERE e.room_id=? AND j.run_id=? AND j.phase='user' AND json_extract(e.value_json,'$.kind')='team_command' "
             "AND json_extract(e.value_json,'$.command')='claim'", (room_id, run_id))}
         # Earlier rounds count: a file they wrote still belongs to its author.
-        writers = Counter(path.casefold() for row in db.execute("SELECT write_paths_json FROM shared_tasks WHERE room_id=? AND owner IS NOT NULL",
-                                                                (room_id,)) for path in json.loads(row[0]))
+        writers = Counter(path.casefold() for row in db.execute("SELECT write_paths_json FROM shared_tasks WHERE room_id=? AND owner IS NOT NULL "
+                                                                "AND status!='withdrawn'", (room_id,)) for path in json.loads(row[0]))
 
         def movable(task):
             return (task["status"] == "assigned" and task["assignment_epoch"] == 0 and task["result_version"] == 0
@@ -2301,7 +2481,7 @@ class TeamStore:
         queued_status = "interrupted" if status == "interrupted" else "cancelled"
         db.execute("UPDATE jobs SET status=?,error=? WHERE room_id=? AND status='queued'", (queued_status, reason, room_id))
         db.execute("UPDATE shared_tasks SET status=?,blocked_reason=COALESCE(blocked_reason,?) WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? "
-                   "AND status NOT IN ('accepted','self_checked','blocked','unknown')",
+                   "AND status NOT IN ('accepted','self_checked','withdrawn','blocked','unknown')",
                    (status if status in {"unknown", "cancelled", "interrupted"} else "blocked", reason, room_id))
         db.execute("UPDATE rooms SET blocked_reason=? WHERE id=?", ("unknown" if status == "unknown" else "needs_user", room_id))
 
@@ -2370,8 +2550,12 @@ class TeamStore:
         if any(member["identity_uncertain"] for member in members):
             return "execution_repair_unavailable"
         tasks = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, run["id"])).fetchall()
+        if any(not task_settled(task) for task in tasks):
+            return "execution_repair_unavailable"
+        # Work the user withdrew is never reopened by a repair.
+        tasks = [task for task in tasks if task["status"] != WITHDRAWN]
         affected = {task["id"] for task in tasks if json.loads(task["write_paths_json"])}
-        if not affected or any(not task_finished(task) for task in tasks):
+        if not affected:
             return "execution_repair_unavailable"
         # A text-only conclusion can depend on code too. Invalidate every DAG
         # descendant, while keeping unrelated accepted text work intact.
@@ -2418,6 +2602,7 @@ class TeamStore:
             return False
         if not self.objectives.can_dispatch(db, room_id):
             return False
+        self.resume_deferred_redelivery(db, room_id)
         if team["phase"] in {"checkpoint", "checkpoint_review"}:
             checkpoint = json.loads(objective["checkpoint_json"])
             if self.pending(db, room_id):
@@ -2448,7 +2633,7 @@ class TeamStore:
             team = self.team(db, room_id)
             if team["phase"] == "working":
                 return False
-        if tasks and all(task_finished(task) for task in tasks):
+        if tasks and all(task_settled(task) for task in tasks):
             db.execute("UPDATE teams SET phase='ready_for_user' WHERE room_id=?", (room_id,))
             return team["phase"] != "ready_for_user"
         if deadline_reached(room["deadline"], self.store.clock()):
@@ -2520,7 +2705,7 @@ class TeamStore:
                 changed = self._queue(db, room_id, task["help_to"], "help", task=task) or changed
             elif task["status"] == "assigned":
                 dependencies = json.loads(task["dependencies_json"])
-                if all(task_finished(self.task(db, room_id, value)) for value in dependencies):
+                if all(task_settled(self.task(db, room_id, value)) for value in dependencies):
                     changed = self._queue(db, room_id, task["owner"], "work", task=task) or changed
         if any(task["status"] == "open" for task in tasks):
             changed = self._coordinate(db, room_id, members) or changed
@@ -2562,7 +2747,7 @@ class TeamStore:
         missing_plan = not db.execute("SELECT 1 FROM shared_tasks WHERE room_id=? AND run_id=?",
                                       (room_id, team["current_run_id"])).fetchone()
         owners = [dict(row) for row in db.execute(
-            "SELECT id,owner FROM shared_tasks WHERE room_id=? AND run_id=? AND owner IS NOT NULL ORDER BY id",
+            "SELECT id,owner FROM shared_tasks WHERE room_id=? AND run_id=? AND owner IS NOT NULL AND status!='withdrawn' ORDER BY id",
             (room_id, team["current_run_id"]))]
         planners = self.coordination_members(db, room_id, self.objectives.available_members(db, room_id))
         unconfirmed = [row[0] for row in db.execute(
@@ -2694,6 +2879,10 @@ class TeamStore:
         if team is None:
             return None
         tasks = []
+        # A task with a running call cannot be withdrawn until that step ends.
+        running = {row[0] for row in db.execute(
+            "SELECT t.task_id FROM team_jobs t JOIN jobs j ON j.id=t.job_id WHERE t.room_id=? AND t.run_id=? "
+            "AND t.task_id IS NOT NULL AND j.status='working'", (room_id, team["current_run_id"]))}
         for row in db.execute("SELECT * FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? ORDER BY rowid", (room_id,)):
             value = {key: row[key] for key in row.keys() if key not in {"room_id", "dependencies_json", "write_paths_json", "result_files_json", "capacity_rejection_json", "ownership_grant_json"}}
             value["dependencies"] = json.loads(row["dependencies_json"])
@@ -2702,6 +2891,8 @@ class TeamStore:
             rejection = json.loads(row["capacity_rejection_json"]) if row["capacity_rejection_json"] else None
             value["capacity_rejection"] = ({key: item for key, item in rejection.items() if key != "proposal"}
                                             if rejection else None)
+            if row["id"] in running:
+                value["call_running"] = True
             tasks.append(value)
         members = [{"id": row["provider"], "planned": bool(row["planned"]),
                     "plan_ready": row["plan_ready_revision"] == team["revision"],
