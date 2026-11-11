@@ -58,9 +58,10 @@ ERROR_CODES = frozenset({
 
 
 class _HTTPError(Exception):
-    def __init__(self, status: int, code: str):
+    def __init__(self, status: int, code: str, details: dict | None = None):
         self.status = status
         self.code = code
+        self.details = details or {}
 
 
 class _BridgeLoop:
@@ -372,7 +373,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._response(200, content, content_type)
         except _HTTPError as error:
             self.close_connection = True
-            self._json(error.status, {"error": error.code})
+            self._json(error.status, {**error.details, "error": error.code})
         except (BridgeError, ParadevError, StoreError) as error:
             code = error.code if error.code in ERROR_CODES else "operation_failed"
             status = 404 if code == "task_not_found" else 409

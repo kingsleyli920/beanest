@@ -501,6 +501,48 @@ def acknowledge_published(workspace, previous_manifest, published_files, *, reso
     return receipt
 
 
+def discard_paths(workspace, previous_manifest, paths):
+    """Put named paths back to their last published bytes in this private tree.
+
+    Used only for work the user withdrew: its unsubmitted bytes must never be
+    collected later. A file the baseline does not know is removed. Returns the
+    new receipt and the paths that actually changed.
+    """
+    root = _directory(workspace)
+    entries = _entries(previous_manifest)
+    discarded = []
+    for name in sorted({_path(value) for value in paths}):
+        path = _file(root, name)
+        before = entries.get(name)
+        if not path.exists():
+            if before is None:
+                continue
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        elif not path.is_file():
+            raise NativeWorkspaceError("invalid_native_file")
+        elif before is None:
+            path.unlink()
+            discarded.append(name)
+            continue
+        elif _file_digest(path) == before["sha256"]:
+            continue
+        raw = _read_baseline(root, before)
+        temporary = path.with_name(".beanest-discard-" + str(uuid4()))
+        try:
+            with temporary.open("xb") as output:
+                output.write(raw)
+            temporary.chmod(0o700 if before.get("executable") else 0o600)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        discarded.append(name)
+    names = set(discarded) | {_path(value) for value in paths}
+    receipt = {**previous_manifest, "conflicts": [item for item in previous_manifest.get("conflicts", [])
+                                                   if item["path"] not in names]}
+    _save_receipt(root, receipt)
+    return receipt, discarded
+
+
 def sync_workspace(workspace, previous_manifest, source_directory, source_manifest, *, cancelled=None):
     """Sync one exact shared revision without replacing unsubmitted local work."""
     root, source = _directory(workspace), _directory(source_directory)

@@ -1505,6 +1505,17 @@ h1 { max-width: none; margin-top: 3px; color: var(--ink); font-size: 19px; line-
 .task-why { grid-column: 2 / span 3; display: flex; flex-direction: column; gap: 6px; padding-bottom: 2px; color: var(--ink2); font-size: 12.5px; }
 .task-row.tone-wait .task-why { color: var(--muted); }
 .task-why p { margin: 0; }
+/* Withdrawal: an action column only on rows that can be withdrawn; colors come from theme variables, so dark mode follows. */
+.task-row.has-action { grid-template-columns: 22px minmax(0, 1fr) auto auto auto; }
+.task-row.has-action .task-why { grid-column: 2 / span 4; }
+.task-withdraw { padding: 3px 9px; white-space: nowrap; }
+.task-withdraw:disabled { cursor: not-allowed; opacity: .55; }
+.task-withdraw-note { grid-column: 2 / -1; color: var(--muted); font-size: 12px; }
+.task-row.tone-wd .task-name { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.si.wd { border: 1px solid var(--line-strong); color: var(--muted); }
+.chip.wd { background: var(--sunken); color: var(--muted); }
+.stage-seg i.wd, .stage-legend i.wd { background: var(--line-strong); opacity: .5; }
+.task-withdraw-dependents { margin: 0 0 4px; padding-left: 20px; color: var(--ink); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
 .pane-empty { margin: 0; padding: 18px 16px; border: 1px dashed var(--line-strong); border-radius: 12px; color: var(--muted); font-size: 13px; text-align: center; }
 .progress-summary { margin: 0; color: var(--ink2); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 

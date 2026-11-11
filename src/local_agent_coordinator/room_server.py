@@ -27,7 +27,7 @@ from .partner_manager import PartnerError
 from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 
-ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective))?")
+ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
@@ -124,6 +124,9 @@ ERROR_STATUS = {
     "native_recovery_required":409,
     "native_recovery_diagnostic_unconfirmed":409,
     "objective_reassessment_unavailable":409,
+    "team_task_not_found":404, "task_already_withdrawn":409, "task_withdraw_finished":409,
+    "task_withdraw_busy":409, "task_withdraw_dependents":409, "task_withdrawal_pending":409, "task_withdraw_unconfirmed":409,
+    "user_task_withdraw_required":403,
 }
 
 
@@ -324,7 +327,9 @@ class _RoomHandler(_Handler):
             code = getattr(error, "code", "operation_failed")
             if code not in ERROR_STATUS:
                 raise _HTTPError(409, "operation_failed") from None
-            raise _HTTPError(ERROR_STATUS[code], code) from None
+            # Only the withdrawal conflict carries data: the tasks the user is asked to confirm.
+            details = getattr(error, "details", None) if code == "task_withdraw_dependents" else None
+            raise _HTTPError(ERROR_STATUS[code], code, details) from None
 
     async def _dispatch_room(self, path: str, query: str, body: dict | None):
         service = self.server.service
@@ -750,6 +755,17 @@ class _RoomHandler(_Handler):
             if body:
                 raise _HTTPError(400, "invalid_arguments")
             return await service.cancel_room(match[1])
+        if match and match[2] == "withdraw-task":
+            if mcp:
+                raise _HTTPError(403, "user_task_withdraw_required")
+            if (set(body) not in ({"request_id", "run_id", "task_id"}, {"request_id", "run_id", "task_id", "include_dependents"})
+                    or not self._text(body.get("request_id"), 512)
+                    or not isinstance(body.get("run_id"), str) or re.fullmatch(TASK_ID, body["run_id"]) is None
+                    or not isinstance(body.get("task_id"), str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", body["task_id"]) is None
+                    or type(body.get("include_dependents", False)) is not bool):
+                raise _HTTPError(400, "invalid_arguments")
+            return await service.withdraw_task(match[1], body["request_id"], run_id=body["run_id"], task_id=body["task_id"],
+                                               include_dependents=body.get("include_dependents", False))
         raise _HTTPError(404, "route_not_found")
 
 

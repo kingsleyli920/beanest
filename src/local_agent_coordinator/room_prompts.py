@@ -32,6 +32,12 @@ _BLOCK_PROTOCOL = (
 )
 
 
+WITHDRAWN_INSTRUCTION = (
+    "The user withdrew these tasks. Do not do, redo, recreate or propose them again, in this round or a later one, "
+    "and do not treat them as missing or unfinished work in a checkpoint, unless the user asks for them again in a "
+    "later message. They are not deliveries: their results and unaccepted file changes were removed from the shared project. ")
+
+
 ROUND_HANDOFF_INSTRUCTION = (
     " context.round_handoff is the record the previous round or task left, and this session starts without that "
     "memory. It is information only: check it against the repository's current state before relying on any of it. "
@@ -125,6 +131,23 @@ def _previous_runs(runs, current_run_id, *, goal_characters=None):
 
 def _earlier_runs_omitted(runs, current_run_id):
     return max(0, sum(item["id"] != current_run_id for item in runs) - RECENT_RUNS)
+
+
+def _withdrawn_by_user(tasks, events):
+    """Tasks the user withdrew, on this board or in an earlier round, newest last."""
+    seen, result = set(), []
+    for event in events:
+        if event["kind"] == "task_withdrawn":
+            for item in event.get("tasks") or []:
+                key = (event.get("run_id"), item["id"])
+                if key not in seen:
+                    seen.add(key)
+                    result.append({"id": item["id"], "title": item["title"], "run_id": event.get("run_id")})
+    for item in tasks:
+        if item.get("status") == "withdrawn" and (item.get("run_id"), item["id"]) not in seen:
+            seen.add((item.get("run_id"), item["id"]))
+            result.append({"id": item["id"], "title": item["title"], "run_id": item.get("run_id")})
+    return result[-16:]
 
 
 def _direct_updates(events):
@@ -320,13 +343,15 @@ class RoomPromptMixin:
 
     def _team_prompt(self, job):
         snapshot = self.store.snapshot(job["room_id"])
-        team = snapshot["team"]
+        # call_running is for the user's page; partners' prompts keep their stable task shape.
+        team = {**snapshot["team"], "tasks": [{key: value for key, value in item.items() if key != "call_running"}
+                                              for item in snapshot["team"]["tasks"]]}
         self._prepare_team_workspace(job, team)
         task = next((item for item in team["tasks"] if item["id"] == job["team"]["task_id"]), None)
         # Keep complete text for this job's deliverable; other results remain
         # explicit excerpts rather than silently filling the whole context.
         dependencies = set(task["dependencies"]) if task else set()
-        board = {**team, "tasks": [{**item,
+        board = {**team, "tasks": [{**item, "result": None, "user_withdrawn": True} if item.get("status") == "withdrawn" else {**item,
             "result": item["result"] if task and (item["id"] == task["id"] or item["id"] in dependencies) else
                       _excerpt(item.get("result") or "", 600)} for item in team["tasks"]]}
         budget = snapshot["budget"]
@@ -362,6 +387,9 @@ class RoomPromptMixin:
             "objective": snapshot.get("objective"),
             "current_user_updates": _direct_updates(snapshot["events"]),
         }
+        withdrawn = _withdrawn_by_user(team["tasks"], snapshot["events"])
+        if withdrawn:
+            context["withdrawn_by_user"] = {"instruction": WITHDRAWN_INSTRUCTION, "tasks": withdrawn}
         if snapshot.get("objective"):
             context["current_stage_goal"] = job["goal"]
             if job["team"]["job_phase"] in {"checkpoint", "checkpoint_review"}:
@@ -385,7 +413,7 @@ class RoomPromptMixin:
         context["previous_deliveries"] = [
             {"run_id":previous["id"],"tasks":[{key:task[key] for key in ("id","title","result_version","result_files")}
                 | {"result":_excerpt(task.get("result") or "",600)}
-                for task in self.store.read_run(job["room_id"],previous["id"])["team"]["tasks"]]}
+                for task in self.store.read_run(job["room_id"],previous["id"])["team"]["tasks"] if task.get("status") != "withdrawn"]}
             for previous in snapshot["runs"][:-1][-2:]]
         source_plan = self._source_plan(snapshot)
         if source_plan:

@@ -5,7 +5,7 @@ from copy import deepcopy
 import re
 
 from .runtime_settings import read_only
-from .execution_policy import task_finished
+from .execution_policy import task_finished, WITHDRAWN
 
 
 class _SystemText(str):
@@ -165,6 +165,11 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     current_files = {file["path"]: file for file in project.get("files", [])}
     stale = False
     for task in team["tasks"]:
+        if task["status"] == WITHDRAWN:
+            # Listed so the board stays true, but never remaining, delivered or reviewed work.
+            tasks.append({"id": task["id"], "title": task["title"], "owner": task["owner"],
+                          "status": task["status"], "waiting_for": "", "result": ""})
+            continue
         waiting = (task.get("blocked_reason") or
                    (_system("等待 {p0} 的协助", names.get(task.get("help_to"), task.get("help_to"))) if task["status"] == "waiting_peer" else
                     _system("等待独立审核") if task["status"] == "review" else
@@ -179,6 +184,9 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
                 if current_files.get(file["path"], {}).get("sha256") != file["sha256"]:
                     stale = True
                     remaining.append(task["title"] + _system("：交付文件后来发生变化，需要重新核对。"))
+    withdrawn = [task for task in tasks if task["status"] == WITHDRAWN]
+    tasks_in_scope = tasks
+    tasks = [task for task in tasks if task["status"] != WITHDRAWN]
     if not verified_execution and tasks and all(task_finished(task) for task in tasks):
         self_checks = sum(task["status"] == "self_checked" for task in tasks)
         validation.update(scope="self_check" if self_checks == len(tasks) else "mixed_review" if self_checks else "static_review",
@@ -200,7 +208,11 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     elif phase == "ready_for_user" and not active:
         objective = snapshot.get("objective")
         checkpoint_finished = objective and objective["status"] in {"complete", "awaiting_continue"}
-        if (not tasks and not checkpoint_finished) or remaining:
+        if not tasks and withdrawn and not remaining and not checkpoint_finished:
+            state = "ready_for_user"
+            reason = _system("本轮的任务都被你撤掉了，没有新的交付。")
+            next_action = _system("需要做别的，直接在这里说。")
+        elif (not tasks and not checkpoint_finished) or remaining:
             state = "needs_user"
             reason = _system("任务清单还有未确认的交付，尚不能验收。")
             next_action = _system("先核对任务清单及实际交付，处理未完成项。")
@@ -267,7 +279,10 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
             validation.update(scope="self_check" if any(task["status"] == "self_checked" for task in tasks) else "not_run",
                 summary=_system("可查看原生工具的实际运行记录；模型结论不能代替测试验收。"))
         validation["summary"] += _system("改动保存在私有副本，豆窝未自动合回原目录；Full Access 不是沙箱。")
+    summary = _system("共享任务 {p0}/{p1} 已交付并检查", sum(task_finished(task) for task in tasks), len(tasks))
+    if withdrawn:
+        summary += _system("，{p0} 项已撤掉", len(withdrawn))
     return _with_display_i18n({"mode": "team", "phase": phase,
-            "summary": _system("共享任务 {p0}/{p1} 已交付并检查", sum(task_finished(task) for task in tasks), len(tasks)),
-            "tasks": tasks, "outcome": {"state": state, "reason": reason, "next_action": next_action,
+            "summary": summary,
+            "tasks": tasks_in_scope, "outcome": {"state": state, "reason": reason, "next_action": next_action,
                 "validation": validation, "artifacts": artifacts, "remaining": remaining}})
