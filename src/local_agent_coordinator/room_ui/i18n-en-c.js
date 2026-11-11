@@ -1023,4 +1023,11 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "伙伴检查中": "Partner checking",
   "已提交子任务，等伙伴检查": "submitted a subtask for a partner's check",
   "{p0} 已提交{p1}，等伙伴检查": "{p0} submitted {p1} for a partner's check",
+  "改名": "Rename",
+  "{p0} 的新名字": "New name for {p0}",
+  "名字不能为空。": "The name can't be empty.",
+  "名字太长了，最多 80 个字。": "The name is too long. Use 80 characters or fewer.",
+  "这个名字不能用。名字里不能有换行这类控制字符，也不能像密钥或令牌。": "This name can't be used. It can't contain control characters such as line breaks, or look like a key or token.",
+  "改名结果还没确认，请刷新列表核对。": "The rename isn't confirmed yet. Refresh the list to check.",
+  "已改名为「{p0}」。": "Renamed to “{p0}”.",
 });

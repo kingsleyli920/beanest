@@ -39,6 +39,7 @@ Snapshot 的 `member_invitation` 提供 `supported/can_invite/reason/candidates`
 - `GET /api/rooms/<uuid>/preview?revision=N&path=<relative.svg>` → `{content_type,content_base64,sha256,source_sha256,revision,path}`；`sha256` 为安全预览字节 hash，`source_sha256` 为原文 hash。预览与导出均只读且只接受当前精确版本；`revision` 必填且只能出现一次，为十进制非负整数，重复或额外 query 键拒绝。
 - `POST /api/rooms/<uuid>/cancel`，空对象 → room snapshot；取消后核对自身子进程，不把“停止派发”当退出。
 - `GET /api/projects` → `{projects:[{id,name,path,files,created_at,selection_kind?}]}`，不返回文件正文；`POST /api/projects`接受默认目录登记`{name,path,selection_kind:"folder"}`，其记录为`files:[]`；旧`{name,path,files}`继续登记指定文件。均仅用户配置入口可用，不启动模型；目录登记不遍历或读取正文。
+- `POST /api/projects/<id>/name`，正文严格为`{"name":"新名字"}`，只改登记里的显示名，返回`{project,projects}`；不动项目目录、路径、文件列表和已有任务的副本。名字去掉首尾空白后为1–80字，含控制字符或疑似凭据返回400 `invalid_project_request`，id不存在返回404 `project_not_found`，正在删除返回409 `project_deletion_pending`；名字不变不写盘。已归档项目也能改名。仅用户配置入口可用，MCP返回403。
 - `GET /api/partners` → `{partners,supported_adapters,connection_templates,connection_protocol,discovery,bean_styles,observed_at,scope:"coordinator_owned_only"}`，包含已保存 health 与本服务 monitor，不触发检查。
 - `POST /api/partners` 接受 `{id,name,adapter,avatar?,bean_style?,connection?}`；Claude/Codex/Kimi 使用原生适配器，`deepseek` / `local_json` 为待配置的本机 JSON 连接器模板，不表示厂商原生 CLI 已兼容。`bean_style` 仅为固定装饰形象，由服务目录提供。
 - `POST /api/partners/discover` 接受空对象，刷新 PATH / 固定位置安装观察。Claude/Codex 只看安装位置；Kimi 已安装时额外做一次不发提示词的登录状态握手。不调用模型，不重写配置或恢复手动停用者。
