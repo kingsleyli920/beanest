@@ -28,7 +28,9 @@ function renderMemberWorkload(id, workload) {
     : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
       : t("本轮工作量 {p0}%", { p0: account.actual_percent });
   const role = copyRole(state.snapshot?.room?.runtime_settings?.members?.[id]?.role);
-  const text = [role ? t("角色：{p0}", { p0: roleName(role) }) : '', share].filter(Boolean).join(' · ');
+  const reserve = state.partners.find((partner) => partner.id === id)?.quota_reserve;
+  const text = [role ? t("角色：{p0}", { p0: roleName(role) }) : '', share,
+    Number.isFinite(reserve) ? t("额度只剩约 {p0}%，先派给别人", { p0: reserve }) : ''].filter(Boolean).join(' · ');
   if (holder.textContent !== text) holder.textContent = text;
 }
 function renderMemberQuota(id) {
@@ -181,7 +183,7 @@ function updateAccountFooter(details, id) {
     : windows.length ? t("{p0} 个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
   details.firstChild.lastChild.textContent = status;
   const body = details.lastChild;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.workload_level, state.workloadSavingId, state.workloadRevision, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.workload_level, state.workloadSavingId, state.workloadRevision, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, partner?.quota_reserve, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
   if (body.dataset.fingerprint === fingerprint) return;
   body.dataset.fingerprint = fingerprint;
   body.replaceChildren();
@@ -208,6 +210,8 @@ function updateAccountFooter(details, id) {
   if (availability.value && (availability.blocked || !(['error', 'unavailable'].includes(quota?.state) && quota?.reason)))
     body.append(element('p', availabilityText(availability), `availability-note${availability.blocked ? ' blocked' : ''}`));
   const recheck = availabilityRecheckControl(id); if (recheck) body.append(recheck);
+  if (Number.isFinite(partner?.quota_reserve) && !availability.blocked)
+    body.append(element('p', t("额度只剩约 {p0}%，豆窝先把活派给其他伙伴，没人能接时才用它。", { p0: partner.quota_reserve }), 'availability-note quota-reserve'));
   if (state.accountRefreshErrors.has(id)) body.append(element('p', state.accountRefreshErrors.get(id), 'quota-unavailable'));
   if (account?.state === 'error' && account.reason && account.reason !== (quota?.reason || account.reason))
     body.append(element('p', t("账号检查：{p0}", { p0: providerAccountReasons(account.reason) }), 'quota-unavailable'));

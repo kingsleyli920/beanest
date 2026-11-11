@@ -82,6 +82,8 @@ Autonomous work continues toward the stated goal until it completes, needs your 
 
 From a partner's model button you can also give it a role and a workload for this task. The role decides which steps it takes part in: **Builder** takes implementation tasks, **Reviewer** only reviews others' changes, **Planner** writes the plan and runs checkpoints, and no role means **All-round**, as before. You can also create your own role with a one-line duty and the steps it joins; custom roles are saved on this computer. A partner that does not plan is not called into planning discussions, which saves quota. When no partner's role fits a step, someone else takes it, so an incomplete set of roles never stalls the task. The task shows what each step of the current round cost.
 
+When an account is down to about 15% of its quota, Beanest gives work to other partners first and uses that account only when nobody else can, so you keep a little for yourself. The partner card says how much is left.
+
 A partner's current quota and the task's token usage are separate observations. Unknown quota is shown as unknown; it is not zero. Several partner profiles using the same CLI sign-in do not create separate accounts or quota pools.
 
 ## Permissions and privacy

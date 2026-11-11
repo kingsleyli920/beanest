@@ -1066,4 +1066,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "其他": "Other",
   "本轮消耗（按 Token 折算）：{p0}": "This round's usage by tokens: {p0}",
   "角色：{p0}": "Role: {p0}",
+  "额度只剩约 {p0}%，豆窝先把活派给其他伙伴，没人能接时才用它。": "Only about {p0}% of this account's quota is left. Beanest gives work to other partners first and uses this one only when nobody else can.",
+  "额度只剩约 {p0}%，先派给别人": "About {p0}% quota left, others go first",
 });

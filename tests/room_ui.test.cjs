@@ -3679,6 +3679,24 @@ test('quota fallback describes the current integration and promises continued us
   }
 });
 
+test('an account down to its reserve says others go first, on the room line and its account panel', async () => {
+  // Catches: the reserve flag computed on the server but never shown, shown on the wrong partner, or English copy absent.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.workload = { configured: false, accounts: [
+    { scope: 'claude', members: ['claude'], share: 2, level: 'normal', points: 600, calls: 2, target_percent: 50, actual_percent: 60 },
+    { scope: 'codex', members: ['codex'], share: 0, level: 'idle', points: 400, calls: 2, target_percent: 0, actual_percent: 40 },
+  ] };
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, workload_level: 'normal', account: claudeUsageAccount([]), quota_reserve: null },
+    { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'normal', quota_reserve: 9 }];
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 40% · 额度只剩约 9%，先派给别人');
+  assert.equal(ui.get('member-workload-claude').textContent, '本轮工作量 60%');
+  assert.match(ui.get('provider-account-codex').textContent, /额度只剩约 9%，豆窝先把活派给其他伙伴，没人能接时才用它。/);
+  assert.doesNotMatch(ui.get('provider-account-claude').textContent, /额度只剩约/);
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
+  assert.equal(english.get('member-workload-codex').textContent, 'This round 40% of the work · About 9% quota left, others go first');
+});
+
 test('each account shows its part of the round and its workload level can be changed', async () => {
   // Catches: the percentages missing or attached to the wrong partner, a setting that never reaches the server, or English copy absent.
   const saved = snapshot({ agents: catalog.slice(0, 2) });

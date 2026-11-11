@@ -21,6 +21,11 @@ STALE_SECONDS = 90
 # A provider may say the limit was hit without saying when it ends. A small
 # real request then is the only way to learn it has ended.
 PROBE_SECONDS = 3600
+# Below this much left in any shared window, an account is kept for when
+# nobody else can do the step, so its owner still has some for themselves.
+RESERVE_PERCENT = 15
+# A low reading stays useful for a while: usage only grows until it resets.
+RESERVE_FRESH_SECONDS = 1800
 _ADAPTERS = {"codex", "claude", "kimi"}
 
 
@@ -126,7 +131,7 @@ class QuotaGate:
             return None
         return self.fingerprint(account["auth_method"] + ":" + account["email"].strip().casefold())
 
-    def _shared_windows(self, scope, account):
+    def _shared_windows(self, scope, account, *, max_age=None):
         adapter = scope_adapter(scope)
         quota = account.get("quota", {})
         source, names = {
@@ -138,10 +143,11 @@ class QuotaGate:
             # meter shows room or the user asks for a recheck.
             "kimi": ("kimi_code_web_oauth_usage", {"kimi:summary", "kimi:monthTotal", "kimi:monthCode"}),
         }.get(adapter, (None, set()))
-        if (quota.get("state") != "available" or quota.get("stale") is not False
-                or quota.get("source") != source or source is None):
-            return []
         now = self.clock()
+        fresh = (quota.get("stale") is False if max_age is None
+                 else _timestamp(quota.get("checked_at")) and 0 <= now - quota["checked_at"] <= max_age)
+        if quota.get("state") != "available" or not fresh or quota.get("source") != source or source is None:
+            return []
         # Claude's is_active picks its single-value headline; it does not
         # decide whether an account-wide meter applies.
         return [row for row in quota.get("windows", []) if isinstance(row, dict)
@@ -149,6 +155,13 @@ class QuotaGate:
                 and (adapter != "claude" or row.get("scope") == "provider_account")
                 and type(row.get("used_percent")) in (int, float) and 0 <= row["used_percent"] <= 100
                 and (row.get("resets_at") is None or _timestamp(row["resets_at"]) and row["resets_at"] > now)]
+
+    def reserve_left(self, scope, account):
+        """The least left in a shared window when it is at or below the reserve, else None."""
+        if not isinstance(account, dict) or self.identity(account) is None:
+            return None
+        left = [100 - row["used_percent"] for row in self._shared_windows(scope, account, max_age=RESERVE_FRESH_SECONDS)]
+        return round(min(left)) if left and min(left) <= RESERVE_PERCENT else None
 
     def observe_account(self, scope, account):
         adapter, identity = scope, self.identity(account)

@@ -307,6 +307,8 @@ class TeamStore:
             abilities = roles.member_abilities(settings)
             if not roles.can(abilities, target, "plan"):
                 target = roles.prefer(self.objectives.available_members(db, room_id) or [target], "plan", abilities)[0]
+            if target in self._reserved(db, room_id):
+                target = self._spare_first(db, room_id, roles.prefer(self.objectives.available_members(db, room_id), "plan", abilities))[0]
         db.execute("UPDATE teams SET phase='planning',revision=0,stop_reason=NULL,plan_author=? WHERE room_id=?", (target,room_id))
         db.execute("UPDATE team_members SET planned=0,plan_ready_revision=-1,coordinated_revision=-1,"
                    "coordinated_signature=NULL,coordination_repair_signature=NULL WHERE room_id=?", (room_id,))
@@ -706,7 +708,8 @@ class TeamStore:
     def create(self, db, room_id, plan_author, members, *, execution_policy=None, directed=True):
         if not directed:
             # A message to everyone lets the room's roles pick who writes the plan.
-            plan_author = roles.prefer(list(members), "plan", self._abilities(db, room_id))[0]
+            plan_author = self._spare_first(db, room_id, roles.prefer(list(members), "plan", self._abilities(db, room_id)),
+                                            members=members)[0]
         db.execute("INSERT INTO teams(room_id,plan_author) VALUES (?,?)", (room_id, plan_author))
         self._create_run(db, room_id, 1)
         if execution_policy is not None:
@@ -1917,10 +1920,26 @@ class TeamStore:
             if any(roles.can(abilities, member, "work") for member in members):
                 idle = {member for member in members if not roles.can(abilities, member, "work")}
 
+        reserved = self._reserved(db, room_id, profiles)
+        if not set(self.objectives.available_members(db, room_id)) <= idle | reserved:
+            idle |= reserved
+
         def profile(member):
-            scope, level = profiles.get(member, (member, workload.DEFAULT_LEVEL))
-            return scope, workload.IDLE if member in idle else levels.get(member, level)
+            entry = profiles.get(member, (member, workload.DEFAULT_LEVEL))
+            return entry[0], workload.IDLE if member in idle else levels.get(member, entry[1])
         return profile
+
+    def _reserved(self, db, room_id, profiles=None, members=None):
+        """Members whose account is down to its reserve, while someone else still has more."""
+        profiles = self.store.account_workloads() if profiles is None else profiles
+        members = self.objectives.available_members(db, room_id) if members is None else list(members)
+        low = {member for member in members if len(profiles.get(member, ())) > 2 and profiles[member][2]}
+        return low if low and len(low) < len(members) else set()
+
+    def _spare_first(self, db, room_id, candidates, members=None):
+        """Candidates in order, those down to their reserve last."""
+        low = self._reserved(db, room_id, members=members)
+        return [member for member in candidates if member not in low] + [member for member in candidates if member in low]
 
     def _fair_order(self, db, room_id, candidates):
         members = self.objectives.available_members(db, room_id)
