@@ -1098,4 +1098,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "你撤掉了 {p0}": "You withdrew {p0}",
   "已经完成的任务不受影响。这个操作不会启动模型。": "Tasks already done are not affected. This does not start a model.",
   "{p0} 上次没回完你的消息，已重新发给它。": "{p0} did not finish replying to your message, so it was sent again.",
+  "有伙伴的角色设置无效，请在它的模型按钮里重新选择角色。": "A partner's role setting is invalid. Choose its role again from its model button.",
+  "有伙伴的工作量设置无效，请在它的模型按钮里重新选择。": "A partner's workload setting is invalid. Choose it again from its model button.",
 });

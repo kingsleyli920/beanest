@@ -233,6 +233,15 @@ class RoomIntegrationTests(unittest.TestCase):
             self.assertEqual(self.request("POST", entry, {**body, "project_path": "/fictional/unapproved"})[0], 400)
         self.assertFalse(list((self.root / "project-artifacts").rglob("*.py")))
 
+    def test_an_unknown_role_or_workload_is_named_as_such(self):
+        # Catches a bad role or workload choice coming back as an unexplained "operation failed".
+        for choice, code in (({"role": "builtin:builder"}, "invalid_role"), ({"workload": "huge"}, "invalid_workload")):
+            status, body = self.request("POST", "/api/rooms", {
+                "goal": "Review a short shared text goal", "target": "claude", "request_id": "bad-" + code,
+                "mode": "text_artifacts", "work_mode": "build",
+                "runtime_settings": {"permission": "workspace_write", "members": {"claude": choice}}})
+            self.assertEqual((status, body), (400, {"error": code}))
+
     def test_mcp_room_without_work_mode_is_a_configurable_build_room_and_old_user_callers_stay_legacy(self):
         # Catches: an agent-started room (work_mode is optional over MCP) being stored as an
         # old legacy record, which the page shows as history with every model locked.

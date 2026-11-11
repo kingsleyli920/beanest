@@ -150,6 +150,8 @@ const errorLabels = localizedLabels({
   all_partners_quota_exhausted: '伙伴的额度都用完了，正在等额度恢复，进度已保留。',
   invalid_execution_policy: '任务设置与当前服务不兼容，请更新本地服务后继续。',
   invalid_runtime_settings: '运行设置不符合要求，请重新选择权限、模型和思考强度。',
+  invalid_role: '有伙伴的角色设置无效，请在它的模型按钮里重新选择角色。',
+  invalid_workload: '有伙伴的工作量设置无效，请在它的模型按钮里重新选择。',
   runtime_settings_unsupported: '这个接入暂不支持指定运行设置，可以选择工具默认。',
   runtime_options_required: '请先在权限与模型中读取这位伙伴的模型选项，再提交任务。',
   runtime_model_unsupported: '这个模型不在工具返回的可选列表中，请刷新模型选项后重选。',

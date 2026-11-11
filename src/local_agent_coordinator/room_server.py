@@ -96,7 +96,7 @@ ERROR_STATUS = {
     "purge_files_incomplete":409, "purge_workspace_busy":409,
     "purge_dependency_unconfirmed":409, "purge_reference_conflict":409,
     "user_account_required":403, "account_adapter_unsupported":409,
-    "invalid_runtime_settings":400, "permission_read_only":409, "runtime_settings_unsupported":409,
+    "invalid_runtime_settings":400, "invalid_role":400, "invalid_workload":400, "permission_read_only":409, "runtime_settings_unsupported":409,
     "runtime_options_required":409, "runtime_model_unsupported":400, "runtime_effort_unsupported":400,
     "user_runtime_settings_required":403,
     "agent_quota_exhausted":409, "agent_quota_unconfirmed":409, "quota_state_corrupt":503,
