@@ -28,7 +28,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "设置": "Settings",
   "下一轮": "Next round",
   "本轮": "This round",
-  "{p0} · 模型与思考强度": "{p0} · Model and reasoning effort",
   "{p0}任务权限": "{p0}Task permissions",
   "本轮设置已经固定，方案阶段强制只读。预设的动手权限不会在本轮生效。": "Settings are fixed for this stage. Plan mode is read only; the selected build permissions do not apply yet.",
   "本轮设置已经固定，不会改变正在处理的任务。": "Settings are fixed for this round and will not change the task in progress.",
