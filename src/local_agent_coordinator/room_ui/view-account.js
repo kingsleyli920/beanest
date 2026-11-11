@@ -24,9 +24,11 @@ function renderMemberWorkload(id, workload) {
   const holder = document.getElementById(`member-workload-${id}`);
   if (!holder) return;
   const account = workload?.accounts?.find((row) => row.members.includes(id));
-  const text = !Number.isInteger(account?.actual_percent) ? ''
+  const share = !Number.isInteger(account?.actual_percent) ? ''
     : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
       : t("本轮工作量 {p0}%", { p0: account.actual_percent });
+  const role = copyRole(state.snapshot?.room?.runtime_settings?.members?.[id]?.role);
+  const text = [role ? t("角色：{p0}", { p0: roleName(role) }) : '', share].filter(Boolean).join(' · ');
   if (holder.textContent !== text) holder.textContent = text;
 }
 function renderMemberQuota(id) {
@@ -297,7 +299,7 @@ function workloadControl(id, partner) {
   status.setAttribute('role', 'status'); status.hidden = !saving && !saved;
   row.append(status);
   const holder = element('div', '', 'account-workload-setting');
-  holder.append(row, element('p', t("额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。现在先用于分配审查。"), 'detail-caption'));
+  holder.append(row, element('p', t("额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。用于分配审查和还没开工的任务；任务里单独设置时以任务为准。"), 'detail-caption'));
   return holder;
 }
 async function saveWorkload(id, level) {

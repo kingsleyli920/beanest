@@ -17,7 +17,7 @@ import threading
 import time
 from uuid import UUID, uuid4
 
-from . import job_progress
+from . import job_progress, roles
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
@@ -1544,7 +1544,7 @@ class RoomStore:
             "OR receipt_room_id=? OR EXISTS (SELECT 1 FROM requests r WHERE r.room_id=? "
             "AND r.request_key=user_outbox.request_key AND r.fingerprint=user_outbox.canonical_fingerprint)",
             (self.clock(), room_id, room_id, room_id))
-        for table in ("partner_load", "project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
+        for table in ("partner_load", "partner_phase_load", "project_inspections", "native_executions", "executions", "team_jobs", "shared_tasks", "team_members"):
             db.execute("DELETE FROM " + table + " WHERE room_id=?", (room_id,))
         db.execute("DELETE FROM objective_progress WHERE objective_id IN (SELECT id FROM objectives WHERE room_id=?)", (room_id,))
         for table in ("native_workspaces", "native_handoffs", "native_handoff_exports", "native_session_history", "native_session_homes", "requests",
@@ -4280,7 +4280,8 @@ class RoomStore:
             self._event(db, room_id, "message", sender=source, recipient=target,
                         text=goal, job_id=None)
             if collaboration:
-                self._team.create(db, room_id, recipients[0], selected, execution_policy=policy)
+                self._team.create(db, room_id, recipients[0], selected, execution_policy=policy,
+                                  directed=target not in ("all", "both"))
                 if artifact_origin and "run_id" in artifact_origin:
                     self._event(db, room_id, "artifact_forked", sender="user", source=artifact_origin,
                                 checks_inherited=False, sessions_inherited=False)
@@ -4484,7 +4485,8 @@ class RoomStore:
             if previous is not None:
                 return False
             recipients = checked_target(target,self.member_ids_in_transaction(db,room_id))
-            self._team.start_next(db,room_id,text,recipients[0],run_id,revision,digest,retry=retry,source=source,work_mode=work_mode,runtime_settings=runtime_settings,execution_policy=execution_policy,rotate_after_handoff=source == "user")
+            self._team.start_next(db,room_id,text,recipients[0],run_id,revision,digest,retry=retry,source=source,work_mode=work_mode,runtime_settings=runtime_settings,execution_policy=execution_policy,rotate_after_handoff=source == "user",
+                                  directed=target not in ("all", "both"))
             self._remember_request(db, key, fingerprint, room_id)
             self._event(db,room_id,"message",sender=source,recipient=target,text=text,job_id=None)
             return True
@@ -4735,7 +4737,8 @@ class RoomStore:
                 self._team.stop(db, room_id, "objective_calls_exhausted")
                 self._settle(db, room_id)
                 return False
-            started = self._team.objectives.begin_checkpoint(db, room_id, binding, members[0])
+            started = self._team.objectives.begin_checkpoint(
+                db, room_id, binding, roles.prefer(members, "checkpoint", self._team._abilities(db, room_id))[0])
             if started:
                 self._team.reconcile(db, room_id)
                 self._settle(db, room_id)

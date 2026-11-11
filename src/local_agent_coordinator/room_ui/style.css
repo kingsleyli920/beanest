@@ -973,6 +973,20 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 .runtime-partner-heading .avatar { width: 22px; height: 22px; min-width: 22px; }
 .runtime-partner-heading .quiet-button { margin-left: auto; padding: 4px 6px; font-size: 9px; }
 .runtime-partner > label { display: grid; grid-template-columns: minmax(58px, max-content) minmax(0, 1fr); align-items: center; gap: 5px; margin-top: 5px; color: var(--muted); }
+.runtime-role { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
+.runtime-role > label, .role-editor > label { display: grid; grid-template-columns: minmax(58px, max-content) minmax(0, 1fr); align-items: center; gap: 5px; margin-top: 5px; color: var(--muted); }
+.runtime-role .role-duty { margin: 4px 0 0; }
+.role-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.role-actions .quiet-button, .role-actions .primary-button { padding: 4px 8px; font-size: 11px; }
+.role-editor { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface, transparent); }
+.role-editor input:not([type="checkbox"]), .role-editor textarea { min-width: 0; width: 100%; box-sizing: border-box; font: inherit; }
+.role-abilities input[type="checkbox"] { width: auto; margin: 0; }
+.role-abilities label span { white-space: nowrap; }
+.role-editor > label { align-items: start; }
+.role-abilities { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 8px 0 0; padding: 0; border: 0; color: var(--muted); }
+.role-abilities legend { padding: 0; margin-bottom: 4px; }
+.role-abilities label { display: inline-flex; align-items: center; gap: 4px; }
+.role-editor-error { margin: 6px 0 0; color: var(--danger, #b42318); }
 @media (max-width: 560px) { .runtime-settings { margin-inline: 12px; } .runtime-settings-popover { padding: 12px; } .runtime-settings-sheet { max-height: calc(100dvh - 24px); padding: 14px; } .runtime-partners { grid-template-columns: minmax(0, 1fr); } }
 
 .participant-option.quota-blocked { border-color: var(--ask-line); background: var(--ask-bg); }

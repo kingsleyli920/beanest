@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 LEVELS = {"low": 1, "normal": 2, "high": 3}
 DEFAULT_LEVEL = "normal"
+IDLE = "idle"  # takes no share of the work being handed out (its role does not build)
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ def accounts(members, loads, profile):
     rows = {}
     for member in members:
         scope, level = profile(member)
-        share = LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
+        share = 0 if level == IDLE else LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
         row = rows.setdefault(scope, {"scope": scope, "members": [], "share": 0, "level": level, "points": 0.0, "calls": 0})
         row["members"].append(member)
         if share > row["share"]:

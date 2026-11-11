@@ -41,7 +41,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "本轮模型和思考强度已固定，不会改变正在处理的任务。": "The model and reasoning effort are fixed for this round and will not change the task in progress.",
   "这里的选择只用于你明确开始的新目标。": "These choices apply only to a new goal you explicitly start.",
   "这里的选择只影响下一轮。": "These choices apply only to the next round.",
-  "为这个伙伴选择模型和思考强度。": "Choose a model and reasoning effort for this partner.",
+  "为这个伙伴选择模型、思考强度、角色和工作量。": "Choose a model, reasoning effort, role and workload for this partner.",
   "后续工作权限": "Permissions for future work",
   "当前不能修改设置。已有设置保持。": "Settings cannot be changed now. Existing settings are preserved.",
   "还没生效：发一条消息才会提交，只发“继续”也可以。正在运行的调用不受影响，这一轮结束后切换。": "Not applied yet: it is submitted with your next message, and just \"continue\" is enough. Calls in progress are unaffected; the change applies after this round.",

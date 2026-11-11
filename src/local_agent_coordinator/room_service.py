@@ -32,7 +32,7 @@ from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
 from .team_store import _COMMAND_FIELDS
 from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, reply_call_died
-from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission
+from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission, model_choice
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
                            TASK_HANDOFF_INSTRUCTION, _BLOCK_PROTOCOL, _DIRECTED_CONTEXT_INSTRUCTION, _direct_updates, _excerpt,
                            _prompt_context, _work_mode_instruction)  # names re-exported for callers of this module
@@ -5667,7 +5667,7 @@ class RoomService(RoomPromptMixin):
                     # under this account would fail or cross accounts.
                     raise RoomError("partner_account_home_changed")
                 settings = job.get("runtime_settings")
-                choice = settings["members"][provider] if settings else None
+                choice = model_choice(settings["members"][provider]) if settings else None
                 runtime_kwargs = ({"runtime_settings": choice} if choice and choice.get("model") is not None else {})
                 if runtime_kwargs and not spec.supports_runtime_settings:
                     raise RoomError("runtime_settings_unsupported")

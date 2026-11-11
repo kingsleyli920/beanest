@@ -2163,11 +2163,50 @@ async function refreshAvailability({ immediate = false } = {}) {
 }
 
 
+// Roles: what each partner does in one room. The room stores the whole role,
+// so editing or deleting a custom role later never changes a room already using it.
+const builtinRoles = ['builder', 'reviewer', 'planner'];
+const roleAbilityIds = ['plan', 'work', 'review', 'checkpoint'];
+const workloadLevels = ['low', 'normal', 'high'];
+const customRolesKey = 'beanest.customRoles';
+function roleAbilityLabels() { return { plan: t("规划"), work: t("干活"), review: t("审查"), checkpoint: t("阶段检查") }; }
+function builtinRoleInfo() {
+  return { builder: { name: t("开发"), duty: t("领实现任务来做，不审查别人，也不写计划。") },
+    reviewer: { name: t("审查"), duty: t("只审别人交付的改动，不领实现任务，也不参加规划。") },
+    planner: { name: t("规划"), duty: t("写计划、做阶段检查，不领实现任务。") } };
+}
+function copyRole(role) {
+  if (!role || typeof role !== 'object' || typeof role.id !== 'string') return null;
+  if (builtinRoles.includes(role.id)) return { id: role.id };
+  if (!/^custom:[a-z0-9][a-z0-9-]{0,39}$/.test(role.id) || typeof role.name !== 'string' || !role.name.trim()
+      || typeof role.duty !== 'string' || !Array.isArray(role.abilities)) return null;
+  const abilities = roleAbilityIds.filter((ability) => role.abilities.includes(ability));
+  return abilities.length ? { id: role.id, name: role.name.trim().slice(0, 20), duty: role.duty.trim().slice(0, 300), abilities } : null;
+}
+function roleName(role) { return !role ? t("全能") : builtinRoleInfo()[role.id]?.name || role.name; }
+function roleDuty(role) {
+  if (!role) return t("规划、干活、审查、阶段检查都参与，和不设角色时一样。");
+  const builtin = builtinRoleInfo()[role.id];
+  if (builtin) return builtin.duty;
+  const abilities = role.abilities.map((ability) => roleAbilityLabels()[ability]).join(t("、"));
+  return role.duty ? t("{p0}（负责：{p1}）", { p0: role.duty, p1: abilities }) : t("负责：{p0}", { p0: abilities });
+}
+function savedCustomRoles() {
+  try {
+    const value = JSON.parse(localStorage.getItem(customRolesKey) || '[]');
+    return Array.isArray(value) ? value.map(copyRole).filter((role) => role?.id.startsWith('custom:')).slice(0, 50) : [];
+  } catch (_) { return []; }
+}
+function saveCustomRoles(roles) {
+  try { localStorage.setItem(customRolesKey, JSON.stringify(roles.slice(0, 50))); } catch (_) { /* The room keeps its own copy of each role. */ }
+}
 function copyRuntimeSettings(settings) {
   const members = {};
   for (const [id, choice] of Object.entries(settings?.members || {})) {
     if (!agentPattern.test(id) || !choice || typeof choice !== 'object') continue;
-    members[id] = { model: typeof choice.model === 'string' ? choice.model : null, effort: typeof choice.effort === 'string' ? choice.effort : null };
+    const role = copyRole(choice.role); const workload = workloadLevels.includes(choice.workload) ? choice.workload : null;
+    members[id] = { model: typeof choice.model === 'string' ? choice.model : null, effort: typeof choice.effort === 'string' ? choice.effort : null,
+      ...(role ? { role } : {}), ...(workload ? { workload } : {}) };
   }
   return { permission: ['plan', 'read_only', 'workspace_write', 'full_access'].includes(settings?.permission) ? settings.permission : 'workspace_write', members };
 }
@@ -2177,7 +2216,9 @@ function validRuntimeSettings(value) {
     && value.members && typeof value.members === 'object' && !Array.isArray(value.members)
     && Object.entries(value.members).every(([id, choice]) => agentPattern.test(id) && choice && typeof choice === 'object'
       && !Array.isArray(choice) && (choice.model == null || typeof choice.model === 'string')
-      && (choice.effort == null || typeof choice.effort === 'string'));
+      && (choice.effort == null || typeof choice.effort === 'string')
+      && (choice.role == null || typeof choice.role === 'object' && !Array.isArray(choice.role))
+      && (choice.workload == null || typeof choice.workload === 'string'));
 }
 function naturalRuntimeConfiguration(snapshot = state.snapshot) {
   if (!state.naturalRuntimeSupported || !snapshot?.room) return null;
@@ -2196,7 +2237,7 @@ function naturalRuntimeConfiguration(snapshot = state.snapshot) {
 function runtimeFingerprint(value) {
   const settings = copyRuntimeSettings(value);
   return JSON.stringify([settings.permission, [...state.participantIds].sort().map((id) =>
-    [id, settings.members[id]?.model || null, settings.members[id]?.effort || null])]);
+    [id, settings.members[id]?.model || null, settings.members[id]?.effort || null, settings.members[id]?.role || null, settings.members[id]?.workload || null])]);
 }
 function pendingRuntimeChanges(snapshot = state.snapshot) {
   const configuration = naturalRuntimeConfiguration(snapshot);
@@ -2252,8 +2293,21 @@ function applyNativePermissionDefault() {
   if (state.selected || state.runtimePermissionExplicit || !nativePlanPermissionsAvailable() || state.runtimeSettings?.permission === 'full_access') return;
   state.runtimeSettings = { ...copyRuntimeSettings(state.runtimeSettings), permission: 'plan' };
 }
+function hasRoleChoices(settings) {
+  return Object.values(copyRuntimeSettings(settings).members).some((choice) => choice.role || choice.workload);
+}
+function setMemberChoice(id, patch) {
+  const next = copyRuntimeSettings(state.runtimeSettings);
+  const merged = { model: null, effort: null, ...next.members[id], ...patch };
+  if (!merged.role) delete merged.role;
+  if (!merged.workload) delete merged.workload;
+  next.members[id] = merged; state.runtimeSettings = next; state.runtimeDraftDirty = true; state.runtimeDraftToken = crypto.randomUUID();
+  saveDraft(); renderRuntimeSettings(); renderControls();
+}
 function runtimePayload() {
-  if (state.runtimeOptions?.scope !== 'coordinator_owned_only' && !state.snapshot?.current_run?.runtime_settings && !state.snapshot?.room?.runtime_settings && !naturalRuntimeConfiguration()) return null;
+  // Roles and workload apply in every room, so choosing them sends settings even before model options are read.
+  if (state.runtimeOptions?.scope !== 'coordinator_owned_only' && !state.snapshot?.current_run?.runtime_settings && !state.snapshot?.room?.runtime_settings && !naturalRuntimeConfiguration()
+      && !hasRoleChoices(state.runtimeSettings)) return null;
   const settings = copyRuntimeSettings(state.runtimeSettings);
   // Preserve the user's requested permission across plan → build. The host
   // owns effective_permission and always enforces read-only during planning.
@@ -2431,20 +2485,22 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     const modelLabel = model ? runtimeShortcutModelLabel(model, models) : fullModelLabel;
     const effort = unrecorded ? t("未记录强度") : effortLabels()[choice?.effort] || choice?.effort || t("默认强度");
     const shortEffort = effort === t("默认强度") ? t("默认") : effort;
-    const text = `${displayName(id)} · ${modelLabel} · ${shortEffort}${historical ? t(" · 仅查看") : ''} ⌄`;
+    const roleSuffix = copyRole(choice?.role) ? ` · ${roleName(copyRole(choice.role))}` : '';
+    const text = `${displayName(id)} · ${modelLabel} · ${shortEffort}${roleSuffix}${historical ? t(" · 仅查看") : ''} ⌄`;
     if (button.dataset.label !== text) {
       button.dataset.label = text;
       const configuration = element('span', '', 'shortcut-configuration');
-      configuration.append(element('span', modelLabel, 'shortcut-model'), element('span', '·', 'shortcut-separator'), element('span', `${shortEffort}${historical ? t(" · 仅查看") : ''}`, 'shortcut-effort'));
+      configuration.append(element('span', modelLabel, 'shortcut-model'), element('span', '·', 'shortcut-separator'), element('span', `${shortEffort}${roleSuffix}${historical ? t(" · 仅查看") : ''}`, 'shortcut-effort'));
       button.replaceChildren(element('span', displayName(id), 'shortcut-name'), configuration, element('span', '⌄', 'shortcut-arrow'));
     }
-    button.title = `${partnerCaption}${displayName(id)} · ${fullModelLabel} · ${effort}${historical ? t(" · 仅查看") : ''}${model?.resolved_model ? t(" · 工具标识：{p0}", { p0: model.resolved_model }) : ''}`;
+    const workloadName = { low: t("少"), normal: t("中"), high: t("多") }[choice?.workload];
+    button.title = `${partnerCaption}${displayName(id)} · ${fullModelLabel} · ${effort}${roleSuffix}${workloadName ? t(" · 工作量{p0}", { p0: workloadName }) : ''}${historical ? t(" · 仅查看") : ''}${model?.resolved_model ? t(" · 工具标识：{p0}", { p0: model.resolved_model }) : ''}`;
     button.setAttribute('aria-label', t("{p0}{p1}的模型与思考强度：{p2}，{p3}{p4}", { p0: partnerCaption, p1: displayName(id), p2: fullModelLabel, p3: effort, p4: historical ? t("，原有设置仅供查看") : !editable ? configuration ? t("，当前不可修改") : t("，本轮已固定") : '' }));
     button.setAttribute('aria-expanded', String(state.runtimePopoverOpen && state.runtimePartner === id));
     const cardModel = document.getElementById(`member-model-${id}`);
     if (cardModel) {
       // A default effort adds nothing to the narrow card button, so it shows only the model there.
-      cardModel.textContent = shortEffort === t("默认") ? `${modelLabel} ⌄` : `${modelLabel} · ${shortEffort} ⌄`; cardModel.title = button.title;
+      cardModel.textContent = (shortEffort === t("默认") ? `${modelLabel}` : `${modelLabel} · ${shortEffort}`) + `${roleSuffix} ⌄`; cardModel.title = button.title;
       cardModel.setAttribute('aria-label', button.getAttribute('aria-label'));
       cardModel.setAttribute('aria-expanded', button.getAttribute('aria-expanded'));
     }
@@ -2459,7 +2515,7 @@ function renderRuntimeSettings() {
   $('runtime-settings').hidden = !!state.reader || materialsOpen();
   renderRuntimeShortcuts();
   const permission = choices.permission;
-  $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型与思考强度", { p0: displayName(state.runtimePartner) })
+  $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型、角色与工作量", { p0: displayName(state.runtimePartner) })
     : t("{p0}任务权限", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '' });
   $('runtime-settings-note').textContent = !editable ? workMode === 'plan' ? t("本轮设置已经固定，方案阶段强制只读。预设的动手权限不会在本轮生效。") : t("本轮设置已经固定，不会改变正在处理的任务。")
     : workMode === 'plan' ? t("方案阶段强制只读。下面预设开始动手后的权限；选择只读后，下一轮也不会自动提升权限。")
@@ -2469,9 +2525,9 @@ function renderRuntimeSettings() {
   if (nativePermissionAvailable() && permission === 'read_only') $('runtime-settings-note').textContent = t("历史只读设置：保留原有只读语义；可用操作由对应工具决定。{p0}", { p0: $('runtime-settings-note').textContent });
   if (nativePermissionAvailable() && workMode === 'plan') $('runtime-settings-note').textContent += t(" 方案阶段仍强制只读，所选动手权限不会在本轮生效。");
   if (state.runtimePartner) $('runtime-settings-note').textContent = !editable ? t("本轮模型和思考强度已固定，不会改变正在处理的任务。")
-    : room ? newGoal ? t("这里的选择只用于你明确开始的新目标。") : t("这里的选择只影响下一轮。") : t("为这个伙伴选择模型和思考强度。");
+    : room ? newGoal ? t("这里的选择只用于你明确开始的新目标。") : t("这里的选择只影响下一轮。") : t("为这个伙伴选择模型、思考强度、角色和工作量。");
   if (configuration) {
-    $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型与思考强度", { p0: displayName(state.runtimePartner) }) : t("后续工作权限");
+    $('runtime-settings-title').textContent = state.runtimePartner ? t("{p0} · 模型、角色与工作量", { p0: displayName(state.runtimePartner) }) : t("后续工作权限");
     $('runtime-settings-note').textContent = !configuration.can_edit ? t("当前不能修改设置。已有设置保持。")
       : unsent ? t("还没生效：发一条消息才会提交，只发“继续”也可以。正在运行的调用不受影响，这一轮结束后切换。")
         : configuration.pending ? t("已保存，后续工作开始生效。正在运行的调用不变。")
@@ -2500,7 +2556,7 @@ function renderRuntimeSettings() {
   $('runtime-settings-message').hidden = !state.runtimeMessage;
   $('runtime-settings-message').textContent = state.runtimeMessage;
   const body = $('runtime-settings-body');
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [state.participantIds, state.runtimeOptions, choices, workMode, locked, state.runtimeLoading, state.runtimeRefreshId, editable, !!recorded, state.runtimePartner, nativePermissionAvailable(), state.participantIds.map((id) => runtimePartnerReadOnly(id))]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [state.participantIds, state.runtimeOptions, choices, workMode, locked, state.runtimeLoading, state.runtimeRefreshId, editable, !!recorded, state.runtimePartner, nativePermissionAvailable(), state.participantIds.map((id) => runtimePartnerReadOnly(id)), state.roleEditor, savedCustomRoles()]]);
   if (body.dataset.fingerprint === fingerprint) return;
   const focusedId = nodeContains(body, document.activeElement) ? document.activeElement.id : '';
   body.dataset.fingerprint = fingerprint; body.replaceChildren();
@@ -2542,7 +2598,7 @@ function renderRuntimeSettings() {
     modelSelect.value = choice.model || ''; modelSelect.disabled = historical || locked || !supported;
     modelSelect.addEventListener('change', () => {
       if (modelSelect.disabled) return;
-      const next = copyRuntimeSettings(state.runtimeSettings); next.members[id] = { model: modelSelect.value || null, effort: null }; state.runtimeSettings = next; state.runtimeDraftDirty = true; state.runtimeDraftToken = crypto.randomUUID(); saveDraft(); renderRuntimeSettings();
+      const next = copyRuntimeSettings(state.runtimeSettings); next.members[id] = { ...next.members[id], model: modelSelect.value || null, effort: null }; state.runtimeSettings = next; state.runtimeDraftDirty = true; state.runtimeDraftToken = crypto.randomUUID(); saveDraft(); renderRuntimeSettings();
     });
     modelLabel.append(modelSelect);
     const defaults = models.filter((model) => model.is_default === true);
@@ -2569,10 +2625,87 @@ function renderRuntimeSettings() {
         : catalog?.state === 'unavailable' || catalog?.supported === false ? t("此接入暂未提供模型选项，可使用工具默认。")
         : !models.length ? t("尚未读取可选模型。点“读取模型选项”只查询工具能力，不启动任务。") : '';
     if (catalogNote) card.append(element('p', catalogNote, 'detail-caption'));
+    renderRoleControls(card, id, choice, !!(historical || locked));
     list.append(card);
   }
   body.append(list);
   if (focusedId) $(focusedId)?.focus({ preventScroll: true });
+}
+function renderRoleControls(card, id, choice, disabled) {
+  const customs = savedCustomRoles();
+  const section = element('div', '', 'runtime-role');
+  const roleLabel = element('label', t("角色 ")); const roleSelect = element('select'); roleSelect.id = `runtime-role-${id}`;
+  const options = [['all', t("全能（默认）")], ...builtinRoles.map((role) => [role, builtinRoleInfo()[role].name]), ...customs.map((role) => [role.id, role.name])];
+  // A custom role this room keeps but this device no longer lists still shows as chosen.
+  if (choice.role?.id?.startsWith('custom:') && !customs.some((role) => role.id === choice.role.id)) options.push([choice.role.id, choice.role.name]);
+  options.push(['new', t("新建角色…")]);
+  for (const [value, text] of options) { const option = element('option', text); option.value = value; roleSelect.append(option); }
+  // While a new role is being written the list says so, not the role it will replace.
+  roleSelect.value = state.roleEditor?.partner === id && !state.roleEditor.id ? 'new' : choice.role?.id || 'all'; roleSelect.disabled = disabled;
+  roleSelect.addEventListener('change', () => {
+    if (roleSelect.disabled) return;
+    if (roleSelect.value === 'new') { state.roleEditor = { partner: id, id: null, name: '', duty: '', abilities: ['work'], error: '' }; renderRuntimeSettings(); $('role-editor-name')?.focus(); return; }
+    state.roleEditor = null;
+    const role = roleSelect.value === 'all' ? null : builtinRoles.includes(roleSelect.value) ? { id: roleSelect.value }
+      : customs.find((entry) => entry.id === roleSelect.value) || (choice.role?.id === roleSelect.value ? choice.role : null);
+    setMemberChoice(id, { role });
+  });
+  roleLabel.append(roleSelect); section.append(roleLabel);
+  if (!(state.roleEditor?.partner === id && !state.roleEditor.id)) section.append(element('p', roleDuty(choice.role), 'detail-caption role-duty'));
+  const custom = choice.role?.id?.startsWith('custom:') ? choice.role : null;
+  if (custom && !disabled && state.roleEditor?.partner !== id) {
+    const actions = element('div', '', 'role-actions');
+    const edit = element('button', t("编辑角色"), 'quiet-button'); edit.type = 'button'; edit.id = `role-edit-${id}`;
+    edit.addEventListener('click', () => { state.roleEditor = { partner: id, id: custom.id, name: custom.name, duty: custom.duty, abilities: [...custom.abilities], error: '' }; renderRuntimeSettings(); $('role-editor-name')?.focus(); });
+    const remove = element('button', t("从角色列表删除"), 'quiet-button'); remove.type = 'button'; remove.id = `role-delete-${id}`;
+    remove.addEventListener('click', () => { saveCustomRoles(savedCustomRoles().filter((role) => role.id !== custom.id)); setMemberChoice(id, { role: null }); });
+    actions.append(edit, remove); section.append(actions);
+  }
+  if (state.roleEditor?.partner === id && !disabled) section.append(roleEditor(id));
+  const loadLabel = element('label', t("工作量 ")); const loadSelect = element('select'); loadSelect.id = `runtime-workload-${id}`;
+  for (const [value, text] of [['', t("跟随账号设置")], ['low', t("少")], ['normal', t("中")], ['high', t("多")]]) { const option = element('option', text); option.value = value; loadSelect.append(option); }
+  loadSelect.value = choice.workload || ''; loadSelect.disabled = disabled;
+  loadSelect.addEventListener('change', () => { if (!loadSelect.disabled) setMemberChoice(id, { workload: loadSelect.value || null }); });
+  loadLabel.append(loadSelect);
+  section.append(loadLabel, element('p', t("只对这个任务生效，覆盖账号上的工作量设置。"), 'detail-caption'));
+  card.append(section);
+}
+function roleEditor(id) {
+  const draft = state.roleEditor;
+  const form = element('div', '', 'role-editor');
+  const nameLabel = element('label', t("角色名称 ")); const name = element('input'); name.id = 'role-editor-name'; name.maxLength = 20; name.value = draft.name;
+  name.addEventListener('input', () => { draft.name = name.value; });
+  nameLabel.append(name);
+  const dutyLabel = element('label', t("职责说明 ")); const duty = element('textarea'); duty.id = 'role-editor-duty'; duty.maxLength = 300; duty.rows = 2; duty.value = draft.duty;
+  duty.placeholder = t("一句话说清这个伙伴负责什么，会原样告诉它。");
+  duty.addEventListener('input', () => { draft.duty = duty.value; });
+  dutyLabel.append(duty);
+  const abilities = element('fieldset', '', 'role-abilities'); abilities.append(element('legend', t("参与哪些环节")));
+  for (const ability of roleAbilityIds) {
+    const label = element('label', ''); const box = element('input'); box.type = 'checkbox'; box.id = `role-editor-ability-${ability}`;
+    box.checked = draft.abilities.includes(ability);
+    box.addEventListener('change', () => { draft.abilities = roleAbilityIds.filter((value) => value === ability ? box.checked : draft.abilities.includes(value)); });
+    label.append(box, element('span', roleAbilityLabels()[ability])); abilities.append(label);
+  }
+  const error = element('p', draft.error || '', 'role-editor-error'); error.id = 'role-editor-error'; error.hidden = !draft.error; error.setAttribute('role', 'alert');
+  const actions = element('div', '', 'role-actions');
+  const save = element('button', t("保存角色"), 'primary-button'); save.type = 'button'; save.id = 'role-editor-save';
+  save.addEventListener('click', () => {
+    const role = copyRole({ id: draft.id || `custom:${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, name: draft.name, duty: draft.duty, abilities: draft.abilities });
+    if (!role) { draft.error = !draft.name.trim() ? t("请填写角色名称。") : t("至少选一个环节。"); renderRuntimeSettings(); return; }
+    const roles = savedCustomRoles(); const index = roles.findIndex((entry) => entry.id === role.id);
+    if (index >= 0) roles[index] = role; else roles.push(role);
+    saveCustomRoles(roles); state.roleEditor = null; setMemberChoice(id, { role });
+  });
+  const cancel = element('button', t("取消"), 'quiet-button'); cancel.type = 'button'; cancel.id = 'role-editor-cancel';
+  cancel.addEventListener('click', () => { state.roleEditor = null; renderRuntimeSettings(); $(`runtime-role-${id}`)?.focus(); });
+  actions.append(save, cancel);
+  form.append(nameLabel, dutyLabel, abilities, error, actions);
+  return form;
+}
+function phaseLabel(phase) {
+  return { plan: t("规划"), coordinate: t("协调"), work: t("干活"), review: t("审查"), checkpoint: t("阶段检查"),
+    checkpoint_review: t("检查复核"), help: t("互助"), user: t("回复你") }[phase] || t("其他");
 }
 function focusRuntimeTarget() {
   const target = state.runtimePartner ? $(`runtime-model-${state.runtimePartner}`) : $('runtime-permission');
@@ -5291,6 +5424,9 @@ function renderMembers(snapshot) {
   $('conversation-budget').hidden = !conversation;
   $('conversation-budget').textContent = conversation
     ? t("历史累计：{p0} 轮 · {p1} 次调用", { p0: Number.isFinite(conversation.run_count) ? conversation.run_count : t("不可用"), p1: Number.isFinite(conversation.used) ? conversation.used : t("不可用") }) : '';
+  const phases = Array.isArray(snapshot?.workload?.phases) ? snapshot.workload.phases.filter((row) => Number.isInteger(row?.percent)) : [];
+  $('phase-load').hidden = !phases.length;
+  $('phase-load').textContent = phases.length ? t("本轮消耗（按 Token 折算）：{p0}", { p0: phases.map((row) => `${phaseLabel(row.phase)} ${row.percent}%`).join(' · ') }) : '';
   renderRunHistory(snapshot);
   renderComposerUsage();
   renderNavQuota();

@@ -3709,6 +3709,107 @@ test('each account shows its part of the round and its workload level can be cha
   assert.equal(english.get('member-workload-claude').textContent, 'This round 60% of the work · set to 75%');
 });
 
+test('each partner can be given a role and a workload for the new task, and a model change keeps them', async () => {
+  // Catches: role or workload never reaching the server, a model change dropping the role, or the chip hiding the role.
+  const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/runtime-options') return runtimeOptionsFixture();
+    if (request.path === '/api/rooms' && request.method === 'POST') return saved;
+  } });
+  await openRuntimeSettings(ui);
+  assert.deepEqual(ui.get('runtime-role-claude').children.map((node) => node.textContent), ['全能（默认）', '开发', '审查', '规划', '新建角色…']);
+  assert.equal(ui.get('runtime-role-claude').value, 'all'); assert.equal(ui.get('runtime-workload-claude').value, '');
+  selectRuntime(ui, 'runtime-role-claude', 'reviewer');
+  assert.match(ui.get('runtime-card-claude').textContent, /只审别人交付的改动，不领实现任务，也不参加规划。/);
+  selectRuntime(ui, 'runtime-workload-claude', 'high');
+  selectRuntime(ui, 'runtime-model-claude', 'opus');
+  assert.equal(ui.get('runtime-role-claude').value, 'reviewer', 'choosing a model keeps the role');
+  selectRuntime(ui, 'runtime-role-codex', 'builder');
+  assert.match(ui.get('runtime-shortcut-claude').textContent, /Opus.*审查/);
+  assert.match(ui.get('runtime-shortcut-claude').title, /审查 · 工作量多/);
+  await ui.click('runtime-settings-close'); ui.type('分工完成一个虚构小任务'); await ui.submit();
+  const create = ui.posts().find((request) => request.path === '/api/rooms'); assert.ok(create);
+  assert.deepEqual(create.body.runtime_settings.members, {
+    claude: { model: 'opus', effort: null, role: { id: 'reviewer' }, workload: 'high' },
+    codex: { model: null, effort: null, role: { id: 'builder' } },
+  });
+});
+
+test('a role is sent even when model options could not be read', async () => {
+  // Catches: settings dropped from the new task because only model choices were thought to need them.
+  const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/runtime-options') return { scope: 'unavailable' };
+    if (request.path === '/api/rooms' && request.method === 'POST') return saved;
+  } });
+  await openRuntimeSettings(ui);
+  assert.equal(ui.get('runtime-model-claude').disabled, true);
+  assert.equal(ui.get('runtime-role-claude').disabled, false);
+  selectRuntime(ui, 'runtime-role-claude', 'planner');
+  await ui.click('runtime-settings-close'); ui.type('先规划再动手'); await ui.submit();
+  const create = ui.posts().find((request) => request.path === '/api/rooms'); assert.ok(create);
+  assert.deepEqual(create.body.runtime_settings.members.claude, { model: null, effort: null, role: { id: 'planner' } });
+});
+
+test('a custom role is checked before saving, offered to every partner and sent whole', async () => {
+  // Catches: an unnamed role or one with no step being saved, the duty text lost, or a deleted role still offered.
+  const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/runtime-options') return runtimeOptionsFixture();
+    if (request.path === '/api/rooms' && request.method === 'POST') return saved;
+  } });
+  await openRuntimeSettings(ui);
+  selectRuntime(ui, 'runtime-role-claude', 'new');
+  assert.equal(ui.get('role-editor-ability-work').checked, true);
+  await ui.click('role-editor-save');
+  assert.equal(ui.get('role-editor-error').textContent, '请填写角色名称。');
+  ui.get('role-editor-name').value = '  文档 '; ui.get('role-editor-name').fire('input');
+  ui.get('role-editor-duty').value = '只写说明文档'; ui.get('role-editor-duty').fire('input');
+  ui.get('role-editor-ability-work').checked = false; ui.get('role-editor-ability-work').fire('change');
+  await ui.click('role-editor-save');
+  assert.equal(ui.get('role-editor-error').textContent, '至少选一个环节。');
+  ui.get('role-editor-ability-review').checked = true; ui.get('role-editor-ability-review').fire('change');
+  await ui.click('role-editor-save');
+  assert.equal(ui.document.getElementById('role-editor-name'), null, 'saving closes the editor');
+  const id = ui.get('runtime-role-claude').value;
+  assert.match(id, /^custom:[a-z0-9]{12}$/);
+  assert.match(ui.get('runtime-card-claude').textContent, /只写说明文档（负责：审查）/);
+  assert.ok(ui.get('runtime-role-codex').children.some((node) => node.value === id && node.textContent === '文档'), 'the saved role is offered to the other partner');
+  selectRuntime(ui, 'runtime-role-codex', id);
+  await ui.click('role-delete-codex');
+  assert.equal(ui.get('runtime-role-codex').value, 'all');
+  assert.equal(ui.get('runtime-role-codex').children.some((node) => node.value === id), false, 'a deleted role is no longer offered');
+  assert.equal(ui.get('runtime-role-claude').value, id, 'a partner already using it keeps it for this task');
+  await ui.click('runtime-settings-close'); ui.type('按自定义角色分工'); await ui.submit();
+  const create = ui.posts().find((request) => request.path === '/api/rooms');
+  assert.deepEqual(create.body.runtime_settings.members.claude.role, { id, name: '文档', duty: '只写说明文档', abilities: ['review'] });
+  assert.equal(create.body.runtime_settings.members.codex.role, undefined);
+});
+
+test('the room shows each partner role and what each step of this round cost', async () => {
+  // Catches: the role invisible once the task runs, or the per-step cost missing, misordered or untranslated.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.room.runtime_settings = { permission: 'workspace_write', effective_permission: 'workspace_write', members: {
+    claude: { model: null, effort: null, role: { id: 'reviewer', abilities: ['review'] } }, codex: { model: null, effort: null } } };
+  saved.workload = { configured: false, accounts: [
+    { scope: 'claude', members: ['claude'], share: 2, level: 'normal', points: 400, calls: 2, target_percent: 50, actual_percent: 40 },
+    { scope: 'codex', members: ['codex'], share: 2, level: 'normal', points: 600, calls: 3, target_percent: 50, actual_percent: 60 },
+  ], phases: [{ phase: 'work', points: 600, calls: 3, percent: 60, members: { codex: 600 } },
+    { phase: 'review', points: 400, calls: 2, percent: 40, members: { claude: 400 } }] };
+  const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.equal(ui.get('member-workload-claude').textContent, '角色：审查 · 本轮工作量 40%');
+  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 60%');
+  assert.equal(ui.get('phase-load').hidden, false);
+  assert.equal(ui.get('phase-load').textContent, '本轮消耗（按 Token 折算）：干活 60% · 审查 40%');
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.equal(english.get('member-workload-claude').textContent, 'Role: Review · This round 40% of the work');
+  assert.equal(english.get('phase-load').textContent, "This round's usage by tokens: Building 60% · Review 40%");
+  saved.workload = null;
+  const none = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.equal(none.get('phase-load').hidden, true);
+  assert.equal(none.get('member-workload-claude').textContent, '角色：审查');
+});
+
 test('composer keeps editable text and send controls outside the independently scrollable setup area', async () => {
   const ui = await browser(); const context = ui.get('composer-context');
   assert.equal(descendants(context).includes(ui.get('message')), false);
@@ -3811,7 +3912,7 @@ test('visible partner model shortcuts load the clicked catalog directly and keep
   assert.equal(ui.get('runtime-settings-popover').hidden, false);
   assert.equal(ui.get('runtime-card-claude').hidden, false); assert.equal(ui.get('runtime-card-codex').hidden, true);
   assert.equal(ui.get('runtime-permission').parentNode.hidden, true);
-  assert.match(ui.get('runtime-settings-title').textContent, /Claude Code.*模型与思考强度/);
+  assert.match(ui.get('runtime-settings-title').textContent, /Claude Code.*模型、角色与工作量/);
   assert.match(ui.get('runtime-card-claude').textContent, /正在从本机工具读取模型选项/);
   assert.doesNotMatch(ui.get('runtime-card-claude').textContent, /尚未读取可选模型/);
   assert.deepEqual(ui.posts().map((request) => request.path), ['/api/partners/claude/runtime/refresh']);

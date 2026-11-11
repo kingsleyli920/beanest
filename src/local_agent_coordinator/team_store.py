@@ -22,7 +22,7 @@ _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 from .stop_policy import continues_automatically
 from .native_outcome import CALL_DIED, FORMAT_ERRORS, NATIVE_METADATA_ERROR, NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES
-from . import workload
+from . import roles, workload
 from .round_handoff import (ROTATION_MIN_CONTEXT_TOKENS, TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS,
                             context_tokens, normalized_handoff)
 from .stop_policy import host_block_recoverable
@@ -84,6 +84,11 @@ class TeamStore:
                 room_id TEXT NOT NULL, run_id TEXT NOT NULL, provider TEXT NOT NULL,
                 points REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (room_id, run_id, provider)
+            );
+            CREATE TABLE IF NOT EXISTS partner_phase_load (
+                room_id TEXT NOT NULL, run_id TEXT NOT NULL, provider TEXT NOT NULL, phase TEXT NOT NULL,
+                points REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (room_id, run_id, provider, phase)
             );
             CREATE TABLE IF NOT EXISTS team_members (
                 room_id TEXT NOT NULL REFERENCES teams(room_id), provider TEXT NOT NULL,
@@ -236,7 +241,8 @@ class TeamStore:
 
     def start_next(self, db, room_id, text, target, run_id, revision, digest, *, retry, source="user", work_mode=None, runtime_settings=None,
                    execution_policy=None, objective_id=None, assessment=False, resume_blocked=False, verified_restart=False,
-                   fresh_native_recovery=False, initial_providers=None, fresh_providers=None, rotate_after_handoff=False):
+                   fresh_native_recovery=False, initial_providers=None, fresh_providers=None, rotate_after_handoff=False,
+                   directed=False):
         team = self.team(db, room_id)
         if team is None or team["current_run_id"] != run_id:
             raise RoomError("team_run_conflict")
@@ -296,6 +302,11 @@ class TeamStore:
         db.execute("UPDATE rooms SET goal=?,deadline=?,used=0,call_limit=?,work_mode=?,stop_requested=0,stop_confirmed=NULL,"
                    "blocked_reason=NULL,status='running',updated_at=? WHERE id=?",
                    (text,0,0,effective_mode,now,room_id))
+        if initial_providers is None and not directed:
+            # The user named nobody, so the room's roles pick who writes the plan.
+            abilities = roles.member_abilities(settings)
+            if not roles.can(abilities, target, "plan"):
+                target = roles.prefer(self.objectives.available_members(db, room_id) or [target], "plan", abilities)[0]
         db.execute("UPDATE teams SET phase='planning',revision=0,stop_reason=NULL,plan_author=? WHERE room_id=?", (target,room_id))
         db.execute("UPDATE team_members SET planned=0,plan_ready_revision=-1,coordinated_revision=-1,"
                    "coordinated_signature=NULL,coordination_repair_signature=NULL WHERE room_id=?", (room_id,))
@@ -317,8 +328,11 @@ class TeamStore:
         elif execution_policy is not None:
             self.objectives.create(db, room_id, text, execution_policy)
         db.execute("UPDATE team_runs SET fresh_sessions=? WHERE id=?",(int(fresh_sessions),new_id))
+        planners = self.coordination_members(db, room_id, [member["provider"] for member in members])
         for member in ([] if assessment else members):
             if initial_providers is not None and member["provider"] not in initial_providers:
+                continue
+            if initial_providers is None and member["provider"] not in planners:
                 continue
             self._queue(db, room_id, member["provider"], "plan", text="Plan the new explicit user iteration. "
                         "Preserve previous deliveries and existing file owners; do not replay earlier calls.")
@@ -689,15 +703,27 @@ class TeamStore:
                 "capacity_correction_of": row["capacity_correction_of"],
                 "repair_execution_id": row["repair_execution_id"]}
 
-    def create(self, db, room_id, plan_author, members, *, execution_policy=None):
+    def create(self, db, room_id, plan_author, members, *, execution_policy=None, directed=True):
+        if not directed:
+            # A message to everyone lets the room's roles pick who writes the plan.
+            plan_author = roles.prefer(list(members), "plan", self._abilities(db, room_id))[0]
         db.execute("INSERT INTO teams(room_id,plan_author) VALUES (?,?)", (room_id, plan_author))
         self._create_run(db, room_id, 1)
         if execution_policy is not None:
             self.objectives.create(db, room_id, self.store._room(db, room_id)["goal"], execution_policy)
         for provider in members:
             db.execute("INSERT INTO team_members(room_id,provider) VALUES (?,?)", (room_id, provider))
-            self._queue(db, room_id, provider, "plan", text="Discuss the shared goal and your capabilities. "
-                        "The plan author proposes the task list; every member confirms the exact plan before work.")
+        planners = self.coordination_members(db, room_id, list(members))
+        for provider in members:
+            if provider in planners:
+                self._queue(db, room_id, provider, "plan", text="Discuss the shared goal and your capabilities. "
+                            "The plan author proposes the task list; every member confirms the exact plan before work.")
+
+    def _settings(self, db, room_id):
+        return json.loads(self.store._room(db, room_id)["runtime_settings_json"] or "null")
+
+    def _abilities(self, db, room_id):
+        return roles.member_abilities(self._settings(db, room_id))
 
     @staticmethod
     def _busy(db, room_id, provider):
@@ -714,7 +740,12 @@ class TeamStore:
         continuation = json.loads(objective["continuation_json"] or "{}") if objective else {}
         target = continuation.get("initial_recipient") if continuation.get("kind") == "directed_user_request" else None
         if target is None:
-            return list(providers)
+            # Members whose role neither plans nor builds stay out of planning;
+            # the plan author always takes part, and nobody is left out alone.
+            abilities = self._abilities(db, room_id)
+            author = self.team(db, room_id)["plan_author"]
+            chosen = [provider for provider in providers if provider == author or roles.can(abilities, provider, roles.COORDINATION)]
+            return chosen or list(providers)
         # A later explicit invitation expands this run's coordination scope;
         # historical invitations do not silently wake the old roster again.
         invited = {provider for row in db.execute(
@@ -1860,21 +1891,43 @@ class TeamStore:
                    "ON CONFLICT(room_id,run_id,provider) DO UPDATE SET points=points+excluded.points,"
                    "calls=calls+1,reported=reported+excluded.reported",
                    (job["room_id"], context["run_id"], job["provider"], points or 0.0, int(points is not None)))
+        # The same call again by step, so a room can see what planning, work and review each cost.
+        db.execute("INSERT INTO partner_phase_load(room_id,run_id,provider,phase,points,calls,reported) VALUES (?,?,?,?,?,1,?) "
+                   "ON CONFLICT(room_id,run_id,provider,phase) DO UPDATE SET points=points+excluded.points,"
+                   "calls=calls+1,reported=reported+excluded.reported",
+                   (job["room_id"], context["run_id"], job["provider"], context.get("job_phase") or "other",
+                    points or 0.0, int(points is not None)))
 
     def _loads(self, db, room_id, run_id):
         return {row["provider"]: dict(row) for row in db.execute(
             "SELECT provider,points,calls,reported FROM partner_load WHERE room_id=? AND run_id=?", (room_id, run_id))}
 
-    def _workload_profile(self):
+    def _workload_profile(self, db, room_id, *, building=False):
+        """Each member's account and level; a level chosen for this room wins.
+
+        For handing out work, an account whose members cannot build in this
+        room gets no share, as long as someone else can build.
+        """
         profiles = self.store.account_workloads()
-        return lambda member: profiles.get(member, (member, workload.DEFAULT_LEVEL))
+        settings = self._settings(db, room_id)
+        levels, abilities = roles.workload_levels(settings), roles.member_abilities(settings)
+        idle = set()
+        if building and abilities:
+            members = self.objectives.available_members(db, room_id)
+            if any(roles.can(abilities, member, "work") for member in members):
+                idle = {member for member in members if not roles.can(abilities, member, "work")}
+
+        def profile(member):
+            scope, level = profiles.get(member, (member, workload.DEFAULT_LEVEL))
+            return scope, workload.IDLE if member in idle else levels.get(member, level)
+        return profile
 
     def _fair_order(self, db, room_id, candidates):
         members = self.objectives.available_members(db, room_id)
         if len(candidates) < 2 or not set(candidates) <= set(members):
             return list(candidates)
         return workload.fair_order(candidates, members, self._loads(db, room_id, self.team(db, room_id)["current_run_id"]),
-                                   self._workload_profile())
+                                   self._workload_profile(db, room_id))
 
     def _rebalance_unstarted(self, db, room_id):
         """Move claimed work nobody has begun to the least occupied accounts.
@@ -1916,8 +1969,11 @@ class TeamStore:
         tasks = [{"id": task["id"], "owner": task["owner"], "dependencies": json.loads(task["dependencies_json"]),
                   "capability": task["capability"], "title": task["title"], "epoch": task["assignment_epoch"], "movable": movable(task)}
                  for task in open_work]
-        moves = workload.rebalance(tasks, members, self._loads(db, room_id, run_id), self._workload_profile(),
-                                   lambda task, member: task["capability"] in self.store.task_capabilities(member))
+        abilities = self._abilities(db, room_id)
+        builders = [member for member in members if roles.can(abilities, member, "work")]
+        moves = workload.rebalance(tasks, members, self._loads(db, room_id, run_id), self._workload_profile(db, room_id, building=True),
+                                   lambda task, member: task["capability"] in self.store.task_capabilities(member)
+                                   and (member in builders or not builders))
         for task, receiver in moves:
             db.execute("UPDATE shared_tasks SET owner=?,assignment_epoch=assignment_epoch+1,ownership_grant_json=NULL "
                        "WHERE room_id=? AND run_id=? AND id=?", (receiver, room_id, run_id, task["id"]))
@@ -1929,7 +1985,31 @@ class TeamStore:
         members = self.objectives.available_members(db, room_id) if team is not None and team["current_run_id"] else []
         if len(members) < 2:
             return None
-        return workload.summary(members, self._loads(db, room_id, team["current_run_id"]), self._workload_profile())
+        summary = workload.summary(members, self._loads(db, room_id, team["current_run_id"]), self._workload_profile(db, room_id))
+        if summary is not None:
+            summary["phases"] = self.phase_load(db, room_id, team["current_run_id"])
+            abilities = self._abilities(db, room_id)
+            summary["roles"] = {member: sorted(abilities[member]) for member in members if member in abilities}
+        return summary
+
+    def phase_load(self, db, room_id, run_id):
+        """This round's cost by step: points and calls, each member's and in total."""
+        rows = db.execute("SELECT provider,phase,points,calls,reported FROM partner_phase_load WHERE room_id=? AND run_id=?",
+                          (room_id, run_id)).fetchall()
+        reported = sum(row["reported"] for row in rows)
+        average = sum(row["points"] for row in rows) / reported if reported else 1.0
+        phases = {}
+        for row in rows:
+            entry = phases.setdefault(row["phase"], {"phase": row["phase"], "points": 0.0, "calls": 0, "members": {}})
+            # A call without usage counts as an average call, as in the round ledger.
+            points = row["points"] + (row["calls"] - row["reported"]) * average
+            entry["points"] += points
+            entry["calls"] += row["calls"]
+            entry["members"][row["provider"]] = round(points)
+        total = sum(entry["points"] for entry in phases.values())
+        return [{**entry, "points": round(entry["points"]),
+                 "percent": round(entry["points"] * 100 / total) if total else None}
+                for entry in sorted(phases.values(), key=lambda entry: -entry["points"])]
 
     def _record_task_handoff(self, db, job, context, commands, usage):
         """Keep the record a large Claude session left at the end of a task.
@@ -2348,17 +2428,17 @@ class TeamStore:
                     if not available:
                         return False
                     previous = checkpoint["provider"]
-                    checkpoint["provider"] = available[0]
+                    checkpoint["provider"] = roles.prefer(available, "checkpoint", self._abilities(db, room_id))[0]
                     db.execute("UPDATE objectives SET checkpoint_json=? WHERE id=?", (json.dumps(checkpoint), objective["id"]))
                     self.store._event(db, room_id, "partner_checkpoint_reassigned", sender="system",
-                                      source_provider=previous, provider=available[0], objective_id=objective["id"])
+                                      source_provider=previous, provider=checkpoint["provider"], objective_id=objective["id"])
                 return self._queue(db, room_id, checkpoint["provider"], "checkpoint")
             choices = [member for member in self.objectives.available_members(db, room_id)
                        if member != checkpoint["provider"]]
             if not choices:
                 self.objectives.finish_checkpoint(db, room_id)
                 return True
-            reviewer = self._fair_order(db, room_id, choices)[0]
+            reviewer = self._fair_order(db, room_id, roles.prefer(choices, "review", self._abilities(db, room_id)))[0]
             checkpoint["reviewer"] = reviewer
             db.execute("UPDATE objectives SET checkpoint_json=? WHERE id=?", (json.dumps(checkpoint), objective["id"]))
             db.execute("UPDATE teams SET phase='checkpoint_review' WHERE room_id=?", (room_id,))
@@ -2423,7 +2503,8 @@ class TeamStore:
                           "AND tj.run_id=(SELECT current_run_id FROM teams WHERE room_id=tj.room_id) AND tj.task_id=? AND j.status IN ('queued','working')", (room_id, task["id"])).fetchone():
                 continue
             if task["status"] == "review":
-                choices = [provider for provider in members if provider != task["owner"]]
+                choices = roles.prefer([provider for provider in members if provider != task["owner"]], "review",
+                                       self._abilities(db, room_id))
                 self_check = not choices and task["owner"] in members and objective is not None
                 if self_check:
                     choices = [task["owner"]]
@@ -2483,9 +2564,10 @@ class TeamStore:
         owners = [dict(row) for row in db.execute(
             "SELECT id,owner FROM shared_tasks WHERE room_id=? AND run_id=? AND owner IS NOT NULL ORDER BY id",
             (room_id, team["current_run_id"]))]
+        planners = self.coordination_members(db, room_id, self.objectives.available_members(db, room_id))
         unconfirmed = [row[0] for row in db.execute(
             "SELECT provider FROM team_members WHERE room_id=? AND plan_ready_revision!=? ORDER BY provider",
-            (room_id, team["revision"]))]
+            (room_id, team["revision"])) if row[0] in planners]
 
         replan_parents = self._replan_parents(db, room_id)
 
