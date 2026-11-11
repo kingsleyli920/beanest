@@ -1066,4 +1066,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "其他": "Other",
   "本轮消耗（按 Token 折算）：{p0}": "This round's usage by tokens: {p0}",
   "角色：{p0}": "Role: {p0}",
+  "{p0} 上次没回完你的消息，已重新发给它。": "{p0} did not finish replying to your message, so it was sent again.",
 });

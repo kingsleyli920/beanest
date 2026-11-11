@@ -28,9 +28,21 @@ KEEP_SCENE = frozenset({
 # Stops with their own waiting path; the generic continuation leaves them alone.
 OWN_RECOVERY = frozenset({"all_partners_quota_exhausted"})
 
+# Kept scenes the host may still continue, but only through the audited
+# fresh-session native recovery the user's 继续 would run (cleanup confirmed,
+# private trees free of unpublished changes, the unknown session never
+# resumed), never by reopening the board in place. A CLI killed before it
+# reported its session stops this way. Without an audited recovery the scene
+# stays for the user.
+AUDITED_RECOVERY = frozenset({"session_identity_unknown"})
+
 
 def continues_automatically(code):
     return isinstance(code, str) and code not in USER_STOPS | KEEP_SCENE | OWN_RECOVERY
+
+
+def continues_after_recovery_audit(code):
+    return code in AUDITED_RECOVERY
 
 
 def host_block_recoverable(task):

@@ -1222,6 +1222,34 @@ class RoomStore:
                                   (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()
             return fingerprint, repeated is not None
 
+    def host_continued_from(self, room_id, binding):
+        """Whether only the host's own automatic continues, since the user last
+        spoke, moved the room on from the exact state this binding names: a
+        new run started from it, or a host block reopened in place."""
+        if not isinstance(binding, dict):
+            return False
+        with self._connection() as db:
+            team = self._team.team(db, room_id)
+            if team is None:
+                return False
+            current = team["current_run_id"]
+            for row in db.execute("SELECT value_json FROM events WHERE room_id=? AND seq>? "
+                                  "AND json_extract(value_json,'$.kind')='objective_auto_continued' ORDER BY seq DESC",
+                                  (room_id, self._latest_direct_user_seq(db, room_id))).fetchall():
+                event = json.loads(row[0])
+                if event.get("run_id") != current:
+                    return False
+                source = event.get("source_run_id")
+                if source == binding.get("run_id"):
+                    if source == current:
+                        return True
+                    run = db.execute("SELECT artifact_revision,artifact_digest FROM team_runs WHERE id=? AND room_id=?",
+                                     (source, room_id)).fetchone()
+                    return (run is not None and run["artifact_revision"] == binding.get("revision")
+                            and run["artifact_digest"] == binding.get("digest"))
+                current = source
+            return False
+
     def note_auto_continued(self, room_id, fingerprint, code, source_run_id):
         with self._connection(write=True) as db:
             self._event(db, room_id, "objective_auto_continued", sender="system", fingerprint=fingerprint,
@@ -2707,6 +2735,12 @@ class RoomStore:
                 return ancestor
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         faults = [candidate for candidate in candidates if candidate["source_error"] in NATIVE_RECOVERY_ERRORS]
+        # A reply to the user, a plan or a review owns no task paths, so its
+        # protocol fault leaves nothing to retain of its own; an owner's work
+        # it cut off is retained exactly as when a work call faults.
+        faults += [{"provider": row["provider"], "source_error": row["error"], "job_id": row["id"]}
+                   for row in latest.values() if row["phase"] != "work" and row["error"] in NATIVE_RECOVERY_ERRORS
+                   and row["status"] in {"failed", "unknown"}]
         if room["stop_requested"] or not faults or team["stop_reason"] not in NATIVE_RECOVERY_ERRORS:
             return candidates
         job_ids = [row["id"] for row in latest.values()]
@@ -3381,20 +3415,28 @@ class RoomStore:
             retained.add(job["id"])
             paths.setdefault(task["owner"], set()).update(json.loads(task["write_paths_json"]))
         # Each abandoned call meets an existing recovery standard: a work call
-        # qualifies for owner retention above; any other call returned every
-        # tool and recorded no possible side effect. Otherwise effects outside
-        # the private tree are unknown and this fallback does not apply.
+        # qualifies for owner retention above. Any other call (a reply to the
+        # user, a plan, a review, a check) owns no task paths. Under a
+        # permission that keeps writes inside its private tree, whatever it
+        # changed there is refused by the service's tree audit and its
+        # processes are confirmed gone, so a process killed mid-tool, or one
+        # that merely read files, is no reason to keep the room stopped with
+        # every action refused. With Full Access it could have acted outside
+        # that tree: it must have returned every tool and recorded no
+        # possible side effect.
         for job in unsettled:
             phase = db.execute("SELECT phase FROM team_jobs WHERE job_id=?", (job["id"],)).fetchone()
             native = db.execute("SELECT metadata_json FROM native_executions WHERE job_id=?", (job["id"],)).fetchone()
             native = json.loads(native[0]) if native else None
             if phase is None or native is None or native.get("cleanup_confirmed") is not True:
                 return None
+            confined = native.get("permission") in {"plan", "read_only", "workspace_write"}
             if phase[0] == "work":
                 if job["id"] not in retained:
                     return None
-            elif (native.get("side_effects_possible") is not False or type(native.get("tool_calls")) is not int
-                    or native.get("tool_calls") != native.get("tool_results")
+            elif (type(native.get("tool_calls")) is not int
+                    or not confined and (native.get("side_effects_possible") is not False
+                                         or native["tool_calls"] != native.get("tool_results"))
                     or native["tool_calls"] and not self.native_job_identity_confirmed(db, job)):
                 # A peer cancelled before its first tool did nothing to bind;
                 # any call that ran tools must prove its own session.
@@ -3957,6 +3999,7 @@ class RoomStore:
             if (user_message and not partial_works and not help_repair and not nonwork and metadata_correction is None
                     and read_only(desired["work_mode"], desired["runtime_settings"])):
                 self._team.send_user(db, room_id, recipients, user_message)
+            self._team.redeliver_unanswered(db, room_id, binding["run_id"])
             objective = self._team.objectives.current(db, room_id)
             db.execute("UPDATE objectives SET baseline_json=? WHERE id=?", (json.dumps(baseline), objective["id"]))
             self._remember_request(db, key, fingerprint, room_id)
@@ -4614,6 +4657,7 @@ class RoomStore:
                         source_run_id=binding["run_id"], source_jobs=[item["job_id"] for item in candidates],
                         task_ids=sorted(scope_errors), old_commands_replayed=False)
                 self._team.reconcile(db, room_id)
+                self._team.redeliver_unanswered(db, room_id, binding["run_id"])
             elif action == "objective":
                 if team["current_run_id"] != binding["run_id"] or team["phase"] != "ready_for_user" or self._team.pending(db, room_id):
                     raise RoomError("team_run_not_ready")

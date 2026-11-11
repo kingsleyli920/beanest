@@ -20,7 +20,7 @@ from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached
-from .stop_policy import continues_automatically, host_block_recoverable
+from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
 from .project_catalog import ProjectCatalog, ProjectCatalogError
@@ -1624,7 +1624,7 @@ class RoomService(RoomPromptMixin):
             return "quota_wait" if policy.get("quota_failover") else None
         # Same phases as _schedule_auto_continue: quitting the app leaves it cancelled.
         if (objective.get("status") in {"stopped", "interrupted"} and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
-                and continues_automatically(team.get("stop_reason"))):
+                and (continues_automatically(team.get("stop_reason")) or continues_after_recovery_audit(team.get("stop_reason")))):
             return "auto"
         return None
 
@@ -1652,9 +1652,15 @@ class RoomService(RoomPromptMixin):
             return None  # The same stop came back without progress: it is the user's now.
         if (snapshot["objective"]["status"] != "needs_user"
                 and (continuation is None or not continuation["can_send"]
-                     or continuation["action"] not in {"restart-objective", "recover-native"})):
+                     or continuation["action"] not in self._auto_continue_actions(snapshot["team"].get("stop_reason")))):
             return None
         return kind
+
+    @staticmethod
+    def _auto_continue_actions(code):
+        """The continuations the host may press for this stop: a kept scene that
+        an audit can release resumes only through fresh-session native recovery."""
+        return {"recover-native"} if continues_after_recovery_audit(code) else {"restart-objective", "recover-native"}
 
     def _natural_continuation(self, snapshot, *, target="all"):
         run, objective = snapshot.get("current_run"), snapshot.get("objective")
@@ -4206,6 +4212,21 @@ class RoomService(RoomPromptMixin):
                     if intent is not None or update else None)
         if identity is not None and self.store.natural_message_seen(room_id, request_id, identity):
             return self._snapshot(room_id)
+        try:
+            return await self._send_message(room_id, text, target, request_id, source, intent, binding, update, identity)
+        except RoomError:
+            # The user wrote against the state they saw. When the host's own
+            # automatic continue moved the room on in the meantime, the message
+            # is still theirs to deliver: decide again, once, against the
+            # current run. The request keeps its original identity.
+            if intent is None or not self.store.host_continued_from(room_id, binding):
+                raise
+            current = self._natural_continuation(self._snapshot(room_id), target=target)
+            if current is None:
+                raise
+            return await self._send_message(room_id, text, target, request_id, source, intent, current["binding"], update, identity)
+
+    async def _send_message(self, room_id, text, target, request_id, source, intent, binding, update, identity):
         if intent is not None:
             snapshot = self._snapshot(room_id)
             continuation = self._natural_continuation(snapshot, target=target)
@@ -4886,7 +4907,7 @@ class RoomService(RoomPromptMixin):
         # phase, tells it apart from the user's own stop.
         elif (objective.get("status") in {"stopped", "interrupted"}
               and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
-              and continues_automatically(team.get("stop_reason"))):
+              and (continues_automatically(team.get("stop_reason")) or continues_after_recovery_audit(team.get("stop_reason")))):
             code = team["stop_reason"]
         else:
             self._auto_continues.pop(room_id, None)
@@ -4913,7 +4934,7 @@ class RoomService(RoomPromptMixin):
         snapshot = self._snapshot(room_id)
         continuation = self._natural_continuation(snapshot)
         if (snapshot["current_run"]["id"] != run_id or not continuation or not continuation["can_send"]
-                or continuation["action"] not in {"restart-objective", "recover-native"}):
+                or continuation["action"] not in self._auto_continue_actions(code)):
             return
         try:
             await self._send_natural_action(snapshot, continuation["action"], None, "auto-continue-" + str(uuid4()),

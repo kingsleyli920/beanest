@@ -525,6 +525,17 @@ test('a round handoff and session rotation show one line each and the handoff ex
   assert.match(english.get('events').textContent, /Settled decisions/);
 });
 
+test('a message sent again after its reply call died shows one line naming the partner', async () => {
+  // Catches: the redelivery hidden from the timeline, shown as a bare "进展", or without English copy.
+  const saved = snapshot({ events: [
+    { seq: 1, kind: 'user_message_redelivered', sender: 'system', recipient: 'claude', source_job_id: jobId, source_run_id: null, created_at: 1800000000 },
+  ] });
+  const ui = await browser({ rooms: [saved.room], saved });
+  assert.match(ui.get('events').textContent, /Claude Code 上次没回完你的消息，已重新发给它。/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.match(english.get('events').textContent, /Claude Code did not finish replying to your message, so it was sent again\./);
+});
+
 test('a cache miss shows one short note for the latest occurrence and stays out of the chat', async () => {
   // Catches: the note missing, listing every miss, leaking into the chat, or showing the wrong unit.
   const miss = (seq, written) => ({ seq, kind: 'native_cache_miss', sender: 'claude', provider: 'claude', job_id: jobId, run_id: null,
