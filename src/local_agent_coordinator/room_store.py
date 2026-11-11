@@ -4264,10 +4264,17 @@ class RoomStore:
             call_limit = 0
             room_id = str(uuid4())
             now = self.clock()
+            # An agent connected through MCP may omit work_mode (it is optional
+            # there) and cannot send runtime settings; its new room is a normal
+            # build room the user can still configure. Only an omitted mode from
+            # an older user client keeps the legacy record. The request
+            # fingerprint above still holds the omitted field, so a retried
+            # request keeps resolving to the same room.
+            stored_mode = work_mode or ("build" if source == "mcp" else "legacy")
             db.execute("INSERT INTO rooms(id,goal,status,created_at,updated_at,deadline,call_limit,mode,project_id,work_mode) "
                        "VALUES (?,?, 'running',?,?,?,?,?,?,?)",
                        (room_id, goal, now, now, 0, call_limit,
-                        mode, project_id, work_mode or "legacy"))
+                        mode, project_id, stored_mode))
             if settings is not None:
                 db.execute("UPDATE rooms SET runtime_settings_json=? WHERE id=?", (json.dumps(settings), room_id))
             for provider in selected:
