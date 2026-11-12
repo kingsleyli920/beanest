@@ -6,6 +6,8 @@ This module neither executes project code nor writes back to its source.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import codecs
 from collections import Counter
 import difflib
@@ -190,7 +192,7 @@ class FolderWorkspace(ProjectWorkspace):
         if (commit["sha256"], revision) in _VALIDATED_INDEXES:
             return value
         if (not isinstance(value, dict)
-                or set(value) != {"format", "revision", "files", "source", "excluded"}
+                or set(value) - {"deleted"} != {"format", "revision", "files", "source", "excluded"}
                 or value["format"] != FORMAT or value["revision"] != revision
                 or not isinstance(value["files"], list) or len(value["files"]) > MAX_SOURCE_FILES
                 or not isinstance(value["excluded"], dict)):
@@ -219,6 +221,23 @@ class FolderWorkspace(ProjectWorkspace):
         if (total > MAX_SOURCE_BYTES
                 or sum(item["bytes"] for item in value["files"] if item["changed"]) > MAX_CHANGED_TOTAL_BYTES):
             raise ProjectWorkspaceError("project_storage_corrupt")
+        # Captured source files a proposal removed. Only written when nonempty,
+        # so indexes and digests without deletions are byte-for-byte unchanged.
+        deleted = value.get("deleted", [])
+        if "deleted" in value and (not isinstance(deleted, list) or not deleted or len(deleted) > MAX_SOURCE_FILES):
+            raise ProjectWorkspaceError("project_storage_corrupt")
+        removed = set()
+        for item in deleted:
+            if (not isinstance(item, dict) or set(item) != {"path", "sha256", "owner"}
+                    or not isinstance(item["path"], str) or item["path"].casefold() in seen | removed
+                    or not isinstance(item["sha256"], str) or not _HASH.fullmatch(item["sha256"])
+                    or (item["owner"] is not None and not safe_agent_id(item["owner"]))):
+                raise ProjectWorkspaceError("project_storage_corrupt")
+            try:
+                _path(item["path"])
+            except ProjectWorkspaceError:
+                raise ProjectWorkspaceError("project_storage_corrupt") from None
+            removed.add(item["path"].casefold())
         source = value["source"]
         if source is not None and (not isinstance(source, dict)
                 or set(source) != {"id", "name", "path", "selection_kind", "source_hash"}
@@ -231,9 +250,11 @@ class FolderWorkspace(ProjectWorkspace):
         _VALIDATED_INDEXES.add((commit["sha256"], revision))
         return value
 
-    def _publish_index(self, room, revisions, manifest, files, proposal_id, fingerprint, source, excluded):
+    def _publish_index(self, room, revisions, manifest, files, proposal_id, fingerprint, source, excluded, deleted=()):
         revision = manifest["revision"] + 1
         index = {"format": FORMAT, "revision": revision, "files": files, "source": source, "excluded": excluded}
+        if deleted:
+            index["deleted"] = sorted(deleted, key=lambda item: item["path"])
         raw, identifier = canonical_json(index), str(uuid4())
         commit = {"snapshot_id": identifier, "sha256": _hash(raw),
                   "proposal_id": proposal_id, "fingerprint": fingerprint}
@@ -310,29 +331,43 @@ class FolderWorkspace(ProjectWorkspace):
     def _content(self, blobs, entry):
         if not entry["text"]:
             raise ProjectWorkspaceError("project_binary_file")
+        try:
+            return self._raw(blobs, entry).decode("utf-8")
+        except UnicodeError:
+            raise ProjectWorkspaceError("project_storage_corrupt") from None
+
+    def _raw(self, blobs, entry):
+        """Exact verified bytes of one stored file, text or binary."""
         if entry["bytes"] > MAX_FILE_BYTES:
             raise ProjectWorkspaceError("project_limit_exceeded")
         with os.fdopen(self._blob(blobs, entry), "rb") as stream:
             raw = stream.read(MAX_FILE_BYTES + 1)
         if len(raw) != entry["bytes"] or _hash(raw) != entry["sha256"]:
             raise ProjectWorkspaceError("project_storage_corrupt")
-        try:
-            return raw.decode("utf-8")
-        except UnicodeError:
-            raise ProjectWorkspaceError("project_storage_corrupt") from None
+        return raw
+
+    def _readable(self, blobs, entry):
+        """Context/display fields: a text file's content; a binary file has
+        none, and its path, size and SHA identify it exactly instead."""
+        if entry["text"]:
+            return {"content": self._content(blobs, entry)}
+        return {"content": None, "text": False}
 
     def _summary(self, index, blobs):
         changed = [{**{key: item[key] for key in ("path", "sha256", "owner", "bytes")},
-                    "content": self._content(blobs, item)} for item in index["files"] if item["changed"]]
+                    **self._readable(blobs, item)} for item in index["files"] if item["changed"]]
         entries = {}
         for item in index["files"]:
             first, _, rest = item["path"].partition("/")
             entries[first] = {"path": first, "type": "directory" if rest else "file"}
-        return {"format": FORMAT, "kind": "folder", "revision": index["revision"], "files": changed,
-                "source": index["source"], "total_files": len(index["files"]),
-                "total_bytes": sum(item["bytes"] for item in index["files"]), "excluded": index["excluded"],
-                "root_entries": [entries[key] for key in sorted(entries)[:100]],
-                "root_entries_truncated": len(entries) > 100}
+        summary = {"format": FORMAT, "kind": "folder", "revision": index["revision"], "files": changed,
+                   "source": index["source"], "total_files": len(index["files"]),
+                   "total_bytes": sum(item["bytes"] for item in index["files"]), "excluded": index["excluded"],
+                   "root_entries": [entries[key] for key in sorted(entries)[:100]],
+                   "root_entries_truncated": len(entries) > 100}
+        if index.get("deleted"):
+            summary["deleted_files"] = [dict(item) for item in index["deleted"]]
+        return summary
 
     def index_sha256(self, revision):
         """Verify an immutable index before trusting a native workspace binding."""
@@ -454,7 +489,7 @@ class FolderWorkspace(ProjectWorkspace):
             blobs = _open_directory("blobs", parent=room)
             try:
                 return [{**{key: files[path][key] for key in ("path", "sha256", "owner", "bytes")},
-                         "content": self._content(blobs, files[path])} for path in names]
+                         **self._readable(blobs, files[path])} for path in names]
             finally:
                 os.close(blobs)
 
@@ -470,6 +505,24 @@ class FolderWorkspace(ProjectWorkspace):
             selected = set(names)
             return [{key: entry[key] for key in ("path", "sha256", "owner", "bytes", "text")}
                     for entry in index["files"] if entry["path"] in selected]
+
+    def raw_files_for_paths(self, paths, revision=None):
+        """Exact bytes of named files at one immutable revision, binary included."""
+        if not isinstance(paths, list) or len(paths) > MAX_CHANGE_FILES:
+            raise ProjectWorkspaceError("invalid_project_files")
+        names = [_path(path) for path in paths]
+        if len(set(names)) != len(names):
+            raise ProjectWorkspaceError("invalid_project_files")
+        with self._locked() as (room, revisions, _):
+            index = self._index(revisions, self._manifest(room), revision)
+            files = {item["path"]: item for item in index["files"]}
+            if any(path not in files for path in names):
+                raise ProjectWorkspaceError("project_file_unavailable")
+            blobs = _open_directory("blobs", parent=room)
+            try:
+                return {path: self._raw(blobs, files[path]) for path in names}
+            finally:
+                os.close(blobs)
 
     def assign_baseline_owners(self, mapping, *, allowed_owners):
         """Freeze known handoff authors on a fresh capture without changing bytes."""
@@ -493,7 +546,7 @@ class FolderWorkspace(ProjectWorkspace):
             assigned = [{**entry, "owner": mapping.get(entry["path"], {}).get("owner", entry["owner"])}
                         for entry in index["files"]]
             self._publish_index(room, revisions, manifest, assigned, "native-baseline-owners",
-                _hash(canonical_json(mapping)), index["source"], index["excluded"])
+                _hash(canonical_json(mapping)), index["source"], index["excluded"], index.get("deleted", ()))
 
     def source_comparison(self, path, revision=None):
         """Compare a captured baseline with one exact private revision, never the source tree."""
@@ -976,37 +1029,64 @@ class FolderWorkspace(ProjectWorkspace):
                 return next((item for item in indexes[number]["files"] if item["path"] == path), None)
 
             merged = {item["path"]: item for item in current["files"]}
+            deleted = {item["path"]: item for item in current.get("deleted", [])}
             changed = []
             for path in names:
-                target = entry(manifest["revision"], path)
+                target, target_revision = entry(manifest["revision"], path), manifest["revision"]
                 for number in range(manifest["revision"], 0, -1):
                     before, after = entry(number - 1, path), entry(number, path)
                     if before == after:
                         continue
                     if manifest["commits"][number]["proposal_id"] not in undone:
                         break
-                    target = before
+                    target, target_revision = before, number - 1
                 if target == merged.get(path):
                     continue
                 changed.append(path)
+                deleted.pop(path, None)
                 if target is None:
                     merged.pop(path, None)
+                    # Going back to a revision where a kept proposal had
+                    # deleted a captured file keeps that deletion's record.
+                    record = next((item for item in indexes[target_revision].get("deleted", [])
+                                   if item["path"] == path), None)
+                    if record is not None:
+                        deleted[path] = dict(record)
                 else:
                     merged[path] = dict(target)
             if not changed:
                 return {"revision": None, "paths": [], "replayed": False}
             result = self._publish_index(room, revisions, manifest, sorted(merged.values(), key=lambda item: item["path"]),
-                                         proposal_id, fingerprint, current["source"], current["excluded"])
+                                         proposal_id, fingerprint, current["source"], current["excluded"], list(deleted.values()))
             return {"revision": result["revision"], "paths": changed, "replayed": False}
 
-    def apply(self, provider, proposal_id, base_revision, files, *, allow_disjoint=True, ownership_grants=None):
+    def apply(self, provider, proposal_id, base_revision, files, *, allow_disjoint=True, ownership_grants=None,
+              native=False):
+        """Publish one proposal as a new immutable revision.
+
+        Each file is one of: text {path, previous_sha256, content}; binary
+        {path, previous_sha256, content_base64}; or a deletion {path,
+        previous_sha256, deleted: true}. Text and binary may add a boolean
+        executable. The fingerprint names binary bytes by SHA and size, so a
+        replay compares exact bytes without hashing a large encoded copy, and
+        text-only proposals keep their earlier fingerprints.
+
+        native=True imports bytes a native partner already wrote into its copy
+        of the user's project: secret-looking text is not refused, and a binary
+        file may be replaced, since the tool itself did both.
+        """
         if (not safe_agent_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
                 or type(base_revision) is not int or base_revision < 0 or type(allow_disjoint) is not bool
                 or not isinstance(files, list) or not 1 <= len(files) <= MAX_CHANGE_FILES):
             raise ProjectWorkspaceError("invalid_project_request")
-        prepared, names, total = [], set(), 0
+        prepared, names, total, payloads = [], set(), 0, {}
         for item in files:
-            if not isinstance(item, dict) or set(item) != {"path", "previous_sha256", "content"}:
+            if not isinstance(item, dict) or not {"path", "previous_sha256"} <= set(item):
+                raise ProjectWorkspaceError("invalid_project_files")
+            shape = set(item) - {"path", "previous_sha256", "executable"}
+            if shape not in ({"content"}, {"content_base64"}, {"deleted"}):
+                raise ProjectWorkspaceError("invalid_project_files")
+            if "executable" in item and (type(item["executable"]) is not bool or shape == {"deleted"}):
                 raise ProjectWorkspaceError("invalid_project_files")
             path = _path(item["path"])
             # The ZIP exporter owns this root manifest name. A directory with
@@ -1015,24 +1095,45 @@ class FolderWorkspace(ProjectWorkspace):
                 raise ProjectWorkspaceError("invalid_project_files")
             if _excluded(path):
                 raise ProjectWorkspaceError("project_sensitive_content")
-            if path.casefold() in names or not isinstance(item["content"], str):
+            if path.casefold() in names:
                 raise ProjectWorkspaceError("invalid_project_files")
             names.add(path.casefold())
-            try:
-                raw = item["content"].encode("utf-8")
-            except UnicodeError:
-                raise ProjectWorkspaceError("invalid_project_files") from None
-            if any(ord(char) < 32 and char not in "\t\r\n" for char in item["content"]):
-                raise ProjectWorkspaceError("invalid_project_files")
-            if _SECRET.search(item["content"]):
-                raise ProjectWorkspaceError("project_sensitive_content")
-            if len(raw) > MAX_FILE_BYTES:
-                raise ProjectWorkspaceError("project_limit_exceeded")
             previous = item["previous_sha256"]
             if previous is not None and (not isinstance(previous, str) or not _HASH.fullmatch(previous)):
                 raise ProjectWorkspaceError("invalid_project_files")
+            entry = {"path": path, "previous_sha256": previous}
+            if shape == {"deleted"}:
+                if item["deleted"] is not True or previous is None:
+                    raise ProjectWorkspaceError("invalid_project_files")
+                prepared.append({**entry, "deleted": True})
+                continue
+            if shape == {"content"}:
+                if not isinstance(item["content"], str):
+                    raise ProjectWorkspaceError("invalid_project_files")
+                try:
+                    raw = item["content"].encode("utf-8")
+                except UnicodeError:
+                    raise ProjectWorkspaceError("invalid_project_files") from None
+                if any(ord(char) < 32 and char not in "\t\r\n" for char in item["content"]):
+                    raise ProjectWorkspaceError("invalid_project_files")
+                if not native and _SECRET.search(item["content"]):
+                    raise ProjectWorkspaceError("project_sensitive_content")
+                entry["content"] = item["content"]
+            else:
+                if not isinstance(item["content_base64"], str):
+                    raise ProjectWorkspaceError("invalid_project_files")
+                try:
+                    raw = base64.b64decode(item["content_base64"].encode("ascii"), validate=True)
+                except (UnicodeError, binascii.Error, ValueError):
+                    raise ProjectWorkspaceError("invalid_project_files") from None
+                entry.update(sha256=_hash(raw), bytes=len(raw), text=False)
+            if len(raw) > MAX_FILE_BYTES:
+                raise ProjectWorkspaceError("project_limit_exceeded")
+            if "executable" in item:
+                entry["executable"] = item["executable"]
             total += len(raw)
-            prepared.append({"path": path, "previous_sha256": previous, "content": item["content"]})
+            payloads[path] = raw
+            prepared.append(entry)
         if total > MAX_CHANGE_BYTES:
             raise ProjectWorkspaceError("project_limit_exceeded")
         prepared.sort(key=lambda item: item["path"])
@@ -1061,7 +1162,10 @@ class FolderWorkspace(ProjectWorkspace):
             original = {item["path"]: item for item in base["files"]}
             merged = {item["path"]: item for item in current["files"]}
             folded = {path.casefold(): path for path in merged}
-            for item in prepared:
+            deleted = {item["path"]: item for item in current.get("deleted", [])}
+            captured = None
+            # Deletions first, so a file may become a folder in one proposal.
+            for item in sorted(prepared, key=lambda item: (not item.get("deleted"), item["path"])):
                 path, previous = item["path"], original.get(item["path"])
                 if ((path.casefold() in folded and folded[path.casefold()] != path)
                         or item["previous_sha256"] != (previous["sha256"] if previous else None)):
@@ -1069,33 +1173,51 @@ class FolderWorkspace(ProjectWorkspace):
                 grant = (ownership_grants or {}).get(path, {})
                 authorized_transfer = (previous is not None and grant.get("old_owner") == previous["owner"]
                                        and grant.get("new_owner") == provider and grant.get("sha256") == previous["sha256"])
-                if previous is not None and (not previous["text"] or previous["owner"] not in {None, provider} and not authorized_transfer):
+                if previous is not None and (not previous["text"] and not native
+                                             or previous["owner"] not in {None, provider} and not authorized_transfer):
                     raise ProjectWorkspaceError("project_owner_conflict")
                 for number in range(base_revision + 1, manifest["revision"] + 1):
                     intervening = {entry["path"]: entry for entry in self._index(revisions, manifest, number)["files"]}
                     if intervening.get(path) != previous:
                         raise ProjectWorkspaceError("project_file_conflict")
+                if item.get("deleted"):
+                    merged.pop(path)
+                    folded.pop(path.casefold())
+                    # Only a file captured from the source is recorded: a file
+                    # this room created and then removed leaves no change.
+                    if not previous["changed"]:
+                        source_sha = previous["sha256"]
+                    else:
+                        if captured is None:
+                            captured = {entry["path"]: entry for entry in self._index(revisions, manifest, 1)["files"]}
+                        source_sha = captured[path]["sha256"] if path in captured else None
+                    if source_sha is not None:
+                        deleted[path] = {"path": path, "sha256": source_sha, "owner": provider}
+                    continue
                 # File/directory collisions must be refused even on a case-insensitive host.
                 lower = path.casefold()
                 if any(other != lower and (other.startswith(lower + "/") or lower.startswith(other + "/"))
                        for other in folded):
                     raise ProjectWorkspaceError("project_file_conflict")
-                merged[path] = {"path": path, "sha256": _hash(item["content"].encode("utf-8")),
-                                "bytes": len(item["content"].encode("utf-8")), "text": True,
+                raw = payloads[path]
+                merged[path] = {"path": path, "sha256": _hash(raw), "bytes": len(raw), "text": "content" in item,
                                 "owner": provider, "changed": True}
-                if previous is not None and "executable" in previous:
+                if "executable" in item:
+                    merged[path]["executable"] = item["executable"]
+                elif previous is not None and "executable" in previous:
                     merged[path]["executable"] = previous["executable"]
                 folded[path.casefold()] = path
+                deleted.pop(path, None)
             if len(merged) > MAX_SOURCE_FILES or sum(item["bytes"] for item in merged.values()) > MAX_SOURCE_BYTES:
                 raise ProjectWorkspaceError("project_limit_exceeded")
             if sum(item["bytes"] for item in merged.values() if item["changed"]) > MAX_CHANGED_TOTAL_BYTES:
                 raise ProjectWorkspaceError("project_limit_exceeded")
             blobs = _open_directory("blobs", parent=room)
             try:
-                for item in prepared:
-                    self._store_bytes(blobs, item["content"].encode("utf-8"))
+                for raw in payloads.values():
+                    self._store_bytes(blobs, raw)
                 result = self._publish_index(room, revisions, manifest, sorted(merged.values(), key=lambda item: item["path"]),
-                                             proposal_id, fingerprint, current["source"], current["excluded"])
+                                             proposal_id, fingerprint, current["source"], current["excluded"], list(deleted.values()))
                 return {**self._summary(result, blobs), "replayed": False}
             finally:
                 os.close(blobs)

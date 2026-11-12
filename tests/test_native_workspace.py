@@ -8,7 +8,7 @@ import unittest
 from uuid import uuid4
 
 from local_agent_coordinator.native_workspace import (
-    NativeWorkspaceError, acknowledge_published, collect_changes, prepare_workspace, sync_workspace,
+    NativeWorkspaceError, acknowledge_published, collect_changes, discard_paths, prepare_workspace, sync_workspace,
 )
 
 
@@ -117,17 +117,81 @@ class NativeWorkspaceTests(unittest.TestCase):
         self.assertEqual({item["path"] for item in changes["blocked"]}, {"peer.py", "unowned.py"})
         self.assertEqual((source[0] / "own.py").read_text(), "old\n")
 
-    def test_binary_changes_and_deletions_are_preserved_but_not_imported(self):
-        source = self.export("source", {"asset.bin": b"\x00", "old.py": "old\n"})
+    def test_owned_binary_changes_deletions_and_mode_flips_are_collected(self):
+        # Catches owned deletions, binaries and chmod +x being blocked instead of imported.
+        source = self.export("source", {"asset.bin": b"\x00", "old.py": "old\n", "run.sh": "echo hi\n"})
         receipt = self.prepare(source)
         project = Path(receipt["project"])
         (project / "asset.bin").write_bytes(b"\x00\x01")
         (project / "old.py").unlink()
-        result = collect_changes(project, receipt, ["asset.bin", "old.py"])
-        self.assertEqual(result["files"], [])
-        self.assertEqual({item["reason"] for item in result["blocked"]},
-            {"native_binary_not_imported", "native_deletion_not_imported"})
+        (project / "run.sh").chmod(0o755)
+        (project / "new.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00")
+        result = collect_changes(project, receipt, ["asset.bin", "old.py", "run.sh", "new.png"])
+        self.assertEqual(result["blocked"], [])
+        files = {item["path"]: item for item in result["files"]}
+        self.assertEqual(files["asset.bin"], {"path": "asset.bin", "previous_sha256": hashlib.sha256(b"\x00").hexdigest(),
+            "sha256": hashlib.sha256(b"\x00\x01").hexdigest(), "bytes": 2, "content_base64": "AAE=", "text": False})
+        self.assertEqual(files["old.py"], {"path": "old.py", "previous_sha256": hashlib.sha256(b"old\n").hexdigest(),
+            "sha256": None, "bytes": 0, "deleted": True})
+        self.assertEqual((files["run.sh"]["content"], files["run.sh"]["executable"]), ("echo hi\n", True))
+        self.assertEqual((files["new.png"]["previous_sha256"], files["new.png"]["text"]), (None, False))
+        self.assertNotIn("executable", files["new.png"])
         self.assertEqual((project / "asset.bin").read_bytes(), b"\x00\x01")
+
+    def test_unowned_deletion_binary_and_mode_flip_stay_blocked(self):
+        # Catches an ownership breach riding in as a deletion, binary or chmod.
+        source = self.export("source", {"asset.bin": b"\x00", "old.py": "old\n", "run.sh": "echo hi\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        (project / "asset.bin").write_bytes(b"\x00\x01")
+        (project / "old.py").unlink()
+        (project / "run.sh").chmod(0o755)
+        result = collect_changes(project, receipt, [])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["blocked"], [{"path": name, "reason": "native_path_not_owned"}
+                                             for name in ("asset.bin", "old.py", "run.sh")])
+
+    def test_published_deletion_and_mode_advance_the_private_baseline(self):
+        # Catches a published deletion or mode flip being collected again on the next call.
+        source = self.export("source", {"old.py": "old\n", "run.sh": "echo hi\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        (project / "old.py").unlink()
+        (project / "run.sh").chmod(0o755)
+        collected = collect_changes(project, receipt, ["old.py", "run.sh"])
+        advanced = acknowledge_published(project, receipt, collected["files"])
+        self.assertEqual([(item["path"], item["executable"]) for item in advanced["files"]], [("run.sh", True)])
+        self.assertEqual(collect_changes(project, advanced, ["old.py", "run.sh"]), {"files": [], "blocked": []})
+        (project / "old.py").write_text("back\n")
+        with self.assertRaisesRegex(NativeWorkspaceError, "native_export_changed"):
+            acknowledge_published(project, receipt, [{"path": "old.py", "sha256": None, "deleted": True}])
+
+    def test_sync_takes_a_published_mode_flip_but_keeps_an_unpublished_one(self):
+        # Catches a peer's tree missing a shared chmod +x when the bytes did not change.
+        source = self.export("source", {"run.sh": "echo hi\n", "own.sh": "echo own\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        (project / "own.sh").chmod(0o755)
+        root, manifest = self.export("incoming", {"run.sh": "echo hi\n", "own.sh": "echo own\n"})
+        for entry in manifest["files"]:
+            entry["executable"] = entry["path"] == "run.sh"
+        synced = sync_workspace(project, receipt, root, manifest)
+        self.assertTrue((project / "run.sh").stat().st_mode & 0o100)
+        self.assertTrue((project / "own.sh").stat().st_mode & 0o100)
+        self.assertEqual([item["path"] for item in collect_changes(project, synced, ["own.sh"])["files"]], ["own.sh"])
+
+    def test_withdrawn_deletion_and_mode_flip_are_put_back(self):
+        # Catches a withdrawn task's deletion or chmod surviving in the private tree.
+        source = self.export("source", {"old.py": "old\n", "run.sh": "echo hi\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        (project / "old.py").unlink()
+        (project / "run.sh").chmod(0o755)
+        _, discarded = discard_paths(project, receipt, ["old.py", "run.sh"])
+        self.assertEqual(discarded, ["old.py", "run.sh"])
+        self.assertEqual((project / "old.py").read_text(), "old\n")
+        self.assertFalse((project / "run.sh").stat().st_mode & 0o111)
+        self.assertEqual(collect_changes(project, receipt, ["old.py", "run.sh"]), {"files": [], "blocked": []})
 
     def test_symlink_cannot_be_collected_as_a_candidate(self):
         source = self.export("source", {"own.py": "old\n"})
@@ -266,14 +330,15 @@ class NativeWorkspaceTests(unittest.TestCase):
         change = collect_changes(project, synced, ["own.py"], resolved_conflicts=["own.py"])["files"][0]
         self.assertEqual(change["previous_sha256"], incoming[1]["files"][0]["sha256"])
 
-    def test_replacing_known_binary_with_text_is_still_reported_as_not_imported(self):
+    def test_replacing_known_binary_with_text_is_collected_as_text(self):
+        # Catches a binary-to-text rewrite of an owned file still being refused.
         source = self.export("source", {"asset.bin": b"\x00\xff"})
         receipt = self.prepare(source)
         project = Path(receipt["project"])
         (project / "asset.bin").write_text("now text\n")
         change = collect_changes(project, receipt, ["asset.bin"])
-        self.assertEqual(change["files"], [])
-        self.assertEqual(change["blocked"][0]["reason"], "native_binary_not_imported")
+        self.assertEqual(change["blocked"], [])
+        self.assertEqual([(item["path"], item["content"]) for item in change["files"]], [("asset.bin", "now text\n")])
 
     def test_sync_base_keeps_exact_crlf_bytes_even_when_git_attributes_normalize(self):
         source = self.export("source", {".gitattributes": "*.txt text eol=lf\n", "own.txt": "old\r\n"})

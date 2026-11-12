@@ -272,6 +272,62 @@ class FolderWorkspaceTests(unittest.TestCase):
              {"path": "new/child.txt", "previous_sha256": None, "content": "child"}]))
         self.assertEqual(self.workspace.snapshot()["files"], [])
 
+    def test_native_binary_deletion_and_mode_import_replays_exactly(self):
+        # Catches binary bytes, deletions or chmod lost on import, or a replay accepting different bytes.
+        (self.source / "logo.png").write_bytes(b"\x89PNG\x00old")
+        (self.source / "old.py").write_text("old\n")
+        (self.source / "run.sh").write_text("echo hi\n")
+        seed = self.seed()
+        before = {item["path"]: item["sha256"] for item in self.inspect()["entries"]}
+        files = [{"path": "logo.png", "previous_sha256": before["logo.png"], "content_base64": "iVBORwBuZXc="},
+                 {"path": "art/new.png", "previous_sha256": None, "content_base64": "AAEC"},
+                 {"path": "old.py", "previous_sha256": before["old.py"], "deleted": True},
+                 {"path": "run.sh", "previous_sha256": before["run.sh"], "content": "echo hi\n", "executable": True}]
+        result = self.workspace.apply("codex", "native-one", seed["revision"], files, native=True)
+        self.assertEqual(result["deleted_files"], [{"path": "old.py", "sha256": before["old.py"], "owner": "codex"}])
+        self.assertEqual({item["path"]: (item["content"], item.get("text")) for item in result["files"]},
+                         {"logo.png": (None, False), "art/new.png": (None, False), "run.sh": ("echo hi\n", None)})
+        self.assertEqual(self.workspace.raw_files_for_paths(["logo.png", "art/new.png"]),
+                         {"logo.png": b"\x89PNG\x00new", "art/new.png": b"\x00\x01\x02"})
+        exported = self.workspace.materialize_snapshot(self.base / "export")
+        self.assertEqual({item["path"]: item["executable"] for item in exported["files"]},
+                         {"art/new.png": None, "logo.png": False, "run.sh": True})
+        self.assertFalse((self.base / "export/old.py").exists())
+        self.assertTrue(self.workspace.apply("codex", "native-one", seed["revision"], files, native=True)["replayed"])
+        changed = [dict(files[0], content_base64="iVBORwBvdGhlcg==")] + files[1:]
+        self.assertCode("project_proposal_conflict", lambda: self.workspace.apply(
+            "codex", "native-one", seed["revision"], changed, native=True))
+        # Re-creating a deleted captured file clears its deletion record.
+        again = self.workspace.apply("codex", "native-two", result["revision"],
+                                     [{"path": "old.py", "previous_sha256": None, "content": "new\n"}], native=True)
+        self.assertNotIn("deleted_files", again)
+
+    def test_secret_looking_text_is_refused_from_a_reply_but_imported_from_native_work(self):
+        # Catches the secret filter rejecting code a native partner already wrote (apiKey: config.apiKey).
+        seed = self.seed()
+        text = "const client = make({ apiKey: config.apiKey });\n"
+        files = [{"path": "client.js", "previous_sha256": None, "content": text}]
+        self.assertCode("project_sensitive_content", lambda: self.workspace.apply("codex", "reply", seed["revision"], files))
+        imported = self.workspace.apply("codex", "native", seed["revision"], files, native=True)
+        self.assertEqual(imported["files"][0]["content"], text)
+        # A credential path is never stored, native or not.
+        self.assertCode("project_sensitive_content", lambda: self.workspace.apply("codex", "env", imported["revision"],
+            [{"path": ".env", "previous_sha256": None, "content": "A=1\n"}], native=True))
+
+    def test_withdrawing_a_deletion_restores_the_file_and_its_record(self):
+        # Catches a withdrawn task's deletion staying in the shared copy or leaving a stale deletion record.
+        (self.source / "old.py").write_text("old\n")
+        seed = self.seed()
+        previous = self.inspect()["entries"][0]["sha256"]
+        removed = self.workspace.apply("codex", "remove", seed["revision"],
+                                       [{"path": "old.py", "previous_sha256": previous, "deleted": True}], native=True)
+        self.assertEqual([item["path"] for item in removed["deleted_files"]], ["old.py"])
+        restored = self.workspace.restore_paths("withdraw-remove", ["old.py"], ["remove"])
+        self.assertEqual(restored["paths"], ["old.py"])
+        snapshot = self.workspace.snapshot()
+        self.assertNotIn("deleted_files", snapshot)
+        self.assertEqual(self.workspace.files_for_paths(["old.py"])[0]["content"], "old\n")
+
     def test_large_existing_file_small_edit_can_commit_and_cumulative_changed_cap_is_atomic(self):
         content = "x" * (300 * 1024)
         (self.source / "large.txt").write_text(content)

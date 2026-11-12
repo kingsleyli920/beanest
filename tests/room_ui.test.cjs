@@ -2209,6 +2209,28 @@ test('folder snapshots display only changed files and the project total', async 
 });
 
 
+test('a native room lists an imported image by size and a deleted source file instead of hiding them', async () => {
+  // Catches a binary file shown as unreadable text, or a partner's deletion missing from the changed-files list.
+  const saved = snapshot();
+  saved.room.mode = 'native_project';
+  saved.project = { available: true, format: 'beanest-folder-workspace-v1', kind: 'folder', revision: 3,
+    total_files: 40, total_bytes: 9000, snapshot_sha256: 'a'.repeat(64), source: { name: '虚构游戏' },
+    files: [{ path: 'art/new.png', owner: 'claude', sha256: 'b'.repeat(64), bytes: 2048, text: false, content: null }],
+    deleted_files: [{ path: 'old.py', owner: 'claude', sha256: 'c'.repeat(64) }], excluded: {} };
+  const ui = await browser({ rooms: [saved.room], saved });
+  const panel = ui.get('project-files').textContent;
+  assert.match(ui.get('project-status').textContent, /2 个已保存改动/);
+  assert.match(panel, /art\/new\.png.*二进制文件（例如图片）· 2048 字节，这里不显示内容/);
+  assert.match(panel, /old\.py · 已删除 · Claude Code/);
+  assert.match(panel, /版本 3 里已没有这个文件；它在原项目里的 SHA256 是 c{64}/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  const englishPanel = english.get('project-files').textContent;
+  assert.match(englishPanel, /Binary file \(such as an image\) · 2048 bytes/);
+  assert.match(englishPanel, /old\.py · deleted · Claude Code/);
+  assert.doesNotMatch(englishPanel, /[一-龥]/);
+});
+
+
 test('a folder project with one selected partner preserves the direct request contract', async () => {
   const project = { id: '33333333-3333-4333-8333-333333333333', name: '项目', path: '/fictional/whole', files: [], selection_kind: 'folder' };
   const ui = await browser({ projects: [project] });

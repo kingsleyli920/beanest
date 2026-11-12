@@ -23,12 +23,14 @@ class ArtifactExportError(ValueError):
         super().__init__(code)
 
 
-def export_project(project: dict, *, expected_revision: int) -> dict:
+def export_project(project: dict, *, expected_revision: int, binaries=None) -> dict:
     """Accept an already-opened immutable workspace snapshot, not host paths.
 
     Both digests are returned: snapshot_sha256 binds the input revision, while
     sha256 binds the exact ZIP bytes. The archive contains only the supplied
     files plus a small public manifest, never sessions, messages or source paths.
+    A folder snapshot's binary file (content None) takes its exact bytes from
+    binaries[path]; captured files a partner deleted are named in the manifest.
     """
     if type(expected_revision) is not int or expected_revision < 0:
         raise ArtifactExportError("invalid_project_revision")
@@ -37,7 +39,9 @@ def export_project(project: dict, *, expected_revision: int) -> dict:
     files = project.get("files")
     folder = project.get("format") == FOLDER_FORMAT
     file_limit, byte_limit = (MAX_SOURCE_FILES, MAX_CHANGED_TOTAL_BYTES) if folder else (MAX_FILES, MAX_BYTES)
-    if not isinstance(files, list) or not 1 <= len(files) <= file_limit:
+    deleted = project.get("deleted_files", []) if folder else []
+    if (not isinstance(files, list) or not isinstance(deleted, list)
+            or not 1 <= len(files) + len(deleted) or len(files) > file_limit):
         raise ArtifactExportError("project_export_unavailable")
     prepared, seen, size = [], set(), 0
     for file in files:
@@ -45,10 +49,17 @@ def export_project(project: dict, *, expected_revision: int) -> dict:
             raise ArtifactExportError("project_export_corrupt")
         try:
             path = (validate_folder_path if folder else validate_text_path)(file.get("path"))
-            content = file["content"].encode("utf-8")
-        except (ProjectCatalogError, ProjectWorkspaceError, KeyError, AttributeError, UnicodeError):
+            if folder and file.get("text") is False and file.get("content") is None:
+                content = (binaries or {})[path]
+                if not isinstance(content, bytes):
+                    raise TypeError
+            else:
+                content = file["content"].encode("utf-8")
+                if "\0" in file["content"]:
+                    raise ArtifactExportError("project_export_corrupt")
+        except (ProjectCatalogError, ProjectWorkspaceError, KeyError, AttributeError, TypeError, UnicodeError):
             raise ArtifactExportError("project_export_corrupt") from None
-        if path.casefold() in seen or path.casefold() == MANIFEST_NAME.casefold() or "\0" in file["content"]:
+        if path.casefold() in seen or path.casefold() == MANIFEST_NAME.casefold():
             raise ArtifactExportError("project_export_corrupt")
         seen.add(path.casefold())
         size += len(content)
@@ -69,6 +80,11 @@ def export_project(project: dict, *, expected_revision: int) -> dict:
                 "files": [{"path": path, "sha256": digest} for path, _, digest in sorted(prepared)]}
     if folder:
         manifest["scope"] = "changed_files_only"
+    if deleted:
+        try:
+            manifest["deleted"] = sorted(validate_folder_path(file["path"]) for file in deleted)
+        except (ProjectWorkspaceError, KeyError, TypeError):
+            raise ArtifactExportError("project_export_corrupt") from None
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         entries = [(path, content) for path, content, _ in sorted(prepared)]

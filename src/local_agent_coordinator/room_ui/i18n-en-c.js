@@ -1103,4 +1103,9 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "这次的成果还没提交到主分支": "This task's results are not committed to the main branch yet",
   "无已跟踪改动待提交，另有 {p0} 个新文件还没纳入 Git": "No tracked changes to commit; {p0} new {p0:file is|files are} not in Git yet",
   "伙伴这次没有动用工具，只是退出得慢；豆窝按普通失败记下，接着做。": "The partner used no tool this time and was only slow to exit; Beanest recorded it as an ordinary failed call and carries on.",
+  "这是二进制文件（例如图片），不能按文本阅读；下载已修改文件可以拿到原样字节。": "This is a binary file (such as an image), so it can't be read as text. Download the changed files to get its exact bytes.",
+  "二进制文件（例如图片）· {p0} 字节，这里不显示内容。": "Binary file (such as an image) · {p0} bytes. Its content isn't shown here.",
+  "二进制文件（例如图片）· {p0} 字节，这里不显示内容；点上面的“{p1}”可以拿到原样文件。": "Binary file (such as an image) · {p0} bytes. Its content isn't shown here; use “{p1}” above to get the exact file.",
+  "{p0} · 已删除 · {p1}": "{p0} · deleted · {p1}",
+  "版本 {p0} 里已没有这个文件；它在原项目里的 SHA256 是 {p1}。": "This file is no longer in version {p0}. Its SHA256 in the original project is {p1}.",
 });

@@ -145,8 +145,26 @@ class GeneratedCacheImportHTTPTests(unittest.TestCase):
         self.assert_private_not_published(fixture, final)
         self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
 
-    def test_sensitive_symlink_captured_and_ordinary_unowned_files_remain_rejected(self):
-        for fault in ('sensitive', 'symlink', 'captured', 'ordinary'):
+    def test_credential_file_stays_private_without_failing_the_task(self):
+        # Catches a partner's local credential file failing the task, or being copied into the shared project.
+        fixture = self.fixture(fault='sensitive')
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertTrue(all(job['error'] is None for job in final['jobs']))
+        project = fixture.service._project(fixture.room_id)
+        self.assertEqual([(entry['path'], entry['sha256']) for entry in project.snapshot()['files']],
+                         [('result.md', hashlib.sha256(fixture.report).hexdigest())])
+        self.assertEqual(project.metadata_for_paths(['code/.godot/credentials.json']), [])
+        state = fixture.service.store.native_workspace(fixture.room_id, 'kimi')
+        self.assertEqual(state.get('blocked'), [])
+        self.assertIn(('code/.godot/credentials.json', 'sensitive_path'),
+                      [(entry['path'], entry.get('reason')) for entry in state.get('generated', [])])
+        self.assertTrue(Path(fixture.work[0]['path']).exists())
+
+    def test_symlink_captured_and_ordinary_unowned_files_remain_rejected(self):
+        # Catches a symlink, a changed captured input or an unowned source edit being imported.
+        for fault in ('symlink', 'captured', 'ordinary'):
             with self.subTest(fault=fault):
                 fixture = self.fixture(fault=fault)
                 try:

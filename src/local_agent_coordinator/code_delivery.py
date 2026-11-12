@@ -198,7 +198,10 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
                 continue
             allowed = sorted({entry["path"] for entry in state["files"]} | set(canonical))
             changes = native_workspace.collect_changes(state["project"], state, allowed, resolved_conflicts=[])
-            unpublished = any(canonical.get(entry["path"]) != entry["sha256"] for entry in changes["files"])
+            # A deletion or mode change still in the private tree's diff has
+            # not been acknowledged as published; its bytes alone cannot say so.
+            unpublished = any(entry.get("deleted") or "executable" in entry
+                              or canonical.get(entry["path"]) != entry["sha256"] for entry in changes["files"])
             blocked = False
             for entry in changes["blocked"]:
                 path = native_workspace._file(native_workspace._directory(state["project"]), entry["path"])
@@ -207,7 +210,7 @@ def summarize(workspaces, *, statuses, native_states, canonical, canonical_chang
                     continue
                 with path.open("rb") as stream:
                     actual = hashlib.file_digest(stream, "sha256").hexdigest()
-                if canonical.get(entry["path"]) != actual or entry["reason"] == "native_mode_change_not_imported":
+                if canonical.get(entry["path"]) != actual:
                     blocked = True
             if unpublished or blocked:
                 private.append({"state": "pending", "reason": "private_work_not_published", "workspace_id": workspace_id})
