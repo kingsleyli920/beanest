@@ -4,7 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import re
 
-from .runtime_settings import read_only
+from .runtime_settings import native_permission, read_only
 from .execution_policy import task_finished, WITHDRAWN
 
 
@@ -278,7 +278,11 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         else:
             validation.update(scope="self_check" if any(task["status"] == "self_checked" for task in tasks) else "not_run",
                 summary=_system("可查看原生工具的实际运行记录；模型结论不能代替测试验收。"))
-        validation["summary"] += _system("改动保存在私有副本，豆窝未自动合回原目录；Full Access 不是沙箱。")
+        if native_permission(room.get("work_mode"), room.get("runtime_settings")) == "full_access":
+            # Under Full Access partners write their own changes into the project, as the tools do when used directly.
+            validation["summary"] += _system("Full Access 下伙伴会把各自负责的改动写进原项目，私有副本另留一份供互审；Full Access 不是沙箱。")
+        else:
+            validation["summary"] += _system("改动保存在私有副本，豆窝未自动合回原目录；Full Access 不是沙箱。")
     summary = _system("共享任务 {p0}/{p1} 已交付并检查", sum(task_finished(task) for task in tasks), len(tasks))
     if withdrawn:
         summary += _system("，{p0} 项已撤掉", len(withdrawn))

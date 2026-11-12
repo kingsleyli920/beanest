@@ -621,6 +621,7 @@ Object.assign(window.BeanestI18nEnglish, {
 Object.assign(window.BeanestI18nEnglish, {
   "含伙伴自检，不代表全部经过独立互审。": " Includes self-checks; not every task received an independent review.",
   "改动保存在私有副本，豆窝未自动合回原目录；Full Access 不是沙箱。": " Changes are kept in private copies. Beanest has not merged them into the original folder; Full Access is not a sandbox.",
+  "Full Access 下伙伴会把各自负责的改动写进原项目，私有副本另留一份供互审；Full Access 不是沙箱。": " With Full Access, partners write the changes they own into the original project and keep a copy in their private trees for review; Full Access is not a sandbox.",
   "改动保存在隔离副本；原项目未回写，项目和测试未运行。": " Changes are kept in an isolated copy. The original project is unchanged, and the project and tests were not run.",
   "下一步需要你确认。": "The next step needs your confirmation.",
   "子任务已交付并互审，等待你验收。": "Subtasks delivered and peer-reviewed; awaiting your acceptance.",
