@@ -102,6 +102,22 @@ class QuotaRecoveryProofTests(unittest.TestCase):
                     with self.subTest(tail=tail['type']):
                         write(rows + [tail])
                         self.assertIsNone(prove())
+                # Kimi Code 2 records the failed turn afterwards, out of time order; that record is not a new action.
+                record = [{'time': 1350, 'type': 'token_counting.turn_recorded', 'agentId': 'main', 'turnId': 7, 'tokens': 1},
+                          {'time': 1352, 'type': 'prompt.completed', 'agentId': 'main', 'reason': 'failed'},
+                          {'time': 1340, 'type': 'agent.message.appended', 'kind': 'event', 'message': {'message': {'role': 'tool'}}},
+                          {'time': 1310, 'type': 'agent.turn.ended', 'kind': 'event', 'turnId': 7, 'outcome': 'failed'},
+                          {'time': 1360, 'type': 'file_history.checkpoint', 'agentId': 'main', 'turnId': 7, 'phase': 'end'}]
+                write(rows + record)
+                self.assertIsNotNone(prove())
+                # A message record written slightly out of order during the turn is no new action either.
+                write([rows[0], rows[1], {'time': 1150, 'type': 'agent.message.appended', 'kind': 'event', 'message': {}}, rows[2], *record])
+                self.assertIsNotNone(prove())
+                for bad in ({**record[3], 'outcome': 'completed'}, {**record[0], 'turnId': 8}, {**record[1], 'reason': 'completed'},
+                            {**record[0], 'time': 2500}):
+                    with self.subTest(bad=bad['type']):
+                        write(rows + [bad])
+                        self.assertIsNone(prove())
                 write([rows[0], {**rows[1], 'modelAlias': 'kimi-code/other'}, rows[2]])
                 self.assertIsNone(prove())
                 write([{**rows[0], 'input': [{'type': 'text', 'text': 'different job'}]}, *rows[1:]])
