@@ -10975,6 +10975,19 @@ test('the read-only room hides the commit and push request, and a missing GitHub
   assert.equal(plan.posts().length, 0);
 });
 
+test('results written into the project but not committed are not called merged', async () => {
+  // Catches a Full Access delivery headline saying "主分支已合入……也不用核对" while the partners' new files sit untracked in the project.
+  const data = taskCodeDeliveryFixture('unknown');
+  data.delivery_summary.remote = { state: 'unknown', reason: 'github_remote_unavailable', checked_at: null };
+  data.delivery_summary.state = 'pending'; data.delivery_summary.reason = 'published_work_not_on_mainline';
+  data.delivery_summary.published = { state: 'pending', reason: 'published_work_not_on_mainline', files: { total: 6, matched: 0, missing: 6, different: 0 } };
+  const saved = withNaturalContinuation(completedSuggestionFixture()); saved.room.work_mode = 'build';
+  const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true,
+    route(request) { if (request.path.includes('/code-status')) return data; } });
+  assert.equal(ui.get('code-status-summary').textContent, '这次的成果还没提交到主分支');
+  assert.equal(ui.get('code-merge-panel').hidden, false, 'the request to commit and merge stays offered');
+});
+
 test('changing the workload shows a short saved note that clears itself', async () => {
   // Catches A23: switching 少/中/多 gave no sign it was saved.
   let clock = 1_000_000;

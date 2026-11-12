@@ -881,6 +881,9 @@ function taskDeliveryMessage(delivery, gitState, active = false) {
   if (main === 'pending') return t("还有任务成果未合入主分支");
   if (privateState === 'pending' || delivery.workspace?.state === 'pending' && !workspaceRunning) return t("还有工作区成果待提交");
   if (workspaceRunning) return t("任务进行中，工作区还有改动没提交");
+  // Files a partner wrote straight into the project (Full Access) can be new and untracked:
+  // the branch itself is merged, but this task's results are not on it yet.
+  if (delivery.state === 'pending' && delivery.reason === 'published_work_not_on_mainline') return t("这次的成果还没提交到主分支");
   if (gitState === 'confirmed') return t("已提交代码已合入并同步 GitHub");
   if (main === 'confirmed') {
     if (remote === 'confirmed') return privateState === 'unknown' || delivery.workspace?.state === 'unknown' ? t("已提交代码已同步，工作区成果尚未核齐") : t("已提交代码已合入并同步 GitHub");
