@@ -438,7 +438,7 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(observation["cleanup_confirmed"])
                 self.assertEqual(self.receipt(result)["proof"]["reason"], "completed")
                 self.assertIn("session/close", [row.get("method") for row in self.trace()])
-                self.assertEqual(next(row for row in self.trace() if row.get("method") == "session/set_mode")["modeId"], "yolo")
+                self.assertEqual(next(row for row in self.trace() if row.get("method") == "session/set_mode")["modeId"], "auto")
 
     async def test_business_format_does_not_replace_native_completion_or_raw_text(self):
         values = ('```json\n[]\n```', 'before ```json\n{}\n```',
@@ -563,13 +563,15 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
         probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
         self.assertEqual(probe, {"project": "written", "temporary": "written"})
 
-    async def test_full_access_is_never_sandboxed_or_approved_for_the_user(self):
-        # Catches: the sandbox or its approval leaking into Full Access, where Kimi only asks about commands its own guard holds back.
+    async def test_full_access_is_never_sandboxed_and_never_stricter_than_kimi(self):
+        # Catches: Beanest limiting Full Access below the tool's own: the sandbox leaking in, Kimi's "yolo" (which still asks
+        # before rm -rf) used instead of its Never Ask "auto", or a question Kimi still raises being refused or left to stop the room.
         self.scenario("permission_refusable")
         result = await self.invoke(permission="full_access", sandbox=True)
         self.assertEqual(result["status"], "completed", result)
         reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
-        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "approve-once"}})
+        self.assertEqual(next(row for row in self.trace() if row.get("method") == "session/set_mode")["modeId"], "auto")
         probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
         self.assertEqual(probe, {"project": "written", "temporary": "written"})
 
@@ -597,26 +599,22 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(profile.endswith('(deny file-write* (subpath (param "PROJECT")))'), profile)
         self.assertNotIn(str(self.cwd), profile)
 
-    async def test_a_writing_call_refuses_what_kimi_still_asks_and_keeps_working(self):
+    async def test_a_limited_writing_call_refuses_what_kimi_still_asks_and_keeps_working(self):
         # Catches: a room stopping on a question the user can never approve (a later answer reaches only a new call,
-        # which Kimi's guard asks about again), as with rm -rf under Full Access.
-        for permission in ("full_access", "workspace_write"):
-            with self.subTest(permission=permission):
-                self.scenario("permission_refusable")
-                result = await self.invoke(permission=permission)
-                self.assertEqual(result["status"], "completed", result)
-                reverse = [row for row in self.trace() if row.get("reverse_id") == 9001][-1]
-                self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
+        # which asks again), or a limited permission approving it.
+        self.scenario("permission_refusable")
+        result = await self.invoke(permission="workspace_write")
+        self.assertEqual(result["status"], "completed", result)
+        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
 
     async def test_a_question_without_a_refusal_is_cancelled_without_auto_approval(self):
-        # Catches: approving when Kimi offers no way to refuse; that question still stops the call.
+        # Catches: a limited permission approving when Kimi offers no way to refuse; that question still stops the call.
         self.scenario("permission")
-        result = await self.invoke(permission="full_access")
+        result = await self.invoke(permission="workspace_write")
         self.assert_failed(result, "native_permission_required")
         reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
         self.assertEqual(reverse["result"], {"outcome": {"outcome": "cancelled"}})
-        mode = next(row for row in self.trace() if row.get("method") == "session/set_mode")
-        self.assertEqual(mode["modeId"], "yolo")
         self.assertIsNone(self.receipt(result)["proof"])
 
     async def test_cancel_confirms_cleanup_of_owned_peer_and_detached_child(self):

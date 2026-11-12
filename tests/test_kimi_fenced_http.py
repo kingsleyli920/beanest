@@ -127,7 +127,7 @@ class KimiFencedHTTPTests(unittest.TestCase):
                             and call["fenced_text_preserved"] for call in kimi))
         self.assertTrue(all(call["permission"] == "full_access" for call in calls))
         trace = [json.loads(line) for line in (fixture.root / "trace.jsonl").read_text().splitlines()]
-        self.assertEqual([row["modeId"] for row in trace if row.get("method") == "session/set_mode"], ["yolo"] * len(kimi))
+        self.assertEqual([row["modeId"] for row in trace if row.get("method") == "session/set_mode"], ["auto"] * len(kimi))
 
     def test_invalid_json_and_missing_native_terminal_are_not_accepted(self):
         for kwargs, expected in (({"malformed": True}, "invalid_agent_response"),

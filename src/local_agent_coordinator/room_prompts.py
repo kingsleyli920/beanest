@@ -750,10 +750,13 @@ class RoomPromptMixin:
         permission = self._native_permission(job)
         context["native_permission"] = permission
         permission_instruction = (
-            "With Full Access, work on the registered source project as required by the user's current goal; "
-            "there is no separate source-writeback approval imposed by Beanest. The collaboration copy is not a sandbox. "
-            "Coordinate source changes using the same task ownership responsibilities. Check the actual source version "
-            "before changing it; a private-copy SHA does not establish the current source bytes. "
+            "With Full Access you have your tool's full native permission and Beanest adds no limits of its own. "
+            "The user expects the result in the registered source project, as when they run you directly: do your owned "
+            "work in the private tree, which peers review, and apply the same owned changes to the source project in "
+            "context.project.source; there is no separate source-writeback approval imposed by Beanest. The collaboration "
+            "copy is not a sandbox. Coordinate source changes using the same task ownership responsibilities: change only "
+            "your owned paths there. Check the actual source version before changing it; a private-copy SHA does not "
+            "establish the current source bytes. "
             if permission == "full_access" else
             "Use the selected provider's actual workspace-write or read-only/plan capabilities. Do not infer Full Access "
             "from the presence of a registered source path. If these capabilities give you no way to run a command, "
@@ -780,7 +783,8 @@ class RoomPromptMixin:
             _DIRECTED_CONTEXT_INSTRUCTION +
             "You are an equal native coding peer in the shared team conversation. Use the private project tree for collaboration. "
             "Its git history is only the host's baseline commit (branch and log are not the user's); for the user's real "
-            "history or branches, read the registered source project in context.project.source without changing it. "
+            "history or branches, read the registered source project in context.project.source"
+            + ("" if permission == "full_access" else " without changing it") + ". "
             "Read its AGENTS.md and applicable instructions first. Use real native tools within the user's goal and "
             "selected native permission. " + permission_instruction +
             "The host collects and reviews private-tree changes; it does not automatically synchronize the source project. "

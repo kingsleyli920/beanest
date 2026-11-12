@@ -881,6 +881,9 @@ function taskDeliveryMessage(delivery, gitState, active = false) {
   if (main === 'pending') return t("还有任务成果未合入主分支");
   if (privateState === 'pending' || delivery.workspace?.state === 'pending' && !workspaceRunning) return t("还有工作区成果待提交");
   if (workspaceRunning) return t("任务进行中，工作区还有改动没提交");
+  // Files a partner wrote straight into the project (Full Access) can be new and untracked:
+  // the branch itself is merged, but this task's results are not on it yet.
+  if (delivery.state === 'pending' && delivery.reason === 'published_work_not_on_mainline') return t("这次的成果还没提交到主分支");
   if (gitState === 'confirmed') return t("已提交代码已合入并同步 GitHub");
   if (main === 'confirmed') {
     if (remote === 'confirmed') return privateState === 'unknown' || delivery.workspace?.state === 'unknown' ? t("已提交代码已同步，工作区成果尚未核齐") : t("已提交代码已合入并同步 GitHub");
@@ -926,7 +929,14 @@ function taskDeliveryScopeStatus(delivery, kind, workspaces = []) {
   const issues = (Array.isArray(delivery.issues) ? delivery.issues : []).filter((issue) => issue.scope === kind && issue.state !== 'confirmed');
   const checks = (Array.isArray(delivery[kind]?.checks) ? delivery[kind].checks : []).filter((check) => check.state !== 'confirmed');
   const problems = [...issues, ...checks];
-  if (!problems.length) return taskDeliveryStatus(delivery[kind], kind);
+  if (!problems.length) {
+    const untracked = delivery[kind]?.untracked;
+    // New files a partner wrote into the project are untracked: say they are there rather than imply nothing is left.
+    if (kind === 'workspace' && delivery[kind]?.state === 'confirmed' && Number.isSafeInteger(untracked) && untracked > 0) {
+      return `${t("工作区")}${interfaceColon()}${t("无已跟踪改动待提交，另有 {p0} 个新文件还没纳入 Git", { p0: untracked })}`;
+    }
+    return taskDeliveryStatus(delivery[kind], kind);
+  }
   const messages = [...new Set(problems.map((issue) => {
     const workspace = workspaces.find((item) => item.id === issue.workspace_id);
     // Only the bound repository is named above the cards; any other workspace still needs its name here.

@@ -59,7 +59,7 @@ class KimiAuthBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(methods.count('session/prompt'), 1)
         self.assertEqual(methods.count('session/resume'), 1)
         modes = [row['modeId'] for row in self.trace() if row.get('method') == 'session/set_mode']
-        self.assertEqual(modes, ['yolo'])
+        self.assertEqual(modes, ['auto'])
         self.assertTrue(result['cleanup_confirmed'])
         self.assertEqual(result['native_execution']['tool_calls'], 0)
         self.assertIsNone(self.receipt(result)['proof'])

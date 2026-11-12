@@ -186,6 +186,15 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
             work_mode="build", runtime_settings={"permission": permission, "members": {}},
             execution_policy={"mode": "autonomous"}, **extra)
 
+    async def test_a_limited_delivery_still_says_the_project_was_not_changed(self):
+        # Catches the Full Access wording leaking into a room whose changes stay in private copies.
+        created = await self.create(permission="workspace_write")
+        await self.settle()
+        result = await self.service.read_room(created["room"]["id"])
+        self.assertEqual(result["objective"]["status"], "complete", result["team"])
+        self.assertIn("豆窝未自动合回原目录", result["collaboration"]["outcome"]["validation"]["summary"])
+        self.assertNotIn("写进原项目", result["collaboration"]["outcome"]["validation"]["summary"])
+
     async def test_a_partner_that_cannot_run_commands_is_told_not_to_wait_for_checks(self):
         # Catches a file-tools-only partner stopping the room to ask the user to run its tests.
         sentence = "a check you cannot run is not a reason to stop or to wait for someone else to run it"
@@ -1657,6 +1666,9 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(call["permission"] == "full_access" and call["timeout"] is None for call in self.fake.calls))
         self.assertTrue(all([await call["progress_fingerprint"]() for call in self.fake.calls]))
         self.assertEqual(result["collaboration"]["outcome"]["validation"]["scope"], "native_review")
+        # Catches a Full Access delivery telling the user their project was not changed while partners write into it.
+        self.assertIn("Full Access 下伙伴会把各自负责的改动写进原项目", result["collaboration"]["outcome"]["validation"]["summary"])
+        self.assertNotIn("豆窝未自动合回原目录", result["collaboration"]["outcome"]["validation"]["summary"])
         self.assertTrue(result["objective"]["delivery"]["verified"])
         self.assertEqual({entry["path"] for entry in result["objective"]["delivery"]["files"]}, {"main.py", "notes.md"})
         unchanged = next(entry for entry in result["objective"]["delivery"]["files"] if entry["path"] == "notes.md")
