@@ -104,9 +104,12 @@ def rebalance(tasks, members, loads, profile, can_take):
     under it receives, and equal shares balance like any other.
     """
     rows = accounts(members, loads, profile)
-    if len(tasks) < 2 or len(rows) < 2 or not any(row["share"] for row in rows):
+    if len(rows) < 2 or not any(row["share"] for row in rows):
         return []
     scope_of = {member: row["scope"] for row in rows for member in row["members"]}
+    # A lone task stays where it is, unless its account should get no work at all.
+    if len(tasks) < 2 and all(row["share"] for row in rows if any(scope_of[task["owner"]] == row["scope"] for task in tasks)):
+        return []
     owners = {task["id"]: task["owner"] for task in tasks}
     held = {row["scope"]: sum(scope_of[owner] == row["scope"] for owner in owners.values()) for row in rows}
     total, shares = len(tasks), sum(row["share"] for row in rows)

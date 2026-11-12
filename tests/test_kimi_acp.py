@@ -563,13 +563,13 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
         probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
         self.assertEqual(probe, {"project": "written", "temporary": "written"})
 
-    async def test_full_access_is_never_sandboxed_or_answered_for_the_user(self):
-        # Catches: the sandbox or its approval leaking into a mode where the question is real.
+    async def test_full_access_is_never_sandboxed_or_approved_for_the_user(self):
+        # Catches: the sandbox or its approval leaking into Full Access, where Kimi only asks about commands its own guard holds back.
         self.scenario("permission_refusable")
         result = await self.invoke(permission="full_access", sandbox=True)
-        self.assert_failed(result, "native_permission_required")
+        self.assertEqual(result["status"], "completed", result)
         reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
-        self.assertEqual(reverse["result"], {"outcome": {"outcome": "cancelled"}})
+        self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
         probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
         self.assertEqual(probe, {"project": "written", "temporary": "written"})
 
@@ -597,15 +597,19 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(profile.endswith('(deny file-write* (subpath (param "PROJECT")))'), profile)
         self.assertNotIn(str(self.cwd), profile)
 
-    async def test_full_access_never_answers_a_tool_request_for_the_user(self):
-        # Catches: the read-only refusal leaking into a mode where the question is real.
-        self.scenario("permission_refusable")
-        result = await self.invoke(permission="full_access")
-        self.assert_failed(result, "native_permission_required")
-        reverse = next(row for row in self.trace() if row.get("reverse_id") == 9001)
-        self.assertEqual(reverse["result"], {"outcome": {"outcome": "cancelled"}})
+    async def test_a_writing_call_refuses_what_kimi_still_asks_and_keeps_working(self):
+        # Catches: a room stopping on a question the user can never approve (a later answer reaches only a new call,
+        # which Kimi's guard asks about again), as with rm -rf under Full Access.
+        for permission in ("full_access", "workspace_write"):
+            with self.subTest(permission=permission):
+                self.scenario("permission_refusable")
+                result = await self.invoke(permission=permission)
+                self.assertEqual(result["status"], "completed", result)
+                reverse = [row for row in self.trace() if row.get("reverse_id") == 9001][-1]
+                self.assertEqual(reverse["result"], {"outcome": {"outcome": "selected", "optionId": "refuse"}})
 
-    async def test_real_native_permission_request_is_cancelled_without_auto_approval(self):
+    async def test_a_question_without_a_refusal_is_cancelled_without_auto_approval(self):
+        # Catches: approving when Kimi offers no way to refuse; that question still stops the call.
         self.scenario("permission")
         result = await self.invoke(permission="full_access")
         self.assert_failed(result, "native_permission_required")

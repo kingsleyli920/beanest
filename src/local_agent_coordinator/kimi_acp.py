@@ -109,13 +109,18 @@ class ACPConnection:
             pass
 
     def _read_only_answer(self, params):
-        """The option id that settles this one tool request in a read-only call.
+        """The option id that settles this one tool request.
 
-        Inside the write-denying sandbox the tool may run: the operating
-        system, not the partner, keeps the project unchanged. Without it the
-        tool is refused and the partner carries on without it.
+        Inside the read-only call's write-denying sandbox the tool may run: the
+        operating system, not the partner, keeps the project unchanged.
+        Otherwise the tool is refused and the partner carries on without it.
+        Beanest cannot put the question in front of the user while the call
+        runs, and an answer given later reaches only a new call, which asks
+        again; stopping would only wait. Even Full Access (Kimi's yolo mode)
+        still asks about commands Kimi's own guard holds back, such as rm -rf,
+        so those are refused, never approved on the user's behalf.
         """
-        if self.permission not in READ_ONLY_PERMISSIONS or not isinstance(params, dict) or not isinstance(params.get("options"), list):
+        if not isinstance(params, dict) or not isinstance(params.get("options"), list):
             return None
         options = [item for item in params["options"] if isinstance(item, dict) and isinstance(item.get("optionId"), str)]
         kinds = ("allow_once",) if self.sandboxed else ()
@@ -158,8 +163,8 @@ class ACPConnection:
                         if self.on_update is not None:
                             await self.on_update(params)
                     elif "id" in row:
-                        # A native permission question remains a real question.
-                        # The coordinator cannot silently approve it for a user.
+                        # Never approved for the user; refused once when Kimi offers that.
+                        # Only a question without a refusal option still stops the call.
                         answer = self._read_only_answer(params) if method == "session/request_permission" else None
                         if answer is not None:
                             await self.send({"jsonrpc": "2.0", "id": row["id"], "result": {"outcome": {"outcome": "selected", "optionId": answer}}})
