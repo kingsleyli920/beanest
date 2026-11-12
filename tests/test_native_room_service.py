@@ -1651,6 +1651,8 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((accepted["team"]["tasks"][0]["owner"], accepted["team"]["tasks"][0]["assignment_epoch"]),
                          (task["owner"], task["assignment_epoch"]))
         self.assertTrue(any(event["kind"] == "partner_quota_recovered" for event in accepted["events"]))
+        # Back in the team: its card must not keep saying it waits for the user (等你处理).
+        self.assertNotEqual(next(member for member in accepted["members"] if member["id"] == "codex")["status"], "needs_user")
         release.set()
         await self.settle()
         final = await self.service.read_room(room_id)

@@ -4696,6 +4696,9 @@ class RoomStore:
                     and retired[provider]["reason"] in {"agent_quota_exhausted", "subscription_limit_reached"}
                     and member is not None and not member[0] and self._team.provider_clean(db, room_id, provider)):
                 del retired[provider]
+                # Back in the team: no longer shown as waiting, and dispatch may use it again.
+                db.execute("UPDATE members SET status='idle',current_task=NULL WHERE room_id=? AND provider=? AND status='needs_user'",
+                           (room_id, provider))
                 self._event(db, room_id, "partner_quota_recovered", sender="system", provider=provider,
                             objective_id=objective["id"], source="fresh_availability", old_calls_replayed=False)
         if objective:
