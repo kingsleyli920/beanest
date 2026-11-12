@@ -6117,6 +6117,9 @@ class RoomService(RoomPromptMixin):
             existing_owners = {file["path"]:file["owner"] for file in project["files"]}
             proposed = {command["id"]:command for command in parsed["commands"] if command["type"] == "propose"}
             task_scopes = {item["id"]:item for item in snapshot["team"]["tasks"]}
+            # A claim in the same reply as an adjust takes the task's narrowed paths.
+            task_scopes.update({command["task_id"]: {**task_scopes[command["task_id"]], "write_paths": command["write_paths"]}
+                                for command in parsed["commands"] if command["type"] == "adjust"})
             task_scopes.update(proposed)
             scopes = {command["task_id"]: task_scopes[command["task_id"]]["write_paths"]
                       for command in parsed["commands"] if command["type"] == "claim"}

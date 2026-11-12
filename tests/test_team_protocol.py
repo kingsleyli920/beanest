@@ -74,7 +74,8 @@ class TeamPhaseSchemaTests(unittest.TestCase):
             "work": {"complete", "request_help", "block"},
             "review": {"review", "block"},
             "help": set(),
-            "user": {"claim"},
+            # The plan author's reply to the user may change unstarted work mid-run; the store checks the rest.
+            "user": {"claim", "propose"},
         }
         for phase, kinds in allowed.items():
             validator = self.validator(phase)
@@ -89,6 +90,13 @@ class TeamPhaseSchemaTests(unittest.TestCase):
                 validator = self.validator(phase, can_propose=False)
                 self.assertFalse(validator.is_valid(native_response([proposal()])))
                 self.assertTrue(validator.is_valid(native_response([{"type": "claim", "task_id": "main"}, {"type": "plan_ready"}])))
+        # Catches a non-author's user-phase schema offering mid-run plan changes it may never make.
+        user = self.validator("user", can_propose=False)
+        self.assertFalse(user.is_valid(native_response([proposal()])))
+        self.assertFalse(user.is_valid(native_response([{"type": "adjust", "task_id": "main", "dependencies": [], "write_paths": []}])))
+        self.assertTrue(user.is_valid(native_response([{"type": "claim", "task_id": "main"}])))
+        self.assertTrue(self.validator("user").is_valid(native_response(
+            [{"type": "adjust", "task_id": "main", "dependencies": [], "write_paths": []}])))
         # Omitting phase still admits every existing team command type.
         broad = self.validator(None)
         self.assertTrue(broad.is_valid(native_response([proposal(), {"type": "complete", "task_id": "main", "result": "Result."}])))

@@ -250,6 +250,16 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'team_help_requested') return t("{p0} 向 {p1} 请求协助", { p0: displayName(event.sender), p1: displayName(event.recipient) });
   if (event.kind === 'team_help_finished') return t("{p0} 已回复协助请求", { p0: displayName(event.sender) });
   if (event.kind === 'task_taken_over') return t("{p0} 已接过 {p1} 的子任务，继续处理。", { p0: displayName(event.owner), p1: displayName(event.previous_owner) });
+  if (event.kind === 'plan_adjusted') {
+    // The plan author changed tasks nobody had started while answering the user; running work is untouched.
+    const titles = (items) => (Array.isArray(items) ? items : []).filter((item) => typeof item?.title === 'string' && item.title)
+      .map((item) => interfaceQuote(taskDisplayTitle(item.title)));
+    const added = titles(event.added); const changed = titles(event.adjusted); const who = displayName(event.sender);
+    if (added.length && changed.length) return t("{p0} 调整了还没开始的任务：新增{p1}，改了{p2}的前置任务或修改范围。进行中的工作照常继续。", { p0: who, p1: interfaceList(added), p2: interfaceList(changed) });
+    if (added.length) return t("{p0} 新增了{p1}，进行中的工作照常继续。", { p0: who, p1: interfaceList(added) });
+    if (changed.length) return t("{p0} 改了还没开始的{p1}的前置任务或修改范围，进行中的工作照常继续。", { p0: who, p1: interfaceList(changed) });
+    return t("{p0} 调整了还没开始的任务，进行中的工作照常继续。", { p0: who });
+  }
   if (event.kind === 'task_rebalanced') return t("为均衡工作量，{p0}已从 {p1} 改由 {p2} 负责。", { p0: taskTitle, p1: displayName(event.previous_owner), p2: displayName(event.owner) });
   if (event.kind === 'task_withdrawn') {
     const named = (Array.isArray(event.tasks) ? event.tasks : []).filter((item) => typeof item?.id === 'string' && typeof item.title === 'string')
@@ -365,7 +375,7 @@ function eventNode(event, jobs, sourceMembers = null) {
       || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated', 'user_message_redelivered'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
-      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
+      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'plan_adjusted' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
       || executionNeedsAttention
       || typeof event.cancellation_confirmed === 'boolean'
       || (event.kind === 'job_created' && jobKind(event, jobs) === 'feedback');
