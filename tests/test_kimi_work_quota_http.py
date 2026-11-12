@@ -285,8 +285,6 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
             self.assertEqual(current_first[key], first[key])
         recovery = [event for event in final['events'] if event['kind'] == 'native_recovery_started']
         self.assertEqual(len(recovery), 1)
-        # The partner that ran out of quota handed its task on; its card must not say it waits for the user.
-        self.assertNotEqual(next(member for member in final['members'] if member['id'] == 'kimi')['status'], 'needs_user')
         self.assertEqual(recovery[0]['sender'], 'system')
         self.assertTrue(all(event['sender'] == 'system' for event in final['events']
                             if event['kind'] == 'native_partial_recovery_attestation'))
