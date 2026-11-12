@@ -101,22 +101,37 @@ class OptionalNativeHintsTests(unittest.IsolatedAsyncioTestCase):
         self.assert_not_published(result)
         self.assertTrue(any(j['error'] == 'invalid_agent_response' for j in result['jobs']))
 
-    async def test_actual_unowned_deletion_and_binary_changes_stay_private(self):
-        for violation in ('unowned', 'deletion', 'binary'):
-            with self.subTest(violation=violation):
+    async def test_actual_unowned_change_stays_private(self):
+        # Catches an ownership breach being imported now that deletions and binaries are.
+        def mutate(cwd, reply):
+            (cwd / 'main.py').write_text('VALUE = 2\n')
+            (cwd / 'outside.txt').write_text('unauthorized')
+        result = await self.run_work(mutate)
+        self.assert_not_published(result)
+        reasons = {b['reason'] for state in result['native_workspaces'] for b in state['blocked']}
+        self.assertIn('native_path_not_owned', reasons)
+
+    async def test_owned_deletion_and_binary_changes_are_imported(self):
+        # Catches an owned file's deletion or binary rewrite still stopping the room.
+        for change in ('deletion', 'binary'):
+            with self.subTest(change=change):
                 def mutate(cwd, reply):
                     (cwd / 'main.py').write_text('VALUE = 2\n')
-                    if violation == 'unowned':
-                        (cwd / 'outside.txt').write_text('unauthorized')
-                    elif violation == 'deletion':
+                    if change == 'deletion':
                         (cwd / 'notes.md').unlink()
                     else:
                         (cwd / 'notes.md').write_bytes(b'\x00\x01')
                 result = await self.run_work(mutate)
-                self.assert_not_published(result)
-                reasons = {b['reason'] for state in result['native_workspaces'] for b in state['blocked']}
-                self.assertIn({'unowned': 'native_path_not_owned', 'deletion': 'native_deletion_not_imported',
-                               'binary': 'native_binary_not_imported'}[violation], reasons)
+                self.assertEqual(result['objective']['status'], 'complete', result['team'])
+                self.assertEqual({b['reason'] for state in result['native_workspaces'] for b in state['blocked']}, set())
+                project = self.service._project(result['room']['id'])
+                notes = project.metadata_for_paths(['notes.md'])
+                if change == 'deletion':
+                    self.assertEqual(notes, [])
+                else:
+                    self.assertEqual([(f['text'], f['sha256']) for f in notes],
+                                     [(False, hashlib.sha256(b'\x00\x01').hexdigest())])
+                self.assertEqual((self.source / 'notes.md').read_text(), 'Original notes.\n')
 
 
 class NativeHintConflictTests(unittest.TestCase):

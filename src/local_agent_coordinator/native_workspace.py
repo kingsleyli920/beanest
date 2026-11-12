@@ -6,6 +6,7 @@ for a CLI running with Full Access. Only the host imports authorized changes.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -348,27 +349,38 @@ def prepare_retained_workspace(destination, canonical_export, canonical_manifest
         seen.add(name.casefold())
         if item.get("previous_sha256") != (before["sha256"] if before else None):
             raise NativeWorkspaceError("native_retained_baseline_changed")
-        content = item.get("content")
-        if (not isinstance(content, str) or type(item.get("bytes")) is not int
-                or not isinstance(item.get("sha256"), str)
-                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
-                or before is not None and not before["text"]):
-            raise NativeWorkspaceError("invalid_native_retained_files")
-        try:
-            raw = content.encode("utf-8")
-        except UnicodeError as error:
-            raise NativeWorkspaceError("invalid_native_retained_files") from error
-        if (len(raw) > 1024 * 1024 or len(raw) != item["bytes"]
-                or hashlib.sha256(raw).hexdigest() != item["sha256"]
-                or any(ord(char) < 32 and char not in "\r\n\t" for char in content)):
-            raise NativeWorkspaceError("invalid_native_retained_files")
-        executable = bool(before.get("executable")) if before else False
         path = _file(source, name)
+        if item.get("deleted") is True:
+            # A retained deletion: the source tree must still lack the file.
+            if before is None or item.get("sha256") is not None or path.exists() or path.is_symlink():
+                raise NativeWorkspaceError("invalid_native_retained_files")
+            retained.append({"path": name, "sha256": None, "bytes": 0, "deleted": True})
+            continue
+        content = item.get("content")
+        if (type(item.get("bytes")) is not int or item["bytes"] < 0
+                or not isinstance(item.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+            raise NativeWorkspaceError("invalid_native_retained_files")
+        if isinstance(content, str):
+            try:
+                raw = content.encode("utf-8")
+            except UnicodeError as error:
+                raise NativeWorkspaceError("invalid_native_retained_files") from error
+            if (len(raw) > 1024 * 1024 or len(raw) != item["bytes"]
+                    or hashlib.sha256(raw).hexdigest() != item["sha256"]
+                    or any(ord(char) < 32 and char not in "\r\n\t" for char in content)):
+                raise NativeWorkspaceError("invalid_native_retained_files")
+        elif item.get("text") is not False or "content" in item:
+            raise NativeWorkspaceError("invalid_native_retained_files")
+        # Binary bytes are verified against sha256/bytes when copied below.
+        if "executable" in item and type(item["executable"]) is not bool:
+            raise NativeWorkspaceError("invalid_native_retained_files")
+        executable = item["executable"] if "executable" in item else bool(before.get("executable")) if before else False
         mode = path.stat().st_mode
         if not stat.S_ISREG(mode) or bool(mode & 0o111) != executable:
             raise NativeWorkspaceError("native_retained_mode_changed")
-        retained.append({"path": name, "sha256": item["sha256"], "bytes": len(raw),
-                         "text": True, "executable": executable})
+        retained.append({"path": name, "sha256": item["sha256"], "bytes": item["bytes"],
+                         "text": isinstance(content, str), "executable": executable})
     # Reuse verified copying, private baseline objects and Git initialization.
     # prepare_workspace owns rollback until it returns; afterwards only this
     # newly created destination can be removed if retained-copy validation fails.
@@ -376,6 +388,11 @@ def prepare_retained_workspace(destination, canonical_export, canonical_manifest
     try:
         project = Path(receipt["project"])
         for entry in retained:
+            if entry.get("deleted"):
+                if _file(source, entry["path"]).exists():
+                    raise NativeWorkspaceError("native_export_changed")
+                _file(project, entry["path"]).unlink()
+                continue
             _copy_verified(source, project, entry)
             mode = _file(source, entry["path"]).stat().st_mode
             if not stat.S_ISREG(mode) or bool(mode & 0o111) != entry["executable"]:
@@ -392,10 +409,15 @@ def prepare_retained_workspace(destination, canonical_export, canonical_manifest
 
 
 def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_conflicts=()):
-    """Read authorized text candidates; final owner/grant/CAS checks are external.
+    """Read every change to authorized paths; final owner/grant/CAS checks are external.
 
-    Binary changes and deletions remain in the private tree and are explicitly
-    reported as unsupported rather than silently discarded or exported.
+    A candidate is text {content}, binary {content_base64, text: False} or a
+    deletion {deleted: True, sha256: None}; "executable" is present when the
+    mode changed, or a new or previously unknown file is executable. Only real
+    coordination rules block: a path this task does not own, an unresolved
+    conflict, and an over-limit file. Paths the shared copy never holds (build
+    and cache folders, credentials such as .env or keys) stay private and are
+    reported under "generated", never imported and never a failure.
     """
     root = _directory(workspace)
     entries = _entries(baseline_manifest)
@@ -412,27 +434,30 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
     for name in sorted(set(entries) | allowed | untracked):
         path = _file(root, name, checked)
         before = entries.get(name)
-        if not path.exists():
-            if before:
-                blocked.append({"path": name, "reason": "native_deletion_not_imported"})
-            continue
-        if not path.is_file():
+        exists = path.exists()
+        if exists and not path.is_file():
             raise NativeWorkspaceError("invalid_native_file")
-        sha = _file_digest(path)
-        if (before is None and name not in allowed and _excluded(name) == "excluded_directory"
-                and not any(_excluded(part) == "sensitive_path" for part in name.split("/"))):
-            # These untracked build/cache outputs were never captured as
-            # project inputs. Keep their bytes private without importing them
-            # or treating a routine native check as an unauthorized source edit.
-            generated.append({"path": name, "sha256": sha, "bytes": path.stat().st_size})
+        if _excluded(name) and (before is None or name in allowed):
+            # Never project inputs: build/cache outputs and credentials. Keep
+            # their bytes private without importing them or treating a routine
+            # native check, or a local .env, as an unauthorized source edit.
+            if exists:
+                sha = _file_digest(path)
+                if before is None or sha != before["sha256"]:
+                    sensitive = any(_excluded(part) == "sensitive_path" for part in name.split("/"))
+                    generated.append({"path": name, "sha256": sha, "bytes": path.stat().st_size,
+                                      **({"reason": "sensitive_path"} if sensitive else {})})
             continue
-        changed_mode = before and before.get("executable") is not None and (
-            bool(path.stat().st_mode & 0o111) != before["executable"])
-        if changed_mode:
-            blocked.append({"path": name, "reason": "native_mode_change_not_imported"})
-            continue
-        if before and sha == before["sha256"]:
-            continue
+        if not exists:
+            if before is None:
+                continue
+            sha = None
+        else:
+            sha = _file_digest(path)
+            executable = bool(path.stat().st_mode & 0o111)
+            mode_changed = before is not None and before.get("executable") is not None and executable != before["executable"]
+            if before and sha == before["sha256"] and not mode_changed:
+                continue
         if name not in allowed:
             blocked.append({"path": name, "reason": "native_path_not_owned"})
             continue
@@ -440,8 +465,9 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
                 and sha == conflicts[name]["candidate_sha256"]):
             blocked.append({"path": name, "reason": "native_unresolved_conflict"})
             continue
-        if before and not before["text"]:
-            blocked.append({"path": name, "reason": "native_binary_not_imported"})
+        previous = before["sha256"] if before else None
+        if sha is None:
+            candidates.append({"path": name, "previous_sha256": previous, "sha256": None, "bytes": 0, "deleted": True})
             continue
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
@@ -450,16 +476,30 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != sha:
             raise NativeWorkspaceError("native_export_changed")
+        candidate = {"path": name, "previous_sha256": previous, "sha256": sha, "bytes": len(raw)}
         try:
             content = raw.decode("utf-8")
             if any(ord(c) < 32 and c not in "\r\n\t" for c in content):
                 raise UnicodeError
+            candidate["content"] = content
         except UnicodeError:
-            blocked.append({"path": name, "reason": "native_binary_not_imported"})
-            continue
-        candidates.append({"path": name, "previous_sha256": before["sha256"] if before else None,
-                           "content": content, "sha256": sha, "bytes": len(raw)})
+            candidate.update(content_base64=base64.b64encode(raw).decode("ascii"), text=False)
+        if mode_changed or executable and (before is None or before.get("executable") is None):
+            candidate["executable"] = executable
+        candidates.append(candidate)
     return {"files": candidates, "blocked": blocked, **({"generated": generated} if generated else {})}
+
+
+def import_file(candidate):
+    """The shared-copy import form of one collect_changes candidate."""
+    item = {"path": candidate["path"], "previous_sha256": candidate["previous_sha256"]}
+    if candidate.get("deleted"):
+        return {**item, "deleted": True}
+    item.update({"content": candidate["content"]} if "content" in candidate
+                else {"content_base64": candidate["content_base64"]})
+    if "executable" in candidate:
+        item["executable"] = candidate["executable"]
+    return item
 
 
 def acknowledge_published(workspace, previous_manifest, published_files, *, resolved_paths=()):
@@ -470,24 +510,36 @@ def acknowledge_published(workspace, previous_manifest, published_files, *, reso
     """
     root = _directory(workspace)
     entries = _entries(previous_manifest)
-    seen = set()
+    seen, removed = set(), set()
     for item in published_files:
         name = _path(item.get("path"))
-        if (name in seen or not isinstance(item.get("sha256"), str)
-                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+        if name in seen:
             raise NativeWorkspaceError("invalid_native_manifest")
         seen.add(name)
         path = _file(root, name)
+        if item.get("deleted") is True and item.get("sha256") is None:
+            # A published deletion: the baseline forgets the file only while
+            # the private tree still agrees that it is gone.
+            if path.exists() or path.is_symlink():
+                raise NativeWorkspaceError("native_export_changed")
+            entries.pop(name, None)
+            removed.add(name)
+            continue
+        if not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
+            raise NativeWorkspaceError("invalid_native_manifest")
         with path.open("rb") as stream:
             actual_sha = hashlib.file_digest(stream, "sha256").hexdigest()
         if actual_sha != item["sha256"]:
             raise NativeWorkspaceError("native_export_changed")
         old = entries.get(name, {})
+        executable = item["executable"] if "executable" in item else old.get("executable")
         entries[name] = {"path": name, "sha256": actual_sha, "bytes": path.stat().st_size,
-            "text": item.get("text", True), "executable": old.get("executable")}
+            "text": item.get("text", True), "executable": executable}
         _remember_baseline(root, root, entries[name])
     resolved = {_path(name) for name in resolved_paths}
     for name in resolved:
+        if name in removed:
+            continue
         if name not in entries:
             raise NativeWorkspaceError("invalid_native_resolution")
         with _file(root, name).open("rb") as stream:
@@ -523,7 +575,8 @@ def discard_paths(workspace, previous_manifest, paths):
             path.unlink()
             discarded.append(name)
             continue
-        elif _file_digest(path) == before["sha256"]:
+        elif _file_digest(path) == before["sha256"] and (
+                before.get("executable") is None or bool(path.stat().st_mode & 0o111) == before["executable"]):
             continue
         raw = _read_baseline(root, before)
         temporary = path.with_name(".beanest-discard-" + str(uuid4()))
@@ -562,6 +615,13 @@ def sync_workspace(workspace, previous_manifest, source_directory, source_manife
             local_sha = None
         if local_sha == wanted_sha:
             if wanted:
+                # Same bytes, but the shared version may have flipped the
+                # executable bit. Take it unless this tree changed the mode.
+                wanted_mode, before_mode = wanted.get("executable"), (before or {}).get("executable")
+                local_mode = bool(path.stat().st_mode & 0o111)
+                if wanted_mode is not None and local_mode != wanted_mode and (before_mode is None or local_mode == before_mode):
+                    mode = path.stat().st_mode
+                    path.chmod(mode | (mode & 0o444) >> 2 if wanted_mode else mode & ~0o111)
                 _remember_baseline(root, source, wanted, cancelled)
                 result[name] = dict(wanted)
             else:

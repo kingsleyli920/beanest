@@ -209,6 +209,7 @@ const errorLabels = localizedLabels({
   invalid_project_files: '有文件不能用。只能选项目里的文本文件（源码、文档、配置），图片、压缩包这类二进制文件不行。',
   project_file_unavailable: '有文件或文件夹找不到、读不了，请核对路径和访问权限。',
   project_sensitive_content: '选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。',
+  project_binary_file: '这是二进制文件（例如图片），不能按文本阅读；下载已修改文件可以拿到原样字节。',
   project_limit_exceeded: '选定文件超出当前范围：最多 12 个，每个 16 KiB，总计 48 KiB。',
   project_capture_limit: '项目超出当前隔离副本的容量范围，尚未开始处理；请缩小项目目录后重试。',
   project_source_changed: '项目来源在准备过程中发生变化，未接受本次快照；请确认文件稳定后重试。',
@@ -5604,7 +5605,7 @@ function renderProject(project) {
     ? t("{p0}已保存版本 {p1} · {p2}{p3}", { p0: project.source?.name ? `${project.source.name} · ` : '', p1: project.revision, p2: folder ? t("项目共 {p0} 个文件 · 已修改文件 {p1} 个 · ", { p0: Number.isSafeInteger(project.total_files) ? project.total_files : t("未知"), p1: project.files?.length || 0 }) : '', p3: project.source ? t("改稿保存在豆窝，不会改动原项目，暂不运行。") : (project.execution === 'sandboxed_unittest' ? t("执行情况见隔离执行记录。") : t("未执行代码或测试。")) })
     : t("代码文件暂不可读取，请检查本地记录；不会自动新建替代版本。");
   if (state.snapshot?.room.mode === 'native_project') $('project-status').textContent = project.available
-    ? t("开发副本 · 已保存版本 {p0} · {p1} 个已保存改动。本机工具按任务要求和所选原生权限执行，具体结果见记录。", { p0: project.revision, p1: project.files?.length || 0 })
+    ? t("开发副本 · 已保存版本 {p0} · {p1} 个已保存改动。本机工具按任务要求和所选原生权限执行，具体结果见记录。", { p0: project.revision, p1: (project.files?.length || 0) + (Array.isArray(project.deleted_files) ? project.deleted_files.length : 0) })
     : t("开发副本的文件暂不可读取，请检查记录，不会自动替换。");
   if (!project.available || !Array.isArray(project.files)) return;
   if (folder) {
@@ -5630,7 +5631,12 @@ function renderProject(project) {
     details.append(element('summary', `${file.path} · ${!file.owner || file.owner === 'source' ? t("项目原稿") : displayName(file.owner)}`),
       element('p', t("版本 {p0} · SHA256 {p1}", { p0: project.revision, p1: file.sha256 }), 'detail-caption'));
     if (typeof file.content === 'string') details.append(element('pre', file.content, 'file-content'));
-    else {
+    else if (file.text === false) {
+      // An image or other binary asset: its exact bytes are kept, never shown as text.
+      details.append(element('p', !exportableProject(state.snapshot)
+        ? t("二进制文件（例如图片）· {p0} 字节，这里不显示内容。", { p0: Number.isSafeInteger(file.bytes) ? file.bytes : t("未知") })
+        : t("二进制文件（例如图片）· {p0} 字节，这里不显示内容；点上面的“{p1}”可以拿到原样文件。", { p0: Number.isSafeInteger(file.bytes) ? file.bytes : t("未知"), p1: $('download-artifacts').textContent }), 'detail-caption'));
+    } else {
       const doc = readable.find((entry) => entry.path === file.path && entry.sha256 === file.sha256);
       if (doc) {
         const open = element('button', t("打开阅读"), 'quiet-button'); open.type = 'button'; open.dataset.openProjectFile = file.path;
@@ -5646,6 +5652,14 @@ function renderProject(project) {
       preview.addEventListener('click', () => void previewSvg(preview, holder, { roomId, revision: project.revision, file }));
       details.append(preview, holder);
     }
+    $('project-files').append(details);
+  }
+  // Captured source files a partner removed are changes too; list them, not hide them.
+  for (const file of Array.isArray(project.deleted_files) ? project.deleted_files : []) {
+    if (typeof file?.path !== 'string') continue;
+    const details = element('details', '', 'project-file project-file-deleted');
+    details.append(element('summary', t("{p0} · 已删除 · {p1}", { p0: file.path, p1: file.owner ? displayName(file.owner) : t("伙伴") })),
+      element('p', t("版本 {p0} 里已没有这个文件；它在原项目里的 SHA256 是 {p1}。", { p0: project.revision, p1: file.sha256 }), 'detail-caption'));
     $('project-files').append(details);
   }
   if (project.source) {

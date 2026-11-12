@@ -34,7 +34,8 @@ class NativeGeneratedOutputTests(unittest.TestCase):
         self.assertEqual(cache.read_bytes(), cache_bytes)
         self.assertFalse((source[0] / cache_path).exists())
 
-    def test_sensitive_env_and_similarly_named_source_are_still_blocked(self):
+    def test_sensitive_env_is_kept_private_and_similarly_named_source_is_still_blocked(self):
+        # Catches a partner's local .env failing the task, being imported, or an unowned cache.py slipping in.
         source = self.export("source", {"main.py": "VALUE = 1\n"})
         receipt = self.prepare(source)
         project = Path(receipt["project"])
@@ -47,20 +48,22 @@ class NativeGeneratedOutputTests(unittest.TestCase):
             (project / name).parent.mkdir(parents=True, exist_ok=True)
             (project / name).write_bytes(raw)
 
-        result = collect_changes(project, receipt, [])
-
-        self.assertEqual(result["files"], [])
-        self.assertEqual(result["blocked"], [
-            {"path": name, "reason": "native_path_not_owned"}
-            for name in sorted(contents)
-        ])
-        self.assertEqual(result.get("generated", []), [])
+        for allowed in ([], [".env"]):
+            with self.subTest(owned=bool(allowed)):
+                result = collect_changes(project, receipt, allowed)
+                self.assertEqual(result["files"], [])
+                self.assertEqual(result["blocked"], [{"path": "cache.py", "reason": "native_path_not_owned"}])
+                self.assertEqual(result["generated"], [
+                    {"path": name, "sha256": hashlib.sha256(contents[name]).hexdigest(),
+                     "bytes": len(contents[name]), "reason": "sensitive_path"}
+                    for name in (".cache/.env", ".env")])
         for name, raw in contents.items():
             with self.subTest(path=name):
                 self.assertEqual((project / name).read_bytes(), raw)
                 self.assertFalse((source[0] / name).exists())
 
-    def test_baseline_cache_changes_and_explicitly_allowed_binary_are_not_hidden(self):
+    def test_baseline_cache_changes_stay_guarded_and_owned_cache_output_stays_private(self):
+        # Catches an unowned captured cache change being hidden, or an owned cache output failing the task.
         tracked_path = "__pycache__/tracked.pyc"
         source = self.export("source", {tracked_path: b"\x00old cache"})
         receipt = self.prepare(source)
@@ -75,15 +78,14 @@ class NativeGeneratedOutputTests(unittest.TestCase):
 
         self.assertEqual(result["files"], [])
         self.assertEqual(result["blocked"], [
-            {"path": allowed_path, "reason": "native_binary_not_imported"},
             {"path": tracked_path, "reason": "native_path_not_owned"},
         ])
-        self.assertEqual(result.get("generated", []), [])
+        self.assertEqual(result["generated"], [{"path": allowed_path,
+            "sha256": hashlib.sha256(allowed_bytes).hexdigest(), "bytes": len(allowed_bytes)}])
         self.assertEqual((project / tracked_path).read_bytes(), tracked_bytes)
         self.assertEqual((project / allowed_path).read_bytes(), allowed_bytes)
         self.assertEqual((source[0] / tracked_path).read_bytes(), b"\x00old cache")
         self.assertFalse((source[0] / allowed_path).exists())
-
 
 if __name__ == "__main__":
     unittest.main()

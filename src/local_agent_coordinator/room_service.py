@@ -586,6 +586,8 @@ class RoomService(RoomPromptMixin):
                 canonical_changes = {path: current.get(path) for path in set(baseline) | set(current)
                     if (baseline.get(path, {}).get("sha256"), baseline.get(path, {}).get("executable"))
                         != (current.get(path, {}).get("sha256"), current.get(path, {}).get("executable"))}
+                # A captured file a partner deleted is wanted absent from the delivery.
+                canonical_changes.update({file["path"]: None for file in project_snapshot.get("deleted_files", [])})
                 source = project_snapshot.get("source") or {}
             except ProjectWorkspaceError:
                 source = {}
@@ -2302,7 +2304,7 @@ class RoomService(RoomPromptMixin):
                     for file in project.metadata_for_paths(paths[offset:offset + 16])]
         members = {member["id"] for member in snapshot["members"]}
         if ({file["path"] for file in metadata} != set(paths)
-                or any(not file["text"] or file["owner"] not in members or baseline[file["path"]] != file["sha256"]
+                or any(file["owner"] not in members or baseline[file["path"]] != file["sha256"]
                        for file in metadata) or set(paths).intersection(candidate["write_paths"])):
             raise RoomError("team_scope_conflict")
         # Another private tree cannot be replaced merely because a helper
@@ -4525,7 +4527,15 @@ class RoomService(RoomPromptMixin):
             raise RoomError("task_withdrawal_pending")
         from .artifact_export import export_project, ArtifactExportError
         try:
-            return export_project(self._project(room_id).snapshot(),expected_revision=revision)
+            project = self._project(room_id)
+            current = project.snapshot()
+            # A binary file has no text in the snapshot; its exact bytes come
+            # from the same immutable revision.
+            binary = [file["path"] for file in current["files"] if file.get("text") is False]
+            payloads = {}
+            for offset in range(0, len(binary), 16):
+                payloads.update(project.raw_files_for_paths(binary[offset:offset + 16], revision=current["revision"]))
+            return export_project(current, expected_revision=revision, binaries=payloads)
         except (ArtifactExportError,ProjectWorkspaceError) as error:
             raise RoomError(error.code) from None
 
@@ -4575,6 +4585,9 @@ class RoomService(RoomPromptMixin):
             file = files[0] if files else None
         else:
             file = next((file for file in project["files"] if file["path"] == path), None)
+        if file is not None and file["sha256"] == sha256 and file.get("text") is False:
+            # An exact binary delivery (an image, a build asset) is not text to read.
+            raise RoomError("project_binary_file")
         if (file is None or file["sha256"] != sha256 or not isinstance(file.get("content"), str)
                 or hashlib.sha256(file["content"].encode("utf-8")).hexdigest() != sha256):
             raise RoomError("objective_binding_changed")
@@ -4844,7 +4857,8 @@ class RoomService(RoomPromptMixin):
             if project["revision"] != revision:
                 raise RoomError("project_revision_conflict")
             file = next((item for item in project["files"] if item["path"] == path),None)
-            if file is None or hashlib.sha256(file["content"].encode()).hexdigest() != file["sha256"]:
+            if (file is None or not isinstance(file.get("content"), str)
+                    or hashlib.sha256(file["content"].encode()).hexdigest() != file["sha256"]):
                 raise RoomError("svg_preview_unavailable")
             return {**svg_preview(file["content"]),"revision":revision,"path":path}
         except (SVGPreviewError,ProjectWorkspaceError) as error:
@@ -5567,7 +5581,7 @@ class RoomService(RoomPromptMixin):
         # Retained handoff files can be unchanged during this call while still
         # differing from the published baseline. The audited disk diff wins.
         parsed["unchanged_paths"] = [entry for entry in parsed["unchanged_paths"] if entry["path"] not in changed]
-        parsed["files"] = [{key:file[key] for key in ("path", "previous_sha256", "content")} for file in collected["files"]]
+        parsed["files"] = [native_workspace.import_file(file) for file in collected["files"]]
         job["native_published_candidates"] = collected["files"]
 
     def _validate_native_workspace_binding(self, job):
@@ -6100,7 +6114,7 @@ class RoomService(RoomPromptMixin):
         files = project.metadata_for_paths(paths)
         members = set(self.store.member_ids(job["room_id"]))
         if ({file["path"] for file in files} != set(paths)
-                or any(not file["text"] or file["owner"] not in members for file in files)):
+                or any(file["owner"] not in members for file in files)):
             raise RoomError("team_scope_conflict")
         return {"revision": current["revision"], "digest": _project_digest(current), "files": files}
 
@@ -6272,13 +6286,17 @@ class RoomService(RoomPromptMixin):
                         raise RoomError("team_files_forbidden")
                     if job["artifact_inspected_revision"] != parsed["base_revision"]:
                         raise RoomError("project_revision_conflict")
-                    if any(_SECRET.search(str(item.get("content", ""))) for item in parsed["files"] if isinstance(item, dict)):
+                    # A native partner already wrote these bytes into its copy
+                    # of the user's project; refusing them here would only
+                    # fail its task. Text proposed in a reply is still checked.
+                    if not native and any(_SECRET.search(str(item.get("content", ""))) for item in parsed["files"] if isinstance(item, dict)):
                         raise RoomError("artifact_sensitive_content")
                     project = self._project(job["room_id"])
                     before = project.snapshot() if job.get("team") else None
                     try:
                         committed = project.apply(job["provider"], job["id"], parsed["base_revision"], parsed["files"],
-                            **({"allow_disjoint": True, "ownership_grants": self.store.ownership_grant(job["id"])} if job.get("team") else {}))
+                            **({"allow_disjoint": True, "ownership_grants": self.store.ownership_grant(job["id"])} if job.get("team") else {}),
+                            **({"native": True} if native else {}))
                     except ProjectWorkspaceError as error:
                         if error.code == "project_limit_exceeded" and job.get("team") and job["mode"] not in {"project_folder", "native_project"}:
                             capacity_rejection = self._capacity_rejection(job, parsed, project, before)
@@ -6303,6 +6321,13 @@ class RoomService(RoomPromptMixin):
                                     if native else actual["files"])
                     artifact_files = [{"path": file["path"], "sha256": file["sha256"]}
                                       for file in actual_files if file["path"] in paths]
+                    if native:
+                        # A captured file this task removed is part of its
+                        # result: no bytes, like a wanted None in delivery.
+                        present = {file["path"] for file in artifact_files}
+                        artifact_files += [{"path": file["path"], "sha256": None} for file in actual.get("deleted_files", [])
+                                           if file["path"] in paths and file["path"] not in present]
+                        artifact_files.sort(key=lambda file: file["path"])
                 else:
                     actual = self._project(job["room_id"]).snapshot(revision=artifact_revision)
                     artifact_files = [{"path": file["path"], "sha256": file["sha256"]} for file in actual["files"]]

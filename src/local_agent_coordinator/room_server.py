@@ -72,7 +72,7 @@ ERROR_STATUS = {
     "invalid_participants": 400, "invalid_project_request": 400,
     "member_limit_reached": 409, "invitation_mode_unsupported": 409, "user_member_invitation_required": 403,
     "invalid_project_path": 400, "invalid_project_files": 400,
-    "project_file_unavailable": 409, "project_sensitive_content": 409,
+    "project_file_unavailable": 409, "project_sensitive_content": 409, "project_binary_file": 409,
     "project_limit_exceeded": 400, "project_not_found": 404,
     "project_capture_limit": 413, "project_source_changed": 409, "project_capture_cancelled": 409,
     "project_catalog_corrupt": 503, "project_not_seeded": 409,

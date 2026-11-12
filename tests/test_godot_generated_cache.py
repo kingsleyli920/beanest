@@ -46,9 +46,10 @@ class GodotGeneratedCacheTests(unittest.TestCase):
         self.assertEqual(cache.read_bytes(), b'')
 
     def test_captured_legacy_cache_input_keeps_change_deletion_and_mode_guards(self):
+        # Catches an unowned captured input changing, vanishing or flipping mode unnoticed.
         for fault, reason in (('change','native_path_not_owned'),
-                              ('delete','native_deletion_not_imported'),
-                              ('mode','native_mode_change_not_imported')):
+                              ('delete','native_path_not_owned'),
+                              ('mode','native_path_not_owned')):
             with self.subTest(fault=fault):
                 # A historical manifest may predate the directory exclusion.
                 source = self.export(fault, {'code/.godot/captured.txt':'captured input\n'})
@@ -63,6 +64,7 @@ class GodotGeneratedCacheTests(unittest.TestCase):
                 self.assertFalse(changes.get('generated'))
 
     def test_sensitive_symlink_and_ordinary_unowned_changes_remain_rejected(self):
+        # Catches a credential file being imported, or an unowned source edit slipping through.
         receipt = self.prepare(self.export('source', {'own.gd':'old\n'}))
         project = Path(receipt['project'])
         directory = project / 'code/.godot'
@@ -70,8 +72,11 @@ class GodotGeneratedCacheTests(unittest.TestCase):
         (directory / '.env').write_text('FICTIONAL=not-a-credential\n')
         (project / 'unowned.gd').write_text('unauthorized\n')
         changes = collect_changes(project, receipt, ['own.gd'])
-        self.assertEqual({item['path'] for item in changes['blocked']}, {'code/.godot/.env','unowned.gd'})
-        self.assertFalse(changes.get('generated'))
+        self.assertEqual({item['path'] for item in changes['blocked']}, {'unowned.gd'})
+        # The credential stays private and is reported, never imported or blocking.
+        self.assertEqual([(item['path'], item.get('reason')) for item in changes['generated']],
+                         [('code/.godot/.env', 'sensitive_path')])
+        self.assertEqual(changes['files'], [])
         (directory / '.env').unlink()
         (directory / 'cache').symlink_to(project / 'own.gd')
         with self.assertRaisesRegex(NativeWorkspaceError, 'native_symlink_refused'):
