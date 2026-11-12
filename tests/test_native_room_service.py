@@ -1878,6 +1878,9 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         state, injected = await self.cleanup_unconfirmed_once(0)
         self.assertEqual(injected, [1])
         self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        # The settled call must not block a later audited recovery in the same room either.
+        with self.service.store._connection() as db:
+            self.assertTrue(self.service.store._native_cleanups_confirmed(db, state["room"]["id"]))
 
     async def test_a_call_that_ran_tools_keeps_its_scene_when_cleanup_is_unconfirmed(self):
         # Catches the toolless rule leaking to calls that may have started work which could still be running.
