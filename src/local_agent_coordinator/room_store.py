@@ -2264,7 +2264,8 @@ class RoomStore:
         settings = (claim.get("runtime_settings") or {}).get("members", {}).get(job["provider"], {})
         model = settings.get("model")
         plan = db.execute("SELECT plan_revision FROM team_jobs WHERE job_id=?", (job["id"],)).fetchone()
-        if not isinstance(model, str) or not model.startswith("kimi-code/") or plan is None:
+        # No model chosen means the tool's own default, which for the Kimi Code login is a kimi-code/ model.
+        if model is not None and (not isinstance(model, str) or not model.startswith("kimi-code/")) or plan is None:
             return None
         return {"job_id": job["id"], "run_id": job["run_id"], "provider": job["provider"], "session_id": sid,
                 "phase": job["phase"], "plan_revision": plan[0], "task_id": job["task_id"],
@@ -3370,7 +3371,8 @@ class RoomStore:
                 continue
             settings = (claim.get("runtime_settings") or {}).get("members", {}).get(job["provider"], {})
             model = settings.get("model")
-            if not isinstance(model, str) or not model.startswith("kimi-code/"):
+            # None is the tool's own default, a kimi-code/ model under the Kimi Code login.
+            if model is not None and (not isinstance(model, str) or not model.startswith("kimi-code/")):
                 continue
             return {"run_id": team["current_run_id"], "job_id": job["id"], "provider": job["provider"],
                     "session_id": sid, "phase": job["phase"], "source_error": job["error"], "model": model,
@@ -3568,14 +3570,21 @@ class RoomStore:
         observation, or, for a call cut off at shutdown before it reported
         any, by the receipt that later confirmed its cleanup. An observation
         that says cleanup failed is never overridden."""
-        latest = {}
+        latest, toolless = {}, set()
         for row in db.execute("SELECT value_json FROM events WHERE room_id=? "
                               "AND json_extract(value_json,'$.kind')='job_cleanup' ORDER BY seq", (room_id,)):
             event = json.loads(row[0])
             latest[event["job_id"]] = event.get("cleanup_confirmed") is True
-        return all(confirmed is True or confirmed is None and latest.get(job_id) is True
-                   for job_id, confirmed in ((row[0], json.loads(row[1]).get("cleanup_confirmed")) for row in db.execute(
-                       "SELECT job_id,metadata_json FROM native_executions WHERE room_id=?", (room_id,))))
+            (toolless.add if event.get("basis") == "no_tool_calls" else toolless.discard)(event["job_id"])
+
+        def settled(job_id, observation):
+            # A call that ran no tool was settled as clean on that basis (native_cleanup_slow);
+            # its own observation still shows no tool, which is what makes that basis hold.
+            return (job_id in toolless and latest.get(job_id) is True
+                    and observation.get("tool_calls") == 0 and observation.get("tool_results") == 0)
+        return all(confirmed is True or confirmed is None and latest.get(job_id) is True or settled(job_id, observation)
+                   for job_id, observation, confirmed in ((row[0], json.loads(row[1]), json.loads(row[1]).get("cleanup_confirmed"))
+                       for row in db.execute("SELECT job_id,metadata_json FROM native_executions WHERE room_id=?", (room_id,))))
 
     def native_recovery_reason(self, room_id):
         with self._connection() as db:
@@ -4687,6 +4696,9 @@ class RoomStore:
                     and retired[provider]["reason"] in {"agent_quota_exhausted", "subscription_limit_reached"}
                     and member is not None and not member[0] and self._team.provider_clean(db, room_id, provider)):
                 del retired[provider]
+                # Back in the team: no longer shown as waiting, and dispatch may use it again.
+                db.execute("UPDATE members SET status='idle',current_task=NULL WHERE room_id=? AND provider=? AND status='needs_user'",
+                           (room_id, provider))
                 self._event(db, room_id, "partner_quota_recovered", sender="system", provider=provider,
                             objective_id=objective["id"], source="fresh_availability", old_calls_replayed=False)
         if objective:

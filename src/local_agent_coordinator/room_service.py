@@ -2742,8 +2742,38 @@ class RoomService(RoomPromptMixin):
             self.store.resume_quota_checkpoint(room_id, candidate, attestation, audit_digest=digest, quota_blocked=blocked)
             self._wake(room_id)
 
+    def _kimi_turn_model(self, room_id, candidate):
+        """The model a Kimi call really ran. A room that left the choice to the
+        tool (no model) records it only in the call's own receipt, which must
+        name one kimi-code/ model for that session; otherwise nothing is proven."""
+        if candidate.get("model") is not None:
+            return candidate["model"]
+        directory = self.workspace.parent / "native-receipts" / room_id
+        models = set()
+        try:
+            for entry in directory.iterdir():
+                if entry.suffix != ".jsonl" or entry.is_symlink():
+                    continue
+                if not candidate["claimed_at"] <= entry.stat().st_mtime <= candidate["finished_at"]:
+                    continue
+                with os.fdopen(os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+                    raw = stream.read(4097)
+                if len(raw) > 4096 or not raw.endswith(b"\n"):
+                    continue
+                native = adapters._strict_json(raw)
+                if isinstance(native, dict) and native.get("type") == "kimi_native_turn" and native.get("session_id") == candidate["session_id"]:
+                    models.add(native.get("model"))
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+            return None
+        model = next(iter(models)) if len(models) == 1 else None
+        return model if isinstance(model, str) and model.startswith("kimi-code/") else None
+
     def _audit_native_context_limit_recovery(self, snapshot, candidate, *, quota=False):
         from .kimi_acp import compaction_quota_recovery_proof, context_limit_recovery_proof, quota_failure_recovery_proof
+        model = self._kimi_turn_model(snapshot["room"]["id"], candidate)
+        if model is None:
+            raise RoomError("native_recovery_diagnostic_unconfirmed")
+        candidate = {**candidate, "model": model}
         state = self.store.native_workspace(snapshot["room"]["id"], candidate["provider"])
         current = self._project(snapshot["room"]["id"]).snapshot()
         binding = candidate.get("binding") or {}
@@ -2796,6 +2826,10 @@ class RoomService(RoomPromptMixin):
     def _audit_native_quota_failure(self, snapshot, candidate, *, fresh=False):
         from .kimi_acp import session_wire
         source = candidate["quota_failure_source"]
+        resolved = self._kimi_turn_model(snapshot["room"]["id"], source)
+        if resolved is None:
+            raise RoomError("native_recovery_diagnostic_unconfirmed")
+        source = {**source, "model": resolved}
         state = self.store.native_workspace(snapshot["room"]["id"], source["provider"])
         if state is None:
             raise RoomError("native_recovery_workspace_unavailable")

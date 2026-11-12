@@ -29,7 +29,8 @@ function renderMemberWorkload(id, workload) {
       : t("本轮工作量 {p0}%", { p0: account.actual_percent });
   const role = copyRole(state.snapshot?.room?.runtime_settings?.members?.[id]?.role);
   const reserve = state.partners.find((partner) => partner.id === id)?.quota_reserve;
-  const text = [role ? t("角色：{p0}", { p0: roleName(role) }) : '', share,
+  // Always named, the default too, so every card shows that a role is set and what it is.
+  const text = [t("角色：{p0}", { p0: roleName(role) }), share,
     Number.isFinite(reserve) ? t("额度只剩约 {p0}%，先派给别人", { p0: reserve }) : ''].filter(Boolean).join(' · ');
   if (holder.textContent !== text) holder.textContent = text;
 }

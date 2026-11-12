@@ -1108,4 +1108,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "二进制文件（例如图片）· {p0} 字节，这里不显示内容；点上面的“{p1}”可以拿到原样文件。": "Binary file (such as an image) · {p0} bytes. Its content isn't shown here; use “{p1}” above to get the exact file.",
   "{p0} · 已删除 · {p1}": "{p0} · deleted · {p1}",
   "版本 {p0} 里已没有这个文件；它在原项目里的 SHA256 是 {p1}。": "This file is no longer in version {p0}. Its SHA256 in the original project is {p1}.",
+  "角色": "Role",
 });

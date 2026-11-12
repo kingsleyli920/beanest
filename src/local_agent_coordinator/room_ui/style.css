@@ -326,6 +326,7 @@ h1 { max-width: 40vw; overflow: hidden; margin: 0; color: var(--ink); font-size:
 .event-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 7px; margin: 0 0 8px; }
 .event-author { color: var(--ink); font-size: 12px; font-weight: 700; }
 .event-recipient { padding: 1px 5px; border-radius: 5px; background: var(--hover); color: var(--muted); font-size: 10px; }
+.event-role { padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); font-size: 10px; }
 .event-time { margin-left: auto; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 .event-text { padding: 13px 16px; border: 1px solid var(--line); border-radius: 5px 17px 17px 17px; background: var(--sunken); color: var(--ink); font-size: 13px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; }
 .event.user .event-text { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }

@@ -41,6 +41,7 @@ class WorkQuotaFixture(OutcomeFixture):
         super().__init__({'native_case': 'completed'}, bad_phase='never')
         self.release_peer.set()
         self.legacy, self.quota, self.fault = legacy, quota, fault
+        self.kimi_model = 'kimi-code/fictional-0'
         self.failed_work = None
         self.release_inspection = threading.Event()
         if not hold_inspection:
@@ -111,7 +112,7 @@ class WorkQuotaFixture(OutcomeFixture):
             'goal': 'Finish fictional tasks while preserving accepted and interrupted work.', 'target': 'kimi',
             'request_id': str(uuid4()), 'mode': 'native_project', 'project_id': self.project_id,
             'participants': ['kimi', 'claude', 'codex'], 'work_mode': 'build',
-            'runtime_settings': {'permission': 'full_access', 'members': {'kimi': {'model': 'kimi-code/fictional-0', 'effort': 'high'}}},
+            'runtime_settings': {'permission': 'full_access', 'members': {'kimi': {'model': self.kimi_model, 'effort': None if self.kimi_model is None else 'high'}}},
             'execution_policy': {'mode': 'autonomous', 'quota_failover': True}})
         assert code == 200, value
         self.room_id = value['room']['id']
@@ -236,9 +237,10 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
     def test_precise_future_quota_automatically_inspects_and_finishes_without_user_continue(self):
         self.assert_automatic_recovery(legacy=False)
 
-    def assert_automatic_recovery(self, *, legacy, startup_unknown_provider=None, receiver_account_failure=False):
+    def assert_automatic_recovery(self, *, legacy, startup_unknown_provider=None, receiver_account_failure=False, kimi_model='kimi-code/fictional-0'):
         fixture = self.fixture(legacy=legacy, hold_inspection=True, startup_unknown_provider=startup_unknown_provider,
                                receiver_account_failure=receiver_account_failure)
+        fixture.kimi_model = kimi_model
         fixture.create()
         held = fixture.wait(lambda value: hasattr(fixture, 'inspection_call'))
         failed_id = fixture.failed_work['job_id']
@@ -286,6 +288,10 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         self.assertEqual(recovery[0]['sender'], 'system')
         self.assertTrue(all(event['sender'] == 'system' for event in final['events']
                             if event['kind'] == 'native_partial_recovery_attestation'))
+
+    def test_quota_handoff_works_when_kimi_follows_its_tool_default_model(self):
+        # Catches the handoff never starting because no model was chosen for Kimi ("跟随工具"), which left a real room stopped.
+        self.assert_automatic_recovery(legacy=False, kimi_model=None)
 
     def test_account_query_unavailable_but_selectable_receivers_automatically_take_retained_work(self):
         self.assert_automatic_recovery(legacy=True, receiver_account_failure=True)

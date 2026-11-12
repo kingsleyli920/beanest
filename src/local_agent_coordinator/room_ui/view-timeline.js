@@ -381,6 +381,12 @@ function eventNode(event, jobs, sourceMembers = null) {
   const content = element('div', '', 'event-content');
   const heading = element('div', '', 'event-heading');
   heading.append(element('span', authorName, 'event-author'));
+  // A partner's role in this room, next to its name, so the conversation shows who is doing which part.
+  if (!sourceMembers && state.snapshot?.members?.some((member) => (member.id || member.provider) === event.sender)) {
+    const role = element('span', roleName(copyRole(state.snapshot.room?.runtime_settings?.members?.[event.sender]?.role)), 'event-role');
+    role.title = t("角色");
+    heading.append(role);
+  }
   // A partner checking its own work addresses itself; "Kimi Code → Kimi Code" reads like a mistake.
   heading.append(event.recipient && event.recipient === event.sender ? element('span', t("自查"), 'event-recipient self-check')
     : element('span', `→ ${event.recipient ? recipientName : t("房间")}`, 'event-recipient'));

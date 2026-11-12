@@ -534,6 +534,28 @@ def _quota_cleanup_footer(row, tasks, ended_at):
     return True
 
 
+_TURN_RECORDS = frozenset({"token_counting.turn_recorded", "prompt.completed", "agent.message.appended",
+                           "agent.turn.ended", "file_history.checkpoint"})
+
+
+def _failed_turn_record(row, turn):
+    """Kimi Code 2's record of the turn that just failed, written after it.
+
+    It counts the turn's tokens, writes out the turn's own messages, closes the
+    prompt and the turn (as failed) and checkpoints file history. Each describes
+    what already happened in this turn, not a new action, and the batch is not
+    in time order, so only its membership in the failed turn is checked.
+    """
+    kind = row.get("type")
+    if kind not in _TURN_RECORDS or row.get("agentId") not in {None, "main"}:
+        return False
+    if "turnId" in row and row["turnId"] != turn:
+        return False
+    if kind == "agent.turn.ended" and row.get("outcome") != "failed":
+        return False
+    return kind != "prompt.completed" or row.get("reason") == "failed"
+
+
 def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, model, validate_prompt, quota, compaction=False):
     """Bind a failed turn to this owned prompt and the current wire tail.
 
@@ -570,6 +592,13 @@ def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, mod
             timestamp = row.get("time")
             if offset is not None and (type(timestamp) not in {int, float} or not math.isfinite(timestamp)):
                 return None
+            if offset is not None and (failed is not None and quota and _failed_turn_record(row, turn)
+                                       or row.get("type") == "agent.message.appended" and row.get("agentId") is None):
+                # Kimi Code 2 writes message records with their own times, slightly out of order.
+                if not claimed_at * 1000 <= timestamp <= finished_at * 1000:
+                    return None
+                digest.update(raw)
+                continue
             if offset is not None:
                 if not claimed_at * 1000 <= timestamp <= finished_at * 1000 or timestamp < last_timestamp:
                     return None  # Every byte after the prompt belongs to this ordered attempt.

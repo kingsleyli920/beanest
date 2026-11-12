@@ -1651,6 +1651,8 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((accepted["team"]["tasks"][0]["owner"], accepted["team"]["tasks"][0]["assignment_epoch"]),
                          (task["owner"], task["assignment_epoch"]))
         self.assertTrue(any(event["kind"] == "partner_quota_recovered" for event in accepted["events"]))
+        # Back in the team: its card must not keep saying it waits for the user (等你处理).
+        self.assertNotEqual(next(member for member in accepted["members"] if member["id"] == "codex")["status"], "needs_user")
         release.set()
         await self.settle()
         final = await self.service.read_room(room_id)
@@ -1878,6 +1880,9 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         state, injected = await self.cleanup_unconfirmed_once(0)
         self.assertEqual(injected, [1])
         self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        # The settled call must not block a later audited recovery in the same room either.
+        with self.service.store._connection() as db:
+            self.assertTrue(self.service.store._native_cleanups_confirmed(db, state["room"]["id"]))
 
     async def test_a_call_that_ran_tools_keeps_its_scene_when_cleanup_is_unconfirmed(self):
         # Catches the toolless rule leaking to calls that may have started work which could still be running.

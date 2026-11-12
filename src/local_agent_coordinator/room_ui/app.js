@@ -2527,7 +2527,8 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     const cardModel = document.getElementById(`member-model-${id}`);
     if (cardModel) {
       // A default effort adds nothing to the narrow card button, so it shows only the model there.
-      cardModel.textContent = (shortEffort === t("默认") ? `${modelLabel}` : `${modelLabel} · ${shortEffort}`) + `${roleSuffix} ⌄`; cardModel.title = button.title;
+      // The card names the role on its own line, so the narrow button keeps to the model.
+      cardModel.textContent = (shortEffort === t("默认") ? `${modelLabel}` : `${modelLabel} · ${shortEffort}`) + ' ⌄'; cardModel.title = button.title;
       cardModel.setAttribute('aria-label', button.getAttribute('aria-label'));
       cardModel.setAttribute('aria-expanded', button.getAttribute('aria-expanded'));
     }
