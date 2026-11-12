@@ -1846,6 +1846,46 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         timeout_jobs = {job["id"] for job in result["jobs"] if job["error"] == "deadline_exceeded"}
         self.assertTrue(any(event["cleanup_confirmed"] is False and event["job_id"] in timeout_jobs for event in cleanups))
 
+    async def cleanup_unconfirmed_once(self, tool_calls):
+        original, injected = self.fake.handler, []
+        def handler(agent, context, cwd):
+            self.fake.failure = None
+            if agent == "codex" and context["job"]["job_phase"] in {"plan", "coordinate"} and not injected:
+                injected.append(1)
+                self.fake.failure = {"status": "failed", "failure_code": "native_cleanup_unconfirmed", "cleanup_confirmed": False,
+                    "native_execution": {"permission": "full_access", "tool_calls": tool_calls, "tool_results": tool_calls,
+                                         "side_effects_possible": bool(tool_calls), "cleanup_confirmed": False, "exit_code": 0,
+                                         "duration_seconds": 0.01}}
+            return original(agent, context, cwd)
+        self.fake.handler = handler
+        created = await self.create()
+        await self.settle()
+        self.fake.failure = None
+        # The periodic pass audits a stopped call after the same pause as the automatic continue.
+        base, offset = self.service.clock, [0]
+        self.service.clock = lambda: base() + offset[0]
+        for _ in range(4):
+            await self.service.expire_tasks()
+            pending = [state["task"] for state in self.service._auto_continues.values() if state.get("task")]
+            await asyncio.gather(*pending, return_exceptions=True)
+            await self.settle()
+            offset[0] += 60
+        return await self.service.read_room(created["room"]["id"]), injected
+
+    async def test_a_call_that_ran_no_tool_does_not_strand_the_room_on_cleanup(self):
+        # Catches a room left with no way forward (no continue, no message, no recovery) because a CLI that only
+        # answered, with no tool run, was slow to exit and its cleanup could not be confirmed.
+        state, injected = await self.cleanup_unconfirmed_once(0)
+        self.assertEqual(injected, [1])
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+
+    async def test_a_call_that_ran_tools_keeps_its_scene_when_cleanup_is_unconfirmed(self):
+        # Catches the toolless rule leaking to calls that may have started work which could still be running.
+        state, injected = await self.cleanup_unconfirmed_once(2)
+        self.assertEqual(injected, [1])
+        self.assertNotEqual(state["objective"]["status"], "complete")
+        self.assertEqual(state["team"]["stop_reason"], "native_cleanup_unconfirmed")
+
     async def test_conflicting_native_cleanup_receipts_do_not_confirm_cleanup(self):
         self.fake.failure = {"cleanup_confirmed": True, "native_execution": {"cleanup_confirmed": False, "permission": "full_access"}}
         created = await self.create()

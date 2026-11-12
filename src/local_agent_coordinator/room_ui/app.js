@@ -89,6 +89,7 @@ const executionLabels = localizedLabels({
   native_preflight_failed: '伙伴的模型服务连接失败，提示词没有发出。',
   subscription_limit_reached: '订阅额度已用完，请在对应工具查看恢复时间。',
   cli_nonzero_exit: '本地 CLI 未正常完成，请在伙伴与额度中核对异常。',
+  native_cleanup_slow: '伙伴这次没有动用工具，只是退出得慢；豆窝按普通失败记下，接着做。',
   unknown_provider_error: '供应商返回未知异常，请在伙伴与额度中核对记录。',
   process_or_output_failure: '本地调用或输出中断，结果尚需核对。',
   cancel_requested: '已请求停止，正在核对本服务登记的执行。',
