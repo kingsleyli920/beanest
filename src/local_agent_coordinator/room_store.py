@@ -1146,7 +1146,11 @@ class RoomStore:
         quota = team["stop_reason"] == "native_side_effects_unconfirmed"
         if quota and not json.loads(objective["policy_json"]).get("quota_failover"):
             return None
-        if not quota and (not continues_automatically(team["stop_reason"])
+        # A call that exited normally and ran no tool cannot have started work
+        # that outlives it; its cleanup can only be unconfirmed because the CLI
+        # or its MCP servers were slow to exit, so it settles like any other.
+        toolless = team["stop_reason"] == "native_cleanup_unconfirmed"
+        if not quota and (not (continues_automatically(team["stop_reason"]) or toolless)
                           or self._native_recovery_requirements(db, room_id)["eligible"]):
             return None
         jobs = db.execute("SELECT j.id,j.provider,j.status,j.error,t.phase,t.task_id,t.run_id,n.metadata_json FROM jobs j "
@@ -1158,8 +1162,11 @@ class RoomStore:
         job = jobs[0]
         native = json.loads(job["metadata_json"] or "{}")
         phases = {"plan", "coordinate", "review", "help"} | (set() if quota else {"work"})
+        if toolless and not (native.get("tool_calls") == 0 and native.get("tool_results") == 0
+                             and native.get("side_effects_possible") is False and native.get("exit_code") == 0):
+            return None
         if (job["error"] != team["stop_reason"] or job["phase"] not in phases
-                or native.get("cleanup_confirmed") is not True or native.get("status") != "failed"):
+                or native.get("cleanup_confirmed") is not True and not toolless or native.get("status") != "failed"):
             return None
         task = db.execute("SELECT owner,write_paths_json FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?",
                           (room_id, job["run_id"], job["task_id"])).fetchone() if job["task_id"] else None
@@ -1168,7 +1175,7 @@ class RoomStore:
                      and task["owner"] == job["provider"] else [])
         return {"job_id": job["id"], "provider": job["provider"], "phase": job["phase"], "task_id": job["task_id"],
                 "run_id": job["run_id"], "error": job["error"], "own_paths": own_paths,
-                "reason": "subscription_limit_reached" if quota else job["error"]}
+                "reason": "subscription_limit_reached" if quota else "native_cleanup_slow" if toolless else job["error"]}
 
     def settle_clean_stop(self, room_id, job_id):
         """Record an audited unchanged-tree failure as an ordinary failed call."""
@@ -1176,7 +1183,7 @@ class RoomStore:
             candidate = self._clean_stop_candidate(db, room_id)
             if candidate is None or candidate["job_id"] != job_id:
                 return None
-            reason, quota = candidate["reason"], candidate["reason"] != candidate["error"]
+            reason, quota = candidate["reason"], candidate["reason"] == "subscription_limit_reached"
             db.execute("UPDATE jobs SET status='failed',error=? WHERE id=?", (reason, job_id))
             db.execute("UPDATE members SET status=?,current_task=NULL WHERE room_id=? AND provider=?",
                        ("needs_user" if quota else "idle", room_id, candidate["provider"]))
@@ -1191,6 +1198,11 @@ class RoomStore:
             db.execute("UPDATE rooms SET blocked_reason='needs_user' WHERE id=?", (room_id,))
             self._event(db, room_id, "native_quota_stop_settled" if quota else "native_failed_call_settled",
                         sender="system", job_id=job_id, provider=candidate["provider"], run_id=candidate["run_id"], code=reason)
+            if reason == "native_cleanup_slow":
+                # The call ran no tool, so nothing it could leave running can touch the work; the
+                # stage is clean on that basis, recorded as such rather than as an observed exit.
+                self._event(db, room_id, "job_cleanup", sender="system", job_id=job_id, provider=candidate["provider"],
+                            cleanup_confirmed=True, basis="no_tool_calls")
             return candidate
 
     def resume_recoverable_block(self, room_id):

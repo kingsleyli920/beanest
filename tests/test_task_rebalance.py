@@ -401,7 +401,9 @@ class RebalanceService(unittest.IsolatedAsyncioTestCase):
         self.plan = [plan("T1", "claude")]
         state = await self.finished(["claude", "codex"])
         self.assertGreaterEqual(len(attempts), 2)
-        correction = next(call for call in self.fake.calls if "its response was rejected" in call["prompt"])
+        # Only the plan author's own correction call; a peer's prompt shows the author's current task cut to a preview.
+        correction = next(call for call in self.fake.calls if call["agent"] == "claude"
+                          and call["context"]["job"]["job_phase"] == "plan" and "its response was rejected" in call["prompt"])
         self.assertIn("Error code: invalid_team_task", correction["prompt"])
         self.assertIn("no leading or trailing '/'", correction["prompt"])
         self.assertIn("at most 1000", correction["prompt"])

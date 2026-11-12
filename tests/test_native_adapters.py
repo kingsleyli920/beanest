@@ -1064,6 +1064,21 @@ time.sleep(60)
             result = await native.invoke_native('codex', 'hello', self.root)
         self.assertEqual(result['failure_code'], 'protocol_turn_incomplete')
 
+    async def test_cleanup_waits_for_a_slow_child_to_exit(self):
+        # Catches a child that needs a moment to die after SIGKILL (an MCP server on a busy machine) being
+        # reported as alive, which used to stop the whole room.
+        process = await asyncio.create_subprocess_exec(sys.executable, '-c', 'pass', start_new_session=True)
+        await process.wait()
+        seen = []
+        def table():
+            seen.append(1)
+            return {999_999: (1, 999_999, 'Mon Jan  1 00:00:00 2026', 'S')} if len(seen) <= 4 else {}
+        with patch.object(native, '_processes', side_effect=table), patch.object(native, '_CLEANUP_SETTLE_SECONDS', 5):
+            self.assertTrue(await native._cleanup(process, {999_999: 'Mon Jan  1 00:00:00 2026'}))
+        with patch.object(native, '_processes', return_value={999_999: (1, 999_999, 'Mon Jan  1 00:00:00 2026', 'S')}), \
+             patch.object(native, '_CLEANUP_SETTLE_SECONDS', 0.3):
+            self.assertFalse(await native._cleanup(process, {999_999: 'Mon Jan  1 00:00:00 2026'}))
+
     async def test_cleanup_inspection_failure_is_not_confirmed(self):
         with self.make_stub(codex_events()):
             with patch.object(native, '_processes', side_effect=RuntimeError('inspection unavailable')):

@@ -84,6 +84,7 @@ _REASONS = {
     "agent_quota_exhausted": _system("当前账号已知额度不足，未继续派发调用；检查账号与额度后再明确尝试。"),
     "agent_quota_unconfirmed": _system("当前登录身份尚未确认，之前记录的额度限制仍保留；未启动新调用，请先检查账号。"),
     "cli_nonzero_exit": _system("本机工具异常退出，尚未确认的工作已停止。"),
+    "native_cleanup_slow": _system("伙伴这次没有动用工具，只是退出得慢；豆窝按普通失败记下，接着做。"),
     "budget_exhausted": _system("本次调用上限已到，未完成的任务保留在清单里。"),
     "objective_calls_exhausted": _system("你设置的调用预算已用完，未完成的任务保留在清单里。"),
     "objective_deadline_exceeded": _system("你设置的结束时间已到，现有成果和未完成任务已保留。"),

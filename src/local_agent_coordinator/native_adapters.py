@@ -35,6 +35,7 @@ def _claude_tool_name_valid(name):
 
 
 _MAX_LINE = 32 * 1024 * 1024
+_CLEANUP_SETTLE_SECONDS = 10
 _MAX_RECEIPT = 64 * 1024 * 1024
 _PUBLIC_PROGRESS_CACHE_SIZE = 256
 _MAX_PUBLIC_PROGRESS_BYTES = 16 * 1024
@@ -757,7 +758,7 @@ def _processes():
     # lstart is localized: zh/ja dates such as "三 10月/14" split into fewer
     # fields, silently dropping processes from cleanup. Parse the C locale.
     completed = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,lstart=,stat='],
-                               capture_output=True, timeout=2, check=False,
+                               capture_output=True, timeout=10, check=False,
                                env={**adapters._environment(), 'LC_ALL': 'C'})
     if completed.returncode:
         raise RuntimeError('native_process_inspection_failed')
@@ -811,9 +812,21 @@ async def _cleanup(process, owned):
             except asyncio.TimeoutError:
                 pass
             await asyncio.sleep(0.05)
-        table = await asyncio.to_thread(_processes)
-        confirmed = not any(row[2] == owned.get(pid) and 'Z' not in row[3]
-                            for pid, row in table.items())
+        # A killed child (a CLI's MCP server, say) can take a moment to exit,
+        # longer on a busy machine; look again for a while before declaring it alive.
+        deadline = time.monotonic() + _CLEANUP_SETTLE_SECONDS
+        while True:
+            table = await asyncio.to_thread(_processes)
+            survivors = [pid for pid, row in table.items() if row[2] == owned.get(pid) and 'Z' not in row[3]]
+            if not survivors or time.monotonic() >= deadline:
+                break
+            for pid in survivors:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            await asyncio.sleep(0.1)
+        confirmed = not survivors
     except (OSError, subprocess.SubprocessError, RuntimeError):
         # Best effort group cleanup is still required if inspection fails;
         # absence cannot then be certified.
