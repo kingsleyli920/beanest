@@ -78,6 +78,9 @@ class NativePermissionPolicyHTTPTests(unittest.TestCase):
             self.assertNotIn("Do not write the source project", call["prompt"])
             self.assertNotIn("source writeback restriction", call["prompt"])
             self.assertIn("no separate source-writeback approval", call["prompt"])
+            # Catches the Full Access prompt telling partners to leave the source alone, so some land the result there and some do not.
+            self.assertIn("apply the same owned changes to the source project", call["prompt"])
+            self.assertNotIn("without changing it", call["prompt"])
 
     def test_full_access_preserves_a_real_user_source_prohibition(self):
         goal = "Update only the collaboration copy. Do not modify the registered source project."
@@ -102,6 +105,7 @@ class NativePermissionPolicyHTTPTests(unittest.TestCase):
                 for call in self.native.calls[first_call:]:
                     self.assertEqual(call["permission"], effective)
                     self.assertIn("Non-modifying native commands", call["prompt"])
+                    self.assertIn("read the registered source project in context.project.source without changing it", call["prompt"])
                     self.assertNotIn("Do not run the project or tests in this mode.", call["prompt"])
                     self.assertNotIn("Only propose text tasks with empty paths; do not submit files/edits or request execution", call["prompt"])
                 self.assertTrue(all(task["write_paths"] == [] for task in final["team"]["tasks"]))

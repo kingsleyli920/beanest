@@ -90,7 +90,7 @@ A partner's current quota and the task's token usage are separate observations. 
 
 Beanest stores its own runtime data on your machine. **Local storage does not mean offline inference:** your goal and relevant context are sent to the agents and providers you select.
 
-A development copy is **not an operating-system sandbox**. With Full Access, a native agent may read or write other accessible files, execute commands, and use the network. Choose this mode only for agents and work you trust. Beanest does not automatically merge a development copy into your source project or publish it to GitHub.
+A development copy is **not an operating-system sandbox**. With Full Access, a native agent may read or write other accessible files, execute commands, and use the network. Choose this mode only for agents and work you trust. Full Access is each tool's own highest permission, and Beanest adds no limits of its own: partners write the changes they own into your project, as when you use them directly. With other permissions, Beanest does not merge a development copy into your source project. Beanest never publishes to GitHub by itself.
 
 Runtime databases, conversations, credentials, connection files, logs, screenshots, and local configuration are excluded from this source release. Do not attach them to public issues. See [Security](SECURITY.md) and [Third-party notices](THIRD_PARTY_NOTICES.md).
 

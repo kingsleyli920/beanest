@@ -116,13 +116,16 @@ class ACPConnection:
         Otherwise the tool is refused and the partner carries on without it.
         Beanest cannot put the question in front of the user while the call
         runs, and an answer given later reaches only a new call, which asks
-        again; stopping would only wait. Even Full Access (Kimi's yolo mode)
-        still asks about commands Kimi's own guard holds back, such as rm -rf,
-        so those are refused, never approved on the user's behalf.
+        again; stopping would only wait. Under Full Access it is approved once.
         """
         if not isinstance(params, dict) or not isinstance(params.get("options"), list):
             return None
         options = [item for item in params["options"] if isinstance(item, dict) and isinstance(item.get("optionId"), str)]
+        # Full Access is the user's approval of everything the tool can do, as
+        # Codex never asks and Claude bypasses permissions: a question Kimi still
+        # raises is answered as the user would, so Beanest is never stricter.
+        if self.permission == "full_access":
+            return next((item["optionId"] for item in options if item.get("kind") == "allow_once"), None)
         kinds = ("allow_once",) if self.sandboxed else ()
         return next((item["optionId"] for kind in (*kinds, "reject_once", "reject_always")
                      for item in options if item.get("kind") == kind), None)
@@ -163,8 +166,8 @@ class ACPConnection:
                         if self.on_update is not None:
                             await self.on_update(params)
                     elif "id" in row:
-                        # Never approved for the user; refused once when Kimi offers that.
-                        # Only a question without a refusal option still stops the call.
+                        # Approved once under Full Access, otherwise refused once; only a
+                        # question without that option still stops the call.
                         answer = self._read_only_answer(params) if method == "session/request_permission" else None
                         if answer is not None:
                             await self.send({"jsonrpc": "2.0", "id": row["id"], "result": {"outcome": {"outcome": "selected", "optionId": answer}}})
@@ -809,7 +812,9 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         await connection.request("session/set_model", {"sessionId": session_id, "modelId": model})
         if effort is not None:
             await connection.request("session/set_config_option", {"sessionId": session_id, "configId": "thinking", "value": effort})
-        mode = {"plan": "plan", "read_only": "plan", "full_access": "yolo", "workspace_write": "auto"}[permission]
+        # Kimi Code 2's "auto" is its Never Ask mode; its "yolo" still asks before
+        # risky commands such as rm -rf (whatever the ACP mode descriptions say).
+        mode = {"plan": "plan", "read_only": "plan", "full_access": "auto", "workspace_write": "auto"}[permission]
         await set_session_mode(connection, session_id, mode, resumed)
         path = session_wire(cwd, session_id)
         before = wire_offset(path)
