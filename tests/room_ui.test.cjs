@@ -5510,6 +5510,29 @@ test('a task the host moved before work began is named in the chat in both langu
   const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
   assert.match(english.get('events').textContent, /To balance the work, .*moved from Claude Code to Codex/);
 });
+test('a mid-run change to unstarted tasks is named in the chat in both languages', async () => {
+  // Catches the plan author's mid-run split staying invisible, losing the task names, or left untranslated.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [
+    { id: 'L1', title: '跑完整回归', owner: 'kimi', status: 'working' }, { id: 'L2a', title: '整理报表字段', owner: null, status: 'open' },
+    { id: 'L2', title: '对比回归结果', owner: 'codex', status: 'assigned' }] };
+  saved.jobs = [];
+  const event = { seq: 1, kind: 'plan_adjusted', sender: 'claude', run_id: saved.current_run.id, revision: 2, created_at: 1100,
+    added: [{ task_id: 'L2a', title: '整理报表字段', dependencies: [], write_paths: ['report.py'] }],
+    adjusted: [{ task_id: 'L2', title: '对比回归结果', previous_dependencies: ['L1'], dependencies: ['L1'],
+      previous_write_paths: ['compare.py', 'report.py'], write_paths: ['compare.py'] }] };
+  saved.events = [event];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(ui.get('events').textContent, /Claude Code 调整了还没开始的任务：新增「整理报表字段」，改了「对比回归结果」的前置任务或修改范围。进行中的工作照常继续。/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(english.get('events').textContent, /Claude Code changed work nobody had started: added “整理报表字段” and changed what “对比回归结果” waits for/);
+  saved.events = [{ ...event, adjusted: [] }];
+  const addedOnly = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(addedOnly.get('events').textContent, /Claude Code 新增了「整理报表字段」，进行中的工作照常继续。/);
+  saved.events = [{ ...event, added: [] }];
+  const changedOnly = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(changedOnly.get('events').textContent, /Claude Code changed what “对比回归结果” waits for or which files it covers before it started\./);
+});
 test('work that reached the repository from outside the room is shown in the chat in both languages', async () => {
   // Catches: the host detecting outside commits but the user seeing nothing,
   // or "1 commits" / untranslated Chinese in the English interface.

@@ -18,7 +18,7 @@ PHASES = ("plan", "coordinate", "work", "review", "help", "user", "checkpoint", 
 MEMBERS = ("claude", "codex")
 SESSION = "42619ac2-4bfa-446c-a773-5193109566ae"
 ALL_KINDS = ["propose", "claim", "complete", "block", "review", "request_help", "plan_ready",
-             "checkpoint", "checkpoint_review"]
+             "checkpoint", "checkpoint_review", "adjust"]
 
 
 def claude_bytes(phase, can_propose, members=MEMBERS):

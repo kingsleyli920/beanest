@@ -19,10 +19,13 @@ _PHASE_COMMANDS = {
     "work": {"complete", "request_help", "block"},
     "review": {"review", "block"},
     "help": set(),
-    "user": {"claim"},
+    # The plan author may also change the unstarted part of a working board
+    # (new tasks, adjust); the service refuses it in any other team phase.
+    "user": {"claim", "propose", "adjust"},
     "checkpoint": {"checkpoint"},
     "checkpoint_review": {"checkpoint_review"},
 }
+PLAN_AUTHOR_COMMANDS = frozenset({"propose", "adjust"})
 # Per-phase schemas require these as non-empty strings. A stable schema leaves
 # them nullable, so the service enforces the same rule from the job's phase.
 PHASE_NONEMPTY_TEXT = {
@@ -60,7 +63,7 @@ def command_shape(*, team_phase=None, can_propose=True, has_peers=True, native=F
         raise ValueError("invalid_response_schema_context")
     allowed = set(_COMMAND_FIELDS) if team_phase is None else _PHASE_COMMANDS[team_phase]
     kinds = [kind for kind in _COMMAND_FIELDS if kind in allowed
-             and (kind != "propose" or can_propose)
+             and (kind not in PLAN_AUTHOR_COMMANDS or can_propose)
              and (has_peers or kind not in {"review", "request_help"} or team_phase == "review" and kind == "review")]
     fields = set().union(*(_COMMAND_FIELDS[kind] for kind in kinds)) if native else set().union(*_COMMAND_FIELDS.values())
     return kinds, fields
@@ -135,7 +138,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
         for field in {"id", "task_id"} & fields:
             command_properties[field].update(pattern=r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                 description=("REQUIRED non-null task identifier when type is propose (id) or claim/complete/"
-                             "block/review/request_help (task_id), for example T1. Null only when unused."))
+                             "block/review/request_help/adjust (task_id), for example T1. Null only when unused."))
         command_properties["type"]["description"] = (
             "Choose an allowed operation. All fields used by that operation must be non-null; "
             "propose requires id such as T1. Optional request_help repair_paths may be null "

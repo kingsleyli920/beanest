@@ -206,7 +206,7 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 `team`是共享任务单源，旧房为null；新房包含run_id、plan_author、phase、revision、stop_reason、成员对确切清单版本的确认，以及tasks。每项任务包含稳定id、title、description、acceptance、dependencies、write_paths、capability、owner、状态、具体求助及result/result_version/result_revision/result_digest/result_files和审核记录。任务状态open → assigned → working → review → accepted；单人自检明确为self_checked、review_kind:self_check，独立审核为review_kind:independent_review。任务亦可waiting_peer、blocked、unknown、interrupted或cancelled；模型单次返回done不改变整个目标的验收状态。
 
-团队响应为`{message,state:"done|working|needs_user",commands:[...]}`，文件模式另带base_revision/files。commands每次最多16项，只允许propose、claim、plan_ready、complete、block、request_help、review。初始plan_author提出完整清单与验收条件，成员各自claim适合自己的任务，不能替另一成员认领；所有成员对同一revision执行plan_ready后才进入工作。最多8个真实子任务；依赖必须指向存在任务、无自依赖或环，依赖任务accepted或self_checked后才排下游，审核方式仍分别保留。不能为用满成员或延长时间制造确认、寒暄或额外任务。
+团队响应为`{message,state:"done|working|needs_user",commands:[...]}`，文件模式另带base_revision/files。commands每次最多16项，只允许propose、claim、plan_ready、complete、block、request_help、review，以及运行中调整用的adjust（见下文）。初始plan_author提出完整清单与验收条件，成员各自claim适合自己的任务，不能替另一成员认领；所有成员对同一revision执行plan_ready后才进入工作。最多8个真实子任务；依赖必须指向存在任务、无自依赖或环，依赖任务accepted或self_checked后才排下游，审核方式仍分别保留。不能为用满成员或延长时间制造确认、寒暄或额外任务。
 
 独立互审由任务状态机安排，不必另建重复审核任务。若同一规划版本仍有未认领项，常规协调后可再给每位成员一次明确补救，要求实际认领或说明阻碍；补救签名持久保存，计入原调用与期限。仍无进展时明确记录`team_plan_stalled`及缺少的负责人/确认，不自动替成员认领，也不无限重复唤醒。
 
@@ -224,6 +224,10 @@ Claude 原生会话长期续接会把全部上下文带进每次调用。checkpo
 服务按成员单在途调用派发，不同成员可并行处理互不冲突的路径。write_paths按大小写折叠检查：无依赖关系的任务不能共用路径；即使有先后依赖，不同负责人也不能认领同一路径。已有文本基线仅首轮在规划确认后按任务范围分配负责人；后续轮不得换掉既有路径负责人。只有该任务的work响应能提交其write_paths内、归自己的文件，plan/coordinate/review/help/user只能返回空files。协调层以owner、逐文件hash、base_revision和不可变快照提交，允许不相交文件的安全合并，冲突不自动覆盖或重试。这里不开放原生编辑器、shell或任意目录。
 
 工作中发现任务拆分缺口时，伙伴须用结构化 `block.cause: coordination_required` 请求调整计划，不能仅在正文要求宿主重规划。该原因只请求正常计划协调，不授予文件、shell或额外业务权限；真实 `permission_required`、`user_decision`、外部依赖与旧未分类阻塞继续保留原等待规则，不能按正文关键词自动降级。自主目标在清理边界回到规划，新增任务仍由计划作者提出、成员本人认领、全员确认确切清单；已有成果、负责人及原写入范围保留。新增依赖、取消/暂停和无进展保护仍须校验。
+
+运行中调整未开始的任务：团队处于 working 时，计划作者回复用户消息（job_phase `user`）可以直接改任务板上还没人开始的部分，不用等在途工作结束，也不回到 planning。能做两件事：用 propose 新增任务，校验和规划阶段一样（id、文字、路径、能力、依赖、和其他任务的写路径冲突）；用 `adjust{type,task_id,dependencies,write_paths}` 给一个未开始的任务换上完整的新依赖列表，并从它的 write_paths 里去掉要移走的路径（只能删，不能加）。未开始指：状态 open 或 assigned，result_version 为 0，没被审核过，不是上一轮带来的或执行修复重开的，没有宿主转交的路径授权，而且从没有任何调用绑定过它；排队中的 work 调用也算已开始。已开始、审核中或有结果的任务一律不能改。拆分时在同一个回复里 propose 新任务带上移走的路径，再 adjust 原任务，写路径冲突和环检查都按调整后的任务板算。一个回复里的命令要么全部生效，要么全部不生效；被拒时沿用原有纠错提示，告诉伙伴违反了哪条（`team_plan_locked`、`invalid_team_task`、`invalid_team_dependencies`、`team_write_path_conflict`）。不是计划作者、不是用户回复、或团队不在 working 时，仍返回 `team_plan_locked`。只读房间的用户回复照旧不能带命令。
+
+调整不改 team.revision，成员不用重新确认：调整来自用户本人的消息，只碰没人开始的任务，在途调用绑定的任务、result_version 和 assignment_epoch 都不变，也不会被取消或重新规划。服务写一条 `plan_adjusted` 事件，带 run_id、新增的任务，以及每个被调整任务改前改后的依赖和写路径；时间线显示这条变化，之后每个成员的 `context.plan_adjustments` 里也能看到本轮的调整。新任务是 open，按正常协调交给成员认领；手上只有在等别的任务结果的成员也算空闲，会被问到。计划作者也可以在同一个回复里认领自己要做的新任务。
 
 `request_help{type,task_id,to,capability,text}`绑定当前工作任务和本间另一成员的具体问题，原任务进入waiting_peer；被请求者回复后，服务把message保存为help_result并排回原负责人继续，协助者不能改对方文件。`image`能力对所有当前成员明确不可用；提案或求助需要image时记录capability_unavailable并阻塞等待用户，不虚构图片、不换新API或计费路径。python能力仅文件模式可用，并不授予模型执行权限。
 
