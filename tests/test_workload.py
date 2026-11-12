@@ -278,6 +278,8 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("merely related or similar has no dependency", plan["prompt"])
         # Catches a task that is only partly blocked keeping its free part waiting (a real plan bundled "queue the lease" with "decide after the test").
         self.assertIn("split off the part that does not into its own task", plan["prompt"])
+        # Catches a plan that chains work only because the user numbered it, when nothing in it needs the earlier result.
+        self.assertIn("The order or numbering in which the user lists things is not a dependency", plan["prompt"])
 
     async def test_an_unconfigured_room_chooses_as_it_always_did(self):
         # Catches the feature changing behaviour for rooms that never set a share.
