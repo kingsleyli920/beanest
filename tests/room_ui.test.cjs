@@ -3722,12 +3722,12 @@ test('an account down to its reserve says others go first, on the room line and 
   const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, workload_level: 'normal', account: claudeUsageAccount([]), quota_reserve: null },
     { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'normal', quota_reserve: 9 }];
   const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
-  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 40% · 额度只剩约 9%，先派给别人');
-  assert.equal(ui.get('member-workload-claude').textContent, '本轮工作量 60%');
+  assert.equal(ui.get('member-workload-codex').textContent, '角色：全能 · 本轮工作量 40% · 额度只剩约 9%，先派给别人');
+  assert.equal(ui.get('member-workload-claude').textContent, '角色：全能 · 本轮工作量 60%');
   assert.match(ui.get('provider-account-codex').textContent, /额度只剩约 9%，豆窝先把活派给其他伙伴，没人能接时才用它。/);
   assert.doesNotMatch(ui.get('provider-account-claude').textContent, /额度只剩约/);
   const english = await browser({ language: 'en', agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
-  assert.equal(english.get('member-workload-codex').textContent, 'This round 40% of the work · About 9% quota left, others go first');
+  assert.equal(english.get('member-workload-codex').textContent, 'Role: All-round · This round 40% of the work · About 9% quota left, others go first');
 });
 
 test('each account shows its part of the round and its workload level can be changed', async () => {
@@ -3741,8 +3741,8 @@ test('each account shows its part of the round and its workload level can be cha
     { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, workload_level: 'low' }];
   const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
     route(request) { if (request.path === '/api/partners/claude/workload') return { partners, supported_adapters: [] }; } });
-  assert.equal(ui.get('member-workload-claude').textContent, '本轮工作量 60% · 设定 75%');
-  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 40% · 设定 25%');
+  assert.equal(ui.get('member-workload-claude').textContent, '角色：全能 · 本轮工作量 60% · 设定 75%');
+  assert.equal(ui.get('member-workload-codex').textContent, '角色：全能 · 本轮工作量 40% · 设定 25%');
   const select = descendants(ui.get('provider-account-claude')).find((node) => node.dataset?.focusKey === 'account-workload');
   assert.equal(select.value, 'high');
   select.value = 'low'; select.fire('change'); await settle();
@@ -3751,13 +3751,13 @@ test('each account shows its part of the round and its workload level can be cha
 
   saved.workload.configured = false;
   const plain = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
-  assert.equal(plain.get('member-workload-claude').textContent, '本轮工作量 60%');
+  assert.equal(plain.get('member-workload-claude').textContent, '角色：全能 · 本轮工作量 60%');
   saved.workload = null;
   const none = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
-  assert.equal(none.get('member-workload-claude').textContent, '');
+  assert.equal(none.get('member-workload-claude').textContent, '角色：全能', 'the role shows even before any work is counted');
   saved.workload = { configured: true, accounts: [{ scope: 'claude', members: ['claude'], share: 3, level: 'high', points: 600, calls: 2, target_percent: 75, actual_percent: 60 }] };
   const english = await browser({ language: 'en', agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved });
-  assert.equal(english.get('member-workload-claude').textContent, 'This round 60% of the work · set to 75%');
+  assert.equal(english.get('member-workload-claude').textContent, 'Role: All-round · This round 60% of the work · set to 75%');
 });
 
 test('each partner can be given a role and a workload for the new task, and a model change keeps them', async () => {
@@ -3849,7 +3849,7 @@ test('the room shows each partner role and what each step of this round cost', a
     { phase: 'review', points: 400, calls: 2, percent: 40, members: { claude: 400 } }] };
   const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
   assert.equal(ui.get('member-workload-claude').textContent, '角色：审查 · 本轮工作量 40%');
-  assert.equal(ui.get('member-workload-codex').textContent, '本轮工作量 60%');
+  assert.equal(ui.get('member-workload-codex').textContent, '角色：全能 · 本轮工作量 60%');
   assert.equal(ui.get('phase-load').hidden, false);
   assert.equal(ui.get('phase-load').textContent, '本轮消耗（按 Token 折算）：干活 60% · 审查 40%');
   const english = await browser({ language: 'en', agents: catalog.slice(0, 2), rooms: [saved.room], saved });
@@ -10779,9 +10779,9 @@ test('Codex ultra effort is named in both languages and not repeated with anothe
   const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
   saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'gpt-x', effort: 'ultra' };
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.match(ui.get('member-model-codex').textContent, /· 极高 · 全能 ⌄$/);
+  assert.match(ui.get('member-model-codex').textContent, /· 极高 ⌄$/);
   const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.match(english.get('member-model-codex').textContent, /· Ultra · All-round ⌄$/);
+  assert.match(english.get('member-model-codex').textContent, /· Ultra ⌄$/);
 });
 
 test('a saved model choice keeps its friendly name after a reload without the model list', async () => {
@@ -10790,12 +10790,12 @@ test('a saved model choice keeps its friendly name after a reload without the mo
   saved.runtime_configuration.desired.runtime_settings.members.claude = { model: 'default', effort: 'low' };
   saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'kimi-code/kimi-for-coding', effort: null };
   const fresh = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.equal(fresh.get('member-model-claude').textContent, '默认推荐 · 低 · 全能 ⌄', 'without any saved names, default reads as the tool default');
-  assert.equal(fresh.get('member-model-codex').textContent, 'kimi-for-coding · 全能 ⌄', 'a path id keeps its last part, and a default effort is left off the card');
+  assert.equal(fresh.get('member-model-claude').textContent, '默认推荐 · 低 ⌄', 'without any saved names, default reads as the tool default');
+  assert.equal(fresh.get('member-model-codex').textContent, 'kimi-for-coding ⌄', 'a path id keeps its last part, and a default effort is left off the card');
   const languageStorage = new Map([['beanest:model-names-v1', JSON.stringify({ claude: {
     default: { name: '', resolved_model: 'claude-opus-5-5' }, opus: { name: 'Opus 5.5', resolved_model: 'claude-opus-5-5' } } })]]);
   const reloaded = await browser({ languageStorage, rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.equal(reloaded.get('member-model-claude').textContent, 'Opus 5.5（默认） · 低 · 全能 ⌄');
+  assert.equal(reloaded.get('member-model-claude').textContent, 'Opus 5.5（默认） · 低 ⌄');
 });
 
 test('the progress pane still lists what earlier rounds finished after the objective moves to a new run', async () => {
@@ -10997,11 +10997,17 @@ test('the read-only room hides the commit and push request, and a missing GitHub
   assert.equal(plan.posts().length, 0);
 });
 
-test('the partner button always names the role, the default one too', async () => {
-  // Catches the role being hidden until someone changes it, so nobody finds where roles are chosen.
-  const saved = snapshot({ agents: catalog.slice(0, 2) });
+test('each partner card and each partner message name its role, the default one too', async () => {
+  // Catches the role being hidden until someone changes it (or cut off in the narrow model button), so nobody sees who does what.
+  const saved = snapshot({ agents: catalog.slice(0, 2), events: [message(1, 'claude', '我来写计划。')] });
+  saved.room.runtime_settings = { permission: 'full_access', effective_permission: 'full_access',
+    members: { claude: { model: null, effort: null, role: { id: 'planner' } }, codex: { model: null, effort: null } } };
   const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
-  assert.match(ui.get('member-model-claude').textContent, /· 全能 ⌄$/);
+  assert.match(ui.get('member-workload-claude').textContent, /^角色：规划/);
+  assert.match(ui.get('member-workload-codex').textContent, /^角色：全能/);
+  assert.doesNotMatch(ui.get('member-model-claude').textContent, /规划/, 'the narrow card button keeps to the model');
+  const roles = descendants(ui.get('events')).filter((node) => node.classList.contains('event-role'));
+  assert.deepEqual(roles.map((node) => node.textContent), ['规划']);
 });
 
 test('results written into the project but not committed are not called merged', async () => {
