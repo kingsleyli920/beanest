@@ -533,7 +533,7 @@ class RoomPromptMixin:
             "acceptance:'Handles empty input',dependencies:[],write_paths:['parser.py'],capability:'python'}. "
             "Its claim is {type:'claim',task_id:'T1'}. propose.id MUST be non-null; claim.task_id MUST be non-null. "
             "In flat native commands, fill those USED fields exactly; null means UNUSED only. "
-            "Use short stable task IDs, at most 8 concrete tasks and 16 commands per response. "
+            "Use short stable task IDs; a task may own as many files as its work really needs. "
             "Keep each description within 300 characters and acceptance within 200; be concrete and concise. "
             "In plan/coordinate: only team.plan_author proposes the initial complete list. It is a temporary planning role. "
             "Split only real required work, state acceptance and dependencies; avoid a separate task just to chat or acknowledge. "

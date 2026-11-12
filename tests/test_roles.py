@@ -41,7 +41,7 @@ class RoleSettings(unittest.TestCase):
     def test_bad_roles_and_levels_are_refused(self):
         # Catches malformed input reaching the scheduler.
         for choice in ({"role": {"id": "boss"}}, {"role": custom(abilities=[])}, {"role": custom(abilities=["fly"])},
-                       {"role": custom(name="")}, {"role": custom(name="x" * 21)}, {"role": custom(duty="x" * 301)},
+                       {"role": custom(name="")}, {"role": custom(name="x" * (roles.NAME_LIMIT + 1))}, {"role": custom(duty="x" * (roles.DUTY_LIMIT + 1))},
                        {"role": custom(identifier="custom:Bad Id")}, {"role": {**custom(), "extra": 1}},
                        {"role": custom(abilities=["work", "work"])}, {"workload": "max"}, {"role": "builder"}):
             with self.subTest(choice=choice), self.assertRaises(RuntimeSettingsError):

@@ -31,8 +31,8 @@ from .native_setup import NATIVE_ADAPTERS, NativeInstall, NativeLogin, native_ad
 TRUSTED_ADAPTERS = {item.id: item.provider for item in NATIVE_ADAPTERS}
 CONNECTOR_TEMPLATES = (("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("local_json", "兼容本机 CLI"))
 CONNECTOR_ADAPTERS = frozenset(item[0] for item in CONNECTOR_TEMPLATES)
-MAX_PROFILES = 32
-MAX_CONFIG_BYTES = 128 * 1024
+MAX_PROFILES = 256
+MAX_CONFIG_BYTES = 1024 * 1024
 _DEFAULT_BEAN_STYLE = object()
 _DEFAULT_CONNECTION = object()
 

@@ -147,7 +147,6 @@ class TeamContextBudgetTests(unittest.TestCase):
             self.prompt()
         self.assertEqual(raised.exception.code, "context_too_large")
         self.assertEqual(self.project, original)
-        self.assertEqual(adapters.MAX_TEXT, 128 * 1024)
 
     def test_large_source_plan_keeps_bound_current_work_and_explicit_handoff_truncation(self):
         current = self.snapshot["current_run"]

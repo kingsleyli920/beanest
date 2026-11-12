@@ -6,6 +6,15 @@ response schema can all depend on it without importing one another.
 from __future__ import annotations
 
 
+# Generous bounds that only stop a runaway response; a real task on a large
+# project can own dozens of files, so these must never shape ordinary work.
+MAX_TASK_PATHS = 1000
+MAX_TASK_DEPENDENCIES = 64
+MAX_RESPONSE_COMMANDS = 100
+MAX_PARTNER_TEXT = 100_000  # characters in one field a partner writes (message, description, reason)
+MAX_ROOM_MEMBERS = 32
+
+
 class RoomError(RuntimeError):
     def __init__(self, code: str):
         self.code = code

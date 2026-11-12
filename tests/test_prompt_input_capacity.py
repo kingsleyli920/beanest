@@ -93,9 +93,9 @@ class PromptInputCapacityTests(unittest.IsolatedAsyncioTestCase):
             spawn.assert_not_called()
 
     def test_output_and_schema_limits_remain_separate(self):
-        self.assertEqual(adapters.MAX_TEXT, 128 * 1024)
-        self.assertEqual(adapters.MAX_OUTPUT, 2 * 1024 * 1024)
-        self.assertEqual(native._MAX_LINE, 2 * 1024 * 1024)
+        self.assertEqual(adapters.MAX_TEXT, 4 * 1024 * 1024)
+        self.assertEqual(adapters.MAX_OUTPUT, 32 * 1024 * 1024)
+        self.assertEqual(native._MAX_LINE, 32 * 1024 * 1024)
         self.assertEqual(adapters.MAX_PROMPT_BYTES, MAX_PROMPT_BYTES)
         with self.assertRaisesRegex(ValueError, 'structured response exceeds size limit'):
             adapters._object_text({'message': 'x' * adapters.MAX_TEXT})

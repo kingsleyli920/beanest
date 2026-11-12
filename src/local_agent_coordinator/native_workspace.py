@@ -16,7 +16,7 @@ import stat
 import subprocess
 from uuid import uuid4
 
-from .folder_workspace import _excluded
+from .folder_workspace import MAX_FILE_BYTES, _excluded
 
 
 class NativeWorkspaceError(ValueError):
@@ -444,8 +444,7 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
             blocked.append({"path": name, "reason": "native_binary_not_imported"})
             continue
         size = path.stat().st_size
-        # The existing FolderWorkspace text import contract is 1 MiB per file.
-        if size > 1024 * 1024:
+        if size > MAX_FILE_BYTES:
             blocked.append({"path": name, "reason": "native_change_too_large"})
             continue
         raw = path.read_bytes()

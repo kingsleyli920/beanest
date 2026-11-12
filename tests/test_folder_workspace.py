@@ -199,6 +199,8 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertEqual(result["next_offset"], 0)
         self.assertEqual(self.inspect("read", "large.txt", offset=1)["content"], "next\n")
 
+    # The per-file bound is far larger now; a small one keeps this boundary behaviour tested without huge files.
+    @patch("local_agent_coordinator.folder_workspace.MAX_FILE_BYTES", 1024 * 1024)
     def test_megabyte_line_search_fails_explicitly_and_content_corruption_is_refused(self):
         (self.source / "large.txt").write_text("x" * (1024 * 1024 + 10), encoding="utf-8")
         self.seed()
@@ -254,6 +256,8 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertCode("project_proposal_conflict", lambda: self.workspace.apply(
             "codex", "one", seed["revision"], [self.proposal("a.txt", "other", seed["revision"])]))
 
+    # The per-file bound is far larger now; a small one keeps this boundary behaviour tested without huge files.
+    @patch("local_agent_coordinator.folder_workspace.MAX_FILE_BYTES", 1024 * 1024)
     def test_whole_batch_rejection_for_secret_size_path_and_file_directory_collision(self):
         self.seed()
         for bad, code in (({"path": ".env", "previous_sha256": None, "content": "value"}, "project_sensitive_content"),
@@ -376,6 +380,8 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.workspace.source_comparison("missing.txt")["reason"], "project_file_unavailable")
         self.assertEqual(self.workspace.source_comparison("old.txt", revision=0)["reason"], "project_not_seeded")
 
+    # The per-file bound is far larger now; a small one keeps this boundary behaviour tested without huge files.
+    @patch("local_agent_coordinator.folder_workspace.MAX_FILE_BYTES", 1024 * 1024)
     def test_source_comparison_utf8_diff_is_bounded_and_missing_large_binary_corrupt_are_explicit(self):
         (self.source / "text.txt").write_text("原" * 10_000 + "\n", encoding="utf-8")
         (self.source / "large.txt").write_text("x" * (1024 * 1024 + 1))
