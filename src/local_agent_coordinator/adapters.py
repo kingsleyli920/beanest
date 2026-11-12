@@ -24,8 +24,8 @@ import weakref
 
 from .message_capacity import MAX_PROMPT_BYTES
 
-MAX_OUTPUT = 2 * 1024 * 1024
-MAX_TEXT = 128 * 1024
+MAX_OUTPUT = 32 * 1024 * 1024
+MAX_TEXT = 4 * 1024 * 1024
 CODEX_APP = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CLAUDE_SYSTEM_PATHS = (Path('/opt/homebrew/bin/claude'), Path('/usr/local/bin/claude'))
 CLAUDE_SUBSCRIPTIONS = ('pro', 'max', 'ultra', 'team', 'enterprise')

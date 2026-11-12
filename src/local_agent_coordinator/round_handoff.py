@@ -16,11 +16,12 @@ TASK_ROTATION_MIN_CONTEXT_TOKENS = 400_000
 # no later call by this partner to ask, so the record is requested well before.
 TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS = 200_000
 
-GOAL_MAX_CHARACTERS = 1000
-ITEM_MAX_CHARACTERS = 500
-LIST_MAX_ITEMS = 12
-KEY_FILE_MAX_CHARACTERS = 240
-KEY_FILES_MAX_ITEMS = 24
+# An over-long handoff is dropped whole, so these stay far above a real summary.
+GOAL_MAX_CHARACTERS = 10_000
+ITEM_MAX_CHARACTERS = 5_000
+LIST_MAX_ITEMS = 100
+KEY_FILE_MAX_CHARACTERS = 1024
+KEY_FILES_MAX_ITEMS = 500
 _LISTS = (("done", LIST_MAX_ITEMS, ITEM_MAX_CHARACTERS), ("decisions", LIST_MAX_ITEMS, ITEM_MAX_CHARACTERS),
           ("unverified", LIST_MAX_ITEMS, ITEM_MAX_CHARACTERS), ("key_files", KEY_FILES_MAX_ITEMS, KEY_FILE_MAX_CHARACTERS))
 _FIELDS = frozenset({"goal", *(name for name, _, _ in _LISTS)})

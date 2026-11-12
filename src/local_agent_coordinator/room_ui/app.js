@@ -2509,7 +2509,8 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
     const modelLabel = model ? runtimeShortcutModelLabel(model, models) : fullModelLabel;
     const effort = unrecorded ? t("未记录强度") : effortLabels()[choice?.effort] || choice?.effort || t("默认强度");
     const shortEffort = effort === t("默认强度") ? t("默认") : effort;
-    const roleSuffix = copyRole(choice?.role) ? ` · ${roleName(copyRole(choice.role))}` : '';
+    // Always name the role, the default too, so the button shows that roles exist and where to change them.
+    const roleSuffix = ` · ${roleName(copyRole(choice?.role))}`;
     const text = `${displayName(id)} · ${modelLabel} · ${shortEffort}${roleSuffix}${historical ? t(" · 仅查看") : ''} ⌄`;
     if (button.dataset.label !== text) {
       button.dataset.label = text;
@@ -2697,10 +2698,10 @@ function renderRoleControls(card, id, choice, disabled) {
 function roleEditor(id) {
   const draft = state.roleEditor;
   const form = element('div', '', 'role-editor');
-  const nameLabel = element('label', t("角色名称 ")); const name = element('input'); name.id = 'role-editor-name'; name.maxLength = 20; name.value = draft.name;
+  const nameLabel = element('label', t("角色名称 ")); const name = element('input'); name.id = 'role-editor-name'; name.maxLength = 40; name.value = draft.name;
   name.addEventListener('input', () => { draft.name = name.value; });
   nameLabel.append(name);
-  const dutyLabel = element('label', t("职责说明 ")); const duty = element('textarea'); duty.id = 'role-editor-duty'; duty.maxLength = 300; duty.rows = 2; duty.value = draft.duty;
+  const dutyLabel = element('label', t("职责说明 ")); const duty = element('textarea'); duty.id = 'role-editor-duty'; duty.maxLength = 4000; duty.rows = 2; duty.value = draft.duty;
   duty.placeholder = t("一句话说清这个伙伴负责什么，会原样告诉它。");
   duty.addEventListener('input', () => { draft.duty = duty.value; });
   dutyLabel.append(duty);

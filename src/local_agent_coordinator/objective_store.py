@@ -10,7 +10,7 @@ import json
 from uuid import uuid4
 
 from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached
-from .room_contract import RoomError, checked_text
+from .room_contract import MAX_PARTNER_TEXT, RoomError, checked_text
 from .stop_policy import continues_automatically, OWN_RECOVERY
 
 
@@ -212,10 +212,10 @@ class ObjectiveStore:
         if not isinstance(decision, str) or decision not in {"continue", "complete", "needs_user"}:
             raise RoomError("invalid_objective_checkpoint")
         proposal = {key: command[key] for key in ("decision", "summary", "next_goal", "scope_reference", "question")}
-        for key, limit in (("summary", 2000), ("next_goal", 3000), ("scope_reference", 3000), ("question", 2000)):
+        for key in ("summary", "next_goal", "scope_reference", "question"):
             value = proposal[key]
             if value is not None:
-                checked_text(value, limit)
+                checked_text(value, MAX_PARTNER_TEXT)
         if (not isinstance(proposal["summary"], str)
                 or decision == "continue" and not isinstance(proposal["next_goal"], str)
                 or decision == "needs_user" and not isinstance(proposal["question"], str)):
@@ -313,7 +313,6 @@ class ObjectiveStore:
         if objective is None or objective["status"] != "running" or not tasks and native_question is None:
             return False
         question = native_question if native_question is not None else "；".join(task["title"] + "：" + (task["blocked_reason"] or "需要补充决定") for task in tasks)
-        question = question[:2000]
         proposal = {"decision": "needs_user", "summary": "有任务明确提出阻塞，未继续派发。",
                     "next_goal": None, "scope_reference": objective["original_goal"], "scope": "current_goal",
                     "question": question}

@@ -23,8 +23,8 @@ BUILTIN = {
 }
 WORKLOADS = ("low", "normal", "high")
 _CUSTOM_ID = re.compile(r"custom:[a-z0-9][a-z0-9-]{0,39}\Z")
-NAME_LIMIT = 20
-DUTY_LIMIT = 300
+NAME_LIMIT = 40
+DUTY_LIMIT = 4000
 
 
 class RoleError(ValueError):

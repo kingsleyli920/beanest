@@ -7549,7 +7549,7 @@ test('compact runtime cards retain full partner identity and independent quota b
   const shortcut = ui.get('runtime-shortcut-claude'); const quota = ui.get('composer-usage-claude');
   assert.equal(descendants(shortcut).find((node) => node.classList.contains('shortcut-name')).textContent, 'Claude Code 工作账号');
   assert.equal(descendants(shortcut).find((node) => node.classList.contains('shortcut-model')).textContent, 'Opus 5.5（默认）');
-  assert.equal(descendants(shortcut).find((node) => node.classList.contains('shortcut-effort')).textContent, '默认');
+  assert.equal(descendants(shortcut).find((node) => node.classList.contains('shortcut-effort')).textContent, '默认 · 全能');
   assert.match(shortcut.getAttribute('aria-label'), /Claude Code 工作账号的模型与思考强度：默认推荐（Opus 5.5），默认强度/);
   assert.equal(shortcut.parentNode, quota.parentNode); assert.notEqual(shortcut.id, quota.id); assert.equal(quota.type, 'button');
   assert.match(quota.getAttribute('aria-label'), /账号额度/);
@@ -10757,9 +10757,9 @@ test('Codex ultra effort is named in both languages and not repeated with anothe
   const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
   saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'gpt-x', effort: 'ultra' };
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.match(ui.get('member-model-codex').textContent, /· 极高 ⌄$/);
+  assert.match(ui.get('member-model-codex').textContent, /· 极高 · 全能 ⌄$/);
   const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.match(english.get('member-model-codex').textContent, /· Ultra ⌄$/);
+  assert.match(english.get('member-model-codex').textContent, /· Ultra · All-round ⌄$/);
 });
 
 test('a saved model choice keeps its friendly name after a reload without the model list', async () => {
@@ -10768,12 +10768,12 @@ test('a saved model choice keeps its friendly name after a reload without the mo
   saved.runtime_configuration.desired.runtime_settings.members.claude = { model: 'default', effort: 'low' };
   saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'kimi-code/kimi-for-coding', effort: null };
   const fresh = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.equal(fresh.get('member-model-claude').textContent, '默认推荐 · 低 ⌄', 'without any saved names, default reads as the tool default');
-  assert.equal(fresh.get('member-model-codex').textContent, 'kimi-for-coding ⌄', 'a path id keeps its last part, and a default effort is left off the card');
+  assert.equal(fresh.get('member-model-claude').textContent, '默认推荐 · 低 · 全能 ⌄', 'without any saved names, default reads as the tool default');
+  assert.equal(fresh.get('member-model-codex').textContent, 'kimi-for-coding · 全能 ⌄', 'a path id keeps its last part, and a default effort is left off the card');
   const languageStorage = new Map([['beanest:model-names-v1', JSON.stringify({ claude: {
     default: { name: '', resolved_model: 'claude-opus-5-5' }, opus: { name: 'Opus 5.5', resolved_model: 'claude-opus-5-5' } } })]]);
   const reloaded = await browser({ languageStorage, rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.equal(reloaded.get('member-model-claude').textContent, 'Opus 5.5（默认） · 低 ⌄');
+  assert.equal(reloaded.get('member-model-claude').textContent, 'Opus 5.5（默认） · 低 · 全能 ⌄');
 });
 
 test('the progress pane still lists what earlier rounds finished after the objective moves to a new run', async () => {
@@ -10973,6 +10973,13 @@ test('the read-only room hides the commit and push request, and a missing GitHub
   const plan = await open('plan');
   assert.equal(plan.get('code-merge-panel').hidden, true);
   assert.equal(plan.posts().length, 0);
+});
+
+test('the partner button always names the role, the default one too', async () => {
+  // Catches the role being hidden until someone changes it, so nobody finds where roles are chosen.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.match(ui.get('member-model-claude').textContent, /· 全能 ⌄$/);
 });
 
 test('results written into the project but not committed are not called merged', async () => {

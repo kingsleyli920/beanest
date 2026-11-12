@@ -303,6 +303,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result['text'], '')
         self.assertEqual(result['status'], 'failed')
 
+    @patch("local_agent_coordinator.adapters.MAX_TEXT", 128 * 1024)
     def test_structured_chinese_payload_uses_actual_utf8_limit_and_rejects_invalid_unicode(self):
         payload = {'text': '豆' * 23000}
         self.assertLess(len(json.dumps(payload, ensure_ascii=False).encode('utf-8')), adapters.MAX_TEXT)

@@ -129,7 +129,7 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(profiles[actor]['monitor']['latest_usage']['values']['input_tokens'], len(actor))
 
     async def test_large_directory_requires_explicit_selection_before_dispatch(self):
-        for number in range(5):
+        for number in range(30):
             self.manager.add(id=f'extra_{number}', name=f'Extra {number}', adapter='codex')
         with self.assertRaises(RoomError) as error:
             await self.service.create_room('No implicit large group.', 'claude', 'too-many-defaults')

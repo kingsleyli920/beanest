@@ -11,7 +11,7 @@ class RoomInvitationStoreTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="beanest-invite-store-")
         self.store = RoomStore(Path(self.directory.name) / "rooms.sqlite3",
-                               agents={"m" + str(i): "Peer " + str(i) for i in range(10)})
+                               agents={"m" + str(i): "Peer " + str(i) for i in range(34)})
 
     def tearDown(self):
         self.store.close()
@@ -23,13 +23,14 @@ class RoomInvitationStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, code)
 
     def test_capacity_and_unsupported_legacy_mode_never_partially_change_members(self):
-        room, _ = self.store.create_room("Existing chat", "m0", str(uuid4()), participants=["m" + str(i) for i in range(7)])
+        # The room bound is MAX_ROOM_MEMBERS (32); it only stops a runaway, but must still never half-apply.
+        room, _ = self.store.create_room("Existing chat", "m0", str(uuid4()), participants=["m" + str(i) for i in range(31)])
         before = self.store.snapshot(room)
-        self.assertCode("member_limit_reached", lambda: self.store.invite_members(room, ["m7", "m8"], str(uuid4())))
+        self.assertCode("member_limit_reached", lambda: self.store.invite_members(room, ["m31", "m32"], str(uuid4())))
         self.assertEqual(self.store.snapshot(room), before)
-        self.assertEqual(self.store.invite_members(room, ["m7"], str(uuid4())), ["m7"])
+        self.assertEqual(self.store.invite_members(room, ["m31"], str(uuid4())), ["m31"])
         joined = self.store.snapshot(room)
-        self.assertEqual(self.store.invite_members(room, ["m7"], str(uuid4())), [])
+        self.assertEqual(self.store.invite_members(room, ["m31"], str(uuid4())), [])
         self.assertEqual(self.store.snapshot(room), joined)
         legacy, _ = self.store.create_room("Legacy files", "m0", str(uuid4()), participants=["m0"], mode="python_artifacts")
         previous = self.store.snapshot(legacy)

@@ -34,7 +34,7 @@ def _claude_tool_name_valid(name):
             and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.:-]{0,255}', name) is not None)
 
 
-_MAX_LINE = 2 * 1024 * 1024
+_MAX_LINE = 32 * 1024 * 1024
 _MAX_RECEIPT = 64 * 1024 * 1024
 _PUBLIC_PROGRESS_CACHE_SIZE = 256
 _MAX_PUBLIC_PROGRESS_BYTES = 16 * 1024

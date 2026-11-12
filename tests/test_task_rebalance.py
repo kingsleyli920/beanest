@@ -376,6 +376,36 @@ class RebalanceService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("at", seen, "T1 never waited for review while third was busy")
         self.assertEqual({task["id"]: task["reviewer"] for task in state["team"]["tasks"]}, {"T1": "third", "T2": "claude"})
 
+    async def test_a_task_that_owns_many_files_is_planned_and_delivered(self):
+        # Catches a fixed small cap (it was 16 paths and 8 dependencies) rejecting a real plan on a large project,
+        # or the delivered files being refused at import because a task changed more than 16 of them.
+        paths = [f"part_{index:02d}.py" for index in range(25)]
+        self.plan = [plan(f"P{index}", "claude", paths=[f"pre_{index}.py"]) for index in range(10)]
+        self.plan.append(plan("BIG", "codex", paths=paths, dependencies=[f"P{index}" for index in range(10)]))
+        state = await self.finished(["claude", "codex"])
+        big = next(task for task in state["team"]["tasks"] if task["id"] == "BIG")
+        self.assertEqual((big["status"], len(big["write_paths"]), len(big["dependencies"])), ("accepted", 25, 10))
+        self.assertEqual(sorted(entry["path"] for entry in big["result_files"]), paths)
+        self.assertFalse(any(event["kind"] == "native_response_rejected" for event in state["events"]))
+
+    async def test_a_rejected_plan_is_told_which_rule_it_broke(self):
+        # Catches a rejection that names only an error code, so the partner rewrites the plan by guessing.
+        attempts = []
+        original = self.propose
+        def propose(context, board):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return [native.proposal("T1", paths=["src/"], capability="python", dependencies=[]), {"type": "claim", "task_id": "T1"}]
+            return original(context, board)
+        self.propose = propose
+        self.plan = [plan("T1", "claude")]
+        state = await self.finished(["claude", "codex"])
+        self.assertGreaterEqual(len(attempts), 2)
+        correction = next(call for call in self.fake.calls if "its response was rejected" in call["prompt"])
+        self.assertIn("Error code: invalid_team_task", correction["prompt"])
+        self.assertIn("no leading or trailing '/'", correction["prompt"])
+        self.assertIn("at most 1000", correction["prompt"])
+
     async def test_a_room_with_one_partner_does_not_rebalance(self):
         # Catches the balancer running where there is nobody to balance with.
         self.plan = [plan(f"T{n}", "claude") for n in range(1, 4)]

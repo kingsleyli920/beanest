@@ -9,7 +9,7 @@ from __future__ import annotations
 from .agent_registry import safe_agent_id
 from .block_contract import BLOCK_CAUSES
 from .round_handoff import handoff_schema
-from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS
+from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_ROOM_MEMBERS, MAX_TASK_PATHS
 
 
 _TEAM_PHASES = frozenset({"plan", "coordinate", "work", "review", "help", "user", "checkpoint", "checkpoint_review"})
@@ -104,7 +104,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
             or type(stable) is not bool or stable and (not native or team_phase is not None)
             or (team_phase is not None and (type(team_phase) is not str or team_phase not in _TEAM_PHASES))
             or type(member_ids) is not tuple
-            or not 1 <= len(member_ids) <= 8
+            or not 1 <= len(member_ids) <= MAX_ROOM_MEMBERS
             or any(type(member) is not str or not safe_agent_id(member) for member in member_ids)
             or len(set(member_ids)) != len(member_ids)
             or type(provider) is not str or not safe_agent_id(provider)
@@ -186,11 +186,11 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
                 rule = ("Used only by " + ", ".join(users) + "; for every other command type this field must be null. ")
                 command_properties[field]["description"] = rule + command_properties[field].get("description", "")
         properties.pop("actions")
-        properties["message"] = {"type": "string", "minLength": 1, "maxLength": 8000}
+        properties["message"] = {"type": "string", "minLength": 1, "maxLength": MAX_PARTNER_TEXT}
         # Fixed fields avoid native generators losing fields across object-union
         # branches. The service requires unused fields to be null, then restores
         # the canonical command before transactional permission checks.
-        properties["commands"] = {"type": "array", "maxItems": 16 if kinds else 0,
+        properties["commands"] = {"type": "array", "maxItems": MAX_RESPONSE_COMMANDS if kinds else 0,
                                   "items": _object(command_properties) if kinds else _object({})}
     if project:
         properties.update({
@@ -224,7 +224,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
     if native:
         properties["files"]["maxItems"] = 0
         properties["edits"]["maxItems"] = 0
-        properties["unchanged_paths"] = {"type": "array", "maxItems": 16,
+        properties["unchanged_paths"] = {"type": "array", "maxItems": MAX_TASK_PATHS,
             "items": _object({"path": {"type": "string"}, "reason": {"type": "string", "minLength": 1}})}
-        properties["resolved_conflicts"] = {"type": "array", "maxItems": 16, "items": {"type": "string"}}
+        properties["resolved_conflicts"] = {"type": "array", "maxItems": MAX_TASK_PATHS, "items": {"type": "string"}}
     return _object(properties)

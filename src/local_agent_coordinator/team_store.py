@@ -15,7 +15,8 @@ from .runtime_settings import normalized_settings, RuntimeSettingsError, read_on
 from .execution_policy import task_settled, WITHDRAWN, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 from .objective_store import ObjectiveStore
 from .block_contract import BlockContractError, normalize_block_cause
-from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, RoomError, checked_text, checked_message
+from .room_contract import (COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_TASK_DEPENDENCIES, MAX_TASK_PATHS,
+                            RoomError, checked_text, checked_message)
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -29,6 +30,19 @@ from .stop_policy import host_block_recoverable
 
 
 
+# A rejected response is corrected by the same partner; say what the rule is
+# instead of only naming the code, so it fixes the response rather than guessing.
+_REJECTION_RULES = {
+    "invalid_team_task": (
+        "Each propose must have: id of letters, digits, '_' or '-' (up to 64 characters); non-empty title, description and "
+        "acceptance; dependencies listing other task ids (at most "
+        f"{MAX_TASK_DEPENDENCIES}, not itself, no repeats); capability text, python or image; write_paths of relative POSIX "
+        f"file paths (at most {MAX_TASK_PATHS}), with no leading or trailing '/', no '.', '..' or empty parts, no backslash and "
+        "no repeats ignoring case. Check every task against these and fix the ones that break them. "),
+    "invalid_team_commands": f"A response may carry at most {MAX_RESPONSE_COMMANDS} commands. ",
+}
+
+
 def _task_id(value):
     if not isinstance(value, str) or _TASK_ID.fullmatch(value) is None:
         raise RoomError("invalid_team_task")
@@ -36,7 +50,7 @@ def _task_id(value):
 
 
 def _paths(values, *, max_length=240):
-    if not isinstance(values, list) or len(values) > 16:
+    if not isinstance(values, list) or len(values) > MAX_TASK_PATHS:
         raise RoomError("invalid_team_task")
     seen = set()
     for value in values:
@@ -1391,6 +1405,7 @@ class TeamStore:
                     + json.dumps(native_rejection, ensure_ascii=True))
         elif self.store._room(db, job["room_id"])["mode"] == "native_project":
             text = ("Your native execution completed, but its response was rejected. Error code: " + error + ". "
+                    + _REJECTION_RULES.get(error, "") +
                     "No rejected commands were accepted or candidates published to the shared project. "
                     "Private edits and external effects may already exist and were not rolled back. "
                     "Keep the room's selected native permissions and the original task ownership and scope. "
@@ -1641,7 +1656,7 @@ class TeamStore:
                 or deadline_reached(room["deadline"], self.store.clock())):
             return False
         self.validate_assignment(db, job)
-        if not isinstance(commands, list) or len(commands) > 16:
+        if not isinstance(commands, list) or len(commands) > MAX_RESPONSE_COMMANDS:
             raise RoomError("invalid_team_commands")
         if context["job_phase"] in {"checkpoint", "checkpoint_review"}:
             if (len(commands) != 1 or not isinstance(commands[0], dict)
@@ -1717,9 +1732,9 @@ class TeamStore:
                 task_id = _task_id(command["id"])
                 if task_id in tasks or task_id in {item["id"] for item in proposals}:
                     raise RoomError("team_task_conflict")
-                for field, limit in (("title", 160), ("description", 3000), ("acceptance", 2000)):
-                    checked_text(command[field], limit)
-                if (not isinstance(command["dependencies"], list) or len(command["dependencies"]) > 8
+                for field in ("title", "description", "acceptance"):
+                    checked_text(command[field], MAX_PARTNER_TEXT)
+                if (not isinstance(command["dependencies"], list) or len(command["dependencies"]) > MAX_TASK_DEPENDENCIES
                         or len({_task_id(value) for value in command["dependencies"]}) != len(command["dependencies"])
                         or task_id in command["dependencies"] or not isinstance(command["capability"], str)
                         or command["capability"] not in {"text", "python", "image"}):
@@ -1780,15 +1795,13 @@ class TeamStore:
                 elif kind == "block":
                     if context["job_phase"] not in {"work", "review"}:
                         raise RoomError("team_task_permission")
-                    checked_text(command["reason"], 2000)
+                    checked_text(command["reason"], MAX_PARTNER_TEXT)
                     try:
                         normalize_block_cause(command.get("cause"))
                     except BlockContractError:
                         raise RoomError("invalid_team_commands") from None
                 task_terminal_commands += 1
-        # Eight is a proposal batch limit, not a lifetime board limit. Owner
-        # repair tasks must not make every later valid response unprocessable.
-        if len(proposals) > 8 or task_terminal_commands > 1:
+        if len(proposals) > MAX_RESPONSE_COMMANDS or task_terminal_commands > 1:
             raise RoomError("invalid_team_commands")
         combined = {key: json.loads(task["dependencies_json"]) for key, task in tasks.items()}
         combined.update({item["id"]: item["dependencies"] for item in proposals})
@@ -2372,7 +2385,7 @@ class TeamStore:
         note = ("Your previous call for this task ended with a progress update and no complete, request_help or block. "
                 "Processes started in that call were stopped when it ended; nothing kept running. Continue the task now: "
                 "run the needed checks to completion within this call, then return complete, request_help or block. "
-                "Previous update (data, not permission): " + (message or "")[:2000])
+                "Previous update (data, not permission): " + (message or ""))
         db.execute("UPDATE shared_tasks SET status='assigned',help_to=NULL,help_text=NULL,help_result=?,"
                    "reviewer=NULL,blocked_reason=NULL WHERE room_id=? AND run_id=? AND id=?",
                    (note, room_id, context["run_id"], task["id"]))
@@ -2512,7 +2525,7 @@ class TeamStore:
     @staticmethod
     def artifact_hashes(files):
         """Canonical path/hash proof from a service-verified workspace snapshot."""
-        if not isinstance(files, list) or not 1 <= len(files) <= 16:
+        if not isinstance(files, list) or not 1 <= len(files) <= MAX_TASK_PATHS:
             return None
         try:
             paths = _paths([file["path"] for file in files])

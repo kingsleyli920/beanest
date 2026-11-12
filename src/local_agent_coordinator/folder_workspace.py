@@ -29,14 +29,18 @@ from .project_workspace import (ProjectWorkspace, ProjectWorkspaceError, _uuid,
 
 
 FORMAT = "beanest-folder-workspace-v1"
-MAX_SOURCE_FILES = 20_000
-MAX_SOURCE_BYTES = 512 * 1024 * 1024
-CAPTURE_SECONDS = 30
-MAX_FILE_BYTES = 1024 * 1024
-MAX_CHANGE_BYTES = 2 * 1024 * 1024
-MAX_CHANGED_TOTAL_BYTES = 16 * 1024 * 1024
-MAX_CHANGE_FILES = 16
-MAX_INDEX_BYTES = 16 * 1024 * 1024
+# A real project (a game with art, a monorepo) is gigabytes and hundreds of
+# thousands of files; Beanest must not be the reason it cannot be used.
+MAX_SOURCE_FILES = 500_000
+MAX_SOURCE_BYTES = 64 * 1024 * 1024 * 1024
+CAPTURE_SECONDS = 1800
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_CHANGE_BYTES = 256 * 1024 * 1024
+# A real task on a large project changes dozens of files, and a long room adds
+# up over many rounds; these bounds only stop a runaway, never ordinary work.
+MAX_CHANGED_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_CHANGE_FILES = 1000
+MAX_INDEX_BYTES = 512 * 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_SEARCH_BYTES = 16 * 1024 * 1024
 MAX_IGNORE_BYTES = 64 * 1024
