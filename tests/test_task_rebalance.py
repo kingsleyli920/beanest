@@ -50,6 +50,11 @@ class Quotas(unittest.TestCase):
         self.assertEqual(moves([task("T1", "a")], {"a": ("a", "low"), "b": ("b", "high")}), [])
         self.assertEqual(moves([task("T1", "a"), task("T2", "a")], {"a": ("pool", "normal"), "b": ("pool", "normal")}), [])
 
+    def test_a_lone_task_leaves_an_account_that_should_get_none(self):
+        # Catches the one-task shortcut keeping work on an account down to its reserve while another can take it.
+        self.assertEqual(moves([task("T1", "a")], {"a": ("a", workload.IDLE), "b": ("b", "normal")}), [("T1", "b")])
+        self.assertEqual(moves([task("T1", "a", movable=False)], {"a": ("a", workload.IDLE), "b": ("b", "normal")}), [])
+
     def test_partners_on_one_account_share_one_quota(self):
         # Catches a task moving between two partners on the same login, which changes no real load.
         members = ("a", "a2", "b")
@@ -335,6 +340,41 @@ class RebalanceService(unittest.IsolatedAsyncioTestCase):
         self.profiles = {"claude": ("a", "low"), "codex": ("b", "high")}
         self.plan = [plan("T1", "claude")]
         self.assertEqual(self.moved(await self.finished(["claude", "codex"])), [])
+
+    async def test_a_lone_task_on_an_account_down_to_its_reserve_moves(self):
+        # Catches a lone task staying with an account that dropped to its last few percent after claiming it, while another partner is free.
+        self.plan = [plan("T1", "codex")]
+        state = await self.finished(["claude", "codex"])
+        self.assertEqual(self.owners(state), {"T1": "codex"}, "without a reserve a lone task stays with its owner")
+        def drops_after_claiming(agent, board):
+            if agent == "codex":
+                self.profiles = {"codex": ("codex", "normal", True)}
+            return []
+        self.on_coordinate = drops_after_claiming
+        self.fake.calls.clear()
+        state = await self.finished(["claude", "codex"])
+        self.assertEqual(self.moved(state), [("T1", "codex", "claude")])
+        self.assertEqual(self.workers(), {"T1": "claude"})
+
+    async def test_a_review_waits_for_a_busy_partner_rather_than_use_a_reserve(self):
+        # Catches the reviewer choice falling through to an account on its last few percent just because the others were busy.
+        self.profiles = {"codex": ("codex", "normal", True)}
+        self.plan = [plan("T1", "claude"), plan("T2", "third")]
+        room, seen = {}, {}
+        async def until():
+            # Keep third busy well past the moment T1 is ready for review.
+            state = await self.service.read_room(room["id"])
+            if any(task["id"] == "T1" and task["status"] == "review" for task in state["team"]["tasks"]):
+                seen.setdefault("at", asyncio.get_running_loop().time())
+            return "at" in seen and asyncio.get_running_loop().time() - seen["at"] > 0.5
+        self.hold_task("T2", until=until)
+        created = await self.create(participants=["claude", "codex", "third"])
+        room["id"] = created["room"]["id"]
+        await self.settle()
+        state = await self.service.read_room(room["id"])
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        self.assertIn("at", seen, "T1 never waited for review while third was busy")
+        self.assertEqual({task["id"]: task["reviewer"] for task in state["team"]["tasks"]}, {"T1": "third", "T2": "claude"})
 
     async def test_a_room_with_one_partner_does_not_rebalance(self):
         # Catches the balancer running where there is nobody to balance with.

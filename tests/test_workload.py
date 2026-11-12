@@ -299,6 +299,19 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("codex", self.reviewers(state))
         self.assertEqual(state["team"]["plan_author"], "claude")
 
+    async def test_an_account_down_to_its_reserve_sits_out_planning(self):
+        # Catches an account on its last few percent still being asked to discuss and confirm every plan.
+        def planning_calls():
+            return [call["context"]["self"] for call in self.fake.calls if call["context"]["job"]["job_phase"] in {"plan", "coordinate"}]
+        await self.finished()
+        self.assertIn("codex", planning_calls(), "without a reserve every member plans")
+        self.fake.calls.clear()
+        self.profiles = {"codex": ("codex", "normal", True)}
+        state = await self.finished()
+        self.assertNotIn("codex", planning_calls())
+        self.assertIn("third", planning_calls())
+        self.assertNotIn("codex", [task["owner"] for task in state["team"]["tasks"]])
+
     async def test_a_planner_down_to_its_reserve_hands_the_plan_on(self):
         # Catches the first member writing the plan from its last few percent while others have plenty.
         self.profiles = {"claude": ("claude", "normal", True)}

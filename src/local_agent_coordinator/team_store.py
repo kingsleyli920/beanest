@@ -904,11 +904,14 @@ class TeamStore:
         continuation = json.loads(objective["continuation_json"] or "{}") if objective else {}
         target = continuation.get("initial_recipient") if continuation.get("kind") == "directed_user_request" else None
         if target is None:
-            # Members whose role neither plans nor builds stay out of planning;
-            # the plan author always takes part, and nobody is left out alone.
+            # Members whose role neither plans nor builds, or whose account is
+            # down to its reserve, stay out of planning; the plan author always
+            # takes part, and nobody is left out alone.
             abilities = self._abilities(db, room_id)
             author = self.team(db, room_id)["plan_author"]
-            chosen = [provider for provider in providers if provider == author or roles.can(abilities, provider, roles.COORDINATION)]
+            low = self._reserved(db, room_id)
+            chosen = [provider for provider in providers if provider == author
+                      or roles.can(abilities, provider, roles.COORDINATION) and provider not in low]
             return chosen or list(providers)
         # A later explicit invitation expands this run's coordination scope;
         # historical invitations do not silently wake the old roster again.
@@ -2693,7 +2696,10 @@ class TeamStore:
                 self_check = not choices and task["owner"] in members and objective is not None
                 if self_check:
                     choices = [task["owner"]]
-                for provider in self._fair_order(db, room_id, choices):
+                order = self._fair_order(db, room_id, choices)
+                # An account down to its reserve waits out a busy reviewer instead of taking the review.
+                spared = [provider for provider in order if provider not in self._reserved(db, room_id)]
+                for provider in spared or order:
                     db.execute("UPDATE shared_tasks SET review_kind=? WHERE room_id=? AND run_id=? AND id=?",
                                ("self_check" if self_check else "independent_review", room_id, team["current_run_id"], task["id"]))
                     task = self.task(db, room_id, task["id"])
