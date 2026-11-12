@@ -1101,4 +1101,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "有伙伴的角色设置无效，请在它的模型按钮里重新选择角色。": "A partner's role setting is invalid. Choose its role again from its model button.",
   "有伙伴的工作量设置无效，请在它的模型按钮里重新选择。": "A partner's workload setting is invalid. Choose it again from its model button.",
   "这次的成果还没提交到主分支": "This task's results are not committed to the main branch yet",
+  "无已跟踪改动待提交，另有 {p0} 个新文件还没纳入 Git": "No tracked changes to commit; {p0} new {p0:file is|files are} not in Git yet",
 });

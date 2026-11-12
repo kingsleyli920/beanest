@@ -10981,10 +10981,12 @@ test('results written into the project but not committed are not called merged',
   data.delivery_summary.remote = { state: 'unknown', reason: 'github_remote_unavailable', checked_at: null };
   data.delivery_summary.state = 'pending'; data.delivery_summary.reason = 'published_work_not_on_mainline';
   data.delivery_summary.published = { state: 'pending', reason: 'published_work_not_on_mainline', files: { total: 6, matched: 0, missing: 6, different: 0 } };
+  data.delivery_summary.workspace = { state: 'confirmed', reason: null, checks: [{ state: 'confirmed', reason: null, workspace_id: 'project', tracked: 0, untracked: 6 }], tracked: 0, untracked: 6 };
   const saved = withNaturalContinuation(completedSuggestionFixture()); saved.room.work_mode = 'build';
   const ui = await browser({ rooms: [saved.room], saved, codeStatusSupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true,
     route(request) { if (request.path.includes('/code-status')) return data; } });
   assert.equal(ui.get('code-status-summary').textContent, '这次的成果还没提交到主分支');
+  assert.match(ui.get('code-delivery-workspace').textContent, /另有 6 个新文件还没纳入 Git/);
   assert.equal(ui.get('code-merge-panel').hidden, false, 'the request to commit and merge stays offered');
 });
 
