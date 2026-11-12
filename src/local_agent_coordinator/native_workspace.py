@@ -366,7 +366,7 @@ def prepare_retained_workspace(destination, canonical_export, canonical_manifest
                 raw = content.encode("utf-8")
             except UnicodeError as error:
                 raise NativeWorkspaceError("invalid_native_retained_files") from error
-            if (len(raw) > 1024 * 1024 or len(raw) != item["bytes"]
+            if (len(raw) > MAX_FILE_BYTES or len(raw) != item["bytes"]
                     or hashlib.sha256(raw).hexdigest() != item["sha256"]
                     or any(ord(char) < 32 and char not in "\r\n\t" for char in content)):
                 raise NativeWorkspaceError("invalid_native_retained_files")
