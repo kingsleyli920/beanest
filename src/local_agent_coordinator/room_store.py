@@ -4158,7 +4158,7 @@ class RoomStore:
             return
         keys = ("permission", "tool_calls", "tool_results", "side_effects_possible", "cleanup_confirmed", "exit_code", "duration_seconds")
         safe = {key: observation.get(key) for key in keys}
-        if observation.get("agent") in {"kimi", "claude"} and "failure_diagnostic" in observation:
+        if observation.get("agent") in {"kimi", "claude", "dsh"} and "failure_diagnostic" in observation:
             from .kimi_acp import safe_failure_diagnostic
             diagnostic = safe_failure_diagnostic(observation["failure_diagnostic"])
             if diagnostic is not None:

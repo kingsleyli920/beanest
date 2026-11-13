@@ -672,7 +672,8 @@ def safe_failure_diagnostic(value):
     result = {}
     if value.get("phase") in {"handshake", "session", "configuration", "prompt", "compaction"}:
         result["phase"] = value["phase"]
-    if value.get("reason") in {"provider_error", "provider_auth_error", "provider_context_limit", "provider_quota_exhausted"}:
+    if value.get("reason") in {"provider_error", "provider_auth_error", "provider_context_limit", "provider_quota_exhausted",
+                               "provider_rate_limited"}:
         result["reason"] = value["reason"]
     if value.get("rpc_method") in {"initialize", "authenticate", "session/new", "session/resume", "session/load",
                                    "session/set_model", "session/set_config_option", "session/set_mode", "session/prompt", "session/close"}:

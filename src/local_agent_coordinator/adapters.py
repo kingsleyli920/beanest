@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 import contextvars
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
@@ -28,6 +29,8 @@ MAX_OUTPUT = 32 * 1024 * 1024
 MAX_TEXT = 4 * 1024 * 1024
 CODEX_APP = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CLAUDE_SYSTEM_PATHS = (Path('/opt/homebrew/bin/claude'), Path('/usr/local/bin/claude'))
+# DeepSeek Harness installs from npm; the global prefixes Homebrew's and the system Node use.
+DSH_SYSTEM_PATHS = (Path('/opt/homebrew/bin/dsh'), Path('/usr/local/bin/dsh'))
 CLAUDE_SUBSCRIPTIONS = ('pro', 'max', 'ultra', 'team', 'enterprise')
 CODE_MODE_DISABLED_NOTICE = (
     'Code Mode is unavailable because code-mode host is disabled. '
@@ -76,7 +79,8 @@ def _find_cli(command: str, fallbacks: tuple[Path, ...]) -> str | None:
 def _install_locations(agent):
     return {'codex': (Path.home() / '.local/bin/codex', CODEX_APP),
             'claude': (Path.home() / '.local/bin/claude', *CLAUDE_SYSTEM_PATHS),
-            'kimi': (Path.home() / '.kimi-code/bin/kimi',)}[agent]
+            'kimi': (Path.home() / '.kimi-code/bin/kimi',),
+            'dsh': (*DSH_SYSTEM_PATHS, Path.home() / '.npm-global/bin/dsh')}[agent]
 
 
 def cli_installations(agent) -> list[str]:
@@ -98,7 +102,7 @@ def cli_installations(agent) -> list[str]:
 # inference, so a quota read never describes a different CLI from the one
 # that runs. A stale copy earlier on PATH (an old nvm global, a second
 # Homebrew install) is skipped and reported instead of silently used.
-_SELECTIONS = {agent: {'path': None, 'skipped': [], 'checked': False} for agent in ('codex', 'claude', 'kimi')}
+_SELECTIONS = {agent: {'path': None, 'skipped': [], 'checked': False} for agent in ('codex', 'claude', 'kimi', 'dsh')}
 _SELECTION_LOCKS = weakref.WeakKeyDictionary()
 
 
@@ -123,6 +127,10 @@ def find_kimi() -> str:
     return _selected_cli('kimi', 'Kimi Code CLI is unavailable')
 
 
+def find_dsh() -> str:
+    return _selected_cli('dsh', 'DeepSeek Harness is unavailable')
+
+
 def cli_selection(agent) -> dict:
     """The last verified choice and why other installations were skipped."""
     selection = _SELECTIONS[agent]
@@ -134,11 +142,12 @@ async def _probe_installation(agent, path, cwd, timeout):
     """Return (authentication or None, skip reason or None) for one installation."""
     command = {'codex': [path, 'login', 'status'],
                'claude': [path, '--safe-mode', '--restricted', 'auth', 'status', '--json'],
-               'kimi': [path, '--version']}[agent]
+               'kimi': [path, '--version'], 'dsh': [path, '--version']}[agent]
     lines, code = await _run(command, '', cwd, timeout, include_stderr=True)
     text = b'\n'.join(lines)[:65536].decode('utf-8', errors='replace')
-    if agent == 'kimi':
-        # Kimi login is one shared managed configuration; a copy only has to run.
+    if agent in ('kimi', 'dsh'):
+        # Kimi login is one shared managed configuration and dsh has no login
+        # (each partner brings its own key); a copy only has to run.
         usable = code == 0 and re.search(r'[0-9]+\.[0-9]+', text) is not None
         return ({'available': True} if usable else None), (None if usable else 'cli_unusable')
     authentication = _authentication(agent, code, text)
@@ -214,17 +223,40 @@ _NETWORK_ENVIRONMENT = frozenset({
 # A partner profile may own a Beanest-created CLI home instead of the shared
 # local login. Only that explicit binding selects a home: the user's own shell
 # CLAUDE_CONFIG_DIR/CODEX_HOME/KIMI_CODE_HOME are still stripped below.
-ACCOUNT_HOME_VARIABLES = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'kimi': 'KIMI_CODE_HOME'}
-_DEFAULT_HOME_NAMES = {'claude': '.claude', 'codex': '.codex', 'kimi': '.kimi-code'}
+ACCOUNT_HOME_VARIABLES = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'kimi': 'KIMI_CODE_HOME',
+                          'dsh': 'DSH_HOME'}
+_DEFAULT_HOME_NAMES = {'claude': '.claude', 'codex': '.codex', 'kimi': '.kimi-code', 'dsh': '.dsh'}
 _ACCOUNT_HOME = contextvars.ContextVar('beanest_account_home', default=None)
+_API_ENDPOINT = contextvars.ContextVar('beanest_api_endpoint', default=None)
+
+
+@dataclass(frozen=True)
+class ApiEndpoint:
+    """Where an API model partner's key lives and which models it prices.
+
+    Holds a reference to the key, never the key: the value is read only when
+    a child is about to start, and only that child's environment receives it.
+    """
+    host: str
+    key: tuple  # sorted (name, value) pairs of the key reference
+    default_model: str
+    models: tuple = ()
+
+    def key_reference(self) -> dict:
+        return dict(self.key)
+
+
+class ApiKeyUnavailable(RuntimeError):
+    """The referenced key could not be read; carries no path and no value."""
 
 
 @contextmanager
-def account_home(agent, home):
+def account_home(agent, home, endpoint: ApiEndpoint | None = None):
     """Bind one profile's CLI home for every child started in this context.
 
     ``None`` keeps the local login. Tasks created inside inherit the binding,
-    so a whole invocation, check or cleanup sees one consistent home.
+    so a whole invocation, check or cleanup sees one consistent home. An API
+    model partner always brings its own home together with its key reference.
     """
     if home is None:
         value = None
@@ -232,11 +264,59 @@ def account_home(agent, home):
         if agent not in ACCOUNT_HOME_VARIABLES or not Path(home).is_absolute():
             raise ValueError('account home must be an absolute path for a supported CLI')
         value = (agent, str(Path(home)))
+    if endpoint is not None and (not isinstance(endpoint, ApiEndpoint) or endpoint.host != agent or value is None):
+        raise ValueError('an API endpoint needs its own home on its host tool')
     token = _ACCOUNT_HOME.set(value)
+    endpoint_token = _API_ENDPOINT.set(endpoint)
     try:
         yield
     finally:
+        _API_ENDPOINT.reset(endpoint_token)
         _ACCOUNT_HOME.reset(token)
+
+
+def bound_api_endpoint(agent) -> ApiEndpoint | None:
+    endpoint = _API_ENDPOINT.get()
+    return endpoint if endpoint is not None and endpoint.host == agent else None
+
+
+def api_key_environment(agent) -> dict[str, str]:
+    """The one variable that carries the bound partner's key; {} when none is bound.
+
+    Reads the key now. Raises ApiKeyUnavailable without saying why in detail.
+    """
+    endpoint = bound_api_endpoint(agent)
+    if endpoint is None:
+        return {}
+    from .api_models import ApiModelError, HOSTS, read_key
+    try:
+        key = read_key(endpoint.key_reference())
+    except ApiModelError:
+        raise ApiKeyUnavailable('api_key_unavailable') from None
+    return {HOSTS[endpoint.host]['key_variable']: key}
+
+
+REDACTED = '[REDACTED]'
+
+
+def scrub_secret(value, secret):
+    """Drop a key from anything a tool returned before it is parsed, stored or shown.
+
+    A model with shell tools can print its own environment; whatever it
+    prints must not carry the key into receipts, events or the room. Works on
+    text, bytes and nested JSON values.
+    """
+    if not secret:
+        return value
+    if isinstance(value, str):
+        return value.replace(secret, REDACTED)
+    if isinstance(value, bytes):
+        return value.replace(secret.encode('utf-8'), REDACTED.encode())
+    if isinstance(value, list):
+        return [scrub_secret(item, secret) for item in value]
+    if isinstance(value, dict):
+        return {scrub_secret(key, secret): scrub_secret(item, secret) for key, item in value.items()}
+    return value
 
 
 def bound_account_home(agent) -> Path | None:
@@ -1320,6 +1400,14 @@ async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = No
         # Legacy text rooms retain their existing tools-disabled contract.
         # Native project rooms invoke the native transport directly instead.
         if result['native_execution']['tool_calls']:
+            result['events'] = [*result.get('events', []), {'type': 'tool_observed'}]
+        return result
+    if agent == 'dsh':
+        from .dsh_acp import invoke_native as invoke_dsh
+        # A reply-only call runs in dsh's own read-only mode.
+        result = await invoke_dsh(prompt, cwd, session_id, timeout, permission='plan',
+                                  response_schema=response_schema, runtime_settings=runtime_settings)
+        if result.get('native_execution', {}).get('tool_calls'):
             result['events'] = [*result.get('events', []), {'type': 'tool_observed'}]
         return result
     if agent not in ('codex', 'claude'):

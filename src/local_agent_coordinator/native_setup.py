@@ -28,6 +28,8 @@ class NativeAdapter:
     login_arguments: tuple[str, ...]
     login_hosts: frozenset[str] = frozenset()
     login_supported: bool = True
+    # Billed per call to the user's own API key; it joins only as an API model partner.
+    pay_per_use: bool = False
 
     def resolve(self):
         return getattr(adapters, "find_" + self.id)()
@@ -41,6 +43,9 @@ NATIVE_ADAPTERS = (
                   "https://chatgpt.com/codex/install.sh", "/bin/sh", ("login",), frozenset({"auth.openai.com"})),
     NativeAdapter("kimi", "Kimi Code", "moonshot", "https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html",
                   "https://code.kimi.com/kimi-code/install.sh", "/bin/bash", ("login",)),
+    # Installed from npm (@deepseek-ai/dsh); there is no official install script to run.
+    NativeAdapter("dsh", "DeepSeek Harness", "deepseek", "https://github.com/deepseek-ai/deepseek-harness",
+                  "", "", (), login_supported=False, pay_per_use=True),
 )
 INSTALL_SECONDS = 600
 _DOWNLOAD_FAILED = 90
@@ -214,7 +219,7 @@ class NativeInstall(NativeLogin):
 
     def start(self, adapter):
         descriptor = native_adapter(adapter)
-        if descriptor is None:
+        if descriptor is None or not descriptor.install_script:
             raise ValueError("native_install_unsupported")
         task = self.tasks.get(adapter)
         if task is not None and not task.done():

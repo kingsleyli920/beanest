@@ -32,7 +32,7 @@ from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
 from .team_store import _COMMAND_FIELDS, _paths as _task_paths
-from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, reply_call_died
+from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, prompt_never_sent, reply_call_died
 from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission, model_choice
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
                            TASK_HANDOFF_INSTRUCTION, _BLOCK_PROTOCOL, _DIRECTED_CONTEXT_INSTRUCTION, _direct_updates, _excerpt,
@@ -52,7 +52,9 @@ _FAILURES = {"deadline_exceeded", "process_or_output_failure", "cli_nonzero_exit
 _FAILURES.update(NATIVE_RECOVERY_ERRORS)
 _FAILURES.update({"native_auth_unconfirmed", "native_provider_error", "native_turn_unconfirmed",
                   "native_turn_incomplete", "native_tool_unpaired", "native_permission_required",
-                  "empty_response", "invalid_response_json", "output_limit", NATIVE_PREFLIGHT_FAILED})
+                  "empty_response", "invalid_response_json", "output_limit", NATIVE_PREFLIGHT_FAILED,
+                  # A pay-per-use partner's key was refused, or its provider kept rate limiting after its own retries.
+                  "api_key_rejected", "provider_rate_limited"})
 
 
 PROGRESS_POLL_SECONDS = 15
@@ -60,6 +62,17 @@ PROGRESS_POLL_SECONDS = 15
 # this many times, after this pause.
 _PREFLIGHT_RETRIES = 1
 _PREFLIGHT_RETRY_DELAY_SECONDS = 2
+# A provider still rate limiting after the tool's own retries gets one more
+# try after this pause; then its task goes to the other partners.
+_RATE_LIMIT_RETRY_DELAY_SECONDS = 30
+
+
+def rate_limited_cleanly(result):
+    """The provider refused for rate before any tool ran: the call changed nothing and can be made again."""
+    observation = result.get("native_execution") if isinstance(result, dict) else None
+    return (isinstance(observation, dict) and result.get("failure_code") == "provider_rate_limited"
+            and result.get("cleanup_confirmed") is True and observation.get("cleanup_confirmed") is True
+            and observation.get("tool_calls") == 0 and observation.get("side_effects_possible") is False)
 
 
 def _visible(text: str) -> str:
@@ -759,7 +772,7 @@ class RoomService(RoomPromptMixin):
                 **settings, "members": {identifier: choice for identifier, choice in settings["members"].items()
                                         if identifier in eligible_members}}
             validate_choices(choices, {identifier: self.registry.get(identifier) for identifier in members},
-                             self._runtime_catalogs)
+                             self._member_catalogs(members))
             return settings
         except RuntimeSettingsError as error:
             raise RoomError(error.code) from None
@@ -792,9 +805,28 @@ class RoomService(RoomPromptMixin):
             partners[spec["id"]] = {"state": "not_checked" if supported else "unavailable",
                 "supported": supported, "models": [], "checked_at": None,
                 "reason": None if supported else "runtime_settings_unsupported",
-                **(self._runtime_catalogs.get(scopes.get(spec["id"], spec["adapter"]), {}) if supported else {})}
+                **(self._runtime_catalogs.get(scopes.get(spec["id"], spec["adapter"]), {}) if supported else {}),
+                **(self._api_catalog(spec["id"]) or {})}
         return {"permissions": [dict(item) for item in PERMISSIONS], "partners": partners,
                 "scope": "coordinator_owned_only"}
+
+    def _api_catalog(self, partner_id):
+        """An API model partner's saved model list; its endpoint is never asked."""
+        if self.partner_manager is None:
+            return None
+        try:
+            return self.partner_manager.api_runtime_options(partner_id)
+        except PartnerError:
+            return None
+
+    def _member_catalogs(self, members):
+        """Catalogs to check model choices against: a partner's own list first, then its tool's."""
+        catalogs = dict(self._runtime_catalogs)
+        for identifier in members:
+            catalog = self._api_catalog(identifier)
+            if catalog is not None:
+                catalogs[identifier] = catalog
+        return catalogs
 
     async def refresh_runtime_options(self, partner_id):
         self._available()
@@ -803,6 +835,8 @@ class RoomService(RoomPromptMixin):
             raise RoomError("unknown_partner")
         if not spec.supports_runtime_settings or spec.adapter not in NATIVE_IDS:
             raise RoomError("runtime_settings_unsupported")
+        if self._api_catalog(partner_id) is not None:
+            return await self.runtime_options()
         scope = self.partner_manager.account_scope(partner_id) if self.partner_manager is not None else spec.adapter
         async with self._runtime_catalog_locks.setdefault(scope, asyncio.Lock()):
             cached = self._runtime_catalogs.get(scope)
@@ -886,7 +920,9 @@ class RoomService(RoomPromptMixin):
                         "cli_available": None, "auth": {"method": None, "subscription_confirmed": None}}}
             for spec in self.registry.describe()]
         from .partner_manager import connection_templates, connection_protocol
+        from .api_models import presets as api_model_presets
         return {"partners": [{**item, "monitor": self.store.monitor(item["id"])} for item in profiles],
+                "api_model_presets": api_model_presets() if self.partner_manager is not None else [],
                 "partner_lifecycle_operations": [self._public_partner_operation(operation) for operation in self.store.partner_operations()],
                 "connection_templates": connection_templates() if self.partner_manager is not None else [],
                 "connection_protocol": connection_protocol() if self.partner_manager is not None else None,
@@ -1254,11 +1290,52 @@ class RoomService(RoomPromptMixin):
         return {"home": home} if home is not None else {}
 
     @staticmethod
-    async def _with_account_home(adapter, home, operation):
+    async def _with_account_home(adapter, home, operation, endpoint=None):
         # Every child of this call, including auth checks and resumed sessions,
         # inherits the profile's home; nothing else changes the environment.
-        with adapters.account_home(adapter, home):
+        # An API model partner also binds its key reference, so only its own
+        # tool's child receives the key.
+        with adapters.account_home(adapter, home, endpoint):
             return await operation
+
+    def _partner_endpoint(self, provider):
+        """The endpoint an API model partner's calls bind; None for everyone else."""
+        if self.partner_manager is None:
+            return None
+        try:
+            return self.partner_manager.api_endpoint(provider)
+        except PartnerError:
+            return None
+
+    # What a pay-per-use partner's call proved about its key or balance.
+    _API_FAULTS = {"api_key_rejected": "api_key_rejected", "subscription_limit_reached": "api_balance_exhausted"}
+
+    def _record_api_call(self, provider, outcome, runtime_kwargs):
+        """Price a finished or cancelled call of an API model partner and keep what it proved.
+
+        Recorded as soon as the call returns, whatever the room then makes of
+        the reply: the provider charged for it either way. A call whose prompt
+        never left is not a call. A refused key or an empty balance holds the
+        partner until its check passes again. Never stops the job.
+        """
+        if self.partner_manager is None:
+            return
+        try:
+            if isinstance(outcome, adapters.ApiKeyUnavailable):
+                self.partner_manager.record_api_fault(provider, "api_key_unavailable")
+                return
+            observation = (outcome.get("native_execution") if isinstance(outcome, dict)
+                           else getattr(outcome, "native_execution", None))
+            if prompt_never_sent(observation):
+                return
+            api_usage = outcome.get("api_usage") if isinstance(outcome, dict) else getattr(outcome, "api_usage", None)
+            model = (runtime_kwargs.get("runtime_settings") or {}).get("model")
+            self.partner_manager.record_api_spend(provider, (api_usage or {}).get("by_model"), model)
+            fault = self._API_FAULTS.get(outcome.get("failure_code")) if isinstance(outcome, dict) else None
+            if fault is not None:
+                self.partner_manager.record_api_fault(provider, fault)
+        except (PartnerError, OSError, ValueError, TypeError, KeyError, AttributeError):
+            pass
 
     async def set_partner_account_source(self, partner_id, source):
         """Switch a profile between the local login and its own CLI home.
@@ -1287,6 +1364,15 @@ class RoomService(RoomPromptMixin):
             return self.partner_manager.workload_profiles()
         except PartnerError:
             return {}
+
+    async def set_partner_api_model(self, partner_id, api_model):
+        """Edit an API model partner's prices, caps, models or key location."""
+        self._available()
+        if self.partner_manager is None:
+            raise RoomError("partner_management_unavailable")
+        self.partner_manager.set_api_model(partner_id, api_model)
+        self._sync_partners()
+        return await self.list_partners()
 
     async def set_partner_workload(self, partner_id, level):
         self._available()
@@ -4037,7 +4123,7 @@ class RoomService(RoomPromptMixin):
         # homes for the shared local login (the sanitized child environment
         # never inherits the user's own overrides), or the profile's own home.
         result = {"provider_managed_deleted": [], "already_missing": [], "pending": []}
-        native = [target for target in targets if target["adapter"] != "kimi"]
+        native = [target for target in targets if target["adapter"] not in {"kimi", "dsh"}]
         for home in dict.fromkeys(target.get("account_home") for target in native):
             group = [target for target in native if target.get("account_home") == home]
             if home is not None and (not isinstance(home, str) or not Path(home).is_absolute()):
@@ -4055,6 +4141,11 @@ class RoomService(RoomPromptMixin):
             if target["adapter"] == "kimi":
                 outcome = await delete_owned_session(target)
                 result[outcome].append({"adapter": "kimi", "session_id": target["session_id"],
+                                        **({"reason": "native_session_cleanup_unconfirmed"} if outcome == "pending" else {})})
+            elif target["adapter"] == "dsh":
+                from .dsh_acp import delete_owned_session as delete_dsh_session
+                outcome = await self._lifecycle_thread(delete_dsh_session, target)
+                result[outcome].append({"adapter": "dsh", "session_id": target["session_id"],
                                         **({"reason": "native_session_cleanup_unconfirmed"} if outcome == "pending" else {})})
         result["cleanup_confirmed"] = not result["pending"]
         confirmed = self.store.record_lifecycle_session_cleanup(identifier, result)
@@ -5907,6 +5998,7 @@ class RoomService(RoomPromptMixin):
                 return
             bound_identity = self.partner_manager.account_identity(provider) if self.partner_manager is not None else None
             home = self._partner_home(provider)
+            endpoint = self._partner_endpoint(provider)
             job = self.store.claim(room_id, provider)
             if job is None:
                 self._maybe_execute(room_id)
@@ -5994,7 +6086,7 @@ class RoomService(RoomPromptMixin):
                                                            timeout=timeout, response_schema=schema, **runtime_kwargs)
                     else:
                         operation = spec.invoke(prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
-                    return self._with_account_home(spec.adapter, home, operation)
+                    return self._with_account_home(spec.adapter, home, operation, endpoint)
                 attempts = 0
                 while True:
                     operation = begin_call()
@@ -6004,19 +6096,33 @@ class RoomService(RoomPromptMixin):
                     cleanup_confirmed = False
                     try:
                         result = await operation if native else await asyncio.wait_for(operation, timeout=timeout)
+                    except asyncio.CancelledError as error:
+                        if endpoint is not None:
+                            self._record_api_call(provider, error, runtime_kwargs)
+                        raise
                     except Exception as error:
-                        if attempts >= _PREFLIGHT_RETRIES or not preflight_failed(job["session_id"], error=error):
+                        if endpoint is not None:
+                            self._record_api_call(provider, error, runtime_kwargs)
+                        # An unreadable key stays unreadable a moment later.
+                        if (attempts >= _PREFLIGHT_RETRIES or isinstance(error, adapters.ApiKeyUnavailable)
+                                or not preflight_failed(job["session_id"], error=error)):
                             raise
                         evidence = error.native_execution
                     else:
+                        if endpoint is not None:
+                            self._record_api_call(provider, result, runtime_kwargs)
                         died = reply_call_died(job, result)
-                        if attempts >= _PREFLIGHT_RETRIES or not (died or preflight_failed(job["session_id"], result=result)):
+                        limited = rate_limited_cleanly(result)
+                        if attempts >= _PREFLIGHT_RETRIES or not (died or limited or preflight_failed(job["session_id"], result=result)):
                             break
-                        if died:
+                        if died or limited:
                             attempts += 1
                             invoked, cleanup_confirmed = False, True
+                            if native and limited:
+                                # Only so a room purge can find the session the refused call opened.
+                                self._retain_native_session_identity(job, result["native_execution"], result.get("session_id"))
                             self.store.record_call_retry(job["id"], attempts, result["failure_code"])
-                            await asyncio.sleep(_PREFLIGHT_RETRY_DELAY_SECONDS)
+                            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY_SECONDS if limited else _PREFLIGHT_RETRY_DELAY_SECONDS)
                             continue
                         evidence = result["native_execution"]
                         if native:
@@ -6062,6 +6168,19 @@ class RoomService(RoomPromptMixin):
                              or self._quota_left_tree_unchanged(job))
                         and self.store.finish_quota_job(job["id"])):
                     retire_reason = "subscription_limit_reached"
+                elif (result.get("failure_code") == "api_key_rejected" and endpoint is not None and cleanup_confirmed
+                        and not observation.get("side_effects_possible")
+                        and self.store.finish_quota_job(job["id"], "agent_quota_exhausted")):
+                    # The provider refused the key: the partner cannot work until
+                    # the user fixes it, so its task goes to the others, the way
+                    # a reached spending cap hands it over.
+                    retire_reason = "agent_quota_exhausted"
+                elif (rate_limited_cleanly(result)
+                        and self.store.finish_quota_job(job["id"], NATIVE_PREFLIGHT_FAILED, peer_required=True)):
+                    # Still rate limited after a pause, and the refused prompt never
+                    # reached a model: like a call that failed before its prompt was
+                    # sent, the partner leaves this objective and the others carry on.
+                    retire_reason = NATIVE_PREFLIGHT_FAILED
                 elif preflight and self.store.finish_quota_job(job["id"], NATIVE_PREFLIGHT_FAILED, peer_required=True):
                     retire_reason = NATIVE_PREFLIGHT_FAILED
                 else:
