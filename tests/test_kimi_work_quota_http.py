@@ -43,6 +43,8 @@ class WorkQuotaFixture(OutcomeFixture):
         self.legacy, self.quota, self.fault = legacy, quota, fault
         self.kimi_model = 'kimi-code/fictional-0'
         self.t2_paths = ['second.md']
+        self.coordination_block = False
+        self.block_cause = 'coordination_required'
         self.failed_work = None
         self.release_inspection = threading.Event()
         if not hold_inspection:
@@ -129,6 +131,9 @@ class WorkQuotaFixture(OutcomeFixture):
         if selected:
             while not any(t['id'] == 'T1' and t['status'] == 'accepted' for t in self.service.store.snapshot(self.room_id)['team']['tasks']):
                 await asyncio.sleep(.005)
+            while self.coordination_block and not any(t['id'] == 'T4' and t['status'] == 'blocked'
+                                                      for t in self.service.store.snapshot(self.room_id)['team']['tasks']):
+                await asyncio.sleep(.005)
             self.failed_work = {'job_id': context['job']['id'], 'cwd': str(cwd), 'context': context}
             self.native_case = 'work_quota' if self.quota else 'work_rate'
         try:
@@ -195,15 +200,30 @@ class WorkQuotaFixture(OutcomeFixture):
             if agent == 'kimi' and not context['team']['tasks']:
                 commands = [proposal('T1', paths=['first.md']), proposal('T2', paths=self.t2_paths, dependencies=['T1']),
                             proposal('T3', paths=['final.md'], dependencies=['T1', 'T2']), {'type': 'claim', 'task_id': 'T2'}]
+                if self.coordination_block:
+                    commands.insert(3, proposal('T4', paths=['side.md']))
             else:
-                target = {'claude': 'T1', 'codex': 'T3'}.get(agent)
-                if any(t['id'] == target and t['owner'] is None for t in context['team']['tasks']):
-                    commands = [{'type': 'claim', 'task_id': target}]
+                if (self.coordination_block and agent == context['team']['plan_author']
+                        and any(t['id'] == 'T4' and t['status'] == 'blocked' for t in context['team']['tasks'])
+                        and not any(t['id'] == 'T4F' for t in context['team']['tasks'])):
+                    # The current plan author answers the re-split request as a real planner would.
+                    return native_reply(context, [proposal('T4F', paths=['side-owner.md']), {'type': 'claim', 'task_id': 'T4F'},
+                                                  {'type': 'plan_ready'}])
+                targets = {'claude': ['T1'], 'codex': ['T3', 'T4']}.get(agent, [])
+                commands = [{'type': 'claim', 'task_id': target} for target in targets
+                            if any(t['id'] == target and t['owner'] is None for t in context['team']['tasks'])]
             return native_reply(context, commands + [{'type': 'plan_ready'}])
         if context.get('native_partial_inspection'):
             second = Path(cwd) / 'second.md'
             self.inspections.append({'agent': agent, 'bytes': second.read_bytes() if second.exists() else None, 'context': context})
             return native_reply(context, [{'type': 'complete', 'task_id': task['id'], 'result': 'Read retained bytes without editing or replay.'}])
+        if phase == 'work' and task['id'] == 'T4' and not any(t['id'] == 'T4' and t['status'] == 'blocked' for t in context['team']['tasks']) \
+                and not getattr(self, 't4_blocked', False):
+            # A partner asks the team to re-split file ownership; the room replans by itself.
+            self.t4_blocked = True
+            return native_reply(context, [{'type': 'block', 'task_id': 'T4', 'cause': self.block_cause,
+                                           'reason': 'Needs ownership of a file no task holds.' if self.block_cause == 'coordination_required'
+                                           else 'Which of two fictional layouts should the side page use?'}])
         if phase == 'work':
             self.work_tasks.append((agent, task['id']))
             for path in task['write_paths']:
@@ -313,6 +333,41 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         second = next(task for task in final['team']['tasks'] if task['id'] == 'T2')
         self.assertNotEqual(second['owner'], 'kimi')
         self.assertIn(second['status'], {'accepted', 'self_checked'})
+
+    def test_a_coordination_block_elsewhere_does_not_stop_the_quota_handoff(self):
+        # Catches the real 九烛 stop: Kimi ran out of quota while Codex's R4 waited for the room to re-split
+        # files; the handoff refused because some other task was blocked, and the objective stayed stopped.
+        fixture = self.fixture(legacy=False)
+        fixture.coordination_block = True
+        fixture.create()
+        final = fixture.wait(lambda value: fixture.failed_work and any(
+            event['kind'] == 'native_recovery_started' for event in value['events'])
+            or fixture.failed_work and fixture.service._quota_handoffs.get(fixture.room_id, {}).get('state') not in {None, 'pending', 'in_progress'})
+        self.assertEqual(fixture.failed_work['result']['failure_code'], 'subscription_limit_reached')
+        self.assertTrue(any(event['kind'] == 'native_recovery_started' and event['sender'] == 'system' for event in final['events']),
+                        (fixture.service._quota_handoffs.get(fixture.room_id), final['team']['stop_reason']))
+        failed_id = fixture.failed_work['job_id']
+        # The room then carries on by itself: the retained task, the re-split and the rest all finish.
+        final = fixture.wait(lambda value: value['objective']['status'] in {'complete', 'needs_user', 'stopped'}
+                             and not any(job['status'] in {'queued', 'working'} for job in value['jobs']))
+        self.assertEqual(final['objective']['status'], 'complete', (final['objective']['stop_reason'], final['team']['tasks']))
+        failure_index = next(i for i, call in enumerate(fixture.calls) if call['job_id'] == failed_id)
+        self.assertFalse(any(call['agent'] == 'kimi' for call in fixture.calls[failure_index + 1:]))
+
+    def test_a_task_waiting_for_the_user_queues_while_the_quota_work_is_handed_over(self):
+        # Catches a block that waits for the user holding everything: the exhausted partner's work must still
+        # move on, the other tasks finish, and only then does the room ask about the blocked task.
+        fixture = self.fixture(legacy=False)
+        fixture.coordination_block, fixture.block_cause = True, 'user_decision'
+        fixture.create()
+        final = fixture.wait(lambda value: fixture.failed_work and value['objective']['status'] in {'complete', 'needs_user', 'stopped'}
+                             and any(event['kind'] == 'native_recovery_started' for event in value['events'])
+                             and not any(job['status'] in {'queued', 'working'} for job in value['jobs']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual({key: tasks[key]['status'] for key in ('T1', 'T2', 'T3', 'T4')},
+                         {'T1': 'accepted', 'T2': 'accepted', 'T3': 'accepted', 'T4': 'blocked'})
+        self.assertNotEqual(tasks['T2']['owner'], 'kimi')
+        self.assertEqual(final['objective']['status'], 'needs_user', final['objective'])
 
     def test_account_query_unavailable_but_selectable_receivers_automatically_take_retained_work(self):
         self.assert_automatic_recovery(legacy=True, receiver_account_failure=True)
