@@ -217,6 +217,31 @@ class ReceiptCompatibility(unittest.TestCase):
                 self.assertIs(self.matches(legacy, phase), True)
                 self.assertIs(self.matches(json.loads(claude_bytes(phase, False)), phase), True)
 
+    def test_a_receipt_from_before_a_new_command_kind_still_proves_itself(self):
+        # Catches the real 九烛 stop after an upgrade: Kimi's quota failure was made by the release before
+        # extend existed, its work schema lacked extend and write_paths, and the handoff refused the proof.
+        import copy
+        current = response_schema(project=True, native=True, collaboration=True, member_ids=MEMBERS, provider="claude",
+                                  team_phase="work", can_propose=False)
+        older = copy.deepcopy(current)
+        items = older["properties"]["commands"]["items"]
+        items["properties"]["type"]["enum"] = ["complete", "block", "request_help"]
+        del items["properties"]["write_paths"]
+        items["required"] = [field for field in items["required"] if field != "write_paths"]
+        self.assertIs(self.matches(older), True)
+        # Dropping a kind that has always existed is still a different schema.
+        items["properties"]["type"]["enum"] = ["complete", "block"]
+        self.assertIs(self.matches(older), False)
+
+    def test_every_command_kind_added_since_the_baseline_is_listed_for_old_receipts(self):
+        # Catches a new command kind shipped without ADDED_COMMAND_KINDS, which would make every call
+        # in flight during that upgrade unprovable, and its room stop.
+        from local_agent_coordinator.room_contract import COMMAND_FIELDS
+        from local_agent_coordinator.room_response_schema import ADDED_COMMAND_KINDS
+        baseline = {"propose", "claim", "plan_ready", "complete", "block", "request_help", "review", "checkpoint",
+                    "checkpoint_review"}
+        self.assertEqual(set(COMMAND_FIELDS) - baseline, set(ADDED_COMMAND_KINDS))
+
     def test_a_receipt_from_another_phase_or_roster_is_refused(self):
         # Catches the two-schema allowance turning into accept-anything.
         other_phase = response_schema(project=True, native=True, collaboration=True, member_ids=MEMBERS, provider="claude",

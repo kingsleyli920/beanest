@@ -26,6 +26,9 @@ _PHASE_COMMANDS = {
     "checkpoint_review": {"checkpoint_review"},
 }
 PLAN_AUTHOR_COMMANDS = frozenset({"propose", "adjust"})
+# Command kinds added after release; a call made by an older release sent a
+# schema without them, and its receipt must still prove itself after upgrade.
+ADDED_COMMAND_KINDS = ("adjust", "extend")
 # Per-phase schemas require these as non-empty strings. A stable schema leaves
 # them nullable, so the service enforces the same rule from the job's phase.
 PHASE_NONEMPTY_TEXT = {
@@ -91,7 +94,7 @@ def _object(properties: dict) -> dict:
 def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str,
                     collaboration: bool = False, team_phase: str | None = None,
                     can_propose: bool = True, folder: bool = False, native: bool = False,
-                    stable: bool = False) -> dict:
+                    stable: bool = False, omit_kinds: frozenset = frozenset()) -> dict:
     """Return an independent schema for one room member's JSON response.
 
     The bounded roster must include the responding member. A single-member
@@ -132,6 +135,10 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
     if collaboration:
         kinds, fields = (stable_command_shape(has_peers=bool(peers)) if stable else
                          command_shape(team_phase=team_phase, can_propose=can_propose, has_peers=bool(peers), native=native))
+        if omit_kinds and native:
+            # The schema an older release sent, before these command kinds existed.
+            kinds = [kind for kind in kinds if kind not in omit_kinds]
+            fields = set().union(*(_COMMAND_FIELDS[kind] for kind in kinds)) | ({STABLE_ONLY_FIELD} if stable else set())
         command_properties = {"type": {"type": "string", "enum": kinds}}
         command_properties.update({field: {"type": ["string", "null"]}
                                    for field in sorted(fields - {"type"})})
