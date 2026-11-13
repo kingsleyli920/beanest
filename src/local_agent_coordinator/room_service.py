@@ -2615,7 +2615,9 @@ class RoomService(RoomPromptMixin):
                 if changes["files"]:
                     board_retained.append({"provider": member["id"], "files": [
                         {"path": file["path"], "sha256": file["sha256"]} for file in changes["files"]]})
-            elif allowed or member["id"] in fenced_retained:
+            elif allowed or member["id"] in fenced_retained or retained is not None and member["id"] == retained["provider"]:
+                # A retained task with no write paths still goes through the audit:
+                # its private tree must hold no change, and the task is handed over.
                 observation = self._audit_native_metadata_candidate(snapshot, retained, state, changes)
                 if retained.get("recovery_ancestry"):
                     # Later empty-plan calls could have changed an authorized
