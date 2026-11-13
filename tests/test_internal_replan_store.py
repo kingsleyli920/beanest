@@ -67,6 +67,35 @@ class InternalReplanStoreTests(unittest.TestCase):
         with self.store._connection() as db:
             self.assertEqual(self.store._team.job_context(db, work['id'])['task_id'], 'fix')
 
+    def test_ready_work_keeps_going_while_a_replan_waits_for_running_calls(self):
+        # Catches the real room where Codex blocked R3 for coordination and then sat idle with three
+        # ready tasks: every dispatch stopped until the other partner's running call ended.
+        self.store.task_capabilities = lambda provider: ()  # planned owners stay put
+        room = self.room()
+        author, peer = self.store.claim(room, 'claude'), self.store.claim(room, 'codex')
+        self.finish(author, [proposal('main', paths=['main.py']), proposal('side', paths=['side.py']),
+                             proposal('tests', paths=['test_main.py']), proposal('final', dependencies=['main'], paths=['final.py']),
+                             {'type':'claim','task_id':'main'}, {'type':'claim','task_id':'side'},
+                             {'type':'claim','task_id':'final'}, {'type':'plan_ready'}])
+        self.finish(peer, [{'type':'claim','task_id':'tests'}, {'type':'plan_ready'}])
+        for _ in range(4):
+            if self.store.snapshot(room)['team']['phase'] == 'working': break
+            job = self.store.claim(room, 'codex')
+            if job: self.finish(job, [{'type':'plan_ready'}])
+        tests = self.store.claim(room, 'codex')
+        self.assertEqual(tests['team']['task_id'], 'tests')
+        main = self.store.claim(room, 'claude')
+        self.assertEqual(main['team']['task_id'], 'main')
+        self.finish(main, [{'type':'block','task_id':'main','cause':'coordination_required',
+                            'reason':'Needs ownership of a file no task holds.'}])
+        side = self.store.claim(room, 'claude')
+        self.assertIsNotNone(side, 'the independent task was held back while the replan waited')
+        self.assertEqual((side['kind'], side['team']['task_id']), ('team_work', 'side'))
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'working')
+        # Work that needs the blocked task still waits for it.
+        self.finish(side, [{'type':'complete','task_id':'side','result':'Concrete independently checked result.'}])
+        self.assertNotEqual(self.task(room, 'final')['status'], 'working')
+
     def test_ready_without_a_proposal_cannot_resume_parent_or_loop(self):
         room = self.planning()
         for _ in range(8):

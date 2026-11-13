@@ -75,6 +75,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "等伙伴协助": "Waiting for a partner's help",
   "等伙伴审核": "Waiting for a partner's review",
   "遇到阻碍": "Blocked",
+  "等重新分配文件": "Waiting for files to be re-split",
   "等待接手或依赖": "Waiting for handoff or dependencies",
   "阶段待核对": "Stage needs checking",
   "安排下一步": "Arrange the next step",

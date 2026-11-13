@@ -5131,10 +5131,14 @@ function memberActivity(snapshot, member) {
   } else {
     const waiting = own.find((entry) => entry.status === 'waiting_peer');
     const review = own.find((entry) => entry.status === 'review');
-    const blocked = own.find((entry) => ['blocked', 'unknown'].includes(entry.status));
+    // A coordination block the room replans by itself is waiting on the team, not stuck.
+    const replanning = own.find((entry) => entry.status === 'blocked' && entry.block_cause === 'coordination_required'
+      && entry.internal_replan_revision !== null && entry.internal_replan_revision !== undefined);
+    const blocked = own.find((entry) => ['blocked', 'unknown'].includes(entry.status) && entry !== replanning);
     const assigned = own.find((entry) => entry.status === 'assigned');
     if (waiting || review) { status = 'waiting_peer'; label = waiting ? t("等伙伴协助") : t("等伙伴审核"); }
     else if (blocked) { status = 'needs_user'; label = t("遇到阻碍"); }
+    else if (replanning) { status = 'waiting_peer'; label = t("等重新分配文件"); }
     else if (assigned) { status = 'waiting_peer'; label = t("等待接手或依赖"); }
     else if (member.status === 'working' || member.status === 'queued') { status = 'unknown'; label = t("阶段待核对"); }
     else if (['failed', 'unknown', 'interrupted'].includes(member.status)) { status = member.status; label = statusLabels[member.status]; }

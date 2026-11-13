@@ -2447,7 +2447,7 @@ class TeamStore:
         if db.execute("SELECT 1 FROM jobs WHERE room_id=? AND status IN ('queued','working') UNION "
                       "SELECT 1 FROM executions WHERE room_id=? AND status IN ('queued','working')",
                       (room_id, room_id)).fetchone():
-            return True  # Drain existing work/review before changing its frozen revision.
+            return True  # Running calls finish on their frozen revision before it changes.
         if not self.store._stage_cleanup_confirmed(db, room_id):
             return True
         db.execute("UPDATE teams SET phase='planning',revision=revision+1 WHERE room_id=?", (room_id,))
@@ -2743,9 +2743,11 @@ class TeamStore:
             return self._queue(db, room_id, reviewer, "checkpoint_review")
         tasks = db.execute("SELECT * FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? ORDER BY rowid", (room_id,)).fetchall()
         if team["phase"] == "working" and self._begin_internal_replan(db, room_id, tasks):
+            # While the replan waits for running calls, ready work that does
+            # not need the blocked task still goes to idle partners. It ends on
+            # its own: once nothing runnable is left, nothing runs and the
+            # replan starts.
             team = self.team(db, room_id)
-            if team["phase"] == "working":
-                return False
         if tasks and all(task_settled(task) for task in tasks):
             db.execute("UPDATE teams SET phase='ready_for_user' WHERE room_id=?", (room_id,))
             return team["phase"] != "ready_for_user"
