@@ -228,6 +228,25 @@ class DeliveryLineageCurrentProofTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.service.read_room(room))["objective"]["delivery"]["files"], expected)
             await self.check_current_proof(room, expected)
 
+    async def test_a_file_an_unfinished_task_is_reworking_is_not_a_changed_delivery(self):
+        # Catches the real room flagging 部分目标成果与已交付版本不一致 while a repair task was still reworking
+        # a file an earlier task delivered; the mismatch belongs to the end check, not the middle of the run.
+        room, expected = await self.prepared_origin()
+        main = next(file for file in expected if file["path"] == "main.py")
+        workspace = self.service._project(room)
+        workspace.apply("claude", str(uuid4()), workspace.snapshot()["revision"],
+                        [{"path": "main.py", "previous_sha256": main["sha256"], "content": "VALUE = 99\n"}])
+        store = self.service.store
+        with store._connection(write=True) as db:
+            run = store._team.team(db, room)["current_run_id"]
+            row = dict(db.execute("SELECT * FROM shared_tasks WHERE room_id=? LIMIT 1", (room,)).fetchone())
+            row.update(id="rework", run_id=run, status="assigned", owner="claude", write_paths_json='["main.py"]',
+                       dependencies_json="[]", result_version=0, result_files_json=None, inherited_from_run=None)
+            db.execute("INSERT INTO shared_tasks(" + ",".join(row) + ") VALUES (" + ",".join("?" for _ in row) + ")", list(row.values()))
+        delivery = (await self.service.read_room(room))["objective"]["delivery"]
+        self.assertEqual((delivery["verified"], delivery["missing_or_changed"]), (True, []))
+        self.assertTrue(next(file for file in delivery["files"] if file["path"] == "main.py")["reworking"])
+
     async def check_current_proof(self, room, expected):
         main = next(file for file in expected if file["path"] == "main.py")
         content = await self.service.read_delivery_file(room, **{key:main[key] for key in ("run_id", "revision", "digest", "path", "sha256")})

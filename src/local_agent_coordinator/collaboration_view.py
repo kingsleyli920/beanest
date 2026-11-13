@@ -170,6 +170,15 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     replanning = {task["id"]: task["title"] for task in team["tasks"]
                   if task["status"] == "blocked" and task.get("block_cause") == "coordination_required"
                   and task.get("internal_replan_revision") is not None}
+    # A later task may legitimately rework a delivered file. Only the latest
+    # delivery of each path is checked, and not while unfinished work holds it.
+    latest = {}
+    for task in team["tasks"]:
+        if task_finished(task):
+            for file in task.get("result_files") or []:
+                latest[file["path"]] = file["sha256"]
+    in_progress = {path for task in team["tasks"] if task["status"] != WITHDRAWN and not task_finished(task)
+                   for path in task.get("write_paths") or []}
     for task in team["tasks"]:
         if task["status"] == WITHDRAWN:
             # Listed so the board stays true, but never remaining, delivered or reviewed work.
@@ -187,7 +196,8 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
             remaining.append(task["title"] + (_system("：") + _REASONS.get(waiting, waiting) if waiting else _system("：尚未交付并通过互审")))
         if task_finished(task):
             for file in task.get("result_files") or []:
-                if current_files.get(file["path"], {}).get("sha256") != file["sha256"]:
+                if (latest.get(file["path"]) == file["sha256"] and file["path"] not in in_progress
+                        and current_files.get(file["path"], {}).get("sha256") != file["sha256"]):
                     stale = True
                     remaining.append(task["title"] + _system("：交付文件后来发生变化，需要重新核对。"))
     withdrawn = [task for task in tasks if task["status"] == WITHDRAWN]

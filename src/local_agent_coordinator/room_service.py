@@ -1419,17 +1419,23 @@ class RoomService(RoomPromptMixin):
                 paths = sorted({file["path"] for file in deliveries} - actual.keys())
                 for offset in range(0, len(paths), 16):
                     actual.update({file["path"]: file for file in self._project(room_id).metadata_for_paths(paths[offset:offset + 16])})
-            files = [{**file, "verified": actual.get(file["path"], {}).get("sha256") == file["sha256"]}
+            # A file an unfinished task is reworking is checked once that task
+            # delivers; until then it is neither verified nor a mismatch.
+            reworking = {path for task in (snapshot.get("team") or {}).get("tasks", [])
+                         if task["status"] not in {"accepted", "self_checked", "withdrawn", "cancelled"}
+                         for path in task.get("write_paths") or []}
+            files = [{**file, "verified": actual.get(file["path"], {}).get("sha256") == file["sha256"],
+                      **({"reworking": True} if file["path"] in reworking else {})}
                      for file in deliveries]
             for file in files:
                 if file["run_id"] == (snapshot.get("current_run") or {}).get("id"):
                     file.update(revision=project.get("revision"), digest=project.get("snapshot_sha256"))
             snapshot["objective"]["delivery"] = {
                 "revision": project.get("revision"), "digest": project.get("snapshot_sha256"), "total": len(files),
-                "files": files, "verified": all(file["verified"] for file in files),
+                "files": files, "verified": all(file["verified"] or file.get("reworking") for file in files),
                 "missing_or_changed": [{"path": file["path"], "expected_sha256": file["sha256"],
                                         "reason": "changed" if file["path"] in actual else "missing"}
-                                       for file in files if not file["verified"]]}
+                                       for file in files if not file["verified"] and not file.get("reworking")]}
         snapshot["collaboration"] = collaboration_view(snapshot, active=active)
         text_failure = self.store.host_text_failure(room_id)
         if text_failure and not text_failure.get("local_response"):
