@@ -33,7 +33,7 @@ _BLOCK_PROTOCOL = (
 
 
 MID_RUN_ADJUSTMENT_INSTRUCTION = (
-    "While team.phase is working, team.plan_author answering a user message (job_phase user) may change the part of the "
+    "While team.phase is working, any partner answering a user message (job_phase user), not only team.plan_author, may change the part of the "
     "board nobody has started, when the user asks for it or when it lets work that does not need another task's result "
     "run now: propose new tasks (same rules as planning) and adjust{type,task_id,dependencies,write_paths} a task that has "
     "not started (status open or assigned, result_version 0, no call made for it yet), giving its complete new dependency "

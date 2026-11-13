@@ -19,8 +19,8 @@ _PHASE_COMMANDS = {
     "work": {"complete", "request_help", "block"},
     "review": {"review", "block"},
     "help": set(),
-    # The plan author may also change the unstarted part of a working board
-    # (new tasks, adjust); the service refuses it in any other team phase.
+    # Any partner answering the user may change the unstarted part of a working
+    # board (new tasks, adjust); the service refuses it in any other team phase.
     "user": {"claim", "propose", "adjust"},
     "checkpoint": {"checkpoint"},
     "checkpoint_review": {"checkpoint_review"},
@@ -63,7 +63,7 @@ def command_shape(*, team_phase=None, can_propose=True, has_peers=True, native=F
         raise ValueError("invalid_response_schema_context")
     allowed = set(_COMMAND_FIELDS) if team_phase is None else _PHASE_COMMANDS[team_phase]
     kinds = [kind for kind in _COMMAND_FIELDS if kind in allowed
-             and (kind not in PLAN_AUTHOR_COMMANDS or can_propose)
+             and (kind not in PLAN_AUTHOR_COMMANDS or can_propose or team_phase == "user")
              and (has_peers or kind not in {"review", "request_help"} or team_phase == "review" and kind == "review")]
     fields = set().union(*(_COMMAND_FIELDS[kind] for kind in kinds)) if native else set().union(*_COMMAND_FIELDS.values())
     return kinds, fields

@@ -1429,10 +1429,14 @@ class TeamStore:
         text += {
             "team_task_permission": (" A command referenced a task, phase or role this call does not hold. Use only the "
                                      "commands allowed for this job phase, for this call's own task or review."),
-            "team_plan_locked": (" Only the plan author changes the plan: it proposes while planning, or, only in its reply "
-                                 "to a user message while the team is working, proposes new tasks and adjusts tasks nobody "
-                                 "has started (open or assigned, no result, no call ever made for them). A task that has "
-                                 "started, is under review or has a result cannot be adjusted. Omit those commands now."),
+            "team_plan_locked": (" The plan changes only in two places: the plan author proposes while planning, and any "
+                                 "partner answering a user message while the team is working may propose new tasks and "
+                                 "adjust tasks nobody has started (open or assigned, no result, no call ever made for them). "
+                                 "A task that has started, is under review or has a result cannot be adjusted. Omit those "
+                                 "commands now."),
+            "team_plan_adjusted_meanwhile": (" Another partner changed the unstarted part of the board after this call began. "
+                                             "Read the current board and context.plan_adjustments, and send only the changes "
+                                             "the user asked for that are still missing; do not repeat a split already made."),
             "invalid_team_dependencies": (" Every dependency must name a task on the board or proposed in this response, "
                                           "and no task may depend on itself directly or through other tasks. Remove the "
                                           "dependency that closes the loop."),
@@ -1739,10 +1743,11 @@ class TeamStore:
         members = set(self.objectives.available_members(db, job["room_id"]))
         proposals = []
         adjustments = {}
-        # The plan author answering the user while work runs may change the part
-        # of the board nobody has started; in-flight work keeps its binding.
-        mid_run = (team["phase"] == "working" and context["job_phase"] == "user"
-                   and job["provider"] == team["plan_author"])
+        # Whoever answers the user while work runs may change the part of the
+        # board nobody has started: the user's message is the authority, and the
+        # plan author is often busy with the longest task. In-flight work keeps
+        # its binding.
+        mid_run = team["phase"] == "working" and context["job_phase"] == "user"
         unstarted = self._unstarted_task_ids(db, job["room_id"], context["run_id"], rows) if mid_run else set()
         task_terminal_commands = 0
         for command in commands:
@@ -1857,6 +1862,15 @@ class TeamStore:
         if len(proposals) > MAX_RESPONSE_COMMANDS or task_terminal_commands > 1:
             raise RoomError("invalid_team_commands")
         combined = {key: json.loads(task["dependencies_json"]) for key, task in tasks.items()}
+        if mid_run and (proposals or adjustments):
+            # Several partners may answer one user message at once. A change made
+            # from a board another partner already adjusted could duplicate that
+            # split, so it is sent back to be redone from the current board.
+            claimed = db.execute("SELECT MAX(seq) FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='job_claimed' "
+                                 "AND json_extract(value_json,'$.job_id')=?", (job["room_id"], job["id"])).fetchone()[0]
+            if db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? AND json_extract(value_json,'$.kind')='plan_adjusted' "
+                          "AND json_extract(value_json,'$.run_id')=?", (job["room_id"], claimed or 0, context["run_id"])).fetchone():
+                raise RoomError("team_plan_adjusted_meanwhile")
         combined.update({key: item["dependencies"] for key, item in adjustments.items()})
         combined.update({item["id"]: item["dependencies"] for item in proposals})
         # Proposed prerequisites and their parent must pass the same DAG check.

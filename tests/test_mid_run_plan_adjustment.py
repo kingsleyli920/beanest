@@ -1,4 +1,4 @@
-"""The plan author changes unstarted work mid-run without stopping work in progress.
+"""A partner answering the user changes unstarted work mid-run without stopping work in progress.
 
 Fictional projects and partner mixes; the store tests use real SQLite and the
 service test drives the real job loop with only the native transport synthetic.
@@ -112,11 +112,32 @@ class MidRunStore(unittest.TestCase):
         self.assertEqual((work["kind"], work["team"]["task_id"]), ("team_work", "L2a"))
         self.assertEqual(self.tasks()["L1"]["status"], "working")
 
-    def test_a_partner_that_is_not_the_plan_author_cannot_change_the_plan(self):
-        # Catches the mid-run exception being granted to whoever answers the user.
+    def test_any_partner_answering_the_user_may_split_but_not_from_a_work_call(self):
+        # Catches the change being locked to the plan author: the author is often busy with the longest task,
+        # so the user's request would wait for it while idle partners sit. Outside a user reply it stays locked.
+        self.refused(self.l1_work, [proposal("L2a", paths=["side.py"])], "team_plan_locked")
         job = self.user_reply_job("codex")
-        self.refused(job, [proposal("L2a", paths=["side.py"])], "team_plan_locked")
-        self.refused(job, [adjust("L2", [], ["core.py", "side.py"])], "team_plan_locked")
+        self.finish(job, self.split())
+        tasks = self.tasks()
+        self.assertEqual((tasks["L2a"]["status"], tasks["D1"]["dependencies"]), ("open", []))
+        event = next(event for event in self.snapshot()["events"] if event["kind"] == "plan_adjusted")
+        self.assertEqual(event["sender"], "codex")
+        self.assertEqual(self.snapshot()["team"]["revision"], self.revision)
+
+    def test_a_change_made_from_a_board_another_partner_already_adjusted_is_sent_back(self):
+        # Catches two partners answering one user message both splitting the same task from the same old board.
+        first, second = self.user_reply_job("claude"), self.user_reply_job("codex")
+        self.finish(first, self.split())
+        self.refused(second, [proposal("L2b", paths=["extra.py"])], "team_plan_adjusted_meanwhile")
+        # Plain replies and a call that began after the change still go through.
+        self.assertTrue(self.store.prevalidate_team_result(second["id"], []))
+        self.finish(second, [])
+        offer = self.store.claim(self.room_id, "codex")
+        self.assertEqual(offer["kind"], "team_coordinate")
+        self.finish(offer, [])
+        fresh = self.user_reply_job("codex")
+        self.finish(fresh, [proposal("L2b", paths=["extra.py"])])
+        self.assertIn("L2b", self.tasks())
 
     def test_a_started_or_reviewed_task_cannot_be_adjusted(self):
         # Catches a dependency or path being changed under a running call or a delivered result.
@@ -157,6 +178,17 @@ class MidRunStore(unittest.TestCase):
         # Catches adjust being used to grant an unstarted task files it never had.
         job = self.user_reply_job("claude")
         self.refused(job, [adjust("D1", [], ["docs.md", "core.py"])], "invalid_team_task")
+
+
+class MidRunSchema(unittest.TestCase):
+    def test_a_partner_that_did_not_write_the_plan_can_send_the_change_in_a_user_reply(self):
+        # Catches per-phase schemas (Codex, Kimi) leaving propose/adjust out for anyone but the plan author,
+        # so the partner the user asked could not express the split at all.
+        from local_agent_coordinator.room_response_schema import command_shape
+        kinds, _ = command_shape(team_phase="user", can_propose=False, native=True)
+        self.assertEqual(sorted(kinds), ["adjust", "claim", "propose"])
+        kinds, _ = command_shape(team_phase="coordinate", can_propose=False, native=True)
+        self.assertEqual(sorted(kinds), ["claim", "plan_ready"])
 
 
 class MidRunService(unittest.IsolatedAsyncioTestCase):

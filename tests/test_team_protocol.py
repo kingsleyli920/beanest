@@ -90,10 +90,10 @@ class TeamPhaseSchemaTests(unittest.TestCase):
                 validator = self.validator(phase, can_propose=False)
                 self.assertFalse(validator.is_valid(native_response([proposal()])))
                 self.assertTrue(validator.is_valid(native_response([{"type": "claim", "task_id": "main"}, {"type": "plan_ready"}])))
-        # Catches a non-author's user-phase schema offering mid-run plan changes it may never make.
+        # Catches a non-author's user-phase schema leaving out the mid-run change the user may ask any partner for.
         user = self.validator("user", can_propose=False)
-        self.assertFalse(user.is_valid(native_response([proposal()])))
-        self.assertFalse(user.is_valid(native_response([{"type": "adjust", "task_id": "main", "dependencies": [], "write_paths": []}])))
+        self.assertTrue(user.is_valid(native_response([proposal()])))
+        self.assertTrue(user.is_valid(native_response([{"type": "adjust", "task_id": "main", "dependencies": [], "write_paths": []}])))
         self.assertTrue(user.is_valid(native_response([{"type": "claim", "task_id": "main"}])))
         self.assertTrue(self.validator("user").is_valid(native_response(
             [{"type": "adjust", "task_id": "main", "dependencies": [], "write_paths": []}])))
