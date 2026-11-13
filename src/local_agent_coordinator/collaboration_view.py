@@ -217,7 +217,13 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         next_action = (_system("不用你操作；有伙伴额度恢复后会自动继续。") if reason_code == "all_partners_quota_exhausted"
                        else _system("点“继续”再试一次；没有发出的工作不会重复。") if reason_code == "native_preflight_failed"
                        else _system("先核对停止原因和现有交付；未确认结果不会自动重跑。"))
-    elif stale or room["status"] == "needs_user" or any(task["status"] == "blocked" and task["id"] not in replanning for task in tasks):
+    # While an objective advances by itself this generic question never shows:
+    # what the user must decide comes as the objective's own needs_user with a
+    # concrete question; everything else (reviews, re-splits, rework, a stale
+    # file) the team handles, and the end-of-objective check covers delivery.
+    elif ((snapshot.get("objective") or {}).get("status") not in {"running", "checkpoint", "paused"}
+          and (stale or room["status"] == "needs_user"
+               or any(task["status"] == "blocked" and task["id"] not in replanning for task in tasks))):
         state = "needs_user"
         reason = reason or _system("有工作尚未完成，需要补充信息或确认处理方式。")
         next_action = _system("查看未完成项，在同一聊天补充所需信息。")

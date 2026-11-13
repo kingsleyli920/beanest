@@ -4320,6 +4320,17 @@ test('objective delivery aggregates verified stages at a checkpoint without prom
   assert.equal(ui.posts().length, 0);
 });
 
+test('a delivery mismatch is reported when the objective ends, not while it is still advancing', async () => {
+  // Catches 部分目标成果与已交付版本不一致 shown mid-run while a later task was still reworking the file.
+  const saved = objectiveDeliveryFixture(); saved.objective.status = 'running';
+  saved.objective.delivery.files[1].verified = false;
+  saved.objective.delivery.missing_or_changed = [{ path: 'second.md', expected_sha256: saved.project.files[1].sha256, reason: 'changed' }];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /部分目标成果与已交付版本不一致/);
+  saved.objective.status = 'complete'; await ui.poll();
+  assert.match(ui.get('collaboration-outcome').textContent, /部分目标成果与已交付版本不一致/);
+});
+
 test('baseline opens only the frozen historical body and remains readable across stages of the same objective', async () => {
   const saved = objectiveDeliveryFixture(); const baseline = addObjectiveBaseline(saved);
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, route(request) {
