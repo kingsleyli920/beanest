@@ -726,7 +726,8 @@ def native_command(agent, session_id=None, *, permission='read_only',
             command += ['-c', 'model_reasoning_effort=' + json.dumps(choice['effort'])]
         return command + ['-']
     if agent == 'claude':
-        settings = json.dumps({'apiKeyHelper': '', 'env': _CLAUDE_BASH_ENV}, separators=(',', ':'))
+        choice, aliases = adapters.api_model_settings('claude', choice)
+        settings = json.dumps({'apiKeyHelper': '', 'env': {**_CLAUDE_BASH_ENV, **aliases}}, separators=(',', ':'))
         command = [adapters.find_claude(), '--settings', settings,
                    '-p', '--output-format', 'stream-json', '--verbose',
                    '--permission-prompts', 'none']
@@ -751,6 +752,18 @@ def native_command(agent, session_id=None, *, permission='read_only',
             command += ['--effort', choice['effort']]
         return command
     raise ValueError('agent must be codex or claude')
+
+
+def launch_environment(agent):
+    """Exactly what one native turn's child process receives.
+
+    The usual stripped environment, Claude's tool timeouts, and, only for an
+    API model partner bound to this host, its base URL and key.
+    """
+    environment = adapters.launch_environment(agent)
+    if agent == 'claude':
+        environment.update(_CLAUDE_BASH_ENV)
+    return environment
 
 
 def _processes():
@@ -1289,8 +1302,20 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
         raise
     started = time.monotonic()
     status = None
+    secret = prepared = None
+    if adapters.bound_api_endpoint(agent) is not None:
+        # An API model partner's account is its endpoint and key: no
+        # subscription check runs, and the key is read now, before anything starts.
+        try:
+            prepared = launch_environment(agent)
+        except adapters.ApiKeyUnavailable as error:
+            not_started(error, True)
+            raise
+        secret = prepared[adapters.api_token_variable(agent)]
+        status = {'subscription_confirmed': True, 'authMethod': 'api_key', 'cleanup_confirmed': True}
     try:
-        status = await asyncio.wait_for(adapters._subscription_status(agent, cwd), timeout=timeout)
+        if secret is None:
+            status = await asyncio.wait_for(adapters._subscription_status(agent, cwd), timeout=timeout)
         if not status.get('subscription_confirmed') or status.get('cleanup_confirmed') is not True:
             raise RuntimeError(f'{agent} subscription authentication is unconfirmed; inference refused')
     except BaseException as error:
@@ -1334,9 +1359,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             receipt = os.fdopen(descriptor, 'wb')
             receipt_path = str(path)
-        environment = adapters._environment()
-        if agent == 'claude':
-            environment.update(_CLAUDE_BASH_ENV)
+        environment = prepared if prepared is not None else launch_environment(agent)
         if progress_file is not None:
             environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
@@ -1372,6 +1395,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
             while raw := await process.stdout.readline():
                 if len(raw) > _MAX_LINE:
                     raise RuntimeError('native_protocol_line_limit')
+                raw = adapters.scrub_secret([raw], secret)[0]
                 await record('stdout', raw)
                 await stream.consume(raw)
                 if stream.failure:

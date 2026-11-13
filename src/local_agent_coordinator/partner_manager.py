@@ -20,10 +20,11 @@ import stat
 import tempfile
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
-from . import adapters, workload
+from . import adapters, api_models, workload
 from .agent_registry import (AgentRegistry, AgentSpec, BEAN_STYLE_IDS,
-                             TOKEN_FIELDS, default_bean_style, safe_agent_id, native_spec)
+                             TOKEN_FIELDS, default_bean_style, safe_agent_id, native_spec, uuid_session_id)
 from .quota_gate import QuotaGate
 from .native_setup import NATIVE_ADAPTERS, NativeInstall, NativeLogin, native_adapter
 
@@ -47,7 +48,7 @@ _HEALTH_KEYS = {"state", "checked_at", "cli_available", "version", "auth", "reas
                 "cost", "subscription_remaining"}
 _REASONS = {None, "not_checked", "cli_missing", "cli_check_failed", "auth_unconfirmed",
             "check_timeout", "check_failed", "connection_not_configured", "protocol_invalid",
-            "connector_not_ready"}
+            "connector_not_ready", "api_key_unavailable"}
 ACCOUNT_STALE_SECONDS = 90
 ACCOUNT_REFRESH_COALESCE_SECONDS = 55
 # A profile's own login lives in a Beanest-created CLI home instead of the
@@ -63,15 +64,32 @@ def _quoted(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
+def _api(item):
+    """An API model partner: a host CLI pointed at the user's own endpoint and key."""
+    return "api_model" in item
+
+
 def _scope(item):
+    # An API model partner is its own account: its endpoint, key and caps.
+    if _api(item):
+        return "api:" + item["id"]
     return item["adapter"] + ":" + item["id"] if item.get("account_source") == PROFILE_HOME else item["adapter"]
+
+
+def _api_error(error):
+    return PartnerError(error.code)
+
+
+# Still accepted for profiles saved before API model partners existed; a new
+# partner for such a vendor is added as an API model partner instead.
+_RETIRED_TEMPLATES = frozenset({"deepseek"})
 
 
 def connection_templates() -> list[dict]:
     return [{"id": adapter, "name": name, "adapter": adapter,
              "protocol": adapters.JSON_CLI_PROTOCOL,
              "description": "保存为待配置工具；需本机连接器实现豆窝 JSON 协议，通过检查后才能参与。"}
-            for adapter, name in CONNECTOR_TEMPLATES if adapter not in TRUSTED_ADAPTERS]
+            for adapter, name in CONNECTOR_TEMPLATES if adapter not in TRUSTED_ADAPTERS and adapter not in _RETIRED_TEMPLATES]
 
 
 def connection_protocol() -> dict:
@@ -154,6 +172,7 @@ class PartnerManager:
             self.quota_gate = QuotaGate(self.root, clock)
         except (OSError, ValueError, TypeError):
             raise PartnerError("quota_state_corrupt") from None
+        self.spend_ledger = api_models.SpendLedger(self.root)
         # Fail closed immediately, rather than silently resetting a bad config.
         with self._locked():
             self._load()
@@ -329,7 +348,7 @@ class PartnerManager:
                 os.close(descriptor)
         if isinstance(data, dict) and isinstance(data.get("profiles"), list):
             for item in data["profiles"]:
-                if (isinstance(item, dict) and set(item) - {"bean_style", "lifecycle_state", "connection", "account_source"}
+                if (isinstance(item, dict) and set(item) - {"bean_style", "lifecycle_state", "connection", "account_source", "api_model"}
                         == _PROFILE_KEYS - {"bean_style", "lifecycle_state"}):
                     # Upgrade in memory only: read-only inspection must not
                     # rewrite configuration. The next explicit save includes it.
@@ -359,7 +378,8 @@ class PartnerManager:
             seen = set()
             for item in data["profiles"]:
                 if (not isinstance(item, dict)
-                        or set(item) - {"workload_level"} not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"})
+                        or set(item) - {"workload_level"} not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"},
+                                                                  _PROFILE_KEYS | {"api_model"})
                         or item.get("workload_level", workload.DEFAULT_LEVEL) not in workload.LEVELS
                         or not safe_agent_id(item["id"]) or item["id"] in seen
                         or not isinstance(item["bean_style"], str) or item["bean_style"] not in BEAN_STYLE_IDS
@@ -369,6 +389,9 @@ class PartnerManager:
                     raise ValueError
                 if "account_source" in item and (item["account_source"] != PROFILE_HOME
                                                  or item["adapter"] not in TRUSTED_ADAPTERS or _connector(item)):
+                    raise ValueError
+                if _api(item) and (item["builtin"] or item["adapter"] not in api_models.HOSTS
+                                   or api_models.config(item["api_model"]) != item["api_model"]):
                     raise ValueError
                 seen.add(item["id"])
                 base = self.base_registry.get(item["id"])
@@ -398,7 +421,7 @@ class PartnerManager:
                     or not _VERSION.fullmatch(health["version"])))
                 or not isinstance(health["auth"], dict)
                 or set(health["auth"]) != {"method", "subscription_confirmed"}
-                or health["auth"]["method"] not in {None, "chatgpt", "claude.ai", "unconfirmed", "local", "configured_cli", "kimi-code"}
+                or health["auth"]["method"] not in {None, "chatgpt", "claude.ai", "unconfirmed", "local", "configured_cli", "kimi-code", "api_key"}
                 or type(health["auth"]["subscription_confirmed"]) not in (bool, type(None))
                 or health["reason"] not in _REASONS
                 or health["cost"] is not None or health["subscription_remaining"] is not None):
@@ -411,6 +434,8 @@ class PartnerManager:
                 raise PartnerError("invalid_partner_storage")
             return replace(spec, bean_style=item["bean_style"])
         adapter = item["adapter"]
+        if _api(item):
+            return self._api_spec(item)
         if _connector(item):
             connection = item.get("connection")
             if connection is not None:
@@ -433,6 +458,22 @@ class PartnerManager:
         return replace(template, id=item["id"], name=item["name"], avatar=item["avatar"],
                        adapter=adapter, provider=TRUSTED_ADAPTERS[adapter], bean_style=item["bean_style"])
 
+    def _api_spec(self, item) -> AgentSpec:
+        """The host CLI's own transport, run with the partner's home and endpoint.
+
+        It never reports a subscription account: its account is the endpoint
+        and key, and its limit is the user's spending cap.
+        """
+        host = item["adapter"]
+        template = self.base_registry.get(host) or native_spec(host)
+        if template is None:
+            template = AgentSpec(host, host, partial(adapters.invoke, host), usage_source=host + "_cli",
+                                 usage_fields=TOKEN_FIELDS, normalize_session_id=uuid_session_id,
+                                 invoke_structured=partial(adapters.invoke, host), supports_runtime_settings=True)
+        return replace(template, id=item["id"], name=item["name"], avatar=item["avatar"], adapter=host,
+                       provider="api_endpoint", bean_style=item["bean_style"], native_account_status=False,
+                       supports_runtime_settings=True)
+
     def _save(self, data):
         self._validate(data)
         descriptor, name = tempfile.mkstemp(prefix=".profiles-", dir=self.root)
@@ -454,6 +495,8 @@ class PartnerManager:
                 pass
 
     def _describe(self, item, data):
+        if _api(item):
+            return self._describe_api(item, data)
         result = self._spec(item).describe()
         installation = self._installation(item["adapter"], item.get("connection"), connector=_connector(item))
         health = data["checks"].get(item["id"], _unknown_health())
@@ -482,6 +525,118 @@ class PartnerManager:
             result["connection"] = item.get("connection")
         # Return independent values; callers cannot edit the persisted structure.
         return json.loads(json.dumps(result))
+
+    def _describe_api(self, item, data):
+        result = self._spec(item).describe()
+        settings = item["api_model"]
+        installation = self._installation(item["adapter"])
+        health = data["checks"].get(item["id"], _unknown_health())
+        spend = self._spend(item)
+        now = self.clock()
+        available = item["enabled"] and item["lifecycle_state"] == "active"
+        capped = spend is None or spend["state"] == "capped"
+        result.update(adapter=item["adapter"], enabled=item["enabled"], builtin=False,
+                      lifecycle_state=item["lifecycle_state"], health=health, installation=installation,
+                      connection_state="api_model",
+                      configuration_selectable=available and (not self._startup_discovery or installation["state"] == "found"),
+                      workload_level=item.get("workload_level", workload.DEFAULT_LEVEL),
+                      api_model={**json.loads(json.dumps(settings)),
+                                 "host_name": native_adapter(item["adapter"]).name if native_adapter(item["adapter"]) else item["adapter"]},
+                      spend=spend,
+                      # Percent of the tighter cap left once it is down to the reserve.
+                      quota_reserve=round(spend["left_percent"]) if spend and spend["state"] == "near_cap" else None)
+        # Its "account" is the endpoint and the key's location; the spend
+        # ledger is always current, so it is never a stale snapshot.
+        result["account"] = {"state": "ready", "email": None, "plan": None, "auth_method": "api_key",
+                             "source": "api_endpoint", "scope": "api_endpoint", "checked_at": now, "stale": False,
+                             "endpoint": urlsplit(settings["base_url"]).hostname,
+                             "reason": None, "shared_profile_ids": [],
+                             "quota": {"state": "unavailable", "windows": [], "source": "api_spend_ledger",
+                                       "scope": "api_endpoint", "checked_at": now, "stale": False,
+                                       "reason": "api_spend_cap"}}
+        result["availability"] = {
+            "state": "blocked" if capped else "available", "selectable": not capped,
+            "reason": ("api_spend_state_corrupt" if spend is None else "spend_cap_reached") if capped else None,
+            "source": "api_spend_ledger", "observed_at": now, "identity_checked_at": now, "resets_at": None,
+            "stale": False, "scope": "api_endpoint", "can_request_recheck": False}
+        result["selectable"] = result["configuration_selectable"] and not capped
+        return json.loads(json.dumps(result))
+
+    def _spend(self, item):
+        """Today's and this month's spend against the caps; None when the ledger cannot be read."""
+        try:
+            return self.spend_ledger.snapshot(item["id"], item["api_model"], self.clock())
+        except (api_models.ApiModelError, OSError, ValueError, TypeError):
+            return None  # an unreadable ledger must not let a capped partner spend again
+
+    def api_endpoint(self, partner_id) -> adapters.ApiEndpoint | None:
+        """What a call by this partner binds; None for every partner that is not an API model partner."""
+        item = self._item(partner_id)
+        if not _api(item):
+            return None
+        settings = item["api_model"]
+        return adapters.ApiEndpoint(host=item["adapter"], base_url=settings["base_url"],
+                                    key=tuple(sorted(settings["key"].items())), default_model=settings["default_model"],
+                                    models=tuple(model["id"] for model in settings["models"]))
+
+    def api_runtime_options(self, partner_id) -> dict | None:
+        """The partner's own model list; nothing is launched to read it."""
+        item = self._item(partner_id)
+        if not _api(item):
+            return None
+        settings = item["api_model"]
+        return {"state": "ready", "checked_at": self.clock(), "catalog_source": "api_model_catalog",
+                "effort_scope": "unknown", "reason": None,
+                "models": [{"id": model["id"], "name": model["id"], "efforts": [], "default_effort": None,
+                            "is_default": model["id"] == settings["default_model"]} for model in settings["models"]]}
+
+    def api_scale_cumulative(self, partner_id) -> bool:
+        item = self._item(partner_id)
+        return _api(item) and workload.SCALES.get(item["adapter"], workload.DEFAULT_SCALE).cumulative_per_session
+
+    def record_api_spend(self, partner_id, usage, model=None, *, previous=None, resumed=False):
+        """Price one finished call from its reported usage and add it to the ledger.
+
+        Returns the new spend snapshot, or None for a partner that is not an API model partner.
+        """
+        item = self._item(partner_id)
+        if not _api(item):
+            return None
+        settings = item["api_model"]
+        at = self.clock()
+        cost = api_models.call_cost(settings, model or settings["default_model"], usage, at,
+                                    previous=previous, resumed=resumed)
+        with self._locked():
+            self.spend_ledger.record(partner_id, settings, cost, at)
+        return self._spend(item)
+
+    def set_api_model(self, partner_id, value) -> dict:
+        """Change prices, caps, models, peak hours or where the key lives.
+
+        The endpoint, host and currency are who this partner is: rooms hold
+        sessions on that endpoint and the ledger counts in that currency, so a
+        different one is a new partner.
+        """
+        try:
+            settings = api_models.config(value)
+        except api_models.ApiModelError as error:
+            raise _api_error(error) from None
+        with self._locked():
+            data = self._load()
+            for item in data["profiles"]:
+                if item["id"] == partner_id:
+                    if not _api(item):
+                        raise PartnerError("unsupported_partner_adapter")
+                    current = item["api_model"]
+                    if any(settings[key] != current[key] for key in ("host", "base_url", "currency")):
+                        raise PartnerError("partner_identity_conflict")
+                    if settings != current:
+                        item["api_model"] = settings
+                        if settings["key"] != current["key"]:
+                            data["checks"].pop(partner_id, None)
+                        self._save(data)
+                    return self._describe(item, data)
+        raise PartnerError("unknown_partner")
 
     def home_path(self, partner_id) -> Path:
         if not safe_agent_id(partner_id):
@@ -526,7 +681,7 @@ class PartnerManager:
     def account_home(self, partner_id) -> Path | None:
         """The CLI home a profile's children must use; None is the local login."""
         item = self._item(partner_id)
-        return self.home_path(partner_id) if item.get("account_source") == PROFILE_HOME else None
+        return self.home_path(partner_id) if item.get("account_source") == PROFILE_HOME or _api(item) else None
 
     def account_scope(self, partner_id) -> str:
         return _scope(self._item(partner_id))
@@ -547,7 +702,7 @@ class PartnerManager:
             data = self._load()
             for item in data["profiles"]:
                 if item["id"] == partner_id:
-                    if item["adapter"] not in TRUSTED_ADAPTERS or _connector(item):
+                    if item["adapter"] not in TRUSTED_ADAPTERS or _connector(item) or _api(item):
                         raise PartnerError("account_adapter_unsupported")
                     if source == PROFILE_HOME:
                         self._ensure_home(partner_id)
@@ -586,6 +741,7 @@ class PartnerManager:
         profile = self.get(partner_id)
         adapter = profile["adapter"]
         if adapter not in TRUSTED_ADAPTERS or profile["connection_state"] != "builtin":
+            # Includes API model partners: their account is an endpoint and a key, never a CLI login.
             raise PartnerError("account_adapter_unsupported")
         scope, home = self.account_scope(partner_id), self.account_home(partner_id)
         async with self._account_locks.setdefault(scope, asyncio.Lock()), self._checks:
@@ -678,7 +834,7 @@ class PartnerManager:
             spec = self.base_registry.get(profile["adapter"]) or native_spec(profile["adapter"])
             included = (profile["lifecycle_state"] == "active" and profile["enabled"]
                         if selected is None else profile["id"] in selected)
-            if (included
+            if (included and profile["connection_state"] == "builtin"
                     and not _connector(profile) and spec is not None and spec.native_account_status):
                 chosen.setdefault(scopes.get(profile["id"], profile["adapter"]), profile["id"])
         await asyncio.gather(*(self.refresh_account(identifier) for identifier in chosen.values()))
@@ -750,7 +906,10 @@ class PartnerManager:
             return AgentRegistry((self._spec(item) for item in data["profiles"]), allow_empty=True)
 
     def add(self, *, id: str, name: str, adapter: str, avatar: str = "",
-            bean_style: object = _DEFAULT_BEAN_STYLE, connection=_DEFAULT_CONNECTION) -> dict:
+            bean_style: object = _DEFAULT_BEAN_STYLE, connection=_DEFAULT_CONNECTION, api_model=None) -> dict:
+        if api_model is not None:
+            return self._add_api(id=id, name=name, adapter=adapter, avatar=avatar, bean_style=bean_style,
+                                 connection=connection, api_model=api_model)
         if not isinstance(adapter, str) or adapter not in TRUSTED_ADAPTERS.keys() | CONNECTOR_ADAPTERS:
             raise PartnerError("unsupported_partner_adapter")
         if connection is not _DEFAULT_CONNECTION and connection is not None:
@@ -790,6 +949,46 @@ class PartnerManager:
             self._save(data)
             return self._describe(item, data)
 
+    def _add_api(self, *, id, name, adapter, avatar, bean_style, connection, api_model):
+        """Save an API model partner and create its own host CLI home.
+
+        The home keeps this partner's sessions and config apart from the
+        user's normal login. Only the key's location is saved.
+        """
+        if connection is not _DEFAULT_CONNECTION:
+            raise PartnerError("invalid_partner_connection")
+        try:
+            settings = api_models.config(api_model)
+        except api_models.ApiModelError as error:
+            raise _api_error(error) from None
+        if adapter != settings["host"]:
+            raise PartnerError("unsupported_partner_adapter")
+        if bean_style is _DEFAULT_BEAN_STYLE:
+            bean_style = "ocean"
+        elif not isinstance(bean_style, str) or bean_style not in BEAN_STYLE_IDS:
+            raise PartnerError("invalid_partner_profile")
+        item = {"id": id, "name": name, "adapter": adapter, "avatar": avatar, "bean_style": bean_style,
+                "enabled": True, "builtin": False, "lifecycle_state": "active", "api_model": settings}
+        try:
+            self._spec(item)
+        except (ValueError, TypeError):
+            raise PartnerError("invalid_partner_profile") from None
+        with self._locked():
+            data = self._load()
+            if id in data["retired_profile_ids"] or id in data["ignored_builtin_ids"]:
+                raise PartnerError("partner_identity_conflict")
+            for original in data["profiles"]:
+                if original["id"] == id:
+                    if all(original.get(key) == item[key] for key in ("name", "adapter", "avatar", "bean_style", "api_model")):
+                        return self._describe(original, data)
+                    raise PartnerError("partner_identity_conflict")
+            if len(data["profiles"]) >= MAX_PROFILES:
+                raise PartnerError("partner_limit_reached")
+            self._ensure_home(id)
+            data["profiles"].append(item)
+            self._save(data)
+            return self._describe(item, data)
+
     def configure(self, partner_id: str, connection: dict) -> dict:
         """Fill a dormant template once; configured identities stay immutable.
 
@@ -804,7 +1003,7 @@ class PartnerManager:
             data = self._load()
             for item in data["profiles"]:
                 if item["id"] == partner_id:
-                    if item["builtin"] or not _connector(item):
+                    if item["builtin"] or not _connector(item) or _api(item):
                         raise PartnerError("unsupported_partner_adapter")
                     if item.get("connection") == connection:
                         return self._describe(item, data)
@@ -839,6 +1038,10 @@ class PartnerManager:
                 for item in data["profiles"]}
 
     def _reserve_left(self, item, data):
+        if _api(item):
+            # Near its spending cap an API partner is held back the way a low subscription is.
+            spend = self._spend(item)
+            return round(spend["left_percent"]) if spend and spend["state"] == "near_cap" else None
         if item["adapter"] not in TRUSTED_ADAPTERS or _connector(item):
             return None
         return self.quota_gate.reserve_left(_scope(item), self._account_snapshot(item, data))
@@ -940,6 +1143,9 @@ class PartnerManager:
             raise PartnerError("unsupported_partner_adapter")
         home = None if _connector(profile) else self.account_home(partner_id)
         lock = self._check_locks.setdefault(partner_id, asyncio.Lock())
+        if profile["connection_state"] == "api_model":
+            async with lock, self._checks:
+                return await self._check_api(partner_id, profile)
         with adapters.account_home(adapter, home):
             async with lock, self._checks:
                 return await self._check(partner_id, profile, adapter, home)
@@ -1018,6 +1224,40 @@ class PartnerManager:
             health.update(state="unknown", reason="check_failed")
         # CancelledError deliberately propagates after adapters._run finishes
         # process-group cleanup. It never overwrites a previous health check.
+        return self._save_check(partner_id, health)
+
+    async def _check_api(self, partner_id, profile):
+        """The host CLI is installed and the key can be read. No request goes to the endpoint."""
+        health = _unknown_health()
+        checked_at = self.clock()
+        if type(checked_at) not in (float, int) or not math.isfinite(checked_at) or checked_at < 0:
+            raise PartnerError("invalid_check_clock")
+        health["checked_at"] = checked_at
+        try:
+            executable = native_adapter(profile["adapter"]).resolve()
+            health["cli_available"] = True
+            lines, code = await adapters._run([executable, "--version"], "", self.root, 10, include_stderr=True)
+            raw = b"\n".join(lines)
+            version = _VERSION.search(raw.decode("utf-8", errors="replace")) if len(raw) <= 65536 else None
+            health["version"] = version.group(0) if code == 0 and version else None
+            try:
+                await asyncio.to_thread(api_models.read_key, profile["api_model"]["key"])
+            except api_models.ApiModelError:
+                health.update(state="unavailable", reason="api_key_unavailable",
+                              auth={"method": "unconfirmed", "subscription_confirmed": None})
+            else:
+                health.update(state="ready" if health["version"] else "unknown",
+                              reason=None if health["version"] else "cli_check_failed",
+                              auth={"method": "api_key", "subscription_confirmed": None})
+        except (FileNotFoundError, RuntimeError):
+            missing = health["cli_available"] is None
+            health.update(state="unavailable" if missing else "unknown", reason="cli_missing" if missing else "check_failed")
+            if missing:
+                health["cli_available"] = False
+        except asyncio.TimeoutError:
+            health.update(state="unknown", reason="check_timeout")
+        except OSError:
+            health.update(state="unknown", reason="check_failed")
         return self._save_check(partner_id, health)
 
     def _save_check(self, partner_id, health):

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 import contextvars
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
@@ -217,14 +218,37 @@ _NETWORK_ENVIRONMENT = frozenset({
 ACCOUNT_HOME_VARIABLES = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'kimi': 'KIMI_CODE_HOME'}
 _DEFAULT_HOME_NAMES = {'claude': '.claude', 'codex': '.codex', 'kimi': '.kimi-code'}
 _ACCOUNT_HOME = contextvars.ContextVar('beanest_account_home', default=None)
+_API_ENDPOINT = contextvars.ContextVar('beanest_api_endpoint', default=None)
+
+
+@dataclass(frozen=True)
+class ApiEndpoint:
+    """Where an API model partner's host CLI sends requests, and where its key lives.
+
+    Holds a reference to the key, never the key: the value is read only when
+    a child is about to start, and only that child's environment receives it.
+    """
+    host: str
+    base_url: str
+    key: tuple  # sorted (name, value) pairs of the key reference
+    default_model: str
+    models: tuple = ()
+
+    def key_reference(self) -> dict:
+        return dict(self.key)
+
+
+class ApiKeyUnavailable(RuntimeError):
+    """The referenced key could not be read; carries no path and no value."""
 
 
 @contextmanager
-def account_home(agent, home):
+def account_home(agent, home, endpoint: ApiEndpoint | None = None):
     """Bind one profile's CLI home for every child started in this context.
 
     ``None`` keeps the local login. Tasks created inside inherit the binding,
-    so a whole invocation, check or cleanup sees one consistent home.
+    so a whole invocation, check or cleanup sees one consistent home. An API
+    model partner always brings its own home together with its endpoint.
     """
     if home is None:
         value = None
@@ -232,11 +256,81 @@ def account_home(agent, home):
         if agent not in ACCOUNT_HOME_VARIABLES or not Path(home).is_absolute():
             raise ValueError('account home must be an absolute path for a supported CLI')
         value = (agent, str(Path(home)))
+    if endpoint is not None and (not isinstance(endpoint, ApiEndpoint) or endpoint.host != agent or value is None):
+        raise ValueError('an API endpoint needs its own home on its host CLI')
     token = _ACCOUNT_HOME.set(value)
+    endpoint_token = _API_ENDPOINT.set(endpoint)
     try:
         yield
     finally:
+        _API_ENDPOINT.reset(endpoint_token)
         _ACCOUNT_HOME.reset(token)
+
+
+def bound_api_endpoint(agent) -> ApiEndpoint | None:
+    endpoint = _API_ENDPOINT.get()
+    return endpoint if endpoint is not None and endpoint.host == agent else None
+
+
+def api_environment(agent) -> dict[str, str]:
+    """The two variables that point a host CLI at the bound endpoint; {} when none is bound.
+
+    Reads the key now. Raises ApiKeyUnavailable without saying why in detail.
+    """
+    endpoint = bound_api_endpoint(agent)
+    if endpoint is None:
+        return {}
+    from .api_models import ApiModelError, HOSTS, read_key
+    host = HOSTS[endpoint.host]
+    try:
+        key = read_key(endpoint.key_reference())
+    except ApiModelError:
+        raise ApiKeyUnavailable('api_key_unavailable') from None
+    return {host['base_url_variable']: endpoint.base_url, host['token_variable']: key}
+
+
+def api_token_variable(agent) -> str | None:
+    endpoint = bound_api_endpoint(agent)
+    if endpoint is None:
+        return None
+    from .api_models import HOSTS
+    return HOSTS[endpoint.host]['token_variable']
+
+
+REDACTED = b'[REDACTED]'
+
+
+def scrub_secret(lines, secret):
+    """Drop a key from a CLI's output before anything parses, stores or shows it.
+
+    A model with shell tools can print its own environment; whatever it
+    prints must not carry the key into receipts, events or the room.
+    """
+    if not secret:
+        return lines
+    raw = secret.encode('utf-8')
+    return [line.replace(raw, REDACTED) if raw in line else line for line in lines]
+
+
+def launch_environment(agent) -> dict[str, str]:
+    """The environment for one host CLI turn: the usual one, plus a bound endpoint's two variables."""
+    return {**_environment(), **api_environment(agent)}
+
+
+def api_model_settings(agent, choice) -> tuple[dict | None, dict]:
+    """(model choice, extra settings env) for a turn on a bound endpoint.
+
+    Without a chosen model the partner's default is used, and the host's own
+    model aliases point at the same model, so no request names a model the
+    endpoint does not serve and every call is priced from the partner's table.
+    """
+    endpoint = bound_api_endpoint(agent)
+    if endpoint is None:
+        return choice, {}
+    model = (choice or {}).get('model') or endpoint.default_model
+    aliases = {name: model for name in ('ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                                        'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL')}
+    return {'model': model, 'effort': (choice or {}).get('effort')}, aliases
 
 
 def bound_account_home(agent) -> Path | None:
@@ -354,10 +448,12 @@ def _command(agent: str, session_id: str | None, *, schema_json: str | None = No
             command += ['-c', 'model_reasoning_effort=' + json.dumps(choice['effort'])]
         return command + ['-']
     if agent == 'claude':
+        choice, aliases = api_model_settings('claude', choice)
+        settings = json.dumps({'apiKeyHelper': '', **({'env': aliases} if aliases else {})}, separators=(',', ':'))
         command = [find_claude(), '--safe-mode', '--restricted', '--tools', '',
                    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                    '--disable-slash-commands', '--no-chrome',
-                   '--settings', '{"apiKeyHelper":""}',
+                   '--settings', settings,
                    '-p', '--output-format', 'stream-json', '--verbose',
                    '--permission-prompts', 'none']
         if schema_json is not None:
@@ -720,8 +816,9 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 async def _run(command: list[str], prompt: str, cwd: Path, timeout: float, *,
                include_stderr: bool = False, max_output: int = MAX_OUTPUT,
-               cleanup_metadata: dict | None = None) -> tuple[list[bytes], int]:
-    process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=_environment(),
+               cleanup_metadata: dict | None = None, environment: dict | None = None) -> tuple[list[bytes], int]:
+    process = await asyncio.create_subprocess_exec(*command, cwd=cwd,
+        env=_environment() if environment is None else environment,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True)
     async def collect():
@@ -1340,7 +1437,21 @@ async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = No
     if not cwd.is_dir():
         raise ValueError('cwd must be a directory')
     command = _command(agent, session_id, runtime_settings=runtime_settings) if schema_json is None else None
-    status = await _subscription_status(agent, cwd)
+    environment, secret = None, None
+    if bound_api_endpoint(agent) is not None:
+        # An API model partner's account is its endpoint and key, not a
+        # subscription login: no auth status runs, and a missing key stops here.
+        try:
+            environment = launch_environment(agent)
+        except ApiKeyUnavailable as error:
+            error.native_execution = {'agent': agent, 'never_started': True, 'tool_calls': 0, 'tool_results': 0,
+                                      'side_effects_possible': False, 'cleanup_confirmed': True,
+                                      'exit_code': None, 'receipt_path': None}
+            raise
+        secret = environment[api_token_variable(agent)]
+        status = {'subscription_confirmed': True, 'authMethod': 'api_key'}
+    else:
+        status = await _subscription_status(agent, cwd)
     if not status['subscription_confirmed']:
         error = RuntimeError(f'{agent} subscription authentication is unconfirmed; inference refused')
         # Inference was never launched; the auth check owns its own cleanup proof.
@@ -1363,7 +1474,10 @@ async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = No
             command = _command(agent, session_id, schema_json=schema_json, schema_path=schema_path,
                                runtime_settings=runtime_settings)
         try:
-            lines, exit_code = await _run(command, prompt, cwd, timeout)
+            # Only an API model partner's turn brings its own environment; every other call is unchanged.
+            lines, exit_code = await (_run(command, prompt, cwd, timeout) if environment is None
+                                      else _run(command, prompt, cwd, timeout, environment=environment))
+            lines = scrub_secret(lines, secret)
         except asyncio.TimeoutError:
             return {'session_id': session_id, 'text': '', 'usage': None, 'events': [],
                     'status': 'timeout', 'failure_code': 'deadline_exceeded'}

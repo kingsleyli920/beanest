@@ -39,8 +39,12 @@ def _counts(usage):
     return {field: values.get(field) if type(values.get(field)) is int and values[field] >= 0 else 0 for field in _FIELDS}
 
 
-def usage_points(adapter, usage, *, previous=None, resumed=False):
-    """Points this call cost, or None when it cannot be told from what was reported."""
+def token_counts(adapter, usage, *, previous=None, resumed=False):
+    """This call's fresh input, output, cache-read and cache-write tokens, or None.
+
+    One place knows how each tool reports tokens, so workload points and an
+    API partner's spend count the same call the same way.
+    """
     counts = _counts(usage)
     if counts is None:
         return None
@@ -52,9 +56,18 @@ def usage_points(adapter, usage, *, previous=None, resumed=False):
         counts = {field: counts[field] - before[field] for field in _FIELDS}
     cached = counts["cached_input_tokens"]
     fresh = max(counts["input_tokens"] - cached, 0) if scale.cached_input_is_part_of_input else counts["input_tokens"]
-    return (fresh * scale.input + counts["output_tokens"] * scale.output
-            + (cached + counts["cache_read_input_tokens"]) * scale.cache_read
-            + counts["cache_creation_input_tokens"] * scale.cache_write)
+    return {"input": fresh, "output": counts["output_tokens"],
+            "cache_read": cached + counts["cache_read_input_tokens"], "cache_write": counts["cache_creation_input_tokens"]}
+
+
+def usage_points(adapter, usage, *, previous=None, resumed=False):
+    """Points this call cost, or None when it cannot be told from what was reported."""
+    counts = token_counts(adapter, usage, previous=previous, resumed=resumed)
+    if counts is None:
+        return None
+    scale = SCALES.get(adapter, DEFAULT_SCALE)
+    return (counts["input"] * scale.input + counts["output"] * scale.output
+            + counts["cache_read"] * scale.cache_read + counts["cache_write"] * scale.cache_write)
 
 
 def accounts(members, loads, profile):

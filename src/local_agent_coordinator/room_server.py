@@ -29,13 +29,16 @@ from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload)")
+PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload|api-model)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
 AVAILABILITY_RECHECK_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/availability/recheck")
 ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/account/refresh")
 LIFECYCLE_ROUTE = re.compile(rf"/api/(projects|rooms|partners)/({TASK_ID}|[a-z][a-z0-9_-]{{0,31}})/lifecycle")
 PROJECT_NAME_ROUTE = re.compile(rf"/api/projects/({TASK_ID})/name")
 ERROR_STATUS = {
+    "invalid_api_model":400, "unsupported_api_host":400, "invalid_api_base_url":400, "invalid_api_key_reference":400,
+    "invalid_api_prices":400, "invalid_api_models":400, "invalid_api_peak_windows":400, "invalid_api_caps":400,
+    "invalid_api_timezone":400,
     "native_login_unsupported":400, "native_install_unsupported":400, "invalid_workload_level":400, "login_operation_changed":409, "user_native_login_required":403,
     "invalid_delivery_repository":409, "delivery_repository_unavailable":409, "user_delivery_repository_required":403,
     "invalid_code_workspace":400, "user_code_status_required":403,
@@ -593,8 +596,9 @@ class _RoomHandler(_Handler):
             if path == "/api/partners":
                 partners = await service.list_partners()
                 if mcp:
-                    partners = {**partners,"partners":[{key:value for key,value in item.items() if key not in {"connection", "account", "account_source"}}
-                                                       for item in partners["partners"]]}
+                    # Where an API partner's key lives is the user's configuration, not an agent's business.
+                    partners = {**partners,"partners":[{key:value for key,value in item.items() if key not in {"connection", "account", "account_source", "api_model"}}
+                                                       for item in partners["partners"]], "api_model_presets": []}
                 return partners
             match = ROOM_ROUTE.fullmatch(path)
             if match and match[2] is None:
@@ -624,7 +628,8 @@ class _RoomHandler(_Handler):
                                                    selection_kind="folder" if folder else "files")
         if not mcp and path == "/api/partners":
             if (not {"id", "name", "adapter"}.issubset(body)
-                    or set(body) - {"id", "name", "adapter", "avatar", "bean_style", "connection"}):
+                    or set(body) - {"id", "name", "adapter", "avatar", "bean_style", "connection", "api_model"}
+                    or "api_model" in body and not isinstance(body["api_model"], dict)):
                 raise _HTTPError(400, "invalid_arguments")
             return await service.add_partner(**body)
         if not mcp and path == "/api/partners/discover":
@@ -635,6 +640,8 @@ class _RoomHandler(_Handler):
         if not mcp and partner:
             if partner[2] == "appearance" and set(body) == {"bean_style"} and isinstance(body["bean_style"], str):
                 return await service.set_partner_appearance(partner[1], body["bean_style"])
+            if partner[2] == "api-model" and set(body) == {"api_model"} and isinstance(body["api_model"], dict):
+                return await service.set_partner_api_model(partner[1], body["api_model"])
             if partner[2] == "workload" and set(body) == {"level"} and isinstance(body["level"], str):
                 return await service.set_partner_workload(partner[1], body["level"])
             if partner[2] == "connection" and set(body) == {"connection"} and isinstance(body["connection"],dict):

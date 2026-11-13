@@ -310,6 +310,7 @@ const state = {
   discovery: null, discoveryOpened: false, discoveryInFlight: false, discoveryLastOpened: null,
   nativeLogins: new Map(), nativeInstalls: new Map(), firstRunOpen: false, firstRunDismissed: false, firstRunFingerprint: '', noUsableTool: false, nativeLoginBusy: new Set(), nativeLoginErrors: new Map(), nativeLoginTimer: null, nativeSetupFingerprint: null,
   connectionTemplates: [], connectionProtocol: null, configuringPartnerId: null,
+  apiPresets: [], apiDraft: null, editingApiPartnerId: null,
   beanStyleOptions: beanStyles, selectedBeanStyle: 'sprout', beanStyleChosen: false,
   pendingPartner: null, pendingPartnerScopeChanged: false,
   partnerSaveUncertain: false, partnerVerifying: false, projectChoosing: false,
@@ -1893,7 +1894,11 @@ function effortLabels() {
 }
 
 function isAdditionalSession(agent) {
-  return ['claude', 'codex'].includes(agent.adapter) && agent.id !== agent.adapter;
+  return ['claude', 'codex'].includes(agent.adapter) && agent.id !== agent.adapter && !isApiPartner(agent);
+}
+// A pay-per-use API model partner runs on a host tool but is its own partner, with its own key and spending cap.
+function isApiPartner(agent) {
+  return agent?.provider === 'api_endpoint' || agent?.connection_state === 'api_model';
 }
 
 function renderParticipantPicker() {
@@ -1997,7 +2002,8 @@ function memberCard(id, descriptor = {}) {
 function partnerAvailability(id) {
   const value = state.partners.find((partner) => partner.id === id)?.availability
     || state.catalog.find((agent) => agent.id === id)?.availability;
-  return value?.scope === 'default_cli_login' && ['available', 'unknown', 'blocked'].includes(value.state)
+  // An API partner's availability comes from its spend ledger, which is always current.
+  return ['default_cli_login', 'api_endpoint'].includes(value?.scope) && ['available', 'unknown', 'blocked'].includes(value.state)
     && typeof value.selectable === 'boolean' ? value : null;
 }
 function observedQuotaLabel(id) {
@@ -2018,9 +2024,13 @@ function availabilityInfo(id) {
   const reasons = { subscription_limit_reached: t("工具已报告订阅额度用完"), quota_exhausted: t("供应商共享额度已用完"),
     quota_reset_due: t("已到预计重置时间，仍需重新确认"), quota_unknown: t("当前接入还没查到额度；明确报告限额时会暂停使用"),
     account_check_failed: t("这次检查未成功，保留上次记录"), account_identity_unknown: t("当前登录待确认，之前的额度限制仍保留，请刷新账号"),
-    adapter_unsupported: t("当前接入暂未支持额度查询") };
+    adapter_unsupported: t("当前接入暂未支持额度查询"),
+    spend_cap_reached: t("已到你设的花费上限；新的一天或新的一月开始后自动恢复"),
+    api_spend_state_corrupt: t("花费记录读不出来，为免超支先不派活") };
+  // An API partner's limit is the user's own spending cap, read from a ledger that is always current.
+  if (value?.source === 'api_spend_ledger') return { value, blocked, stale: false, summary: blocked ? t("已到花费上限 · 暂不能开始") : t("花费未到上限"), detail: reasons[value.reason] || '' };
   const observed = !blocked && ['quota_unknown', 'adapter_unsupported'].includes(value?.reason) ? observedQuotaLabel(id) : null;
-  const knownExhausted = ['subscription_limit_reached', 'quota_exhausted'].includes(value?.reason);
+  const knownExhausted = ['subscription_limit_reached', 'quota_exhausted', 'spend_cap_reached'].includes(value?.reason);
   const summary = blocked ? knownExhausted ? t("额度已用完 · 暂不能开始") : value?.reason === 'account_identity_unknown' ? t("当前登录待确认 · 暂不能开始") : t("可用状态待确认 · 暂不能开始")
     : observed ? observed.text : value?.state === 'available' ? t("额度够用") : quotaPendingLabel(id);
   const detail = observed ? t("{p0} · 额度更新：{p1}{p2}", { p0: observed.text, p1: Number.isFinite(observed.quota.checked_at) ? timeLabel(observed.quota.checked_at, true) : t("时间未提供"), p2: observed.quota.stale ? t(" · 旧快照") : '' }) : value ? [reasons[value.reason] || (blocked ? t("暂不能开始新任务") : summary),
@@ -2035,6 +2045,7 @@ function availabilityInfo(id) {
 function memberAvailabilityLine(info) {
   if (!info.value || !info.blocked) return null;
   const reason = info.value.reason;
+  if (reason === 'spend_cap_reached') return { tone: 'wait', text: t("已到花费上限 · 到期自动恢复") };
   if (['subscription_limit_reached', 'quota_exhausted'].includes(reason)) return { tone: 'wait',
     text: Number.isFinite(info.value.resets_at) ? t("额度用完 · {p0} 恢复", { p0: timeLabel(info.value.resets_at, true) }) : t("额度用完 · 供应商没给恢复时间，每小时自动试一次") };
   if (reason === 'quota_reset_due') return { tone: 'wait', text: t("额度应已恢复 · 点“账号与额度”确认") };
@@ -2051,6 +2062,7 @@ function partnerSetupState(id) {
 function memberLoginCaption(account, id) {
   const setupState = partnerSetupState(id);
   if (setupState === 'not_installed') return t("还没安装");
+  if (account?.source === 'api_endpoint') return accountLoginText(account);
   if (setupState === 'login_required') return t("还差登录");
   if (!account || account.state === 'not_checked') return setupState === 'ready' ? t("已登录") : t("登录未检查");
   const known = !!accountEmail(account) || typeof account.plan === 'string' && !!account.plan || setupState === 'ready';
@@ -2073,7 +2085,7 @@ function availabilityBlockMessage() {
 }
 function quotaFailoverSelection() {
   const policy = executionPolicyPayload(); const blocked = blockedParticipants();
-  if (!policy?.quota_failover || !blocked.length || blocked.some((id) => !['subscription_limit_reached', 'quota_exhausted'].includes(availabilityInfo(id).value?.reason))) return null;
+  if (!policy?.quota_failover || !blocked.length || blocked.some((id) => !['subscription_limit_reached', 'quota_exhausted', 'spend_cap_reached'].includes(availabilityInfo(id).value?.reason))) return null;
   const available = state.participantIds.filter((id) => !blocked.includes(id) && state.catalog.some((agent) => agent.id === id && eligibleAgent(agent)));
   return available.length ? { blocked, available } : null;
 }
@@ -3214,7 +3226,9 @@ function eligibleAgent(agent) {
   return !removed && !pendingPartnerOperation(agent.id) && agent.enabled !== false && activeEntry(agent) && (!registered || (registered.enabled !== false && activeEntry(registered)));
 }
 function notSetUp(agent) {
-  return ['not_installed', 'login_required'].includes(state.adapters.find((adapter) => adapter.id === (agent?.adapter || agent?.id))?.setup?.state);
+  const setup = state.adapters.find((adapter) => adapter.id === (agent?.adapter || agent?.id))?.setup?.state;
+  // An API partner needs the host tool installed, never the host's own subscription login.
+  return isApiPartner(agent) ? setup === 'not_installed' : ['not_installed', 'login_required'].includes(setup);
 }
 function selectableAgent(agent, { retainBlocked = false } = {}) {
   return eligibleAgent(agent) && !notSetUp(agent) && (retainBlocked || !availabilityInfo(agent.id).blocked);

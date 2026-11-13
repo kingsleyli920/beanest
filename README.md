@@ -86,11 +86,26 @@ When an account is down to about 15% of its quota, Beanest gives work to other p
 
 A partner's current quota and the task's token usage are separate observations. Unknown quota is shown as unknown; it is not zero. Several partner profiles using the same CLI sign-in do not create separate accounts or quota pools.
 
+### Pay-per-use API models
+
+Some model vendors sell API access but have no coding CLI of their own. Beanest can add such a model as a partner by running Claude Code against the vendor's Anthropic-compatible endpoint. In **Partners**, open **Add a tool or separate session**, choose a preset such as **DeepSeek (pay-per-use API)** or **Custom Anthropic-compatible endpoint**, and fill in:
+
+- the endpoint's base URL (https, with no trailing `/` or `/v1`);
+- where the key lives: a local `.env` file and the variable name in it, or a macOS Keychain item;
+- the models you want to use and your price for each, per 1M tokens (input, output, cache read, cache write), with optional peak-hour prices and the hours they apply;
+- a daily and/or monthly spending cap.
+
+**Beanest never stores the key.** It saves only where the key lives, reads it just before each call, and passes it to that one Claude Code process as `ANTHROPIC_AUTH_TOKEN` together with `ANTHROPIC_BASE_URL`. No other partner ever receives these variables. If a tool prints the key, Beanest removes it from what it records. The partner runs with its own Claude Code configuration folder, separate from your normal Claude sign-in, and does not need a Claude subscription.
+
+The prices in a preset are starting points copied from the vendor's price page. They are your numbers: check them and edit them at any time. After each call Beanest prices the tokens the call reported and adds them to the partner's spend for the day and the month, which the partner card shows against your caps. Below about 15% of a cap the partner is used only when nobody else can take the work. At the cap it gets no new work and the task continues with the other partners; if it is the only partner, the task waits as it does for an exhausted quota and continues when a new day or month starts. These figures are estimates; your vendor's bill is the record. Calls that report no usage are counted but cannot be priced.
+
 ## Permissions and privacy
 
 Beanest stores its own runtime data on your machine. **Local storage does not mean offline inference:** your goal and relevant context are sent to the agents and providers you select.
 
 A development copy is **not an operating-system sandbox**. With Full Access, a native agent may read or write other accessible files, execute commands, and use the network. Choose this mode only for agents and work you trust. Full Access is each tool's own highest permission, and Beanest adds no limits of its own: partners write the changes they own into your project, as when you use them directly. With other permissions, Beanest does not merge a development copy into your source project. Beanest never publishes to GitHub by itself.
+
+An API model partner's key stays where you put it. Beanest's own files hold only its location.
 
 Runtime databases, conversations, credentials, connection files, logs, screenshots, and local configuration are excluded from this source release. Do not attach them to public issues. See [Security](SECURITY.md) and [Third-party notices](THIRD_PARTY_NOTICES.md).
 

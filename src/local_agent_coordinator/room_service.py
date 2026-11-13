@@ -749,7 +749,7 @@ class RoomService(RoomPromptMixin):
                 **settings, "members": {identifier: choice for identifier, choice in settings["members"].items()
                                         if identifier in eligible_members}}
             validate_choices(choices, {identifier: self.registry.get(identifier) for identifier in members},
-                             self._runtime_catalogs)
+                             self._member_catalogs(members))
             return settings
         except RuntimeSettingsError as error:
             raise RoomError(error.code) from None
@@ -782,9 +782,28 @@ class RoomService(RoomPromptMixin):
             partners[spec["id"]] = {"state": "not_checked" if supported else "unavailable",
                 "supported": supported, "models": [], "checked_at": None,
                 "reason": None if supported else "runtime_settings_unsupported",
-                **(self._runtime_catalogs.get(scopes.get(spec["id"], spec["adapter"]), {}) if supported else {})}
+                **(self._runtime_catalogs.get(scopes.get(spec["id"], spec["adapter"]), {}) if supported else {}),
+                **(self._api_catalog(spec["id"]) or {})}
         return {"permissions": [dict(item) for item in PERMISSIONS], "partners": partners,
                 "scope": "coordinator_owned_only"}
+
+    def _api_catalog(self, partner_id):
+        """An API model partner's saved model list; its endpoint is never asked."""
+        if self.partner_manager is None:
+            return None
+        try:
+            return self.partner_manager.api_runtime_options(partner_id)
+        except PartnerError:
+            return None
+
+    def _member_catalogs(self, members):
+        """Catalogs to check model choices against: a partner's own list first, then its tool's."""
+        catalogs = dict(self._runtime_catalogs)
+        for identifier in members:
+            catalog = self._api_catalog(identifier)
+            if catalog is not None:
+                catalogs[identifier] = catalog
+        return catalogs
 
     async def refresh_runtime_options(self, partner_id):
         self._available()
@@ -793,6 +812,8 @@ class RoomService(RoomPromptMixin):
             raise RoomError("unknown_partner")
         if not spec.supports_runtime_settings or spec.adapter not in NATIVE_IDS:
             raise RoomError("runtime_settings_unsupported")
+        if self._api_catalog(partner_id) is not None:
+            return await self.runtime_options()
         scope = self.partner_manager.account_scope(partner_id) if self.partner_manager is not None else spec.adapter
         async with self._runtime_catalog_locks.setdefault(scope, asyncio.Lock()):
             cached = self._runtime_catalogs.get(scope)
@@ -876,7 +897,9 @@ class RoomService(RoomPromptMixin):
                         "cli_available": None, "auth": {"method": None, "subscription_confirmed": None}}}
             for spec in self.registry.describe()]
         from .partner_manager import connection_templates, connection_protocol
+        from .api_models import presets as api_model_presets
         return {"partners": [{**item, "monitor": self.store.monitor(item["id"])} for item in profiles],
+                "api_model_presets": api_model_presets() if self.partner_manager is not None else [],
                 "partner_lifecycle_operations": [self._public_partner_operation(operation) for operation in self.store.partner_operations()],
                 "connection_templates": connection_templates() if self.partner_manager is not None else [],
                 "connection_protocol": connection_protocol() if self.partner_manager is not None else None,
@@ -1244,11 +1267,41 @@ class RoomService(RoomPromptMixin):
         return {"home": home} if home is not None else {}
 
     @staticmethod
-    async def _with_account_home(adapter, home, operation):
+    async def _with_account_home(adapter, home, operation, endpoint=None):
         # Every child of this call, including auth checks and resumed sessions,
         # inherits the profile's home; nothing else changes the environment.
-        with adapters.account_home(adapter, home):
+        # An API model partner also binds its endpoint, so only its own host
+        # CLI child receives the base URL and the key.
+        with adapters.account_home(adapter, home, endpoint):
             return await operation
+
+    def _partner_endpoint(self, provider):
+        """The endpoint an API model partner's calls bind; None for everyone else."""
+        if self.partner_manager is None:
+            return None
+        try:
+            return self.partner_manager.api_endpoint(provider)
+        except PartnerError:
+            return None
+
+    def _record_api_spend(self, room_id, provider, job, result, runtime_kwargs):
+        """Price a finished call of an API model partner from the usage it reported.
+
+        Recorded as soon as the call returns, whatever the room then makes of
+        the reply: the endpoint charged for it either way. Never stops the job.
+        """
+        if self.partner_manager is None or not isinstance(result, dict):
+            return
+        try:
+            model = (runtime_kwargs.get("runtime_settings") or {}).get("model")
+            previous, resumed = None, bool(job.get("session_id"))
+            if resumed and self.partner_manager.api_scale_cumulative(provider):
+                member = next((item for item in self.store.snapshot(room_id)["members"] if item["id"] == provider), None)
+                previous = (member or {}).get("usage")
+            usage = {"values": result["usage"]} if isinstance(result.get("usage"), dict) else None
+            self.partner_manager.record_api_spend(provider, usage, model, previous=previous, resumed=resumed)
+        except (PartnerError, OSError, ValueError, TypeError, KeyError):
+            pass
 
     async def set_partner_account_source(self, partner_id, source):
         """Switch a profile between the local login and its own CLI home.
@@ -1277,6 +1330,15 @@ class RoomService(RoomPromptMixin):
             return self.partner_manager.workload_profiles()
         except PartnerError:
             return {}
+
+    async def set_partner_api_model(self, partner_id, api_model):
+        """Edit an API model partner's prices, caps, models or key location."""
+        self._available()
+        if self.partner_manager is None:
+            raise RoomError("partner_management_unavailable")
+        self.partner_manager.set_api_model(partner_id, api_model)
+        self._sync_partners()
+        return await self.list_partners()
 
     async def set_partner_workload(self, partner_id, level):
         self._available()
@@ -5814,6 +5876,7 @@ class RoomService(RoomPromptMixin):
                 return
             bound_identity = self.partner_manager.account_identity(provider) if self.partner_manager is not None else None
             home = self._partner_home(provider)
+            endpoint = self._partner_endpoint(provider)
             job = self.store.claim(room_id, provider)
             if job is None:
                 self._maybe_execute(room_id)
@@ -5901,7 +5964,7 @@ class RoomService(RoomPromptMixin):
                                                            timeout=timeout, response_schema=schema, **runtime_kwargs)
                     else:
                         operation = spec.invoke(prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
-                    return self._with_account_home(spec.adapter, home, operation)
+                    return self._with_account_home(spec.adapter, home, operation, endpoint)
                 attempts = 0
                 while True:
                     operation = begin_call()
@@ -5916,6 +5979,8 @@ class RoomService(RoomPromptMixin):
                             raise
                         evidence = error.native_execution
                     else:
+                        if endpoint is not None:
+                            self._record_api_spend(room_id, provider, job, result, runtime_kwargs)
                         died = reply_call_died(job, result)
                         if attempts >= _PREFLIGHT_RETRIES or not (died or preflight_failed(job["session_id"], result=result)):
                             break

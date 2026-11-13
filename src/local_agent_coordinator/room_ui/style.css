@@ -1716,3 +1716,20 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 html[lang="en"] .quota-row { grid-template-columns: 4.9em minmax(0, 1fr) auto; }
 /* The account panel reads in two sizes: 13px window titles, 11.5px for facts, captions and buttons. */
 .provider-account-body .monitor-facts, .provider-account-body > .detail-caption, .provider-account-body > p, .provider-account-body .quiet-button { font-size: 11.5px; }
+
+/* API model partner: model rows with one labelled cell per price. */
+.partner-api { display: grid; gap: 8px; margin: 10px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; }
+.partner-api legend { padding: 0 6px; font-weight: 600; }
+.api-models-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+.api-models { display: grid; gap: 10px; }
+.api-model-row { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.api-model-heading { display: flex; align-items: center; gap: 10px; }
+.api-model-heading > input { flex: 1; min-width: 0; }
+.partner-api .api-model-default { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12px; }
+.partner-api .api-model-default input { display: inline-block; width: auto; margin: 0; }
+.api-price-line { display: grid; grid-template-columns: 9.5em repeat(4, minmax(0, 1fr)); gap: 8px; align-items: end; }
+.api-price-caption { align-self: center; color: var(--muted); font-size: 12px; }
+.partner-api .api-price-cell { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11px; }
+.api-price-cell input { width: 100%; min-width: 0; }
+.api-price-list { display: grid; gap: 4px; margin: 10px 0; }
+@media (max-width: 640px) { .api-price-line { grid-template-columns: repeat(2, minmax(0, 1fr)); } .api-price-caption { grid-column: 1 / -1; } }
