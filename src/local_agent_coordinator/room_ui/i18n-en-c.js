@@ -1113,4 +1113,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "{p0} · 已删除 · {p1}": "{p0} · deleted · {p1}",
   "版本 {p0} 里已没有这个文件；它在原项目里的 SHA256 是 {p1}。": "This file is no longer in version {p0}. Its SHA256 in the original project is {p1}.",
   "角色": "Role",
+  "模型：{p0}": "Model: {p0}",
+  "{p0}的模型、角色与工作量：{p1}": "{p0} model, role and workload: {p1}",
+  "每位伙伴的模型、角色与工作量": "Model, role and workload for each partner",
 });

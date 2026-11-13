@@ -1369,7 +1369,6 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .new-room > span[aria-hidden="true"] { font-size: 17px; font-weight: 400; }
 .member-heading > .avatar { grid-column: 1; grid-row: 1; }
 .member-heading > div { grid-column: 2; grid-row: 1; }
-.member-heading > .member-model { grid-column: 3; grid-row: 1; }
 .member-heading .appearance-button { grid-row: 2; grid-column: 2 / -1; justify-self: start; width: auto; min-width: 0; margin: 0; text-align: left; white-space: nowrap; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; }
 .member-doing .member-status { margin: 0; padding: 0; background: transparent; color: var(--ink2); font-size: 12.5px; }
 .sidebar-footer { margin-top: 8px; padding: 10px 4px 0; border-color: var(--line); font-size: 11px; }
@@ -1591,8 +1590,8 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .member-heading .member-status { display: none; }
 .account-email, .adapter-identity { margin: 0; overflow: hidden; color: var(--muted); font-size: 11.5px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .adapter-identity { display: none; }
-.member-model { max-width: 100px; height: 26px; overflow: hidden; padding: 0 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--sunken); color: var(--ink2); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
-.member-model:hover { border-color: var(--line-strong); }
+/* Model and role are read-only lines on the card; they are changed in the bottom bar or in 任务选项. */
+.member-model { margin: 0; color: var(--ink2); font-size: 12px; overflow-wrap: anywhere; }
 .member-model:empty { display: none; }
 .member-doing { display: flex; align-items: flex-start; gap: 7px; margin: 0; color: var(--ink2); font-size: 12.5px; line-height: 1.5; }
 .member-doing::before { content: ""; flex: none; width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--line-strong); }
@@ -1682,10 +1681,9 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
   .app-shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar { display: none; }
 }
-/* A narrow partner column (laptop widths) gives the name the whole first row; the model and the appearance link stack below it. */
+/* A narrow partner column (laptop widths) gives the name the whole first row; the appearance link (partner manager) stacks below it. */
 @media (max-width: 1366px) {
   .member-heading > div { grid-column: 2 / -1; }
-  .member-heading > .member-model { grid-column: 2 / -1; grid-row: 2; justify-self: start; max-width: 100%; }
   .member-heading .appearance-button, html[lang="en"] .member-heading > .appearance-button { grid-column: 2 / -1; grid-row: 3; }
 }
 /* Long English labels wrap instead of cutting off what the state is. */
@@ -1716,3 +1714,27 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 html[lang="en"] .quota-row { grid-template-columns: 4.9em minmax(0, 1fr) auto; }
 /* The account panel reads in two sizes: 13px window titles, 11.5px for facts, captions and buttons. */
 .provider-account-body .monitor-facts, .provider-account-body > .detail-caption, .provider-account-body > p, .provider-account-body .quiet-button { font-size: 11.5px; }
+/* 任务选项 → 参与工具: one line per partner with what is set, and its settings card opened in place. */
+.task-partner-settings { display: flex; flex-direction: column; gap: 6px; margin-top: 9px; }
+.task-partner-settings[hidden] { display: none; }
+.task-partner-row { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--sunken); }
+.task-partner-line { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 6px 5px 8px; font-size: 12px; line-height: 1.45; }
+.task-partner-line .avatar { flex: none; width: 22px; height: 25px; }
+.task-partner-line .bean-body { inset: 2px 2px 4px; }
+.task-partner-line .avatar-initial { display: none; }
+.task-partner-name { flex: 0 1 auto; max-width: 38%; overflow: hidden; color: var(--ink2); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.task-partner-summary { flex: 1 1 auto; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+.task-partner-toggle { flex: none; margin-left: auto; padding: 3px 10px; font-size: 11.5px; }
+.task-partner-panel { padding: 0 9px 9px; font-size: 12px; }
+.task-partner-panel[hidden] { display: none; }
+/* One label column, so the selects line up whatever each label's length. */
+.task-partner-panel .runtime-partner > label, .task-partner-panel .runtime-role > label { grid-template-columns: 4.5em minmax(0, 1fr); }
+html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .task-partner-panel .runtime-role > label { grid-template-columns: 8.6em minmax(0, 1fr); }
+.task-partner-panel .runtime-partner { padding: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+.task-partner-panel .runtime-partner-heading { justify-content: flex-end; margin: 6px 0 2px; }
+.task-partner-panel .runtime-partner-heading > .avatar, .task-partner-panel .runtime-partner-heading > strong { display: none; }
+@media (max-width: 560px) {
+  .task-partner-line { flex-wrap: wrap; }
+  .task-partner-name { max-width: calc(100% - 100px); }
+  .task-partner-summary { order: 3; flex-basis: 100%; padding-left: 29px; }
+}

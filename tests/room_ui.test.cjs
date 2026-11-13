@@ -3786,6 +3786,115 @@ test('each partner can be given a role and a workload for the new task, and a mo
   });
 });
 
+test('任务选项 sets each chosen partner\'s model, role and workload in place, the same way the per-partner popover does', async () => {
+  // Catches the settings moving into 任务选项 but writing a different draft than the popover (lost role, reset workload) or not reaching the new task.
+  const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });
+  const open = () => browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/runtime-options') return runtimeOptionsFixture();
+    if (request.path === '/api/rooms' && request.method === 'POST') return saved;
+  } });
+  const ui = await open();
+  await ui.click('task-options-partners');
+  assert.equal(ui.get('task-partner-summary-claude').textContent, '默认模型 · 默认 · 全能');
+  assert.equal(ui.get('task-partner-panel-claude').hidden, true);
+  await ui.click('task-partner-toggle-claude');
+  const panel = ui.get('task-partner-panel-claude');
+  assert.equal(panel.hidden, false); assert.equal(ui.get('task-partner-toggle-claude').textContent, '收起');
+  assert.equal(descendants(panel).includes(ui.get('runtime-card-claude')), true, 'the settings card opens inside the dialog');
+  assert.equal(descendants(ui.get('runtime-settings-body')).some((node) => node.id === 'runtime-card-claude'), false, 'one card per partner, never two with the same ids');
+  assert.equal(ui.get('runtime-settings-popover').hidden, true); assert.equal(ui.get('task-options-popover').hidden, false);
+  assert.ok(ui.get('runtime-model-claude').children.some((node) => node.value === 'opus'), 'the model list is read on opening, as in the popover');
+  selectRuntime(ui, 'runtime-model-claude', 'opus'); selectRuntime(ui, 'runtime-effort-claude', 'high');
+  selectRuntime(ui, 'runtime-role-claude', 'reviewer'); selectRuntime(ui, 'runtime-workload-claude', 'high');
+  assert.equal(ui.get('task-partner-summary-claude').textContent, 'Opus · 高 · 审查 · 工作量多');
+  assert.match(ui.get('runtime-shortcut-claude').textContent, /Opus.*高.*审查/, 'the bottom bar shows the same choice');
+  assert.equal(ui.get('member-model-claude').textContent, '模型：Opus · 高');
+  assert.equal(ui.get('member-workload-claude').textContent, '角色：审查');
+  assert.equal(descendants(ui.get('task-partner-panel-codex')).length, 0, 'a partner that is not opened has no card in the dialog');
+  await ui.click('task-partner-toggle-codex');
+  assert.equal(ui.get('task-partner-panel-claude').hidden, true, 'one partner open at a time');
+  selectRuntime(ui, 'runtime-role-codex', 'new');
+  assert.equal(descendants(ui.get('task-partner-panel-codex')).includes(ui.get('role-editor-name')), true, 'a new role is written in the dialog');
+  ui.get('role-editor-name').value = '文档'; ui.get('role-editor-name').fire('input');
+  await ui.click('role-editor-save');
+  const customId = ui.get('runtime-role-codex').value; assert.match(customId, /^custom:[a-z0-9]{12}$/);
+  await ui.click('task-options-close');
+  assert.equal(descendants(ui.get('runtime-settings-body')).some((node) => node.id === 'runtime-card-claude'), true, 'closing the dialog gives the card back to the popover');
+  ui.type('分工完成一个虚构小任务'); await ui.submit();
+  const viaDialog = ui.posts().find((request) => request.path === '/api/rooms').body.runtime_settings.members;
+  assert.deepEqual(viaDialog, {
+    claude: { model: 'opus', effort: 'high', role: { id: 'reviewer' }, workload: 'high' },
+    codex: { model: null, effort: null, role: { id: customId, name: '文档', duty: '', abilities: ['work'] } },
+  });
+  // The same choices through the per-partner popover give the same draft.
+  const popover = await open();
+  await popover.click('runtime-shortcut-claude');
+  selectRuntime(popover, 'runtime-model-claude', 'opus'); selectRuntime(popover, 'runtime-effort-claude', 'high');
+  selectRuntime(popover, 'runtime-role-claude', 'reviewer'); selectRuntime(popover, 'runtime-workload-claude', 'high');
+  await popover.click('runtime-settings-close'); popover.type('分工完成一个虚构小任务'); await popover.submit();
+  assert.deepEqual(popover.posts().find((request) => request.path === '/api/rooms').body.runtime_settings.members.claude, viaDialog.claude);
+});
+
+test('任务选项 keeps a fixed round and a handed-over partner read-only, as the popover does', async () => {
+  // Catches the new in-dialog settings letting a running round or a retired partner be changed.
+  const saved = activeActivitySnapshot(); saved.current_run.runtime_settings = { permission: 'workspace_write', effective_permission: 'workspace_write',
+    members: { claude: { model: 'opus', effort: 'high' }, codex: { model: null, effort: null } } };
+  const ui = await browser({ rooms: [saved.room], saved, route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });
+  await ui.click('task-options-partners');
+  assert.equal(ui.get('task-partner-summary-claude').textContent, 'opus · 高 · 全能', 'before the model list is read, the saved id shows as is');
+  await ui.click('task-partner-toggle-claude');
+  for (const id of ['runtime-model-claude', 'runtime-effort-claude', 'runtime-role-claude', 'runtime-workload-claude', 'runtime-refresh-claude']) assert.equal(ui.get(id).disabled, true, id);
+  assert.equal(ui.posts().length, 0, 'a fixed round never asks the tool for its models');
+  const retired = withRuntimeConfiguration(withNaturalContinuation(objectiveSnapshot({ status: 'running' }))); retired.team.phase = 'working';
+  Object.assign(retired.members[0], { configuration_dispatchable: false, configuration_dispatch_reason: 'partner_removed', configuration_handoff_completed: true, configuration_handoff_state: 'done' });
+  Object.assign(retired.members[1], { configuration_dispatchable: true, configuration_dispatch_reason: null });
+  const handed = await browser({ rooms: [retired.room], saved: retired, partnerLifecycleSupport: true, naturalRuntimeSupport: true, naturalContinuationSupport: true, executionPolicySupport: true,
+    route(request) { if (request.path === '/api/runtime-options' || request.path.endsWith('/runtime/refresh')) return runtimeOptionsFixture(); } });
+  await handed.click('task-options-partners');
+  assert.match(handed.get('task-partner-summary-claude').textContent, / · 仅查看$/);
+  await handed.click('task-partner-toggle-claude');
+  for (const id of ['runtime-model-claude', 'runtime-effort-claude', 'runtime-role-claude', 'runtime-workload-claude']) assert.equal(handed.get(id).disabled, true, id);
+  await handed.click('task-partner-toggle-codex');
+  assert.equal(handed.get('runtime-role-codex').disabled, false, 'the partner taking over can still be set');
+});
+
+test('the partner card on the right only reports model, effort and role and opens no settings', async () => {
+  // Catches a settings button (model or appearance) coming back onto the monitoring card.
+  const saved = snapshot({ agents: catalog.slice(0, 2), events: [message(1, 'claude', '我来写计划。')] });
+  saved.room.runtime_settings = { permission: 'workspace_write', effective_permission: 'workspace_write',
+    members: { claude: { model: 'opus', effort: 'high', role: { id: 'builder' } }, codex: { model: null, effort: null } } };
+  const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved, route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });
+  const card = ui.get('member-claude');
+  assert.equal(ui.get('member-model-claude').tagName, 'P');
+  assert.equal(ui.get('member-model-claude').textContent, '模型：opus · 高');
+  assert.match(ui.get('member-workload-claude').textContent, /^角色：开发/);
+  const openers = descendants(card).filter((node) => node.getAttribute('aria-controls') === 'runtime-settings-popover' || node.dataset.appearance);
+  assert.deepEqual(openers.map((node) => node.id || node.className), []);
+  assert.deepEqual(descendants(card).filter((node) => ['BUTTON', 'SELECT'].includes(node.tagName) && !nodeContainsAccount(node)).map((node) => node.id || node.className), [],
+    'every control left on the card belongs to the account footer');
+  ui.get('member-model-claude').fire('click'); await settle();
+  assert.equal(ui.get('runtime-settings-popover').hidden, true); assert.equal(ui.get('appearance-dialog').hidden, true);
+});
+function nodeContainsAccount(node) {
+  // Account recovery actions (sign in, refresh quota, enable) stay on the card; they are not task settings.
+  for (let parent = node; parent; parent = parent.parentNode) if (parent.id?.startsWith('provider-account-')) return true;
+  return false;
+}
+
+test('a partner with no model chosen reads 默认模型 everywhere, in both languages', async () => {
+  // Catches the old "跟随工具" wording, which read as a tool setting rather than the model.
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });
+  assert.equal(ui.get('member-model-claude').textContent, '模型：默认模型');
+  assert.match(ui.get('runtime-shortcut-claude').textContent, /^Claude Code默认模型·默认 · 全能⌄$/);
+  await ui.click('runtime-shortcut-claude');
+  assert.equal(ui.get('runtime-model-claude').firstChild.textContent, '工具默认模型');
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });
+  assert.equal(english.get('member-model-claude').textContent, 'Model: Default model');
+  await english.click('task-options-partners'); await english.click('task-partner-toggle-claude');
+  assert.equal(english.get('runtime-model-claude').firstChild.textContent, "Tool's default model");
+  assert.equal(english.get('task-partner-toggle-claude').textContent, 'Collapse');
+});
+
 test('a role is sent even when model options could not be read', async () => {
   // Catches: settings dropped from the new task because only model choices were thought to need them.
   const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });
@@ -3958,7 +4067,7 @@ test('visible partner model shortcuts load the clicked catalog directly and keep
   } });
   const trigger = ui.get('runtime-shortcut-claude'); const quota = ui.get('composer-usage-claude');
   assert.equal(trigger.type, 'button'); assert.equal(trigger.parentNode, quota.parentNode);
-  assert.match(trigger.getAttribute('aria-label'), /Claude Code的模型与思考强度：跟随工具，默认强度/);
+  assert.match(trigger.getAttribute('aria-label'), /Claude Code的模型与思考强度：默认模型，默认强度/);
   ui.type('这份目标不被设置弹层改掉'); await ui.click(trigger.id);
   assert.equal(ui.get('runtime-settings-popover').hidden, false);
   assert.equal(ui.get('runtime-card-claude').hidden, false); assert.equal(ui.get('runtime-card-codex').hidden, true);
@@ -3970,7 +4079,7 @@ test('visible partner model shortcuts load the clicked catalog directly and keep
   waiting.resolve(); await settle();
   assert.equal(ui.document.activeElement.id, 'runtime-model-claude');
   assert.ok(ui.get('runtime-model-claude').children.some((node) => node.textContent === 'Opus 5.5'));
-  assert.equal(ui.get('runtime-model-claude').firstChild.textContent, '跟随工具设置');
+  assert.equal(ui.get('runtime-model-claude').firstChild.textContent, '工具默认模型');
   assert.ok(ui.get('runtime-model-claude').children.some((node) => node.value === 'default' && node.textContent === '默认推荐（Opus 5.5）'));
   assert.equal(ui.get('runtime-model-claude').value, '', 'opening a catalog never turns null into an explicit recommended model');
   selectRuntime(ui, 'runtime-model-claude', 'opus'); selectRuntime(ui, 'runtime-effort-claude', 'high');
@@ -9540,7 +9649,9 @@ test('existing active partners can preview cancel and save ten outfits without s
     if (request.path === '/api/partners' || request.path === '/api/partners?view=compact') return response();
   } });
   ui.type('保留我的草稿'); await ui.choose('codex');
-  const open = () => descendants(ui.get('member-claude')).find((node) => node.dataset.appearance === 'claude').fire('click');
+  // Appearance is changed in 伙伴与额度; the partner card on the right only reports.
+  await ui.click('open-partners');
+  const open = () => descendants(ui.get('workspace-manager')).find((node) => node.dataset.appearance === 'claude').fire('click');
   open();
   assert.equal(ui.get('appearance-dialog').hidden, false);
   assert.equal(ui.get('appearance-picker').children.length, 10);
@@ -9566,7 +9677,8 @@ test('existing active partners can preview cancel and save ten outfits without s
 
 test('appearance saving failure preserves selection and can close without changing a profile', async () => {
   const ui = await browser({ route(request) { if (request.path.endsWith('/appearance')) throw new Error('offline'); } });
-  descendants(ui.get('member-claude')).find((node) => node.dataset.appearance === 'claude').fire('click');
+  await ui.click('open-partners');
+  descendants(ui.get('workspace-manager')).find((node) => node.dataset.appearance === 'claude').fire('click');
   ui.get('appearance-picker').children.at(-1).fire('click'); await ui.click('appearance-save');
   assert.equal(ui.get('appearance-error').hidden, false);
   assert.equal(ui.get('appearance-picker').children.at(-1).getAttribute('aria-checked'), 'true');
@@ -10802,9 +10914,9 @@ test('Codex ultra effort is named in both languages and not repeated with anothe
   const saved = withRuntimeConfiguration(objectiveSnapshot({ status: 'complete' }));
   saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'gpt-x', effort: 'ultra' };
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.match(ui.get('member-model-codex').textContent, /· 极高 ⌄$/);
+  assert.equal(ui.get('member-model-codex').textContent, '模型：gpt-x · 极高');
   const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.match(english.get('member-model-codex').textContent, /· Ultra ⌄$/);
+  assert.equal(english.get('member-model-codex').textContent, 'Model: gpt-x · Ultra');
 });
 
 test('a saved model choice keeps its friendly name after a reload without the model list', async () => {
@@ -10813,12 +10925,12 @@ test('a saved model choice keeps its friendly name after a reload without the mo
   saved.runtime_configuration.desired.runtime_settings.members.claude = { model: 'default', effort: 'low' };
   saved.runtime_configuration.desired.runtime_settings.members.codex = { model: 'kimi-code/kimi-for-coding', effort: null };
   const fresh = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.equal(fresh.get('member-model-claude').textContent, '默认推荐 · 低 ⌄', 'without any saved names, default reads as the tool default');
-  assert.equal(fresh.get('member-model-codex').textContent, 'kimi-for-coding ⌄', 'a path id keeps its last part, and a default effort is left off the card');
+  assert.equal(fresh.get('member-model-claude').textContent, '模型：默认推荐 · 低', 'without any saved names, default reads as the tool default');
+  assert.equal(fresh.get('member-model-codex').textContent, '模型：kimi-for-coding', 'a path id keeps its last part, and a default effort is left off the card');
   const languageStorage = new Map([['beanest:model-names-v1', JSON.stringify({ claude: {
     default: { name: '', resolved_model: 'claude-opus-5-5' }, opus: { name: 'Opus 5.5', resolved_model: 'claude-opus-5-5' } } })]]);
   const reloaded = await browser({ languageStorage, rooms: [saved.room], saved, executionPolicySupport: true, naturalRuntimeSupport: true });
-  assert.equal(reloaded.get('member-model-claude').textContent, 'Opus 5.5（默认） · 低 ⌄');
+  assert.equal(reloaded.get('member-model-claude').textContent, '模型：Opus 5.5（默认） · 低');
 });
 
 test('the progress pane still lists what earlier rounds finished after the objective moves to a new run', async () => {
@@ -11028,7 +11140,7 @@ test('each partner card and each partner message name its role, the default one 
   const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
   assert.match(ui.get('member-workload-claude').textContent, /^角色：规划/);
   assert.match(ui.get('member-workload-codex').textContent, /^角色：全能/);
-  assert.doesNotMatch(ui.get('member-model-claude').textContent, /规划/, 'the narrow card button keeps to the model');
+  assert.doesNotMatch(ui.get('member-model-claude').textContent, /规划/, 'the model line keeps to the model; the role has its own line');
   const roles = descendants(ui.get('events')).filter((node) => node.classList.contains('event-role'));
   assert.deepEqual(roles.map((node) => node.textContent), ['规划']);
 });
