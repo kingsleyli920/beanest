@@ -5179,13 +5179,14 @@ class RoomStore:
             db.execute("UPDATE team_jobs SET extension_grants_json=? WHERE job_id=?", (json.dumps(grants), job_id))
 
     def grant_taken_files(self, job_id, files, revision, *, baseline=None):
-        """Exact-SHA grants for the running work call's own task files whose writer cannot hand them over.
+        """Exact-SHA grants for the running work call's own task files that another partner wrote.
 
-        A file a retired, clean partner wrote moves by make_grant, as in a
-        quota handoff. With baseline (selected-files mode), a source file
-        nobody has changed yet still has its first assignment, so it moves to
-        whoever took the task. A file an active partner changed stays theirs;
-        the submission is refused at apply as before.
+        make_grant moves a file whose writer has retired, or is present but no
+        longer holds it in unfinished work. With baseline (selected-files
+        mode), a source file nobody has changed yet still has its first
+        assignment, so it moves to whoever took the task. A file another
+        partner is still changing in unfinished work stays theirs; the
+        submission is refused at apply as before.
         """
         with self._connection(write=True) as db:
             job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()

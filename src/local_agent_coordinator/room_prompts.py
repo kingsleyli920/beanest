@@ -51,8 +51,8 @@ EXTEND_INSTRUCTION = (
     "When your work task must also change files outside its write_paths, add them to your own task with "
     "extend{type,task_id,write_paths:[the new paths]} in the same response as its complete, request_help or block, and keep "
     "working: the files you change there are imported like the rest of your task and reviewed with it. You may add a file no "
-    "unfinished task on the board lists (a finished task's file is fine) unless another active partner owns it; those go to "
-    "their owner through request_help repair_paths. A file another unfinished task holds still needs block "
+    "unfinished task on the board lists (a finished task's file is fine, whoever wrote it: the host hands it over to your task). "
+    "A file another unfinished task holds still needs block "
     "coordination_required. If extend breaks a rule, the whole response is rejected and nothing is imported. ")
 
 
@@ -493,7 +493,7 @@ class RoomPromptMixin:
                 "old_text and new_text must differ; no change should use edits:null and files:[]. "
                 "Use literal text, never regex/diff syntax. At most 16 edits, old/new combined at most 32KiB UTF-8. "
                 "Multiple edits use the same original snapshot and must not overlap; no sequential matching. "
-                "Only a work job may change files, only its task.write_paths plus files its extend adds, and only files owned by you. "
+                "Only a work job may change files, only its task.write_paths plus files its extend adds; a file another partner wrote and finished is handed to your task by the host. "
                 "All plan/coordinate/review/help/user jobs must return files:[] and edits:null or []; "
                 "they never write a peer's file. "
                 "A work response may submit an intermediate artifact with request_help, then consume help_result "
@@ -608,7 +608,7 @@ class RoomPromptMixin:
             "When source_plan is present, use its host-bound task results as the shared implementation baseline. "
             "It contains delivered results, not the whole prior discussion. If truncated, do not invent omitted "
             "requirements or claim full receipt; ask a specific question when the missing portion affects work. "
-            "Existing files keep their owners in every later plan: a task writing a partner's existing file goes to that partner. "
+            "Any partner may take a task on a file another partner wrote and finished; the host hands the file over. "
             "You cannot open another run or accept a delivery for the user. "
             "Do not claim full inspection of excerpted other-task results. Reply in the user's language. "
             "Final delivery is coordinator-derived from all task results, reviews, checks and unresolved items; never certify it from prose.\n"

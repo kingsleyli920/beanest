@@ -5450,13 +5450,13 @@ class RoomService(RoomPromptMixin):
                     raise
 
     def _grant_taken_files(self, job, team):
-        """Let a work call change its own task's files that their writer can no longer hand over.
+        """Let a work call change its own task's files that another partner wrote.
 
-        A task is owned only from when someone takes it from the pool, so a
-        file in its scope may still belong to a partner who retired on quota,
-        or (selected-files mode) to whoever the untouched source was first
-        given to. The store grants exactly those, by exact SHA; a file an
-        active partner changed stays theirs.
+        Whoever is free takes a task, so a file in its scope may belong to a
+        partner who wrote it in a finished task, retired on quota, or (selected-
+        files mode) was first given the untouched source. The store grants
+        those by exact SHA before anything is imported; a file another partner
+        is still changing in unfinished work stays theirs.
         """
         if job["mode"] not in PROJECT_MODES or job["team"]["job_phase"] != "work" or not job["team"]["task_id"]:
             return

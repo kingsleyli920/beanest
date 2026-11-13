@@ -1139,9 +1139,26 @@ class TeamStore:
                             ORDER BY receipt.seq DESC LIMIT 1), 0) IS NOT 1
             LIMIT 1""", (room_id, provider)).fetchone() is None
 
+    @staticmethod
+    def _holding_unfinished(db, room_id, owner, path):
+        """Whether owner still has an unfinished task in this run that lists path (case folded)."""
+        for row in db.execute("SELECT write_paths_json FROM shared_tasks WHERE room_id=? "
+                              "AND run_id=(SELECT current_run_id FROM teams WHERE room_id=?) AND owner=? "
+                              "AND status NOT IN ('accepted','self_checked','withdrawn','cancelled')", (room_id, room_id, owner)):
+            if path.casefold() in {value.casefold() for value in json.loads(row[0])}:
+                return True
+        return False
+
     def make_grant(self, db, room_id, provider, paths, files, revision, epoch, *, partner_operation=None, partner_target=None):
+        """Exact-SHA transfers of files another partner wrote to provider, or team_scope_conflict.
+
+        Ownership only keeps two partners from editing one file at once. A
+        present partner's file moves once none of its unfinished tasks in this
+        run lists it; a retired, clean partner's file always moves.
+        """
         objective = self.objectives.current(db, room_id)
         retired = json.loads(objective["retired_json"]) if objective else {}
+        members = set(self.store.member_ids_in_transaction(db, room_id))
         actual = {file["path"]: file for file in files}
         grants = {}
         for path in paths:
@@ -1152,7 +1169,10 @@ class TeamStore:
             lifecycle_authority = (partner_operation is not None and partner_target is not None
                 and owner == partner_operation["provider"] and path in partner_target["paths"]
                 and not db.execute("SELECT 1 FROM jobs WHERE room_id=? AND provider=? AND status='working'", (room_id, owner)).fetchone())
-            if not lifecycle_authority and (owner not in retired or not self.provider_clean(db, room_id, owner)):
+            retired_clean = owner in retired and self.provider_clean(db, room_id, owner)
+            finished_with = (owner in members and owner not in retired
+                             and not self._holding_unfinished(db, room_id, owner, path))
+            if not (lifecycle_authority or retired_clean or finished_with):
                 raise RoomError("team_scope_conflict")
             grants[path] = {"old_owner": owner, "new_owner": provider, "sha256": previous["sha256"],
                             "revision": revision, "assignment_epoch": epoch}
@@ -1460,8 +1480,10 @@ class TeamStore:
                                       "finished. Nothing was imported, including your private changes to it. Restore that "
                                       "file to its shared version, then finish within your task's scope, or block with cause "
                                       "coordination_required naming the file, the task holding it and the change needed."),
-            "team_extend_path_owned": (" An extend named an existing file another active partner owns; only its owner changes "
-                                       "it. Nothing was imported, including your private changes to it. Restore that file to "
+            # Kept for old replies: a partner's file now moves by grant unless one of its unfinished tasks holds it,
+            # which extend already refuses as team_extend_path_held.
+            "team_extend_path_owned": (" An extend named an existing file another partner is still changing in unfinished work. "
+                                       "Nothing was imported, including your private changes to it. Restore that file to "
                                        "its shared version, then finish within your scope, or request_help with repair_paths "
                                        "naming it so its owner makes the change."),
             "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
@@ -2901,43 +2923,43 @@ class TeamStore:
             changed = self._take_from_pool(db, room_id, members) or changed
         return changed
 
-    def _path_holders(self, db, room_id):
-        """Who wrote each path last, by the tasks that list it: its file stays with that author.
-
-        Earlier rounds count. A task gets an owner only once someone takes it,
-        so this is the partner whose files a later task on the same path needs.
-        """
+    def _unfinished_holders(self, db, room_id):
+        """Case-folded path -> partners whose unfinished task in this run lists it."""
         holders = {}
-        for row in db.execute("SELECT s.owner,s.write_paths_json FROM shared_tasks s JOIN team_runs r ON r.id=s.run_id "
-                              "WHERE s.room_id=? AND s.owner IS NOT NULL AND s.status!='withdrawn' ORDER BY r.number,s.rowid",
-                              (room_id,)):
+        for row in db.execute("SELECT owner,write_paths_json FROM shared_tasks WHERE room_id=? "
+                              "AND run_id=(SELECT current_run_id FROM teams WHERE room_id=?) AND owner IS NOT NULL "
+                              "AND status NOT IN ('accepted','self_checked','withdrawn','cancelled')", (room_id, room_id)):
             for path in json.loads(row["write_paths_json"]):
-                holders[path.casefold()] = row["owner"]
+                holders.setdefault(path.casefold(), set()).add(row["owner"])
         return holders
 
     def _pool_takers(self, db, room_id, members):
-        """can_take(task, member): who may take a pool task, busy or not.
+        """(able, can_take): who could ever do a pool task, and who may take it now, busy or not.
 
-        The member must have the capability and a role that builds (when
-        anyone in the room builds), and no other active partner may hold one
-        of its files. An account down to its reserve takes it only when no
-        one else could.
+        able: the member has the capability and a role that builds (when
+        anyone in the room builds). can_take adds two rules: no other partner
+        may hold one of its files in unfinished work (the plan's path check
+        already forbids that; this is a guard against two editors at once),
+        and an account down to its reserve takes it only when no one else could.
+        A file another partner wrote and is done with moves to the taker by
+        grant when its work call starts.
         """
         abilities = self._abilities(db, room_id)
         builders = [member for member in members if roles.can(abilities, member, "work")]
-        holders = self._path_holders(db, room_id)
+        holders = self._unfinished_holders(db, room_id)
         reserved = self._reserved(db, room_id)
 
+        def able(task, member):
+            return task["capability"] in self.store.task_capabilities(member) and (member in builders or not builders)
+
         def fits(task, member):
-            held = {holders[path.casefold()] for path in json.loads(task["write_paths_json"])
-                    if path.casefold() in holders} & set(members)
-            return (task["capability"] in self.store.task_capabilities(member)
-                    and (member in builders or not builders) and held <= {member})
+            held = set().union(*(holders.get(path.casefold(), set()) for path in json.loads(task["write_paths_json"])))
+            return able(task, member) and held <= {member}
 
         def can_take(task, member):
             return fits(task, member) and (member not in reserved
                                             or all(other in reserved for other in members if fits(task, other)))
-        return can_take
+        return able, can_take
 
     def _take_from_pool(self, db, room_id, members):
         """Hand each free member the next ready task nobody has taken.
@@ -2956,7 +2978,7 @@ class TeamStore:
                  and all(value in by_id and task_settled(by_id[value]) for value in json.loads(row["dependencies_json"]))]
         if not ready:
             return False
-        can_take = self._pool_takers(db, room_id, members)
+        able, can_take = self._pool_takers(db, room_id, members)
         free = [member for member in members if not self._busy(db, room_id, member)]
         order = workload.fair_order(free, members, self._loads(db, room_id, run_id),
                                     self._workload_profile(db, room_id, building=True)) if len(free) > 1 else free
@@ -2976,8 +2998,8 @@ class TeamStore:
                         changed = True
                         break
         if not changed and not self.pending(db, room_id) and not any(
-                can_take(task, member) for task in ready for member in members):
-            # Ready work that no partner in the room can do would otherwise wait forever.
+                able(task, member) for task in ready for member in members):
+            # Ready work that no partner in the room has the capability or role for would otherwise wait forever.
             self.store._event(db, room_id, "warning", sender="system", code="team_plan_stalled",
                               unowned_task_ids=[task["id"] for task in ready], unconfirmed_members=[])
             self.stop(db, room_id, "team_plan_stalled")

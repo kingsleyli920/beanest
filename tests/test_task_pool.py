@@ -50,11 +50,12 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
         self.user_claims = {}
         self.room_id = None
 
-    async def create(self, participants, *, members=None):
+    async def create(self, participants, *, members=None, objective=True):
         created = await self.service.create_room(
             "Update the existing value and preserve notes.", participants[0], str(uuid4()), mode="native_project",
             project_id=self.registration["project"]["id"], participants=participants, work_mode="build",
-            runtime_settings={"permission": "full_access", "members": members or {}}, execution_policy={"mode": "autonomous"})
+            runtime_settings={"permission": "full_access", "members": members or {}},
+            **({"execution_policy": {"mode": "autonomous"}} if objective else {}))
         self.room_id = created["room"]["id"]
         return created
 
@@ -243,27 +244,32 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
         await self.finished()
         self.assertEqual(self.workers(), {"T1": "claude", "T2": "codex", "T3": "codex"})
 
-    async def test_a_task_on_a_file_another_partner_wrote_goes_to_that_partner(self):
-        # Catches the pool handing a task to the first free partner when its file belongs to another active partner,
-        # whose ownership would then refuse the submission. Without the rule claude, first in the room, takes T1.
-        self.plan = [plan("T1"), plan("T2")]
-        handler = self.handler
-        async def earlier_round_first(agent, context, cwd):
-            if context["job"]["job_phase"] == "plan" and not context["team"]["tasks"] and context["self"] == context["team"]["plan_author"]:
-                with self.service.store._connection(write=True) as db:
-                    # A far-off number, so the room's own "previous round" lookup never picks this row.
-                    earlier = str(uuid4())
-                    db.execute("INSERT INTO team_runs(id,room_id,number,goal,created_at,deadline,call_limit,status) "
-                               "VALUES (?,?,-5,'old',0,0,0,'accepted')", (earlier, self.room_id))
-                    db.execute("INSERT INTO shared_tasks(room_id,run_id,id,title,description,acceptance,dependencies_json,"
-                               "write_paths_json,capability,status,owner) VALUES (?,?,'OLD','Old','Old','Old','[]',?,"
-                               "'python','accepted','codex')", (self.room_id, earlier, '["t1.PY"]'))
-            return await handler(agent, context, cwd)
-        self.fake.handler = earlier_round_first
-        await self.create(["claude", "codex"])
-        await self.finished()
-        self.assertEqual(self.workers(), {"T1": "codex", "T2": "claude"})
-
+    async def test_a_free_partner_takes_a_task_on_a_file_another_partner_wrote_and_finished(self):
+        # Catches the author pin: a later task on a file another present partner wrote in finished work must go to
+        # whoever is free, import its change without team_scope_conflict, and move the file to its new author.
+        self.plan = [plan("T1", paths=["f.md"])]
+        await self.create(["codex", "claude"], objective=False)
+        await self.settle()
+        first = await self.state()
+        self.assertEqual(first["team"]["phase"], "ready_for_user", first["team"])
+        self.assertEqual(self.workers(), {"T1": "codex"})
+        self.assertEqual({file["path"]: file["owner"] for file in first["project"]["files"] if file["path"] == "f.md"}, {"f.md": "codex"})
+        self.plan = [plan("T0", paths=["other.md"]), plan("T2", paths=["f.md"])]
+        self.works.clear()
+        current = first["current_run"]
+        await self.service.start_run(self.room_id, "Update the notes again.", "all", str(uuid4()), run_id=current["id"],
+                                     revision=current["revision"], digest=current["digest"], retry=False)
+        await self.settle()
+        second = await self.state()
+        self.assertEqual(second["team"]["phase"], "ready_for_user", second["team"])
+        self.assertIsNone(second["team"]["stop_reason"])
+        # Free partners in room order take ready tasks in plan order; claude gets the task on codex's file.
+        self.assertEqual(self.workers(), {"T0": "codex", "T2": "claude"})
+        granted = [(event["task_id"], event["provider"], event["paths"]) for event in second["events"] if event["kind"] == "task_files_granted"]
+        self.assertEqual(granted, [("T2", "claude", ["f.md"])])
+        self.assertFalse(any(job["error"] for job in second["jobs"] if job["kind"] == "team_work"))
+        shared = next(file for file in second["project"]["files"] if file["path"] == "f.md")
+        self.assertEqual(shared["owner"], "claude")
 
     async def test_a_file_whose_author_ran_out_of_quota_moves_to_whoever_takes_the_next_step(self):
         # Catches a pool task on a retired partner's file being taken without a transfer grant:
@@ -279,8 +285,7 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
         await self.create(["claude", "codex"])
         state = await self.finished()
         self.assertEqual(self.workers(), {"T1": "claude", "T0": "codex", "T2": "claude"})
-        returned = [event["task_id"] for event in state["events"] if event["kind"] == "task_returned_to_pool"]
-        self.assertEqual(returned, ["T2"], "codex had been handed T2 by the chain rule and gave it back unstarted")
+        self.assertTrue(any(event["kind"] == "partner_retired" and event["provider"] == "codex" for event in state["events"]))
         shared = next(file for file in state["project"]["files"] if file["path"] == "shared.py")
         self.assertEqual(shared["owner"], "claude")
 
@@ -440,23 +445,41 @@ class PoolStore(unittest.TestCase):
         self.assertEqual(len({provider for provider, _ in work}), 3)
 
     def test_a_taken_task_gets_its_untouched_source_file_but_never_a_changed_one(self):
-        # Catches a pool task being unable to change a selected source file first assigned to another partner
+        # Catches a pool task being unable to change a selected source file first assigned elsewhere
         # (selected-files mode), or that grant reaching a file someone has already changed.
         with self.store._connection(write=True) as db:
             db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND id='A'", ('["a.py"]', self.room_id))
         self.finish(self.confirmation, [{"type": "plan_ready"}])
         work = self.store.claim(self.room_id, "claude")
         self.assertEqual(work["team"]["task_id"], "A")
-        source = {"path": "a.py", "owner": "codex", "sha256": "1" * 64}
+        # The baseline owner is not a partner, so only the untouched-source rule can move it.
+        source = {"path": "a.py", "owner": "seeder", "sha256": "1" * 64}
         self.assertEqual(self.store.grant_taken_files(work["id"], [{**source, "sha256": "2" * 64}], 3,
-                                                      baseline={"a.py": ("codex", "1" * 64)}), {})
+                                                      baseline={"a.py": ("seeder", "1" * 64)}), {})
         self.assertEqual(self.store.ownership_grant(work["id"]), {})
-        granted = self.store.grant_taken_files(work["id"], [source], 3, baseline={"a.py": ("codex", "1" * 64)})
-        expected = {"a.py": {"old_owner": "codex", "new_owner": "claude", "sha256": "1" * 64, "revision": 3, "assignment_epoch": 0}}
+        granted = self.store.grant_taken_files(work["id"], [source], 3, baseline={"a.py": ("seeder", "1" * 64)})
+        expected = {"a.py": {"old_owner": "seeder", "new_owner": "claude", "sha256": "1" * 64, "revision": 3, "assignment_epoch": 0}}
         self.assertEqual(granted, expected)
         self.assertEqual(self.store.ownership_grant(work["id"]), expected)
-        # Without a baseline an active partner's file stays theirs.
-        self.assertEqual(self.store.grant_taken_files(work["id"], [{**source, "path": "a.py"}], 3), {})
+
+    def test_a_partners_file_moves_once_none_of_its_unfinished_tasks_holds_it(self):
+        # Catches the two ways the file rule can go wrong: a present partner keeping a file forever after its work
+        # on it is finished (the pool could then hand most tasks to one partner or to nobody), or a file moving away
+        # while that partner's unfinished task still lists it (two editors at once).
+        with self.store._connection(write=True) as db:
+            db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND id='B'", ('["Shared.md"]', self.room_id))
+        self.finish(self.confirmation, [{"type": "plan_ready"}])
+        self.assertEqual(self.tasks()["B"]["owner"], "codex")
+        team = self.store._team
+        files = [{"path": "shared.md", "owner": "codex", "sha256": "3" * 64}, {"path": "done.md", "owner": "codex", "sha256": "4" * 64}]
+        with self.store._connection(write=True) as db:
+            self.assertEqual(team.make_grant(db, self.room_id, "claude", ["done.md"], files, 5, 2),
+                             {"done.md": {"old_owner": "codex", "new_owner": "claude", "sha256": "4" * 64, "revision": 5, "assignment_epoch": 2}})
+            with self.assertRaises(RoomError) as held:
+                team.make_grant(db, self.room_id, "claude", ["shared.md"], files, 5, 2)
+            self.assertEqual(held.exception.code, "team_scope_conflict")
+            db.execute("UPDATE shared_tasks SET status='accepted' WHERE room_id=? AND id='B'", (self.room_id,))
+            self.assertEqual(team.make_grant(db, self.room_id, "claude", ["shared.md"], files, 5, 2)["shared.md"]["old_owner"], "codex")
 
     def test_a_task_nobody_in_the_room_can_do_stops_instead_of_waiting_forever(self):
         # Catches ready work that no partner can take leaving the room silently idle.
