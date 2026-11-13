@@ -3751,8 +3751,11 @@ class RoomStore:
                             or self._room(db, room_id)["stop_requested"]):
                         raise RoomError("native_recovery_unavailable")
                     retained_tasks = {item["candidate"]["task_id"] for item in partial_works}
+                    # Only a block waiting for the user holds the handoff; the room
+                    # re-splits files for a coordination block by itself.
                     if any(row["id"] not in retained_tasks for row in db.execute(
-                            "SELECT id FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked'", (room_id, binding["run_id"]))):
+                            "SELECT id FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked' "
+                            "AND COALESCE(block_cause,'')!='coordination_required'", (room_id, binding["run_id"]))):
                         raise RoomError("native_recovery_unavailable")
                     source_jobs = {item["candidate"]["job_id"] for item in partial_works if item["candidate"].get("requires_quota_failure_audit")}
                     if any(not item["candidate"].get("requires_quota_failure_audit")
