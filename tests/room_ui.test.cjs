@@ -4323,6 +4323,8 @@ test('objective delivery aggregates verified stages at a checkpoint without prom
 test('a delivery mismatch is reported when the objective ends, not while it is still advancing', async () => {
   // Catches 部分目标成果与已交付版本不一致 shown mid-run while a later task was still reworking the file.
   const saved = objectiveDeliveryFixture(); saved.objective.status = 'running';
+  // The real card: the room said needs_user while the objective was still running.
+  saved.collaboration = teamCollaboration({ state: 'needs_user', tasks: [] });
   saved.objective.delivery.files[1].verified = false;
   saved.objective.delivery.missing_or_changed = [{ path: 'second.md', expected_sha256: saved.project.files[1].sha256, reason: 'changed' }];
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
