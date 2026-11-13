@@ -139,6 +139,34 @@ class MidRunStore(unittest.TestCase):
         self.finish(fresh, [proposal("L2b", paths=["extra.py"])])
         self.assertIn("L2b", self.tasks())
 
+    def test_freed_work_held_by_a_busy_partner_moves_to_an_idle_one(self):
+        # Catches the real run where the user freed T3 but it stayed with Codex, busy on T1, while Claude sat idle:
+        # nothing balanced unstarted work after a mid-run change.
+        room = self.store.create_room("Fictional ledger, slug and clamp", "codex", str(uuid4()), collaboration=True)[0]
+        plans = {provider: self.store.claim(room, provider) for provider in ("claude", "codex", "kimi")}
+        self.finish(plans["codex"], [proposal("T1", paths=["ledger.py"]), proposal("T2", dependencies=["T1"], paths=["slug.py"]),
+                                     proposal("T3", dependencies=["T2"], paths=["clamp.py"]),
+                                     {"type": "claim", "task_id": "T1"}, {"type": "claim", "task_id": "T3"}, {"type": "plan_ready"}])
+        self.finish(plans["kimi"], [{"type": "claim", "task_id": "T2"}, {"type": "plan_ready"}])
+        self.finish(plans["claude"], [{"type": "plan_ready"}])
+        for _ in range(6):
+            if self.store.snapshot(room)["team"]["phase"] == "working":
+                break
+            for provider in ("claude", "codex", "kimi"):
+                job = self.store.claim(room, provider)
+                if job and job["kind"] in {"team_coordinate", "team_plan"}:
+                    self.finish(job, [{"type": "plan_ready"}])
+        self.assertEqual(self.store.claim(room, "codex")["team"]["task_id"], "T1")
+        owners = lambda: {task["id"]: task["owner"] for task in self.store.snapshot(room)["team"]["tasks"]}
+        self.assertEqual(owners(), {"T1": "codex", "T2": "kimi", "T3": "codex"})
+        self.store.task_capabilities = lambda provider: ("text",)
+        self.assertTrue(self.store.send_message(room, "Slug and clamp do not need the ledger; run them now.", "claude", str(uuid4())))
+        reply = self.store.claim(room, "claude")
+        self.assertEqual(reply["kind"], "team_user")
+        self.finish(reply, [adjust("T2", [], ["slug.py"]), adjust("T3", [], ["clamp.py"])])
+        self.assertEqual(owners(), {"T1": "codex", "T2": "kimi", "T3": "claude"})
+        self.assertEqual(self.store.claim(room, "claude")["team"]["task_id"], "T3")
+
     def test_a_started_or_reviewed_task_cannot_be_adjusted(self):
         # Catches a dependency or path being changed under a running call or a delivered result.
         job = self.user_reply_job("claude")

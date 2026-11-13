@@ -2128,6 +2128,9 @@ class TeamStore:
                               added=[{"task_id": item["id"], "title": item["title"], "dependencies": item["dependencies"],
                                       "write_paths": item["write_paths"]} for item in proposed],
                               adjusted=adjusted)
+            # Work that no longer waits may sit with a partner busy on something
+            # else; balance unstarted tasks so an idle partner can take it now.
+            self._rebalance_unstarted(db, room_id)
         if context["job_phase"] in {"plan", "coordinate"}:
             db.execute("UPDATE team_members SET planned=1 WHERE room_id=? AND provider=?", (room_id, provider))
         elif context["job_phase"] == "help":
