@@ -23,7 +23,7 @@ EXPECTED = {
              "native_protocol_invalid", "native_protocol_unknown", "native_provider_error", "native_tool_unpaired",
              "native_turn_incomplete", "native_turn_unconfirmed", "native_unchanged_reason_required", "output_limit",
              "process_or_output_failure", "protocol_turn_incomplete", "service_restarted", "service_shutdown",
-             "subscription_limit_reached", "team_capability_unavailable", "team_files_forbidden", "team_plan_locked",
+             "subscription_limit_reached", "team_capability_unavailable", "team_files_forbidden", "team_plan_adjusted_meanwhile", "team_plan_locked",
              "team_plan_missing", "team_plan_stalled", "team_result_missing", "team_task_not_found",
              "team_task_permission", "team_write_path_conflict", "unexpected_tool_event", "unknown_provider_error"},
 }
