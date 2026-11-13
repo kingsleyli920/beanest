@@ -209,7 +209,9 @@ class TeamServiceTests(unittest.IsolatedAsyncioTestCase):
         during = self.service.store.snapshot(room_id)
         self.assertEqual({item["id"] for item in during["team"]["tasks"] if item["status"] == "working"},
                          {"schema", "examples"})
-        self.assertEqual(Counter(item["owner"] for item in during["team"]["tasks"]), {"claude": 2, "codex": 3})
+        # Only the running tasks have owners; the rest wait in the pool for whoever is free when they are ready.
+        self.assertEqual({item["id"]: item["owner"] for item in during["team"]["tasks"]},
+                         {"schema": "claude", "examples": "codex", "edges": None, "guide": None, "summary": None})
         self.assertNotEqual(during["room"]["status"], "ready_for_user")
         release.set()
         await self.settle()

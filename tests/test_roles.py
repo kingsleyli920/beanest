@@ -71,8 +71,8 @@ class RoleService(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await WorkloadService.asyncSetUp(self)
-        # Planned owners may be handed over, so a role that does not build can give its work away.
-        self.service.store.task_capabilities = lambda provider: ("text", "python")
+        # No pinned planned owners here: the pool hands work only to a role that builds.
+        del self.service.store._team.finish
 
     async def create_roles(self, members, *, target="all"):
         return await self.service.create_room("Update the existing value and preserve notes.", target, str(uuid4()),
@@ -152,8 +152,11 @@ class RoleService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state["workload"]["configured"])
         accounts = {row["scope"]: row for row in state["workload"]["accounts"]}
         self.assertEqual((accounts["codex"]["target_percent"], accounts["third"]["target_percent"]), (50, 17))
+        # The high level takes the pool's work first (the chain then stays with it), so reviews
+        # split between the other two by their room levels; account levels alone would put third first.
+        self.assertEqual({task["owner"] for task in state["team"]["tasks"]}, {"codex"})
         counts = Counter(self.reviewers(state))
-        self.assertGreater(counts["codex"], counts["third"])
+        self.assertGreater(counts["claude"], counts["third"])
 
     async def test_cost_is_shown_by_step(self):
         # Catches the ledger only knowing totals, so savings from roles could not be seen.

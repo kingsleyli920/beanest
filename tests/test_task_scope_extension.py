@@ -33,7 +33,7 @@ class ScopeExtensionStore(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.store = RoomStore(Path(self.directory.name) / "rooms.sqlite3", clock=lambda: 1000.0,
                                agents={"claude": "Claude", "codex": "Codex", "kimi": "Kimi"})
-        self.store.task_capabilities = lambda provider: ()  # planned owners stay put
+        native.planned_owners(self.store)  # planned owners stay put
         self.room_id = self.store.create_room("Ship the ledger tool", "claude", str(uuid4()), collaboration=True)[0]
         plans = {provider: self.store.claim(self.room_id, provider) for provider in ("claude", "codex", "kimi")}
         self.finish(plans["claude"], [proposal("T0", paths=["base.py"]), proposal("T1", paths=["a.py"]),
@@ -137,7 +137,7 @@ class ScopeExtensionService(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await native.NativeRoomServiceTests.asyncSetUp(self)
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
         self.fake.handler = self.handler
         self.plan = [("T1", "claude", ["main.py"], []), ("T2", "codex", ["notes.md"], ["T1"])]
         self.work = {}

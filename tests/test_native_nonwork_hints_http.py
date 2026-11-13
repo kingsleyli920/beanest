@@ -17,7 +17,7 @@ from local_agent_coordinator.native_workspace import collect_changes
 from local_agent_coordinator import kimi_acp
 from test_kimi_native_setup import configuration
 from test_kimi_setup_http import SetupFixture
-from test_native_room_service import NativeTransport, native_reply
+from test_native_room_service import NativeTransport, native_reply, planned_owners
 from test_team_store import proposal
 from fixtures.retired_nonwork_host import forced_readonly_recovery, reject_nonwork_hints
 from wait_support import poll
@@ -102,6 +102,8 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
         self.native = NativeTransport()
         self.native.handler = self.handler
         self.service.native_invoke = self.native
+        # These recovery cases replay a board whose owners were set while planning.
+        planned_owners(self.service)
         self.goal_to_room = {}
         self.target_phase = "plan"
         self.violation = None

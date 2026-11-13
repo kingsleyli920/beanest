@@ -32,7 +32,7 @@ class InterruptedUserMessages(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await native.NativeRoomServiceTests.asyncSetUp(self)
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
         self.kill_replies = 0       # user-phase calls whose CLI is killed after reading files
         self.kill_code = "protocol_turn_incomplete"  # what a CLI killed mid-turn reports
         self.kill_tools = 1         # tools the killed reply had started

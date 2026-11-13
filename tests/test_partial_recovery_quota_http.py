@@ -17,7 +17,7 @@ class PartialRecoveryQuotaHTTPTests(unittest.TestCase):
 
     def setUp(self):
         http.LongTeamResultHTTPTests.setUp(self)
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
 
     def tearDown(self):
         if hasattr(self, "release_inspection"):

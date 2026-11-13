@@ -87,7 +87,7 @@ class NativeOutcomeCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(event["kind"] == "format_correction_queued" for event in final["events"]))
 
     async def test_repeated_work_rejection_blocks_only_bound_task_and_keeps_other_dispatch(self):
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
         invoke = self.service.native_invoke
         original = self.handler
         def handler(agent, context, cwd):

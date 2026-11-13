@@ -77,7 +77,7 @@ _REASONS = {
     "project_edit_overlap": _system("同一批精确修改的位置重叠，未接受这批修改。"),
     "project_edit_limit": _system("精确修改超过文本容量限制，未接受这批修改。"),
     "team_plan_missing": _system("伙伴尚未提交可执行的任务清单，协作已停止。"),
-    "team_plan_stalled": _system("分工仍有未认领或未确认的事项，一次明确协调后仍未解决；请查看任务清单中的负责人和依赖。"),
+    "team_plan_stalled": _system("还有任务没有伙伴能领取，或分工一直没确认；请查看任务清单里的依赖、伙伴能力和角色。"),
     "team_revision_limit": _system("这项交付修订后仍未通过互审，需要你决定下一步。"),
     "team_files_forbidden": _system("这次回复超出了当前任务的文件写入权限，改稿未接受。"),
     "subscription_limit_reached": _system("工具报告订阅额度已用完，协作已停止。"),

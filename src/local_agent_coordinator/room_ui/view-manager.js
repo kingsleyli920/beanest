@@ -229,7 +229,7 @@ function acceptPartners(result) {
 }
 
 function monitorTaskText(task) {
-  if (task.work_mode === 'plan' && task.kind === 'team_work') return t("整理已认领任务的方案");
+  if (task.work_mode === 'plan' && task.kind === 'team_work') return t("整理所领任务的方案");
   if (Object.hasOwn(teamStageLabels, task.kind)) return teamStageLabels[task.kind];
   if (typeof task.kind === 'string' && task.kind.startsWith('team_')) return t("团队任务阶段待核对");
   return typeof task.current_task === 'string' ? task.current_task : t("任务摘要不可用");

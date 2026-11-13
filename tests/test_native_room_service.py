@@ -68,9 +68,28 @@ def native_reply(context, commands=(), *, unchanged=(), resolved=()):
             "unchanged_paths": list(unchanged), "resolved_conflicts": list(resolved)}
 
 
-def no_rebalance(service):
-    """For a test about something else: with no partner able to receive a handed-over task, planned owners stay."""
-    service.store.task_capabilities = lambda provider: ()
+def planned_owners(target):
+    """For a test about something else: a claim made while planning keeps its task for that partner.
+
+    The product ignores such claims and hands tasks out from the pool; this
+    applies them the way a claim answering the user pins a task, so a test
+    still knows who holds what. target is a RoomService or a RoomStore.
+    """
+    team = getattr(target, "store", target)._team
+    finish = team.finish
+
+    def finish_and_pin(db, job, commands, **options):
+        context = team.job_context(db, job["id"])
+        result = finish(db, job, commands, **options)
+        # The store dispatches only after this returns, so the pins are in place before work starts.
+        if (context is not None and context["job_phase"] in {"plan", "coordinate"}
+                and not options.get("error") and not options.get("uncertain")):
+            for command in commands or ():
+                if isinstance(command, dict) and command.get("type") == "claim":
+                    db.execute("UPDATE shared_tasks SET owner=?,status='assigned' WHERE room_id=? AND run_id=? AND id=? "
+                               "AND status='open' AND owner IS NULL", (job["provider"], job["room_id"], context["run_id"], command["task_id"]))
+        return result
+    team.finish = finish_and_pin
 
 
 def legacy_metadata_host(method):
@@ -987,6 +1006,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((work[0]["cwd"] / "main.py").read_text(), "VALUE = 2\n")
 
     async def partial_work_failure(self, *, new_files=False, failure_code="cli_nonzero_exit", finite=False):
+        planned_owners(self.service)  # the recovery cases below rely on who claimed what while planning
         original = self.handler
         paths = ["runner.py", "runner.txt", "pilot.py"] if new_files else ["main.py", "notes.md"]
         def handler(agent, context, cwd):
@@ -2051,6 +2071,7 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.format_review_transfer(legacy=False)
 
     async def format_review_transfer(self, *, legacy):
+        planned_owners(self.service)  # codex holds T3 from planning, so its quota transfer is what is tested
         reviews = 0
         work = []
         quota_exhausted = False
@@ -2124,8 +2145,11 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tasks["T1"]["status"], "accepted")
         self.assertEqual(tasks["T2"]["result_version"], 1)
         self.assertEqual(tasks["T3"]["result_version"], 0)
-        self.assertEqual(tasks["T3"]["owner"], "claude")
+        # codex ran out of quota before starting T3, so T3 went back to the pool rather than to a fixed successor.
+        self.assertIsNone(tasks["T3"]["owner"])
         self.assertEqual(tasks["T3"]["assignment_epoch"], 1)
+        self.assertEqual([(event["task_id"], event["previous_owner"]) for event in before["events"] if event["kind"] == "task_returned_to_pool"],
+                         [("T3", "codex")])
         self.assertTrue(before["current_run"]["can_restart_objective"])
         binding = {"run_id": before["current_run"]["id"], "revision": before["current_run"]["revision"], "digest": before["current_run"]["digest"]}
         calls_before = len(self.fake.calls)

@@ -2,6 +2,7 @@ import concurrent.futures
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from local_agent_coordinator.room_store import RoomError, RoomStore
@@ -55,6 +56,7 @@ class TeamStoreTests(unittest.TestCase):
         self.assertEqual(error.exception.code, expected)
 
     def test_missing_confirmation_prompts_only_ready_then_queues_independent_work(self):
+        # Catches a confirmation prompt that still asks for claims, or work waiting on owners after every member confirmed.
         self.store.close()
         self.store = RoomStore(self.path, clock=lambda: self.now,
             agents={"claude":"Claude", "kimi":"Kimi", "codex":"Codex"})
@@ -77,31 +79,34 @@ class TeamStoreTests(unittest.TestCase):
                     self.finish(coordinate, [])
                     coordinate = self.store.claim(room_id, "kimi")
                     self.assertIn("The shared plan is stalled", coordinate["text"])
-                self.assertIn('Unclaimed task IDs: []', coordinate["text"])
-                self.assertIn('Do not issue claim commands or repeat existing claims', coordinate["text"])
+                self.assertIn("Tasks are not claimed", coordinate["text"])
+                self.assertNotIn("Unclaimed task IDs", coordinate["text"])
                 self.assertIn('Your only missing action is the command {"type":"plan_ready"}', coordinate["text"])
-                self.assertIn('"owner": "kimi"', coordinate["text"])
+                self.assertEqual({task["owner"] for task in self.store.snapshot(room_id)["team"]["tasks"]}, {None},
+                                 "claims made while planning reserve nothing")
                 self.assertEqual(self.store.snapshot(room_id)["team"]["phase"], "planning")
                 self.finish(coordinate, [{"type":"plan_ready"}])
                 queued = self.store.snapshot(room_id)
                 self.assertEqual(queued["team"]["phase"], "working")
                 self.assertEqual(sum(job["kind"] == "team_work" and job["status"] == "queued" for job in queued["jobs"]), 2)
-                self.assertEqual(self.store.claim(room_id, "kimi")["team"]["task_id"], "T1")
-                self.assertEqual(self.store.claim(room_id, "claude")["team"]["task_id"], "T2")
+                # Free members in room order take the ready tasks in plan order; T3 waits for both.
+                self.assertEqual(self.store.claim(room_id, "claude")["team"]["task_id"], "T1")
+                self.assertEqual(self.store.claim(room_id, "kimi")["team"]["task_id"], "T2")
                 self.assertIsNone(self.store.claim(room_id, "codex"))
                 self.assertEqual(self.task(room_id, "T3")["dependencies"], ["T1", "T2"])
 
-    def test_open_coordination_prompt_lists_only_unowned_ids_and_existing_owners(self):
+    def test_coordination_prompt_asks_only_for_confirmation_and_lists_started_owners(self):
+        # Catches the confirmation prompt still asking members to claim tasks from a list.
         room_id = self.room()
         author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [proposal("owned"), proposal("open"),
-            {"type":"claim", "task_id":"owned"}, {"type":"plan_ready"}])
+        self.finish(author, [proposal("first"), proposal("second"),
+            {"type":"claim", "task_id":"first"}, {"type":"plan_ready"}])
         self.finish(peer, [])
         coordinate = self.store.claim(room_id, "codex")
-        self.assertIn('Unclaimed task IDs: ["open"]', coordinate["text"])
-        self.assertIn('"id": "owned", "owner": "claude"', coordinate["text"])
-        self.assertIn('Claim only useful unclaimed task IDs listed above', coordinate["text"])
-        self.assertIn('explicitly return the command {"type":"plan_ready"}', coordinate["text"])
+        self.assertIn("Tasks are not claimed: after the plan is confirmed, the host hands each ready task to a free member", coordinate["text"])
+        self.assertIn("Started tasks keep their owners: []", coordinate["text"])
+        self.assertNotIn("Claim only useful", coordinate["text"])
+        self.assertIn('Your only missing action is the command {"type":"plan_ready"}', coordinate["text"])
 
     def test_opt_in_limits_idempotency_and_legacy_compatibility(self):
         room_id, fresh = self.store.create_room("Goal", "all", "team-key", collaboration=True, mode="python_artifacts")
@@ -222,15 +227,19 @@ class TeamStoreTests(unittest.TestCase):
         self.assertFalse(any(job["kind"] in {"feedback", "review"} for job in snapshot["jobs"]))
 
     def test_dependency_waits_for_acceptance_not_merely_result(self):
+        # Catches a dependent task starting on a result nobody has accepted yet.
         room_id = self.plan(dependency=True)
         self.assertIsNone(self.store.claim(room_id, "codex"))
         work = self.store.claim(room_id, "claude")
         self.finish(work, [{"type": "complete", "task_id": "main", "result": "Main"}])
+        self.assertEqual(self.task(room_id, "tests")["status"], "open", "a result under review does not release its dependents")
         review = self.store.claim(room_id, "codex")
         self.assertEqual(review["kind"], "team_review")
         self.finish(review, [{"type": "review", "task_id": "main", "verdict": "accept", "reason": "Checked"}])
-        next_job = self.store.claim(room_id, "codex")
+        # Both are free now; the partner who did main continues the chain.
+        next_job = self.store.claim(room_id, "claude")
         self.assertEqual((next_job["kind"], next_job["team"]["task_id"]), ("team_work", "tests"))
+        self.assertIsNone(self.store.claim(room_id, "codex"))
 
     def test_help_is_bound_and_resumes_owner_once(self):
         room_id = self.plan(dependency=True)
@@ -253,7 +262,9 @@ class TeamStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.claim(room_id, "codex"))
         self.assertEqual(self.store.snapshot(room_id)["room"]["status"], "needs_user")
 
-    def test_empty_queue_and_unclaimed_tasks_do_not_complete_or_loop(self):
+    def test_empty_queue_and_untakeable_tasks_do_not_complete_or_loop(self):
+        # Catches ready work nobody in the room can take either looping or passing as done.
+        self.store.task_capabilities = lambda provider: ()
         room_id = self.room()
         author = self.store.claim(room_id, "claude")
         self.finish(author, [proposal("main"), {"type": "plan_ready"}])
@@ -266,7 +277,7 @@ class TeamStoreTests(unittest.TestCase):
                     self.assertEqual(coord["kind"], "team_coordinate")
                     coordinated.append(provider)
                     self.finish(coord, [{"type": "plan_ready"}])
-        self.assertCountEqual(coordinated, ["claude", "codex", "claude", "codex"])
+        self.assertEqual(coordinated, ["codex"])
         count = len(self.store.snapshot(room_id)["jobs"])
         for _ in range(4):
             self.store.reconcile_team(room_id)
@@ -276,78 +287,68 @@ class TeamStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["team"]["phase"], "stopped")
         self.assertEqual(snapshot["team"]["stop_reason"], "team_plan_stalled")
 
-    def test_five_tasks_can_be_claimed_one_per_coordinate_without_planning_stall(self):
+    def test_five_tasks_need_only_confirmation_and_go_out_as_members_free_up(self):
+        # Catches work waiting for every task to have an owner, or the pool handing out more than one task per member.
         room_id = self.room()
         author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [*[proposal(f"part{number}") for number in range(5)],
-                             {"type": "claim", "task_id": "part0"}, {"type": "plan_ready"}])
+        self.finish(author, [*[proposal(f"part{number}") for number in range(5)], {"type": "plan_ready"}])
         self.finish(peer, [])
-        coordinate_count = 0
-        for _ in range(8):
-            if self.store.snapshot(room_id)["team"]["phase"] == "working":
-                break
-            progressed = False
-            for provider in ("claude", "codex"):
-                job = self.store.claim(room_id, provider)
-                if not job:
-                    continue
-                progressed = True
-                self.assertEqual(job["kind"], "team_coordinate")
-                board = self.store.snapshot(room_id)["team"]
-                remaining = next((task for task in board["tasks"] if task["status"] == "open"), None)
-                commands = [{"type": "claim", "task_id": remaining["id"]}] if remaining else []
-                if board["phase"] == "planning":
-                    commands.append({"type": "plan_ready"})
-                self.finish(job, commands)
-                coordinate_count += 1
-                if self.store.snapshot(room_id)["team"]["phase"] == "working":
-                    break
-            self.assertTrue(progressed)
+        confirmation = self.store.claim(room_id, "codex")
+        self.assertEqual(confirmation["kind"], "team_coordinate")
+        self.finish(confirmation, [{"type": "plan_ready"}])
         snapshot = self.store.snapshot(room_id)
         self.assertEqual(snapshot["team"]["phase"], "working")
-        self.assertEqual({task["status"] for task in snapshot["team"]["tasks"]}, {"assigned"})
-        self.assertEqual({task["owner"] for task in snapshot["team"]["tasks"]}, {"claude", "codex"})
-        self.assertGreaterEqual(coordinate_count, 4)
+        self.assertEqual({task["id"]: (task["owner"], task["status"]) for task in snapshot["team"]["tasks"]},
+                         {"part0": ("claude", "assigned"), "part1": ("codex", "assigned"), "part2": (None, "open"),
+                          "part3": (None, "open"), "part4": (None, "open")})
         count = len(snapshot["jobs"])
         for _ in range(3):
             self.store.snapshot(room_id)
             self.store.list_rooms()
             self.store.reconcile_team(room_id)
         self.assertEqual(len(self.store.snapshot(room_id)["jobs"]), count)
+        work = self.store.claim(room_id, "codex")
+        self.finish(work, [{"type": "complete", "task_id": "part1", "result": "Part one"}])
+        # codex is free again (its review waits for busy claude), so it takes the next ready part.
+        self.assertEqual(self.store.claim(room_id, "codex")["team"]["task_id"], "part2")
 
     def test_delayed_same_revision_plan_confirmation_is_safe_after_work_starts(self):
-        room_id = self.room()
-        author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [proposal("one"), proposal("two"), proposal("three"),
-                             {"type": "claim", "task_id": "one"}, {"type": "plan_ready"}])
-        self.finish(peer, [])
-        author_coord = self.store.claim(room_id, "claude")
-        peer_coord = self.store.claim(room_id, "codex")
-        self.assertEqual(author_coord["kind"], "team_coordinate")
-        self.assertEqual(peer_coord["kind"], "team_coordinate")
-        self.finish(peer_coord, [{"type": "claim", "task_id": "two"},
-                                {"type": "claim", "task_id": "three"}, {"type": "plan_ready"}])
-        self.assertEqual(self.store.snapshot(room_id)["team"]["phase"], "working")
-        self.finish(author_coord, [{"type": "plan_ready"}])
-        self.assertEqual(self.store.snapshot(room_id)["team"]["phase"], "working")
-        self.assertEqual(self.store.claim(room_id, "claude")["kind"], "team_work")
-
-    def test_no_progress_confirmation_of_same_remaining_set_stops_without_extra_dispatch(self):
-        room_id = self.room()
-        author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [*[proposal(f"part{number}") for number in range(5)],
-                             {"type": "claim", "task_id": "part0"}, {"type": "plan_ready"}])
-        self.finish(peer, [{"type": "claim", "task_id": "part1"}, {"type": "plan_ready"}])
-        for _ in range(2):
-            for provider in ("claude", "codex"):
-                coordinate = self.store.claim(room_id, provider)
-                self.assertEqual(coordinate["kind"], "team_coordinate")
-                self.finish(coordinate, [{"type": "plan_ready"}])
+        # Catches a confirmation call that finishes after work began (as a newly invited member's does)
+        # being refused as a plan change.
+        room_id = self.plan()
+        team = self.store._team
+        with self.store._connection(write=True) as db:
+            with patch.object(team, "_busy", return_value=False):
+                self.assertTrue(team._queue(db, room_id, "claude", "coordinate", text="Confirm the plan."))
+        work = self.store.claim(room_id, "claude")
+        self.assertEqual(work["kind"], "team_work")
+        self.finish(work, [{"type": "complete", "task_id": "main", "result": "Main"}])
+        late = self.store.claim(room_id, "claude")
+        self.assertEqual(late["kind"], "team_coordinate")
+        before = self.store.snapshot(room_id)["events"][-1]["seq"]
+        self.finish(late, [{"type": "plan_ready"}])
         snapshot = self.store.snapshot(room_id)
-        self.assertEqual(snapshot["budget"]["used"], 6)
+        self.assertEqual(snapshot["team"]["phase"], "working")
+        self.assertFalse(any(event["kind"] == "warning" and event["seq"] > before for event in snapshot["events"]))
+        self.assertEqual(next(member for member in snapshot["team"]["members"] if member["id"] == "claude")["plan_ready"], True)
+
+    def test_no_progress_confirmation_stops_without_extra_dispatch(self):
+        # Catches a member that never confirms being woken again and again on the same revision.
+        room_id = self.room()
+        author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
+        self.finish(author, [*[proposal(f"part{number}") for number in range(5)], {"type": "plan_ready"}])
+        self.finish(peer, [])
+        for _ in range(2):
+            coordinate = self.store.claim(room_id, "codex")
+            self.assertEqual(coordinate["kind"], "team_coordinate")
+            self.finish(coordinate, [])
+        snapshot = self.store.snapshot(room_id)
+        self.assertEqual(snapshot["budget"]["used"], 4)
         self.assertEqual(snapshot["room"]["status"], "needs_user")
         self.assertEqual(snapshot["team"]["stop_reason"], "team_plan_stalled")
-        self.assertEqual(sum(task["owner"] is None for task in snapshot["team"]["tasks"]), 3)
+        warning = next(event for event in snapshot["events"] if event["kind"] == "warning" and event["code"] == "team_plan_stalled")
+        self.assertEqual(warning["unconfirmed_members"], ["codex"])
+        self.assertEqual(sum(task["owner"] is None for task in snapshot["team"]["tasks"]), 5)
         for _ in range(4):
             self.store.snapshot(room_id)
             self.store.list_rooms()
@@ -356,35 +357,24 @@ class TeamStoreTests(unittest.TestCase):
             self.assertIsNone(self.store.claim(room_id, "codex"))
         self.assertEqual(self.store.snapshot(room_id)["jobs"], snapshot["jobs"])
 
-    def test_explicit_coordination_repair_can_claim_dependent_text_tasks_and_start_work(self):
+    def test_explicit_coordination_repair_confirms_and_starts_ready_work(self):
+        # Catches a stalled confirmation never getting its one repair call, or dependent text work starting early.
         room_id = self.room()
         author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [proposal("code"), proposal("summary", dependencies=["code"]),
-                             {"type": "claim", "task_id": "code"}, {"type": "plan_ready"}])
-        self.finish(peer, [{"type": "plan_ready"}])
-        for _ in range(8):
-            for provider in ("claude", "codex"):
-                job = self.store.claim(room_id, provider)
-                if job is None:
-                    continue
-                self.assertEqual(job["kind"], "team_coordinate")
-                commands = [{"type": "plan_ready"}]
-                if provider == "codex" and "shared plan is stalled" in job["text"]:
-                    self.assertIn('"summary"', job["text"])
-                    commands.insert(0, {"type": "claim", "task_id": "summary"})
-                self.finish(job, commands)
-            if self.store.snapshot(room_id)["team"]["phase"] == "working":
-                break
+        self.finish(author, [proposal("code"), proposal("summary", dependencies=["code"]), {"type": "plan_ready"}])
+        self.finish(peer, [])
+        first = self.store.claim(room_id, "codex")
+        self.assertEqual(first["kind"], "team_coordinate")
+        self.finish(first, [])
+        repair = self.store.claim(room_id, "codex")
+        self.assertIn("shared plan is stalled", repair["text"])
+        self.finish(repair, [{"type": "plan_ready"}])
         snapshot = self.store.snapshot(room_id)
         self.assertEqual(snapshot["team"]["phase"], "working")
-        self.assertEqual(self.task(room_id, "summary")["owner"], "codex")
-        next_job = self.store.claim(room_id, "claude")
-        if next_job["kind"] == "team_coordinate":
-            self.finish(next_job, [{"type": "plan_ready"}])
-            next_job = self.store.claim(room_id, "claude")
-        self.assertEqual(next_job["kind"], "team_work")
+        self.assertEqual((self.task(room_id, "code")["owner"], self.task(room_id, "summary")["owner"]), ("claude", None))
+        self.assertEqual(self.store.claim(room_id, "claude")["kind"], "team_work")
         self.assertIsNone(self.store.claim(room_id, "codex"), "dependent work must still wait")
-        self.assertGreaterEqual(sum(event["kind"] == "coordination_repair_queued" for event in snapshot["events"]), 1)
+        self.assertEqual(sum(event["kind"] == "coordination_repair_queued" for event in snapshot["events"]), 1)
 
     def test_existing_team_member_schema_gains_signature_without_replaying_jobs(self):
         room_id = self.room()
@@ -490,22 +480,32 @@ class TeamStoreTests(unittest.TestCase):
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT deadline FROM rooms WHERE id=?", (room_id,)).fetchone()[0], 1001)
 
-    def test_competing_claims_keep_one_owner_and_can_choose_other_task(self):
+    def test_competing_user_claims_keep_one_owner(self):
+        # Catches two partners answering the user both taking the same open task.
         room_id = self.room()
         author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [proposal("main"), proposal("tests"), {"type": "claim", "task_id": "main"}, {"type": "plan_ready"}])
-        self.finish(peer, [{"type": "claim", "task_id": "main"}, {"type": "plan_ready"}])
-        self.assertEqual(self.task(room_id, "main")["owner"], "claude")
-        self.assertEqual(self.task(room_id, "tests")["status"], "open")
-        coord = self.store.claim(room_id, "codex")
-        self.finish(coord, [{"type": "claim", "task_id": "tests"}, {"type": "plan_ready"}])
-        # The plan author is also asked once to coordinate the initially open
-        # task; ending that already queued call does not duplicate work.
-        author_coord = self.store.claim(room_id, "claude")
-        if author_coord and author_coord["kind"] == "team_coordinate":
-            self.finish(author_coord, [])
-        self.assertEqual(self.task(room_id, "tests")["owner"], "codex")
+        self.finish(author, [proposal("main"), proposal("docs", dependencies=["main"]), {"type": "plan_ready"}])
+        self.finish(peer, [])
+        self.finish(self.store.claim(room_id, "codex"), [{"type": "plan_ready"}])
         self.assertEqual(self.store.snapshot(room_id)["team"]["phase"], "working")
+        work = self.store.claim(room_id, "claude")
+        self.finish(work, [{"type": "complete", "task_id": "main", "result": "Done"}])
+        team = self.store._team
+        # Both answer the same message; codex's queued review does not hold its answer back here.
+        with patch.object(team, "_busy", return_value=False):
+            self.assertTrue(self.store.send_message(room_id, "Who does the docs?", "all", str(uuid4())))
+        left = self.store.claim(room_id, "claude")
+        review = self.store.claim(room_id, "codex")
+        self.assertEqual((left["kind"], review["kind"]), ("team_user", "team_review"))
+        self.finish(review, [{"type": "review", "task_id": "main", "verdict": "accept", "reason": "Checked"}])
+        self.assertEqual(self.task(room_id, "docs")["owner"], None, "both partners are busy, so docs stays in the pool")
+        right = self.store.claim(room_id, "codex")
+        self.assertEqual(right["kind"], "team_user")
+        self.finish(left, [{"type": "claim", "task_id": "docs"}])
+        self.finish(right, [{"type": "claim", "task_id": "docs"}])
+        self.assertEqual(self.task(room_id, "docs")["owner"], "claude")
+        warning = [event for event in self.store.snapshot(room_id)["events"] if event["kind"] == "warning" and event.get("task_id") == "docs"]
+        self.assertEqual([event["code"] for event in warning], ["team_claim_conflict"])
 
     def test_ready_author_with_owned_work_is_not_asked_for_empty_coordination(self):
         room_id = self.room()

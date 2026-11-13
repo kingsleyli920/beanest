@@ -1007,8 +1007,8 @@ test('global monitors describe historical attention states without pretending th
   assert.match(ui.get('partners-list').textContent, /实际登记的当前目标.*正在核对指定文本/);
   assert.doesNotMatch(ui.get('partners-list').textContent, /有历史任务待查看|核对历史状态/);
   for (const [kind, expected] of [
-    ['team_plan', '讨论目标与规划分工'], ['team_coordinate', '确认分工并认领任务'],
-    ['team_work', '推进已认领的子任务'], ['team_review', '独立审核伙伴的交付'],
+    ['team_plan', '讨论目标与规划分工'], ['team_coordinate', '确认任务计划'],
+    ['team_work', '推进领到的子任务'], ['team_review', '独立审核伙伴的交付'],
     ['team_help', '回答伙伴的具体求助'], ['team_user', '处理你的补充说明'],
     ['team_future', '团队任务阶段待核对'],
   ]) {
@@ -1541,7 +1541,7 @@ test('team assignments and waiting dependencies stay in the conversation without
   assert.equal(plan.hidden, false);
   assert.match(plan.textContent, /任务分工.*实现计分规则正在处理负责人：Claude Code/);
   assert.match(plan.textContent, /检查边界条件等待伙伴负责人：Codex正在等待：Claude Code 提交版本 2/);
-  assert.match(plan.textContent, /补充使用说明待认领负责人：等待伙伴认领/);
+  assert.match(plan.textContent, /补充使用说明待领取负责人：待领取，空闲的伙伴会接手/);
   const child = plan.firstChild;
   ui.get('timeline').scrollTop = 10;
   ui.get('message').focus();
@@ -1868,7 +1868,7 @@ test('planning, claiming and clarification cards translate active jobs without p
   assert.equal(ui.get('task-claude').textContent, '正在讨论目标与规划分工');
   saved.jobs[0].kind = 'team_coordinate';
   await ui.poll();
-  assert.equal(ui.get('task-claude').textContent, '正在确认分工并认领任务');
+  assert.equal(ui.get('task-claude').textContent, '正在确认任务计划');
   saved.jobs[0].kind = 'team_user';
   saved.jobs[0].status = 'queued';
   saved.members[0].status = 'queued';
@@ -5631,6 +5631,28 @@ test('a task the host moved before work began is named in the chat in both langu
   assert.match(ui.get('events').textContent, /为均衡工作量，.*整理导入脚本.*已从 Claude Code 改由 Codex 负责/);
   const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
   assert.match(english.get('events').textContent, /To balance the work, .*moved from Claude Code to Codex/);
+});
+test('taking a task from the pool and handing one back are named in the chat in both languages', async () => {
+  // Catches a pool take or a quota return staying invisible, the chain step reading like a plain take, or untranslated text.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [
+    { id: 'T1', title: '整理导入脚本', owner: 'claude', status: 'working' }, { id: 'T2', title: '核对字段', owner: 'claude', status: 'assigned' },
+    { id: 'T3', title: '补充说明', owner: null, status: 'open' }] };
+  saved.jobs = [];
+  saved.events = [
+    { seq: 1, kind: 'task_taken', sender: 'system', run_id: saved.current_run.id, task_id: 'T1', title: '整理导入脚本', owner: 'claude', reason: 'next_ready', created_at: 1100 },
+    { seq: 2, kind: 'task_taken', sender: 'system', run_id: saved.current_run.id, task_id: 'T2', title: '核对字段', owner: 'claude', reason: 'chain', created_at: 1101 },
+    { seq: 3, kind: 'task_returned_to_pool', sender: 'system', run_id: saved.current_run.id, task_id: 'T3', title: '补充说明', previous_owner: 'codex', assignment_epoch: 1, created_at: 1102 }];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  const text = ui.get('events').textContent;
+  assert.match(text, /Claude Code 领取了「整理导入脚本」/);
+  assert.match(text, /Claude Code 接着做「核对字段」/);
+  assert.match(text, /Codex 额度用完，「补充说明」放回任务池，等空闲的伙伴领取。/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  const translated = english.get('events').textContent;
+  assert.match(translated, /Claude Code took “整理导入脚本”/);
+  assert.match(translated, /Claude Code continued with “核对字段”/);
+  assert.match(translated, /Codex ran out of quota; “补充说明” went back to the pool for the next free partner\./);
 });
 test('a mid-run change to unstarted tasks is named in the chat in both languages', async () => {
   // Catches the plan author's mid-run split staying invisible, losing the task names, or left untranslated.

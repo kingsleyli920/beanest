@@ -5178,6 +5178,45 @@ class RoomStore:
             grants = self._team.make_grant(db, job["room_id"], job["provider"], paths, files, revision, task["assignment_epoch"])
             db.execute("UPDATE team_jobs SET extension_grants_json=? WHERE job_id=?", (json.dumps(grants), job_id))
 
+    def grant_taken_files(self, job_id, files, revision, *, baseline=None):
+        """Exact-SHA grants for the running work call's own task files whose writer cannot hand them over.
+
+        A file a retired, clean partner wrote moves by make_grant, as in a
+        quota handoff. With baseline (selected-files mode), a source file
+        nobody has changed yet still has its first assignment, so it moves to
+        whoever took the task. A file an active partner changed stays theirs;
+        the submission is refused at apply as before.
+        """
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            context = self._team.job_context(db, job_id)
+            if job is None or context is None or context["job_phase"] != "work" or context["task_id"] is None:
+                return {}
+            self._team.validate_assignment(db, job)
+            task = self._team.task(db, job["room_id"], context["task_id"])
+            if task["owner"] != job["provider"] or task["status"] != "working":
+                return {}
+            grants = json.loads(task["ownership_grant_json"] or "{}")
+            current = {file["path"]: file for file in files}
+            added = {}
+            for path in json.loads(task["write_paths_json"]):
+                file = current.get(path)
+                if path in grants or file is None or file["owner"] in {None, job["provider"]}:
+                    continue
+                try:
+                    added.update(self._team.make_grant(db, job["room_id"], job["provider"], [path], files, revision,
+                                                       task["assignment_epoch"]))
+                except RoomError:
+                    if baseline is not None and baseline.get(path) == (file["owner"], file["sha256"]):
+                        added[path] = {"old_owner": file["owner"], "new_owner": job["provider"], "sha256": file["sha256"],
+                                       "revision": revision, "assignment_epoch": task["assignment_epoch"]}
+            if added:
+                db.execute("UPDATE shared_tasks SET ownership_grant_json=? WHERE room_id=? AND run_id=? AND id=?",
+                           (json.dumps({**grants, **added}), job["room_id"], task["run_id"], task["id"]))
+                self._event(db, job["room_id"], "task_files_granted", sender="system", job_id=job_id, task_id=task["id"],
+                            provider=job["provider"], paths=sorted(added), assignment_epoch=task["assignment_epoch"])
+            return added
+
     @staticmethod
     def _task_ownership_grants(task):
         """Validate the owner's transfer proof without assigning it to a reader."""

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from local_agent_coordinator.room_store import RoomError, RoomStore
 from tests import test_native_room_service as native
-from tests import test_task_rebalance as rebalance
+from tests import test_task_pool as pool
 from test_team_store import proposal
 
 native_reply = native.native_reply
@@ -30,7 +30,7 @@ class MidRunStore(unittest.TestCase):
         self.store = RoomStore(Path(self.directory.name) / "rooms.sqlite3", clock=lambda: 1000.0,
                                agents={"claude": "Claude", "codex": "Codex", "kimi": "Kimi"})
         # Planned owners stay put, so each case knows who holds what.
-        self.store.task_capabilities = lambda provider: ()
+        native.planned_owners(self.store)
         self.room_id = self.store.create_room("Ship the report tool", "claude", str(uuid4()), collaboration=True)[0]
         plans = {provider: self.store.claim(self.room_id, provider) for provider in ("claude", "codex", "kimi")}
         self.finish(plans["claude"], [proposal("L1", paths=["load.py"]),
@@ -88,7 +88,7 @@ class MidRunStore(unittest.TestCase):
         job = self.user_reply_job("claude")
         self.finish(job, self.split())
         tasks = self.tasks()
-        self.assertEqual((tasks["L2a"]["status"], tasks["L2a"]["owner"], tasks["L2a"]["write_paths"]), ("open", None, ["side.py"]))
+        self.assertEqual((tasks["L2a"]["status"], tasks["L2a"]["owner"], tasks["L2a"]["write_paths"]), ("assigned", "codex", ["side.py"]))
         self.assertEqual((tasks["L2"]["dependencies"], tasks["L2"]["write_paths"]), (["L1"], ["core.py"]))
         self.assertEqual(tasks["D1"]["dependencies"], [])
         self.assertEqual(tasks["I1"]["dependencies"], ["L2", "L2a"])
@@ -102,12 +102,8 @@ class MidRunStore(unittest.TestCase):
         self.assertEqual({item["task_id"]: (item["previous_dependencies"], item["dependencies"]) for item in event["adjusted"]},
                          {"L2": (["L1"], ["L1"]), "D1": (["L1"], []), "I1": (["L2"], ["L2", "L2a"])})
         self.assertEqual(next(item for item in event["adjusted"] if item["task_id"] == "L2")["previous_write_paths"], ["core.py", "side.py"])
-        # The author now has D1 to do; codex only waits on L1, so it is the idle partner offered L2a.
+        # The author now has D1 to do; codex only waits on L1, so the free codex took L2a from the pool at once.
         self.assertEqual(self.store.claim(self.room_id, "claude")["team"]["task_id"], "D1")
-        offer = self.store.claim(self.room_id, "codex")
-        self.assertEqual(offer["kind"], "team_coordinate")
-        self.assertIn('Unclaimed task IDs: ["L2a"]', offer["text"])
-        self.finish(offer, [{"type": "claim", "task_id": "L2a"}, {"type": "plan_ready"}])
         work = self.store.claim(self.room_id, "codex")
         self.assertEqual((work["kind"], work["team"]["task_id"]), ("team_work", "L2a"))
         self.assertEqual(self.tasks()["L1"]["status"], "working")
@@ -119,7 +115,8 @@ class MidRunStore(unittest.TestCase):
         job = self.user_reply_job("codex")
         self.finish(job, self.split())
         tasks = self.tasks()
-        self.assertEqual((tasks["L2a"]["status"], tasks["D1"]["dependencies"]), ("open", []))
+        # codex is free once it has answered, so it takes the part it split off.
+        self.assertEqual((tasks["L2a"]["owner"], tasks["L2a"]["status"], tasks["D1"]["dependencies"]), ("codex", "assigned", []))
         event = next(event for event in self.snapshot()["events"] if event["kind"] == "plan_adjusted")
         self.assertEqual(event["sender"], "codex")
         self.assertEqual(self.snapshot()["team"]["revision"], self.revision)
@@ -132,22 +129,22 @@ class MidRunStore(unittest.TestCase):
         # Plain replies and a call that began after the change still go through.
         self.assertTrue(self.store.prevalidate_team_result(second["id"], []))
         self.finish(second, [])
-        offer = self.store.claim(self.room_id, "codex")
-        self.assertEqual(offer["kind"], "team_coordinate")
-        self.finish(offer, [])
+        # Free again, codex takes the split part straight from the pool.
+        work = self.store.claim(self.room_id, "codex")
+        self.assertEqual((work["kind"], work["team"]["task_id"]), ("team_work", "L2a"))
+        self.finish(work, [{"type": "complete", "task_id": "L2a", "result": "Side part done."}])
         fresh = self.user_reply_job("codex")
         self.finish(fresh, [proposal("L2b", paths=["extra.py"])])
         self.assertIn("L2b", self.tasks())
 
-    def test_freed_work_held_by_a_busy_partner_moves_to_an_idle_one(self):
-        # Catches the real run where the user freed T3 but it stayed with Codex, busy on T1, while Claude sat idle:
-        # nothing balanced unstarted work after a mid-run change.
+    def test_freed_work_goes_to_idle_partners_at_once(self):
+        # Catches the real run where the user freed T3 but it stayed queued behind Codex's long T1 while Claude sat idle:
+        # tasks freed by a mid-run change must go straight to whoever is free.
         room = self.store.create_room("Fictional ledger, slug and clamp", "codex", str(uuid4()), collaboration=True)[0]
         plans = {provider: self.store.claim(room, provider) for provider in ("claude", "codex", "kimi")}
         self.finish(plans["codex"], [proposal("T1", paths=["ledger.py"]), proposal("T2", dependencies=["T1"], paths=["slug.py"]),
-                                     proposal("T3", dependencies=["T2"], paths=["clamp.py"]),
-                                     {"type": "claim", "task_id": "T1"}, {"type": "claim", "task_id": "T3"}, {"type": "plan_ready"}])
-        self.finish(plans["kimi"], [{"type": "claim", "task_id": "T2"}, {"type": "plan_ready"}])
+                                     proposal("T3", dependencies=["T2"], paths=["clamp.py"]), {"type": "plan_ready"}])
+        self.finish(plans["kimi"], [{"type": "plan_ready"}])
         self.finish(plans["claude"], [{"type": "plan_ready"}])
         for _ in range(6):
             if self.store.snapshot(room)["team"]["phase"] == "working":
@@ -156,16 +153,16 @@ class MidRunStore(unittest.TestCase):
                 job = self.store.claim(room, provider)
                 if job and job["kind"] in {"team_coordinate", "team_plan"}:
                     self.finish(job, [{"type": "plan_ready"}])
-        self.assertEqual(self.store.claim(room, "codex")["team"]["task_id"], "T1")
         owners = lambda: {task["id"]: task["owner"] for task in self.store.snapshot(room)["team"]["tasks"]}
-        self.assertEqual(owners(), {"T1": "codex", "T2": "kimi", "T3": "codex"})
-        self.store.task_capabilities = lambda provider: ("text",)
-        self.assertTrue(self.store.send_message(room, "Slug and clamp do not need the ledger; run them now.", "claude", str(uuid4())))
-        reply = self.store.claim(room, "claude")
+        self.assertEqual(owners(), {"T1": "claude", "T2": None, "T3": None})
+        self.assertEqual(self.store.claim(room, "claude")["team"]["task_id"], "T1")
+        self.assertTrue(self.store.send_message(room, "Slug and clamp do not need the ledger; run them now.", "codex", str(uuid4())))
+        reply = self.store.claim(room, "codex")
         self.assertEqual(reply["kind"], "team_user")
         self.finish(reply, [adjust("T2", [], ["slug.py"]), adjust("T3", [], ["clamp.py"])])
-        self.assertEqual(owners(), {"T1": "codex", "T2": "kimi", "T3": "claude"})
-        self.assertEqual(self.store.claim(room, "claude")["team"]["task_id"], "T3")
+        self.assertEqual(owners(), {"T1": "claude", "T2": "codex", "T3": "kimi"})
+        self.assertEqual(self.store.claim(room, "codex")["team"]["task_id"], "T2")
+        self.assertEqual(self.store.claim(room, "kimi")["team"]["task_id"], "T3")
 
     def test_a_started_or_reviewed_task_cannot_be_adjusted(self):
         # Catches a dependency or path being changed under a running call or a delivered result.
@@ -221,35 +218,19 @@ class MidRunSchema(unittest.TestCase):
 
 class MidRunService(unittest.IsolatedAsyncioTestCase):
     """A fictional project with three partners on three tools, through real storage and the job loop."""
-    create = native.NativeRoomServiceTests.create
     settle = native.NativeRoomServiceTests.settle
     asyncTearDown = native.NativeRoomServiceTests.asyncTearDown
-    propose = rebalance.RebalanceService.propose
-    hold_task = rebalance.RebalanceService.hold_task
-
-    async def asyncSetUp(self):
-        with patch.object(native, "default_registry", rebalance.registry):
-            await native.NativeRoomServiceTests.asyncSetUp(self)
-        self.fake.handler = self.handler
-        self.plan = [rebalance.plan("L1", "ember"),
-                     rebalance.plan("L2", "codex", dependencies=["L1"], paths=["l2_core.py", "l2_side.py"]),
-                     rebalance.plan("D1", "claude", dependencies=["L1"]),
-                     rebalance.plan("I1", "claude", dependencies=["L2"])]
-        self.profiles = {}
-        self.service.store.account_workloads = lambda: self.profiles
-        self.before_plan = None
-        self.blocked_once = set()
-        self.hold_coordinate = None
-        self.user_replies = []
+    asyncSetUp = pool.PoolService.asyncSetUp
+    create = pool.PoolService.create
+    state = pool.PoolService.state
+    statuses = pool.PoolService.statuses
+    workers = pool.PoolService.workers
 
     async def handler(self, agent, context, cwd):
         if context["job"]["job_phase"] != "user":
-            return await rebalance.RebalanceService.handler(self, agent, context, cwd)
+            return await pool.PoolService.handler(self, agent, context, cwd)
         self.user_replies.append(context["self"])
-        if context["self"] != context["team"]["plan_author"]:
-            return native_reply(context, [])
-        # The codex partner takes the split part when it is offered.
-        self.plan.append(rebalance.plan("L2a", "codex", paths=["l2_side.py"]))
+        self.plan.append(pool.plan("L2a", paths=["l2_side.py"]))
         return native_reply(context, [
             native.proposal("L2a", paths=["l2_side.py"], capability="python", dependencies=[]),
             adjust("L2", ["L1"], ["l2_core.py"]), adjust("D1", [], ["D1.py"]), adjust("I1", ["L2", "L2a"], ["I1.py"])])
@@ -257,54 +238,59 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
     async def test_a_split_runs_while_the_long_task_keeps_working(self):
         # Catches a mid-run split waiting for in-flight work: the new task and the freed task must run while L1 is held,
         # and L1 must never be cancelled, replanned or restarted.
-        room, seen = {}, {}
+        self.plan = [pool.plan("L1"), pool.plan("L2", dependencies=["L1"], paths=["l2_core.py", "l2_side.py"]),
+                     pool.plan("D1", dependencies=["L1"]), pool.plan("I1", dependencies=["L2"])]
+        self.user_replies = []
+        seen = {}
 
         async def until():
-            state = await self.service.read_room(room["id"])
-            status = {task["id"]: task["status"] for task in state["team"]["tasks"]}
+            status = await self.statuses()
             if status.get("L2a") == "accepted" and status.get("D1") == "accepted":
                 seen["while_l1_working"] = status["L1"]
                 return True
             return False
-        self.hold_task("L1", until=until)
-        created = await self.create(participants=["claude", "codex", "ember"])
-        room["id"] = created["room"]["id"]
-        await asyncio.wait_for(self.entered.wait(), 5)
+        self.holds["L1"] = until
+        await self.create(["claude", "codex", "ember"])
         for _ in range(300):
-            state = await self.service.read_room(room["id"])
-            if not any(job["provider"] in {"claude", "codex"} and job["status"] in {"queued", "working"} for job in state["jobs"]):
+            state = await self.state()
+            if ("claude", "L1") in self.works and not any(
+                    job["provider"] in {"codex", "ember"} and job["status"] in {"queued", "working"} for job in state["jobs"]):
                 break
             await asyncio.sleep(0.01)
         revision = state["team"]["revision"]
+        # Only L1 is ready, so the first free partner took it; the rest wait in the pool.
         self.assertEqual({task["id"]: task["owner"] for task in state["team"]["tasks"]},
-                         {"L1": "ember", "L2": "codex", "D1": "claude", "I1": "claude"})
-        await self.service.send_message(room["id"], "Half of L2 does not need L1; split it off so it can start now.",
-                                        "claude", str(uuid4()), source="user")
+                         {"L1": "claude", "L2": None, "D1": None, "I1": None})
+        await self.service.send_message(self.room_id, "Half of L2 does not need L1; split it off so it can start now.",
+                                        "codex", str(uuid4()), source="user")
         await self.settle()
-        state = await self.service.read_room(room["id"])
+        state = await self.state()
         self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        self.assertEqual(self.user_replies, ["codex"])
         self.assertEqual(seen.get("while_l1_working"), "working", "L2a and D1 were delivered while L1 was still running")
         tasks = {task["id"]: task for task in state["team"]["tasks"]}
         self.assertEqual({key: task["status"] for key, task in tasks.items()}, dict.fromkeys(("L1", "L2", "D1", "I1", "L2a"), "accepted"))
-        self.assertEqual((tasks["L2a"]["owner"], tasks["L2a"]["write_paths"]), ("codex", ["l2_side.py"]))
+        # The two freed tasks went to the two free partners, in plan order and room order.
+        self.assertEqual((tasks["D1"]["owner"], tasks["L2a"]["owner"]), ("codex", "ember"))
+        self.assertEqual(tasks["L2a"]["write_paths"], ["l2_side.py"])
         self.assertEqual((tasks["L2"]["dependencies"], tasks["L2"]["write_paths"]), (["L1"], ["l2_core.py"]))
         self.assertEqual((tasks["D1"]["dependencies"], tasks["I1"]["dependencies"]), ([], ["L2", "L2a"]))
         self.assertEqual(state["team"]["revision"], revision, "nobody had to re-confirm")
-        work = [call["context"]["task"]["id"] for call in self.fake.calls if call["context"]["job"]["job_phase"] == "work"]
+        work = [task_id for _, task_id in self.works]
         self.assertEqual(work.count("L1"), 1, "the held task was never restarted")
         self.assertLess(work.index("L2"), work.index("I1"))
-        l1_jobs = [job for job in state["jobs"] if job["kind"] == "team_work" and job["status"] == "cancelled"]
-        self.assertEqual(l1_jobs, [])
+        self.assertEqual(self.workers()["L2"], "claude", "the partner who did L1 continues the chain")
+        self.assertEqual([job for job in state["jobs"] if job["kind"] == "team_work" and job["status"] == "cancelled"], [])
         kinds = {event["kind"] for event in state["events"]}
         self.assertFalse({"internal_replan_requested", "internal_replan_started"} & kinds)
         self.assertNotIn("native_response_rejected", kinds)
         event = next(event for event in state["events"] if event["kind"] == "plan_adjusted")
-        self.assertEqual((event["sender"], [item["task_id"] for item in event["added"]]), ("claude", ["L2a"]))
-        # The partner offered the split part sees what changed and why the board looks different.
-        offer = next(call for call in self.fake.calls if call["agent"] == "codex" and call["context"]["job"]["job_phase"] == "coordinate"
-                     and "L2a" in call["context"]["job"]["text"])
-        self.assertEqual(offer["context"]["plan_adjustments"][0]["by"], "claude")
-        # The plan author's reply was told it may do this.
+        self.assertEqual((event["sender"], [item["task_id"] for item in event["added"]]), ("codex", ["L2a"]))
+        # The partner who took the split part sees what changed and why the board looks different.
+        taken = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "work"
+                     and call["context"]["task"]["id"] == "L2a")
+        self.assertEqual(taken["context"]["plan_adjustments"][0]["by"], "codex")
+        # The answering partner's reply was told it may do this.
         reply = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "user")
         self.assertIn("adjust{type,task_id,dependencies,write_paths}", reply["prompt"])
 

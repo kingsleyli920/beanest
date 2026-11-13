@@ -38,8 +38,8 @@ const statusLabels = localizedLabels({
   ready_for_user: '已交付，待你验收', accepted: '本轮已接受',
 });
 const teamStageLabels = localizedLabels({
-  team_plan: '讨论目标与规划分工', team_coordinate: '确认分工并认领任务',
-  team_work: '推进已认领的子任务', team_review: '独立审核伙伴的交付',
+  team_plan: '讨论目标与规划分工', team_coordinate: '确认任务计划',
+  team_work: '推进领到的子任务', team_review: '独立审核伙伴的交付',
   team_help: '回答伙伴的具体求助', team_user: '处理你的补充说明',
 });
 const eventLabels = localizedLabels({
@@ -4106,7 +4106,7 @@ function renderRooms() {
 
 
 const taskStatusLabels = localizedLabels({
-  open: '待认领', assigned: '已分配，等待开始', working: '正在处理', waiting_peer: '等待伙伴',
+  open: '待领取', assigned: '已分配，等待开始', working: '正在处理', waiting_peer: '等待伙伴',
   review: '等伙伴检查', accepted: '已完成 · 伙伴看过', self_checked: '已完成 · 只做了自查', blocked: '遇到阻塞', unknown: '结果待确认',
   interrupted: '已中断', cancelled: '已取消', withdrawn: '已撤掉',
 });
@@ -4589,7 +4589,7 @@ function renderCollaboration(snapshot) {
     const counted = tasks.filter((task) => !taskWithdrawn(task)).length;
     board.append(element('summary', tasks.length ? selfChecked ? t("任务分工 · {p0}/{p1} 已完成 · {p2} 项只做了自查", { p0: accepted + selfChecked, p1: counted, p2: selfChecked }) : t("任务分工 · {p0}/{p1} 已完成，伙伴看过", { p0: accepted, p1: counted }) : t("任务分工 · 正在规划")));
     if (typeof collaboration.summary === 'string' && collaboration.summary) board.append(element('p', collaboration.summary, 'collaboration-summary'));
-    if (!tasks.length) board.append(element('p', t("正在整理分工，伙伴随后可认领任务。"), 'detail-caption'));
+    if (!tasks.length) board.append(element('p', t("正在整理任务；确认后，空闲的伙伴会依次领取。"), 'detail-caption'));
     const list = element('ol', '', 'collaboration-tasks');
     for (const task of tasks) {
       if (!task || typeof task.title !== 'string') continue;
@@ -4599,7 +4599,7 @@ function renderCollaboration(snapshot) {
       const title = element('strong', taskDisplayTitle(task.title)); title.title = task.title;
       heading.append(title, element('span', task.review_kind === 'self_check'
         ? ['accepted', 'self_checked'].includes(task.status) ? taskStatusLabels.self_checked : t("{p0} · 完成后只做自查", { p0: taskLabel }) : taskLabel, 'task-state'));
-      item.append(heading, element('p', task.owner ? t("负责人：{p0}", { p0: displayName(task.owner) }) : t("负责人：等待伙伴认领"), 'task-owner'));
+      item.append(heading, element('p', task.owner ? t("负责人：{p0}", { p0: displayName(task.owner) }) : t("负责人：待领取，空闲的伙伴会接手"), 'task-owner'));
       const reviewTask = task.status === 'review' ? snapshot.team?.tasks?.find((entry) => entry.id === task.id && entry.status === 'review') : null;
       if (typeof reviewTask?.reviewer === 'string' && agentPattern.test(reviewTask.reviewer)) {
         item.append(element('p', t("本次审核：{p0}", { p0: displayName(reviewTask.reviewer) }), 'task-reviewer'));
@@ -4826,7 +4826,7 @@ function renderCollaboration(snapshot) {
     build.type = 'button'; build.id = 'build-from-plan';
     build.addEventListener('click', () => {
       if (state.snapshot?.room.id !== snapshot.room.id || JSON.stringify(runBinding(state.snapshot?.current_run)) !== JSON.stringify(runBinding(snapshot.current_run))) return;
-      if (fileContainer) void submitRunAction('run', { workMode: 'build', text: t("按本轮已交付的方案继续实施：{p0}\n请自主认领、分工修改、需要时求助并互相审核。未完成或未验证的部分如实说明。", { p0: (snapshot.current_run.goal || snapshot.room.goal).slice(0, 2600) }) });
+      if (fileContainer) void submitRunAction('run', { workMode: 'build', text: t("按本轮已交付的方案继续实施：{p0}\n空闲的伙伴依次领取任务，需要时求助并互相审核。未完成或未验证的部分如实说明。", { p0: (snapshot.current_run.goal || snapshot.room.goal).slice(0, 2600) }) });
       else void buildFromLegacyPlan();
     });
     actions.append(build, element('span', fileContainer ? t("继续本轮方案，开始新一轮实际修改。完整讨论仍可在聊天查看。") : t("新建可交付文件的任务，带上当前方案摘录；原聊天保留。"), 'detail-caption'));
@@ -5333,7 +5333,7 @@ function teamMemberTask(snapshot, member) {
   if (pending) {
     const dependencies = Array.isArray(pending.dependencies) ? pending.dependencies
       .map((id) => tasks.find((task) => task.id === id)).filter((task) => task && !['accepted', 'self_checked', 'withdrawn'].includes(task.status)) : [];
-    return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: interfaceList(dependencies.map((task) => taskDisplayTitle(task.title))) }) : t("「{p0}」已认领，等待派发", { p0: taskDisplayTitle(pending.title) });
+    return dependencies.length ? t("「{p0}」等待依赖：{p1}", { p0: taskDisplayTitle(pending.title), p1: interfaceList(dependencies.map((task) => taskDisplayTitle(task.title))) }) : t("「{p0}」已归它，排队等待开始", { p0: taskDisplayTitle(pending.title) });
   }
   const blocked = owned.find((task) => ['blocked', 'unknown', 'interrupted', 'cancelled'].includes(task.status));
   // Unfinished work carries into the next attempt unless the user stopped it, as on the progress board.
@@ -6066,7 +6066,7 @@ function renderControls() {
   $('new-room-setup').hidden = !!state.selected;
   $('team-setup-note').hidden = !!state.selected;
   $('team-setup-note').textContent = state.participantIds.length >= 2
-    ? t("先由谁整理分工？伙伴会认领任务、按需要求助并交叉检查。需要你决定或遇到阻碍时，会在聊天中说明。")
+    ? t("先由谁整理分工？之后空闲的伙伴会依次领取任务，按需要求助并交叉检查。需要你决定或遇到阻碍时，会在聊天中说明。")
     : t("当前选了一个工具，将直接处理你的目标。可再邀请伙伴共同拆分与互审。");
   const selectedProject = state.projects.find((project) => project.id === state.selectedProject);
   $('project-choice-label').textContent = selectedProject ? t("项目：{p0}{p1}", { p0: selectedProject.name, p1: nativeMode ? t(" · 完整开发") : t(" · 隔离修改，原项目保持") }) : t("关联项目（可选）");

@@ -102,7 +102,9 @@ class ReplyOnlyCrashes(ServiceCase):
             return {"session_id": self.provider.session_of[agent] or str(uuid4()), "status": "failed", "failure_code": "unknown_provider_error",
                     "text": "", "usage": None, "events": [], "cleanup_confirmed": True}
         self.provider.faults = [Fault("claude", 1, phase="work", result=failed)]
-        room_id = await self.create()
+        # One partner, so no sibling call is cut off mid-flight: that would leave its session identity unknown,
+        # a separate and still-guarded case.
+        room_id = await self.create(["claude"])
         stopped = await self.final(room_id)
         self.assertEqual((stopped["team"]["phase"], stopped["team"]["stop_reason"]), ("unknown", "unknown_provider_error"))
         self.assertTrue(any(task["status"] == "unknown" for task in stopped["team"]["tasks"]), stopped["team"]["tasks"])

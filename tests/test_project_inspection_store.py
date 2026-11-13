@@ -358,7 +358,7 @@ class ProjectInspectionStoreTests(unittest.TestCase):
         self.store.finish_job(job["id"], team_commands=[proposal, {"type": "claim", "task_id": "long"}])
         task = self.store.snapshot(room_id)["team"]["tasks"][0]
         self.assertEqual(task["write_paths"], [path])
-        self.assertEqual(task["owner"], "claude")
+        self.assertIsNone(task["owner"], "a planning claim reserves nothing; the task waits in the pool")
         legacy, _ = self.store.create_room("Legacy task", "claude", str(uuid4()), collaboration=True)
         legacy_job = self.store.claim(legacy, "claude")
         with self.assertRaises(RoomError) as failure:

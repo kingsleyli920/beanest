@@ -59,7 +59,8 @@ class ContinuousObjectiveHTTPTests(unittest.TestCase):
         after = self.wait(room_id,lambda item:item['objective']['status']=='complete')
         self.assertNotEqual(after['objective']['id'],before['objective']['id'])
         self.assertEqual(after['team']['tasks'][0]['id'],before['team']['tasks'][0]['id'])
-        self.assertEqual(after['team']['tasks'][0]['owner'],before['team']['tasks'][0]['owner'])
+        # Nobody had started it, so it waited in the pool and the restarted round handed it out.
+        self.assertEqual((before['team']['tasks'][0]['owner'],after['team']['tasks'][0]['owner']),(None,'claude'))
         self.assertFalse(any(call['context']['job']['job_phase'] in {'plan','coordinate'} for call in self.provider.calls[count:]))
         code,replay = self.request('POST',f'/api/rooms/{room_id}/restart-objective',payload)
         self.assertEqual(code,200)

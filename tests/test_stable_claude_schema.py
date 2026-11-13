@@ -301,9 +301,9 @@ class ServiceDispatch(unittest.IsolatedAsyncioTestCase):
                     reply["commands"][0]["reason"] = None
             return reply
         self.fake.handler = handler
-        # Codex plans and owns the task, so the independent review goes to Claude.
+        # Codex is first in the room, so it takes the task from the pool and the independent review goes to Claude.
         created = await self.service.create_room("Update the existing value and preserve notes.", "codex", "req-1",
-            mode="native_project", project_id=self.registration["project"]["id"], participants=["claude", "codex"],
+            mode="native_project", project_id=self.registration["project"]["id"], participants=["codex", "claude"],
             work_mode="build", runtime_settings={"permission": "full_access", "members": {}},
             execution_policy={"mode": "autonomous"})
         await self.settle()

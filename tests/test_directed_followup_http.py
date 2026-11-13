@@ -17,7 +17,7 @@ from local_agent_coordinator import adapters, native_adapters
 
 from test_kimi_native_setup import configuration
 from test_kimi_setup_http import SetupFixture
-from test_native_room_service import NativeTransport, native_reply, no_rebalance
+from test_native_room_service import NativeTransport, native_reply, planned_owners
 from test_team_runs_http import TeamRunHTTPTests as _Helpers
 from test_team_store import proposal
 from wait_support import poll
@@ -36,7 +36,7 @@ class DirectedFollowupHTTPTests(unittest.TestCase):
         self.addCleanup(self.fixture.close)
         self.fixture.config.write_text(configuration(), encoding="utf-8")
         self.service, self.server = self.fixture.service, self.fixture.server
-        no_rebalance(self.service)
+        planned_owners(self.service)
         self.root, self.port, self.source = self.fixture.root, self.fixture.port, self.fixture.source
         (self.source / "notes.md").write_text("An unchanged canonical note.\n", encoding="utf-8")
         self.native = NativeTransport()
