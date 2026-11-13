@@ -158,7 +158,23 @@ def prompt(identifier, params):
     if CASE == "hang":
         time.sleep(3600)
     answer = SCENARIO.get("answer", "hi")
-    if CASE in {"tool", "escalate", "leak"}:
+    if CASE == "leak":
+        # As if the model ran `env` and the key were in it (real dsh keeps it out
+        # of command environments): the same tool_call / tool_call_update /
+        # agent_message_chunk shapes as the capture, each carrying the key.
+        call = "toolu_env_1"
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": call, "title": "bash", "kind": "other", "status": "in_progress",
+                     "rawInput": {"command": "env; echo " + KEY, "description": "check env"}})
+        output = "PATH=/usr/bin:/bin\nDEEPSEEK_API_KEY=" + KEY + "\n" + KEY + "\n[exit code: 0]"
+        update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed",
+                     "content": [{"type": "content", "content": {"type": "text", "text": output}}]})
+        state["log"].append("tool/result", {"turn": state["turn"], "step": 1, "message": {"role": "tool", "toolCallId": call,
+                                            "content": [{"type": "text", "text": output}], "isError": False}})
+        assistant(state, "The environment has DEEPSEEK_API_KEY=" + KEY + ".", usage(1200, 40, 800))
+        if "write" in SCENARIO:
+            Path(SCENARIO["write"]["path"]).write_text(SCENARIO["write"]["text"])
+        answer = answer.replace("KEY", KEY)
+    if CASE in {"tool", "escalate"}:
         call = "toolu_fake_1"
         target = SCENARIO.get("write", {"path": "made-by-dsh.txt", "text": "hello\n"})
         command = f"printf %s {json.dumps(target['text'])} > {target['path']} && cat {target['path']}"
@@ -186,9 +202,6 @@ def prompt(identifier, params):
                             "so stop and explain instead of working around it")
         else:
             Path(target["path"]).write_text(target["text"])
-        if CASE == "leak":
-            text = "DEEPSEEK_API_KEY=" + KEY + "\n"  # a model printing its own key, for the scrub
-            answer = SCENARIO.get("answer", "hi").replace("KEY", KEY)
         update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": call, "status": outcome,
                      "content": [{"type": "content", "content": {"type": "text", "text": text}}]})
         state["log"].append("tool/result", {"turn": state["turn"], "step": 1, "message": {"role": "tool", "toolCallId": call,

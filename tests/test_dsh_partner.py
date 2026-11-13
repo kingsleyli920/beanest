@@ -308,11 +308,20 @@ class Transport(unittest.IsolatedAsyncioTestCase):
     async def test_a_key_the_model_prints_is_scrubbed_from_text_events_and_receipts(self):
         # Catches the key reaching the room through the reply or a tool's output.
         self.scenario("leak", answer="your key is KEY")
-        result = await self.call()
-        self.assertNotIn(FAKE_KEY, json.dumps(result))
-        self.assertIn(adapters.REDACTED, result["text"])
-        for path in (self.root / "receipts").iterdir():
+        events = []
+        result = await self.call("full_access", on_activity=events.append)
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["text"], "your key is " + adapters.REDACTED)
+        self.assertEqual(result["native_execution"]["tool_calls"], 1, "the env call was seen")
+        self.assertTrue(events, "progress events were produced")
+        for value in (result, events):
+            self.assertNotIn(FAKE_KEY, json.dumps(value))
+        receipts = list((self.root / "receipts").iterdir())
+        self.assertTrue(receipts)
+        for path in receipts:
             self.assertNotIn(FAKE_KEY, path.read_text())
+        dsh_log = b"".join(path.read_bytes() for path in (self.home / "sessions").rglob("session.v4.jsonl"))
+        self.assertIn(FAKE_KEY.encode(), dsh_log, "the fake really sent the key, so the checks above had it to miss")
 
     async def test_deleting_a_room_session_removes_it_and_its_subagents_from_the_partners_home(self):
         # Catches a purge that leaves child sessions, or one that touches a session another cwd owns.
@@ -499,9 +508,14 @@ class RoomWithDshPartner(unittest.IsolatedAsyncioTestCase):
             # dsh itself runs: the reply is what the plan asks for, and a work call writes its file through dsh's tool.
             with tempfile.TemporaryDirectory() as scratch:
                 reply = plan_four(agent, context, Path(scratch))
+            if self.case == "leak":
+                reply["message"] += " KEY"  # the fake swaps in the key: the model repeats what env showed
             scenario = {"case": self.case, "answer": json.dumps(reply)}
-            if context["job"]["job_phase"] == "work" and self.case == "text":
-                scenario.update(case="tool", write={"path": f"{context['task']['id']}.py", "text": "VALUE = 1\n"})
+            write = {"path": f"{context['task']['id']}.py", "text": "VALUE = 1\n"} if context["job"]["job_phase"] == "work" else None
+            if write and self.case == "text":
+                scenario.update(case="tool", write=write)
+            elif write and self.case == "leak":
+                scenario.update(write=write)
             (self.home / "fake-scenario.json").write_text(json.dumps(scenario))
             return await native_adapters.invoke_native(agent, prompt, cwd, session_id=session_id, **options)
         self.service = RoomService(self.root / "rooms.sqlite3", self.root / "workspaces", partners=self.partners,
@@ -603,6 +617,33 @@ class RoomWithDshPartner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(traces(self.home), [])
         listed = next(item for item in (await self.service.list_partners())["partners"] if item["id"] == "ds")
         self.assertEqual(listed["availability"]["reason"], "api_key_unavailable")
+
+    async def test_a_key_dsh_prints_never_reaches_the_rooms_events_files_or_responses(self):
+        # Catches a key that dsh returned (in a message, a tool call or its output) landing in the room's
+        # messages, events, progress, receipts, runtime files or API responses.
+        self.case = "leak"
+        state = await self.run_room()
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        self.assertTrue(any(task["owner"] == "ds" and task["status"] == "accepted" for task in state["team"]["tasks"]))
+        partner_home = self.home.resolve()
+        dsh_own = {path for path in partner_home.rglob("*") if path.is_file()
+                   and (partner_home / "sessions" in path.parents or partner_home / "storages" in path.parents)}
+        self.assertTrue(any(FAKE_KEY.encode() in path.read_bytes() for path in dsh_own),
+                        "dsh really returned the key this run, so the checks below had it to miss")
+        self.assertTrue(any(event["kind"] == "message" and event["sender"] == "ds" and adapters.REDACTED in event["text"]
+                            for event in state["events"]),
+                        "the reply that carried the key reached the room, redacted")
+        responses = [json.dumps(state), json.dumps(await self.service.list_partners()),
+                     json.dumps(await self.service.runtime_options())]
+        for text in responses:
+            self.assertNotIn(FAKE_KEY, text)
+        scanned = 0
+        for path in self.root.rglob("*"):
+            # The key file itself, and dsh's own session logs in the partner's dsh home, are not Beanest's records.
+            if path.is_file() and path != self.key_file and path.resolve() not in dsh_own:
+                scanned += 1
+                self.assertNotIn(FAKE_KEY.encode(), path.read_bytes(), path)
+        self.assertGreater(scanned, 20)
 
     async def test_the_key_never_reaches_storage_events_prompts_or_responses(self):
         # Catches the key value being copied anywhere Beanest writes or returns, dsh's own files included.

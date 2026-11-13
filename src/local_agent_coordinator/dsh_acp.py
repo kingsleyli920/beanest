@@ -346,7 +346,11 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     updates = DshTurnUpdates(on_activity, progress_fingerprint)
 
     async def scrubbed(params):
-        # The key never reaches anything the room parses, stores or shows.
+        # The one place the key is taken out: everything dsh sends (message
+        # chunks, tool input and output, a permission question) passes here
+        # before anything reads it, so the reply text, events, progress and
+        # questions built from it are clean by construction. dsh commits each
+        # text block whole, so a key never arrives split across two updates.
         await updates(adapters.scrub_secret(params, secret))
 
     result = {"session_id": session_id, "text": "", "status": "failed", "usage": None, "events": []}
@@ -484,11 +488,11 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
             cancelled.native_execution = observation
             cancelled.api_usage = {"by_model": by_model}
             raise cancelled
-    result.update(session_id=session_id, text=adapters.scrub_secret(updates.text, secret), events=updates.events,
+    result.update(session_id=session_id, text=updates.text, events=updates.events,
                   cleanup_confirmed=clean, native_execution=observation, usage=total_usage(by_model),
                   api_usage={"by_model": by_model, "model": model})
     if updates.permission_required and updates.question is not None:
-        result["native_question"] = adapters.scrub_secret(updates.question, secret)
+        result["native_question"] = updates.question
     if not clean:
         result.update(status="failed", failure_code="native_cleanup_unconfirmed")
     return result
