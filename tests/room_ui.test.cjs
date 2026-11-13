@@ -6009,6 +6009,17 @@ test('missing bootstrap authentication is a real connection failure and never pr
   assert.equal(ui.get('send').disabled, true); assert.match(ui.get('notice').textContent, /从本地协作服务打开/);
 });
 
+test('a partner whose task waits for the room to re-split files is not shown as blocked', async () => {
+  // Catches the real card that said 遇到阻碍 while the room was replanning R3 by itself and nothing was asked of anyone.
+  const saved = activeActivitySnapshot(); saved.jobs = []; saved.members.forEach((member) => { member.status = 'idle'; });
+  saved.team.tasks = [{ id: 'R3', title: '修演练等待预算', owner: 'codex', status: 'blocked', block_cause: 'coordination_required', internal_replan_revision: -1 }];
+  const ui = await browser({ rooms: [saved.room], saved });
+  assert.equal(ui.get('status-codex').textContent, '等重新分配文件');
+  // A block nobody replans still reads as blocked.
+  saved.team.tasks[0] = { ...saved.team.tasks[0], internal_replan_revision: null }; await ui.poll();
+  assert.equal(ui.get('status-codex').textContent, '遇到阻碍');
+});
+
 test('sidebar uses the same task waiting semantics as the compact activity card and native working takes precedence', async () => {
   const saved = activeActivitySnapshot(); saved.jobs = []; saved.members.forEach((member) => { member.status = 'idle'; });
   saved.team.tasks = [{ id: 'a', title: '实现规则', owner: 'claude', reviewer: 'codex', status: 'review' }];
