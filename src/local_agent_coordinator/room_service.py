@@ -2903,12 +2903,17 @@ class RoomService(RoomPromptMixin):
 
     @staticmethod
     def _native_receipt_schema_matches(actual, context, provider, phase, *, can_propose=False):
-        from .room_response_schema import response_schema
+        from itertools import combinations
+        from .room_response_schema import ADDED_COMMAND_KINDS, response_schema
         common = dict(project=True, native=True, collaboration=True,
                       member_ids=tuple(member["id"] for member in context["members"]), provider=provider)
-        # A receipt may predate the stable schema, so both remain genuine.
-        expected = (response_schema(**common, team_phase=phase, can_propose=can_propose),
-                    response_schema(**common, stable=True))
+        # A receipt may predate the stable schema, or command kinds added since
+        # its call was made (an upgrade mid-run); each of those remains genuine.
+        omitted = [frozenset(group) for size in range(len(ADDED_COMMAND_KINDS) + 1)
+                   for group in combinations(ADDED_COMMAND_KINDS, size)]
+        expected = [schema for omit in omitted for schema in (
+            response_schema(**common, team_phase=phase, can_propose=can_propose, omit_kinds=omit),
+            response_schema(**common, stable=True, omit_kinds=omit))]
         def normalized(value, *, property_map=False):
             if isinstance(value, dict):
                 # Enum order and description annotations do not change schema
