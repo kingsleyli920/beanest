@@ -4716,7 +4716,8 @@ function renderCollaboration(snapshot) {
   const savedDocuments = documents.filter(savedOnly);
   const inheritedDocuments = documents.filter((doc) => doc.historical);
   const currentDocuments = documents.filter((doc) => !doc.historical && !savedOnly(doc));
-  if (objective?.delivery?.missing_or_changed?.length) result.append(element('p', t("部分目标成果与已交付版本不一致，未列为可核对的交付。请查看已保存文件与任务记录。"), 'detail-caption'));
+  // Checked when the objective ends; mid-run a later task may still be reworking a file.
+  if (objective?.delivery?.missing_or_changed?.length && !['running', 'checkpoint', 'paused'].includes(objective.status)) result.append(element('p', t("部分目标成果与已交付版本不一致，未列为可核对的交付。请查看已保存文件与任务记录。"), 'detail-caption'));
   if (objective?.baseline?.files?.length && objective.baseline.verified !== true) result.append(element('p', t("上一轮交付的绑定尚未确认，暂不展示为沿用成果。"), 'detail-caption'));
   let remainingDocuments = state.deliveryLimit; let shownDocuments = 0;
   for (const [entries, group] of [[currentDocuments, 'current'], [inheritedDocuments, 'baseline'], [savedDocuments, 'saved']]) {

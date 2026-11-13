@@ -170,6 +170,15 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     replanning = {task["id"]: task["title"] for task in team["tasks"]
                   if task["status"] == "blocked" and task.get("block_cause") == "coordination_required"
                   and task.get("internal_replan_revision") is not None}
+    # A later task may legitimately rework a delivered file. Only the latest
+    # delivery of each path is checked, and not while unfinished work holds it.
+    latest = {}
+    for task in team["tasks"]:
+        if task_finished(task):
+            for file in task.get("result_files") or []:
+                latest[file["path"]] = file["sha256"]
+    in_progress = {path for task in team["tasks"] if task["status"] != WITHDRAWN and not task_finished(task)
+                   for path in task.get("write_paths") or []}
     for task in team["tasks"]:
         if task["status"] == WITHDRAWN:
             # Listed so the board stays true, but never remaining, delivered or reviewed work.
@@ -187,7 +196,8 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
             remaining.append(task["title"] + (_system("：") + _REASONS.get(waiting, waiting) if waiting else _system("：尚未交付并通过互审")))
         if task_finished(task):
             for file in task.get("result_files") or []:
-                if current_files.get(file["path"], {}).get("sha256") != file["sha256"]:
+                if (latest.get(file["path"]) == file["sha256"] and file["path"] not in in_progress
+                        and current_files.get(file["path"], {}).get("sha256") != file["sha256"]):
                     stale = True
                     remaining.append(task["title"] + _system("：交付文件后来发生变化，需要重新核对。"))
     withdrawn = [task for task in tasks if task["status"] == WITHDRAWN]
@@ -207,7 +217,13 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         next_action = (_system("不用你操作；有伙伴额度恢复后会自动继续。") if reason_code == "all_partners_quota_exhausted"
                        else _system("点“继续”再试一次；没有发出的工作不会重复。") if reason_code == "native_preflight_failed"
                        else _system("先核对停止原因和现有交付；未确认结果不会自动重跑。"))
-    elif stale or room["status"] == "needs_user" or any(task["status"] == "blocked" and task["id"] not in replanning for task in tasks):
+    # While an objective advances by itself this generic question never shows:
+    # what the user must decide comes as the objective's own needs_user with a
+    # concrete question; everything else (reviews, re-splits, rework, a stale
+    # file) the team handles, and the end-of-objective check covers delivery.
+    elif ((snapshot.get("objective") or {}).get("status") not in {"running", "checkpoint", "paused"}
+          and (stale or room["status"] == "needs_user"
+               or any(task["status"] == "blocked" and task["id"] not in replanning for task in tasks))):
         state = "needs_user"
         reason = reason or _system("有工作尚未完成，需要补充信息或确认处理方式。")
         next_action = _system("查看未完成项，在同一聊天补充所需信息。")

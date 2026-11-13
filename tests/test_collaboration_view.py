@@ -163,6 +163,39 @@ class CollaborationViewTests(unittest.TestCase):
                 value["team"]["tasks"][1].update(block_cause=cause, internal_replan_revision=replan)
                 self.assertEqual(collaboration_view(value)["outcome"]["state"], "needs_user")
 
+    def test_a_file_reworked_by_a_later_task_is_not_a_changed_delivery(self):
+        # Catches the real room that said work needed the user while running: a repair task changed a file
+        # an earlier accepted task had delivered, and the earlier delivery was reported as changed afterwards.
+        value = snapshot(mode="native_project", status="accepted", phase="working")
+        value["project"]["files"] = [{"path": "result.py", "sha256": "b" * 64}]
+        value["team"]["tasks"].append({"id": "repair", "title": "Repair result", "owner": "codex", "status": "review",
+                                       "dependencies": [], "write_paths": ["result.py"], "result": "Reworked.",
+                                       "result_files": [{"path": "result.py", "sha256": "b" * 64}]})
+        outcome = collaboration_view(value)["outcome"]
+        self.assertEqual(outcome["state"], "in_progress")
+        self.assertFalse(any("交付文件后来发生变化" in line for line in outcome["remaining"]))
+        # Once the repair is accepted its version is the delivery, and it matches.
+        value["team"]["tasks"][1]["status"] = "accepted"
+        self.assertFalse(any("交付文件后来发生变化" in line for line in collaboration_view(value)["outcome"]["remaining"]))
+        # The latest delivery changed afterwards with nobody holding the file: that still needs a look.
+        value["project"]["files"] = [{"path": "result.py", "sha256": "c" * 64}]
+        outcome = collaboration_view(value)["outcome"]
+        self.assertEqual(outcome["remaining"], ["Repair result：交付文件后来发生变化，需要重新核对。"])
+
+    def test_a_running_objective_never_shows_the_generic_needs_user_headline(self):
+        # Catches 有工作尚未完成，需要补充信息或确认处理方式 shown while the objective advanced by itself; only the
+        # objective's own needs_user, with its concrete question, asks the user, and manual rooms keep the headline.
+        value = snapshot(mode="native_project", status="blocked", phase="working")
+        value["team"]["tasks"][0].update(block_cause="user_decision", blocked_reason="Which fictional layout?")
+        value["objective"] = {"status": "running", "pause_requested": False}
+        self.assertEqual(collaboration_view(value)["outcome"]["state"], "in_progress")
+        value["objective"] = {"status": "needs_user", "next_step": {"question": "Pick the fictional layout."}}
+        outcome = collaboration_view(value)["outcome"]
+        self.assertEqual((outcome["state"], outcome["reason"]), ("needs_user", "Pick the fictional layout."))
+        del value["objective"]
+        outcome = collaboration_view(value)["outcome"]
+        self.assertEqual((outcome["state"], outcome["reason"]), ("needs_user", "有工作尚未完成，需要补充信息或确认处理方式。"))
+
     def test_stop_and_unknown_preserve_actionable_subscription_failure_reason(self):
         for phase, expected in (("stopped", "stopped"), ("unknown", "unknown")):
             with self.subTest(phase=phase):
