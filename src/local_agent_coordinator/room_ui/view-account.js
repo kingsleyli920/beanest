@@ -20,17 +20,18 @@ function memberQuotaWindows(id) {
       return { window, remaining: remaining !== null ? remaining : used !== null ? 100 - used : null, stale: quota.stale === true };
     }).filter((entry) => entry.remaining !== null).slice(0, 3);
 }
-function renderMemberWorkload(id, workload) {
+// The role comes from the same choice the model line and the bottom bar show (partnerRuntimeLabels),
+// so a role picked for a new task shows on its card before the task starts.
+function renderMemberWorkload(id, workload, role = partnerRuntimeLabels(id).role) {
   const holder = document.getElementById(`member-workload-${id}`);
   if (!holder) return;
   const account = workload?.accounts?.find((row) => row.members.includes(id));
   const share = !Number.isInteger(account?.actual_percent) ? ''
     : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
       : t("本轮工作量 {p0}%", { p0: account.actual_percent });
-  const role = copyRole(state.snapshot?.room?.runtime_settings?.members?.[id]?.role);
   const reserve = state.partners.find((partner) => partner.id === id)?.quota_reserve;
   // Always named, the default too, so every card shows that a role is set and what it is.
-  const text = [t("角色：{p0}", { p0: roleName(role) }), share,
+  const text = [t("角色：{p0}", { p0: role }), share,
     Number.isFinite(reserve) ? t("额度只剩约 {p0}%，先派给别人", { p0: reserve }) : ''].filter(Boolean).join(' · ');
   if (holder.textContent !== text) holder.textContent = text;
 }

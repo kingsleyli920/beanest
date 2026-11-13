@@ -313,7 +313,7 @@ const state = {
   beanStyleOptions: beanStyles, selectedBeanStyle: 'sprout', beanStyleChosen: false,
   pendingPartner: null, pendingPartnerScopeChanged: false,
   partnerSaveUncertain: false, partnerVerifying: false, projectChoosing: false,
-  contextMenu: null, usagePopover: null, usageButtons: new Map(), partnerControls: new Map(), activityNodes: new Map(), taskOptions: null, handoffHistory: null,
+  contextMenu: null, usagePopover: null, usageButtons: new Map(), partnerControls: new Map(), activityNodes: new Map(), taskOptions: null, taskPartnerExpanded: null, handoffHistory: null,
   lifecycleViews: { projects: 'active', partners: 'active', rooms: 'active' }, lifecycleConfirm: null, roomLifecycleSupported: false, roomNativeSessionCleanupSupported: false, messageReceiptsSupported: false, projectDeletionSupported: false, partnerLifecycleSupported: false, partnerOperations: new Map(), partnerIntentEpoch: 0, partnerRequestGeneration: 0, partnerAppliedGeneration: 0, partnerOperationSequence: 0, partnerResponseContexts: new WeakMap(), partnerOperationChecks: new Set(), messageReceiptChecks: new Set(), projectDeletions: new Map(), lifecycleOperations: new Map(), lifecyclePolling: false, roomControlRequests: new Map(), stopRequests: new Set(), sidelinedRequests: new Map(), deletedRooms: new Set(),
   availabilityTimer: null, availabilityRefreshing: false, availabilityLastStarted: null, availabilityError: '', availabilityRecheck: null, taskWithdraw: null, taskWithdrawalSupported: false,
   accountRefreshId: null, accountTimer: null, accountPanels: new Map(), accountAuto: new Map(), accountRefreshTimes: new Map(), accountRefreshErrors: new Map(),
@@ -1973,11 +1973,9 @@ function memberCard(id, descriptor = {}) {
   identity.append(name, email);
   const adapter = descriptor.adapter || descriptor.provider;
   if (adapter) identity.append(element('p', ({ claude: 'Claude Code', codex: 'Codex' })[adapter] || adapter, 'adapter-identity'));
-  const model = element('button', '', 'member-model'); model.type = 'button'; model.id = `member-model-${id}`;
-  model.setAttribute('aria-haspopup', 'dialog'); model.setAttribute('aria-controls', 'runtime-settings-popover');
-  model.addEventListener('click', () => void openRuntimePopover({ partnerId: id, trigger: model }));
-  heading.append(avatar(id, descriptor), identity, model);
-  if (state.partners.some((partner) => partner.id === id)) heading.append(appearanceButton(id));
+  // The card only reports; model, role and workload are set from the bottom bar or 任务选项, appearance from 伙伴与额度.
+  const model = element('p', '', 'member-model'); model.id = `member-model-${id}`;
+  heading.append(avatar(id, descriptor), identity);
   const doing = element('p', '', 'member-doing'); doing.append(status);
   const task = element('p', '', 'current-task'); task.id = `task-${id}`;
   const publicProgress = element('div', '', 'member-public-progress'); publicProgress.id = `public-progress-${id}`;
@@ -1991,7 +1989,7 @@ function memberCard(id, descriptor = {}) {
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
   const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
   const workload = element('p', '', 'member-workload'); workload.id = `member-workload-${id}`;
-  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, workload, usageSummary, details, accountFooter(id));
+  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, model, workload, usageSummary, details, accountFooter(id));
   return card;
 }
 
@@ -2429,9 +2427,9 @@ function policySubmissionError() {
 function contextWorkMode() { return state.snapshot?.current_run?.work_mode || state.snapshot?.room?.work_mode; }
 function closeTaskOptions({ restoreFocus = true } = {}) {
   if (!state.taskOptions) return;
-  const { trigger } = state.taskOptions; state.taskOptions = null;
+  const { trigger } = state.taskOptions; state.taskOptions = null; state.taskPartnerExpanded = null;
   $('task-options-popover').hidden = true; trigger.setAttribute('aria-expanded', 'false');
-  syncModalInert();
+  syncModalInert(); renderRuntimeSettings();
   if (restoreFocus && trigger.isConnected !== false && !trigger.hidden) trigger.focus({ preventScroll: true });
 }
 function openTaskOptions(section, trigger) {
@@ -2495,25 +2493,43 @@ function runtimeShortcutModelLabel(model, models) {
   const resolved = models.find((entry) => entry.id !== 'default' && entry.resolved_model && entry.resolved_model === model.resolved_model);
   return resolved ? t("{p0}（默认）", { p0: resolved.name || resolved.id }) : t("默认推荐");
 }
+// One reading of a partner's model, effort, role and workload for every place that shows it:
+// the bottom bar, the partner card and the rows in 任务选项.
+function partnerRuntimeLabels(id, context = runtimeContext()) {
+  const { recorded, unrecorded, choices } = context;
+  const historical = runtimePartnerReadOnly(id);
+  const choice = historical ? recorded?.members?.[id] : choices.members[id];
+  const models = knownModels(id);
+  const model = models.find((entry) => entry.id === choice?.model);
+  const fullModelLabel = unrecorded ? t("未记录模型") : choice?.model ? model ? runtimeModelLabel(model, models) : fallbackModelLabel(choice.model) : t("默认模型");
+  const modelLabel = model ? runtimeShortcutModelLabel(model, models) : fullModelLabel;
+  const effort = unrecorded ? t("未记录强度") : effortLabels()[choice?.effort] || choice?.effort || t("默认强度");
+  const shortEffort = effort === t("默认强度") ? t("默认") : effort;
+  const role = roleName(copyRole(choice?.role));
+  const workloadName = { low: t("少"), normal: t("中"), high: t("多") }[choice?.workload] || '';
+  return { historical, choice, model, fullModelLabel, modelLabel, effort, shortEffort, role, workloadName };
+}
 function renderRuntimeShortcuts(context = runtimeContext()) {
-  const { room, editable, recorded, unrecorded, choices, workMode, newGoal, nativeRecovery, configuration, unsent } = context;
+  const { room, editable, newGoal, configuration, unsent, workMode, choices, nativeRecovery, unrecorded } = context;
   const caption = configuration ? unsent ? t("发消息后生效 · ") : configuration.pending ? t("后续工作生效 · ") : t("设置 · ") : room ? editable ? newGoal ? t("新目标 · ") : t("下一轮 · ") : t("本轮 · ") : '';
   $('runtime-settings-summary').textContent = configuration ? t("{p0}权限：{p1}", { p0: caption, p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) }) : nativeRecovery ? t("继续沿用本任务设置") : unrecorded ? t("权限：未记录")
     : t("{p0}权限：{p1}", { p0: editable && room ? newGoal ? t("新目标 · ") : t("下一轮 · ") : '', p1: workMode === 'plan' ? t("方案只读") : runtimePermissionName(choices.permission) });
   for (const id of state.participantIds) {
+    const labels = partnerRuntimeLabels(id, context);
+    const { historical, model, fullModelLabel, modelLabel, effort, shortEffort, workloadName } = labels;
+    // The partner card only reports what is set; changing it happens in the bottom bar or in 任务选项.
+    const cardModel = document.getElementById(`member-model-${id}`);
+    if (cardModel) {
+      const cardText = t("模型：{p0}", { p0: shortEffort === t("默认") ? modelLabel : `${modelLabel} · ${shortEffort}` });
+      if (cardModel.textContent !== cardText) cardModel.textContent = cardText;
+      cardModel.title = `${fullModelLabel} · ${effort}${model?.resolved_model ? t(" · 工具标识：{p0}", { p0: model.resolved_model }) : ''}`;
+      renderMemberWorkload(id, state.snapshot?.workload, labels.role);
+    }
     const group = state.partnerControls.get(id); if (!group) continue;
     const button = group.firstChild;
-    const historical = runtimePartnerReadOnly(id);
     const partnerCaption = historical ? t("原有设置 · 仅查看 · ") : caption;
-    const choice = historical ? recorded?.members?.[id] : choices.members[id];
-    const models = knownModels(id);
-    const model = models.find((entry) => entry.id === choice?.model);
-    const fullModelLabel = unrecorded ? t("未记录模型") : choice?.model ? model ? runtimeModelLabel(model, models) : fallbackModelLabel(choice.model) : t("跟随工具");
-    const modelLabel = model ? runtimeShortcutModelLabel(model, models) : fullModelLabel;
-    const effort = unrecorded ? t("未记录强度") : effortLabels()[choice?.effort] || choice?.effort || t("默认强度");
-    const shortEffort = effort === t("默认强度") ? t("默认") : effort;
     // Always name the role, the default too, so the button shows that roles exist and where to change them.
-    const roleSuffix = ` · ${roleName(copyRole(choice?.role))}`;
+    const roleSuffix = ` · ${labels.role}`;
     const text = `${displayName(id)} · ${modelLabel} · ${shortEffort}${roleSuffix}${historical ? t(" · 仅查看") : ''} ⌄`;
     if (button.dataset.label !== text) {
       button.dataset.label = text;
@@ -2521,23 +2537,78 @@ function renderRuntimeShortcuts(context = runtimeContext()) {
       configuration.append(element('span', modelLabel, 'shortcut-model'), element('span', '·', 'shortcut-separator'), element('span', `${shortEffort}${roleSuffix}${historical ? t(" · 仅查看") : ''}`, 'shortcut-effort'));
       button.replaceChildren(element('span', displayName(id), 'shortcut-name'), configuration, element('span', '⌄', 'shortcut-arrow'));
     }
-    const workloadName = { low: t("少"), normal: t("中"), high: t("多") }[choice?.workload];
     button.title = `${partnerCaption}${displayName(id)} · ${fullModelLabel} · ${effort}${roleSuffix}${workloadName ? t(" · 工作量{p0}", { p0: workloadName }) : ''}${historical ? t(" · 仅查看") : ''}${model?.resolved_model ? t(" · 工具标识：{p0}", { p0: model.resolved_model }) : ''}`;
     button.setAttribute('aria-label', t("{p0}{p1}的模型与思考强度：{p2}，{p3}{p4}", { p0: partnerCaption, p1: displayName(id), p2: fullModelLabel, p3: effort, p4: historical ? t("，原有设置仅供查看") : !editable ? configuration ? t("，当前不可修改") : t("，本轮已固定") : '' }));
     button.setAttribute('aria-expanded', String(state.runtimePopoverOpen && state.runtimePartner === id));
-    const cardModel = document.getElementById(`member-model-${id}`);
-    if (cardModel) {
-      // A default effort adds nothing to the narrow card button, so it shows only the model there.
-      // The card names the role on its own line, so the narrow button keeps to the model.
-      cardModel.textContent = (shortEffort === t("默认") ? `${modelLabel}` : `${modelLabel} · ${shortEffort}`) + ' ⌄'; cardModel.title = button.title;
-      cardModel.setAttribute('aria-label', button.getAttribute('aria-label'));
-      cardModel.setAttribute('aria-expanded', button.getAttribute('aria-expanded'));
-    }
   }
   $('composer-usage-bar').dataset.nextRun = String(!!room && editable);
   $('composer-usage-bar').setAttribute('aria-label', t("{p0}伙伴模型与额度", { p0: caption }));
   $('runtime-shortcuts-caption').textContent = configuration ? unsent ? t("发消息后生效") : configuration.pending ? t("后续工作生效") : t("设置") : room ? editable ? newGoal ? t("新目标") : t("下一轮") : t("本轮") : '';
   $('runtime-shortcuts-caption').hidden = !room;
+}
+// 任务选项 lists every partner with what is set for it; "设置" opens the same card the bottom bar opens,
+// in place, so model, effort, role and workload are chosen where the partners are chosen.
+function renderTaskPartnerRows() {
+  const container = $('task-partner-settings');
+  const anchor = state.selected ? $('frozen-participants') : $('participant-disabled-note');
+  const siblings = anchor.parentNode ? [...anchor.parentNode.children] : [];
+  if (anchor.parentNode && siblings[siblings.indexOf(anchor) + 1] !== container) anchor.after(container);
+  if (state.taskPartnerExpanded && !state.participantIds.includes(state.taskPartnerExpanded)) state.taskPartnerExpanded = null;
+  const existing = new Map([...container.children].map((row) => [row.dataset.partner, row]));
+  const context = runtimeContext();
+  const rows = state.participantIds.map((id) => {
+    let row = existing.get(id);
+    if (!row) {
+      row = element('div', '', 'task-partner-row'); row.dataset.partner = id;
+      const line = element('div', '', 'task-partner-line');
+      const toggle = element('button', '', 'quiet-button task-partner-toggle'); toggle.type = 'button'; toggle.id = `task-partner-toggle-${id}`;
+      toggle.setAttribute('aria-controls', `task-partner-panel-${id}`);
+      toggle.addEventListener('click', () => toggleTaskPartner(id));
+      const summary = element('span', '', 'task-partner-summary'); summary.id = `task-partner-summary-${id}`;
+      line.append(avatar(id), element('span', '', 'task-partner-name'), summary, toggle);
+      const panel = element('div', '', 'task-partner-panel'); panel.id = `task-partner-panel-${id}`;
+      row.append(line, panel);
+    }
+    const { modelLabel, effort, role, workloadName, historical } = partnerRuntimeLabels(id, context);
+    const [, name, summary, toggle] = row.firstChild.children;
+    const expanded = state.taskPartnerExpanded === id;
+    const text = `${modelLabel} · ${effort} · ${role}${workloadName ? t(" · 工作量{p0}", { p0: workloadName }) : ''}${historical ? t(" · 仅查看") : ''}`;
+    if (name.textContent !== displayName(id)) name.textContent = displayName(id);
+    if (summary.textContent !== text) summary.textContent = text;
+    const label = expanded ? t("收起") : t("设置");
+    if (toggle.textContent !== label) toggle.textContent = label;
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.setAttribute('aria-label', t("{p0}的模型、角色与工作量：{p1}", { p0: displayName(id), p1: text }));
+    row.lastChild.hidden = !expanded;
+    row.classList.toggle('expanded', expanded);
+    return row;
+  });
+  if (rows.length !== container.children.length || rows.some((row, index) => container.children[index] !== row)) container.replaceChildren(...rows);
+  container.hidden = !rows.length;
+}
+function toggleTaskPartner(id) {
+  state.taskPartnerExpanded = state.taskPartnerExpanded === id ? null : id;
+  renderRuntimeSettings();
+  if (state.taskPartnerExpanded !== id) { $(`task-partner-toggle-${id}`)?.focus({ preventScroll: true }); return; }
+  focusTaskPartner(id); const firstFocus = document.activeElement?.id;
+  $(`task-partner-panel-${id}`)?.scrollIntoView?.({ block: 'nearest' });
+  // Like the popover: once the model list is read, focus moves to the model unless the user already moved it.
+  const stillOpen = () => !!state.taskOptions && state.taskPartnerExpanded === id;
+  void loadPartnerRuntimeOptions(id, stillOpen, () => { if (document.activeElement?.id === firstFocus) focusTaskPartner(id); });
+}
+function focusTaskPartner(id) {
+  const model = $(`runtime-model-${id}`); const role = $(`runtime-role-${id}`);
+  (model && !model.disabled ? model : role && !role.disabled ? role : $(`task-partner-toggle-${id}`))?.focus({ preventScroll: true });
+}
+// Reads the model list for one partner the way the per-partner popover does: the local catalog, then the tool itself.
+async function loadPartnerRuntimeOptions(id, stillOpen, onCatalog = () => {}) {
+  await loadRuntimeOptions();
+  if (!stillOpen()) return;
+  onCatalog();
+  if (partnerCatalogRefreshable(id)) await refreshRuntimeOptions(id);
+}
+function partnerCatalogRefreshable(id) {
+  return runtimeContext().editable && !!id && !runtimePartnerReadOnly(id) && state.runtimeOptions?.partners?.[id]?.supported !== false;
 }
 function renderRuntimeSettings() {
   const { room, editable, locked, recorded, unrecorded, choices, workMode, supported, newGoal, nativeHandoff, configuration, unsent } = runtimeContext();
@@ -2571,7 +2642,7 @@ function renderRuntimeSettings() {
       const choice = actual?.members?.[state.runtimePartner];
       const actualLabel = state.runtimePartner ? choice
         ? `${choice.model ? (() => { const models = knownModels(state.runtimePartner); const model = models.find((entry) => entry.id === choice.model);
-          return model ? runtimeModelLabel(model, models) : fallbackModelLabel(choice.model); })() : t("工具默认")} · ${effortLabels()[choice.effort] || choice.effort || t("默认强度")}`
+          return model ? runtimeModelLabel(model, models) : fallbackModelLabel(choice.model); })() : t("默认模型")} · ${effortLabels()[choice.effort] || choice.effort || t("默认强度")}`
         : t("未记录") : (activeJob?.work_mode || room?.work_mode) === 'plan' ? t("方案只读") : runtimePermissionName(activeJob?.permission || actual?.permission);
       $('runtime-settings-note').textContent += t(" 当前设置：{p0}。", { p0: actualLabel });
     }
@@ -2585,11 +2656,19 @@ function renderRuntimeSettings() {
   $('runtime-settings-message').hidden = !state.runtimeMessage;
   $('runtime-settings-message').textContent = state.runtimeMessage;
   const body = $('runtime-settings-body');
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [state.participantIds, state.runtimeOptions, choices, workMode, locked, state.runtimeLoading, state.runtimeRefreshId, editable, !!recorded, state.runtimePartner, nativePermissionAvailable(), state.participantIds.map((id) => runtimePartnerReadOnly(id)), state.roleEditor, savedCustomRoles()]]);
-  if (body.dataset.fingerprint === fingerprint) return;
-  const focusedId = nodeContains(body, document.activeElement) ? document.activeElement.id : '';
+  renderTaskPartnerRows();
+  // A partner opened in 任务选项 gets its settings card there instead of in this popover; the two never show at once.
+  const taskPartner = state.taskOptions && state.participantIds.includes(state.taskPartnerExpanded) ? state.taskPartnerExpanded : null;
+  const taskHost = taskPartner ? $(`task-partner-panel-${taskPartner}`) : null;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [state.participantIds, state.runtimeOptions, choices, workMode, locked, state.runtimeLoading, state.runtimeRefreshId, editable, !!recorded, state.runtimePartner, nativePermissionAvailable(), state.participantIds.map((id) => runtimePartnerReadOnly(id)), state.roleEditor, savedCustomRoles(), taskPartner]]);
+  if (body.dataset.fingerprint === fingerprint && (!taskHost || taskHost.children.length)) return;
+  const focusedId = [body, taskHost].some((host) => host && nodeContains(host, document.activeElement)) ? document.activeElement.id : '';
   body.dataset.fingerprint = fingerprint; body.replaceChildren();
-  if (unrecorded) { body.append(element('p', t("这份记录没有保存权限、模型或思考强度，无法确认当时的设置。"), 'detail-caption')); return; }
+  for (const row of [...$('task-partner-settings').children]) row.lastChild?.replaceChildren();
+  if (unrecorded) {
+    const note = t("这份记录没有保存权限、模型或思考强度，无法确认当时的设置。");
+    body.append(element('p', note, 'detail-caption')); taskHost?.append(element('p', note, 'detail-caption')); return;
+  }
   const label = element('label', workMode === 'plan' ? t("动手时统一权限 ") : t("统一权限 "), 'runtime-permission'); const select = element('select'); select.id = 'runtime-permission';
   label.hidden = !!state.runtimePartner;
   const nativePermissions = nativePlanPermissionsAvailable();
@@ -2604,7 +2683,7 @@ function renderRuntimeSettings() {
     state.runtimeSettings = { ...choices, permission: select.value }; state.runtimePermissionExplicit = true; state.runtimeDraftDirty = true; state.runtimeDraftToken = crypto.randomUUID(); saveDraft(); renderControls();
   });
   label.append(select); body.append(label);
-  if (!supported) body.append(element('p', state.runtimeLoading ? t("正在读取设置…") : t("展开后读取本地设置；模型保持工具默认，不会自行查询模型或启动任务。"), 'detail-caption'));
+  if (!supported) for (const host of [body, taskHost]) host?.append(element('p', state.runtimeLoading ? t("正在读取设置…") : t("展开后读取本地设置；模型保持工具默认，不会自行查询模型或启动任务。"), 'detail-caption'));
   const list = element('div', '', 'runtime-partners');
   for (const id of state.participantIds) {
     const catalog = state.runtimeOptions?.partners?.[id];
@@ -2612,14 +2691,14 @@ function renderRuntimeSettings() {
     const historical = runtimePartnerReadOnly(id);
     const choice = (historical ? recorded?.members?.[id] : choices.members[id]) || { model: null, effort: null };
     const card = element('section', '', 'runtime-partner'); card.id = `runtime-card-${id}`; card.setAttribute('tabindex', '-1');
-    card.hidden = state.runtimePartner !== id;
+    card.hidden = state.runtimePartner !== id && taskPartner !== id;
     const heading = element('div', '', 'runtime-partner-heading');
     heading.append(avatar(id), element('strong', displayName(id)));
     const refresh = element('button', state.runtimeRefreshId === id ? t("正在读取…") : t("读取模型选项"), 'quiet-button'); refresh.type = 'button'; refresh.id = `runtime-refresh-${id}`;
     refresh.disabled = historical || locked || !supported || catalog?.supported === false || !!state.runtimeRefreshId;
     refresh.addEventListener('click', () => void refreshRuntimeOptions(id)); heading.append(refresh); card.append(heading);
     const modelLabel = element('label', t("模型 ")); const modelSelect = element('select'); modelSelect.id = `runtime-model-${id}`;
-    const defaultModel = element('option', t("跟随工具设置")); defaultModel.value = ''; modelSelect.append(defaultModel);
+    const defaultModel = element('option', t("工具默认模型")); defaultModel.value = ''; modelSelect.append(defaultModel);
     for (const model of models) { const option = element('option', runtimeModelLabel(model, models)); option.value = model.id;
       if (typeof model.resolved_model === 'string') option.title = t("工具标识：{p0}", { p0: model.resolved_model });
       modelSelect.append(option); }
@@ -2655,7 +2734,7 @@ function renderRuntimeSettings() {
         : !models.length ? t("尚未读取可选模型。点“读取模型选项”只查询工具能力，不启动任务。") : '';
     if (catalogNote) card.append(element('p', catalogNote, 'detail-caption'));
     renderRoleControls(card, id, choice, !!(historical || locked));
-    list.append(card);
+    (taskPartner === id ? taskHost : list).append(card);
   }
   body.append(list);
   if (focusedId) $(focusedId)?.focus({ preventScroll: true });
@@ -2757,7 +2836,7 @@ async function openRuntimePopover({ partnerId = null, trigger = $('runtime-setti
   await loadRuntimeOptions();
   if (!state.runtimePopoverOpen || state.runtimePartner !== partnerId) return;
   focusId = focusUnchangedRuntimeTarget(focusId);
-  if (runtimeContext().editable && partnerId && !runtimePartnerReadOnly(partnerId) && state.runtimeOptions?.partners?.[partnerId]?.supported !== false) await refreshRuntimeOptions(partnerId);
+  if (partnerCatalogRefreshable(partnerId)) await refreshRuntimeOptions(partnerId);
   if (state.runtimePopoverOpen) focusUnchangedRuntimeTarget(focusId);
 }
 function closeRuntimePopover({ restoreFocus = true } = {}) {
