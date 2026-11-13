@@ -2312,8 +2312,10 @@ class RoomStore:
             return None
         binding = observation["binding"]
         # A task that writes no files (a check, a measurement) is handed over the
-        # same way; the audit then requires its private tree to hold no change.
+        # same way when its partner ran out of quota; the audit then requires its
+        # private tree to hold no change. Other failures keep their own recovery.
         if (binding.get("task_id") != task["id"] or binding.get("result_version") != task["result_version"]
+                or not json.loads(task["write_paths_json"]) and not quota_source
                 or job["error"] == "cli_nonzero_exit" and (type(observation.get("exit_code")) is not int or observation["exit_code"] == 0)):
             return None
         candidate = {"job_id": job["id"], "run_id": job["run_id"], "provider": job["provider"],
