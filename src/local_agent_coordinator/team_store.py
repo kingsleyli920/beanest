@@ -38,7 +38,9 @@ _REJECTION_RULES = {
         "acceptance; dependencies listing other task ids (at most "
         f"{MAX_TASK_DEPENDENCIES}, not itself, no repeats); capability text, python or image; write_paths of relative POSIX "
         f"file paths (at most {MAX_TASK_PATHS}), with no leading or trailing '/', no '.', '..' or empty parts, no backslash and "
-        "no repeats ignoring case. Check every task against these and fix the ones that break them. "),
+        "no repeats ignoring case. Check every task against these and fix the ones that break them. "
+        "An adjust names one existing task at most once and gives its complete new dependencies (same rules) and "
+        "write_paths; those write_paths may only drop paths the task already has, never add one. "),
     "invalid_team_commands": f"A response may carry at most {MAX_RESPONSE_COMMANDS} commands. ",
 }
 
@@ -1427,7 +1429,17 @@ class TeamStore:
         text += {
             "team_task_permission": (" A command referenced a task, phase or role this call does not hold. Use only the "
                                      "commands allowed for this job phase, for this call's own task or review."),
-            "team_plan_locked": " Only the plan author proposes, and only while planning; omit propose commands now.",
+            "team_plan_locked": (" The plan changes only in two places: the plan author proposes while planning, and any "
+                                 "partner answering a user message while the team is working may propose new tasks and "
+                                 "adjust tasks nobody has started (open or assigned, no result, no call ever made for them). "
+                                 "A task that has started, is under review or has a result cannot be adjusted. Omit those "
+                                 "commands now."),
+            "team_plan_adjusted_meanwhile": (" Another partner changed the unstarted part of the board after this call began. "
+                                             "Read the current board and context.plan_adjustments, and send only the changes "
+                                             "the user asked for that are still missing; do not repeat a split already made."),
+            "invalid_team_dependencies": (" Every dependency must name a task on the board or proposed in this response, "
+                                          "and no task may depend on itself directly or through other tasks. Remove the "
+                                          "dependency that closes the loop."),
             "invalid_target": (" request_help.to must name a different available peer; with repair_paths it may be null. "
                                "If no peer is available, finish with a self-checked result or block with a concrete reason."),
             "team_files_forbidden": (" This room is read-only: files must be [] and edits [] or null; put any proposed "
@@ -1440,7 +1452,8 @@ class TeamStore:
                                             "files and edits empty in the JSON reply."),
             "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
                                          "neither depends on the other. Add that existing task to the new task's dependencies, "
-                                         "or choose write_paths no other task writes."),
+                                         "or choose write_paths no other task writes. When splitting a task nobody has started, "
+                                         "adjust it in the same response so it no longer lists the moved paths."),
         }.get(error, "")
         diagnostic = (rejection_evidence or {}).get("response_validation") or {}
         for issue in diagnostic.get("commands", []):
@@ -1644,6 +1657,22 @@ class TeamStore:
                for dependency in json.loads(task["dependencies_json"])):
             self._queue(db, job["room_id"], job["provider"], "work", task=task)
 
+    @staticmethod
+    def _unstarted_task_ids(db, room_id, run_id, rows):
+        """Tasks a mid-run plan adjustment may still change.
+
+        Nobody has begun them: open or assigned, no result, never reviewed,
+        not carried over or reopened, no host path grant, and no call of any
+        kind (queued or finished) was ever bound to them. A queued work call
+        counts as begun, as in _rebalance_unstarted.
+        """
+        bound = {row[0] for row in db.execute("SELECT DISTINCT task_id FROM team_jobs WHERE room_id=? AND run_id=? "
+                                              "AND task_id IS NOT NULL", (room_id, run_id))}
+        return {row["id"] for row in rows
+                if row["status"] in {"open", "assigned"} and row["result_version"] == 0 and row["id"] not in bound
+                and not row["inherited_from_run"] and not row["repair_execution_id"] and not row["review_reason"]
+                and not json.loads(row["ownership_grant_json"] or "{}")}
+
     def validate(self, db, job, commands):
         """Validate without mutations, including task-bound response permissions."""
         context = self.job_context(db, job["id"])
@@ -1713,6 +1742,13 @@ class TeamStore:
                 raise RoomError("team_context_changed")
         members = set(self.objectives.available_members(db, job["room_id"]))
         proposals = []
+        adjustments = {}
+        # Whoever answers the user while work runs may change the part of the
+        # board nobody has started: the user's message is the authority, and the
+        # plan author is often busy with the longest task. In-flight work keeps
+        # its binding.
+        mid_run = team["phase"] == "working" and context["job_phase"] == "user"
+        unstarted = self._unstarted_task_ids(db, job["room_id"], context["run_id"], rows) if mid_run else set()
         task_terminal_commands = 0
         for command in commands:
             if (not isinstance(command, dict) or not isinstance(command.get("type"), str)
@@ -1726,8 +1762,8 @@ class TeamStore:
                     and not (kind == "request_help" and set(command) == fields - {"repair_paths"})):
                 raise RoomError("invalid_team_commands")
             if kind == "propose":
-                if (team["phase"] != "planning" or context["job_phase"] not in {"plan", "coordinate"}
-                        or job["provider"] != team["plan_author"]):
+                if not mid_run and (team["phase"] != "planning" or context["job_phase"] not in {"plan", "coordinate"}
+                                    or job["provider"] != team["plan_author"]):
                     raise RoomError("team_plan_locked")
                 task_id = _task_id(command["id"])
                 if task_id in tasks or task_id in {item["id"] for item in proposals}:
@@ -1744,6 +1780,28 @@ class TeamStore:
                         command["write_paths"] or command["capability"] not in read_only_capabilities(room["mode"])):
                     raise RoomError("plan_read_only" if room["work_mode"] == "plan" else "permission_read_only")
                 proposals.append(command)
+            elif kind == "adjust":
+                if not mid_run:
+                    raise RoomError("team_plan_locked")
+                task_id = _task_id(command["task_id"])
+                if task_id not in tasks:
+                    raise RoomError("team_task_not_found")
+                if task_id in adjustments:
+                    raise RoomError("invalid_team_commands")
+                # Started, reviewed or delivered work, or any task a work call
+                # was ever made for, keeps its dependencies and file authority.
+                if task_id not in unstarted:
+                    raise RoomError("team_plan_locked")
+                if (not isinstance(command["dependencies"], list) or len(command["dependencies"]) > MAX_TASK_DEPENDENCIES
+                        or len({_task_id(value) for value in command["dependencies"]}) != len(command["dependencies"])
+                        or task_id in command["dependencies"]):
+                    raise RoomError("invalid_team_task")
+                _paths(command["write_paths"], max_length=1024 if room["mode"] in {"project_folder", "native_project"} else 240)
+                # Paths may only be narrowed: moving one to a new task is a proposal plus this.
+                held = {path.casefold() for path in json.loads(tasks[task_id]["write_paths_json"])}
+                if any(path.casefold() not in held for path in command["write_paths"]):
+                    raise RoomError("invalid_team_task")
+                adjustments[task_id] = command
             elif kind == "plan_ready":
                 same_plan_in_progress = (team["phase"] == "working"
                                          and context["revision"] == team["revision"])
@@ -1804,6 +1862,16 @@ class TeamStore:
         if len(proposals) > MAX_RESPONSE_COMMANDS or task_terminal_commands > 1:
             raise RoomError("invalid_team_commands")
         combined = {key: json.loads(task["dependencies_json"]) for key, task in tasks.items()}
+        if mid_run and (proposals or adjustments):
+            # Several partners may answer one user message at once. A change made
+            # from a board another partner already adjusted could duplicate that
+            # split, so it is sent back to be redone from the current board.
+            claimed = db.execute("SELECT MAX(seq) FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='job_claimed' "
+                                 "AND json_extract(value_json,'$.job_id')=?", (job["room_id"], job["id"])).fetchone()[0]
+            if db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? AND json_extract(value_json,'$.kind')='plan_adjusted' "
+                          "AND json_extract(value_json,'$.run_id')=?", (job["room_id"], claimed or 0, context["run_id"])).fetchone():
+                raise RoomError("team_plan_adjusted_meanwhile")
+        combined.update({key: item["dependencies"] for key, item in adjustments.items()})
         combined.update({item["id"]: item["dependencies"] for item in proposals})
         # Proposed prerequisites and their parent must pass the same DAG check.
         for parent in self._replan_parents(db, job["room_id"]):
@@ -1826,6 +1894,7 @@ class TeamStore:
             visit(task_id)
         paths = {}
         task_paths = {key: json.loads(row["write_paths_json"]) for key, row in tasks.items()}
+        task_paths.update({key: item["write_paths"] for key, item in adjustments.items()})
         task_paths.update({item["id"]: item["write_paths"] for item in proposals})
 
         def depends_on(task_id, other):
@@ -1922,12 +1991,30 @@ class TeamStore:
         self._record_task_handoff(db, job, context, commands, usage)
         proposed = [command for command in commands if command["type"] == "propose"]
         replan_parents = self._replan_parents(db, room_id) if proposed else []
-        if proposed:
+        # A mid-run adjustment answers the user's own message and touches only
+        # unstarted tasks, so it keeps the confirmed revision: nobody re-confirms
+        # and no running call is rebound. Planning still re-confirms every change.
+        mid_run = context["job_phase"] == "user"
+        if proposed and not mid_run:
             db.execute("UPDATE teams SET revision=revision+1 WHERE room_id=?", (room_id,))
             db.execute("UPDATE team_members SET plan_ready_revision=-1 WHERE room_id=?", (room_id,))
+        # Applied before claims so a claim in the same reply sees the moved paths.
+        adjusted = []
+        for command in commands:
+            if command["type"] != "adjust":
+                continue
+            before = self.task(db, room_id, command["task_id"])
+            db.execute("UPDATE shared_tasks SET dependencies_json=?,write_paths_json=? WHERE room_id=? AND run_id=? AND id=? "
+                       "AND status IN ('open','assigned') AND result_version=0",
+                       (json.dumps(command["dependencies"]), json.dumps(command["write_paths"]), room_id, context["run_id"], command["task_id"]))
+            adjusted.append({"task_id": command["task_id"], "title": before["title"],
+                             "previous_dependencies": json.loads(before["dependencies_json"]), "dependencies": command["dependencies"],
+                             "previous_write_paths": json.loads(before["write_paths_json"]), "write_paths": command["write_paths"]})
         for command in commands:
             kind = command["type"]
-            if kind == "propose":
+            if kind == "adjust":
+                pass  # applied above
+            elif kind == "propose":
                 blocked = command["capability"] == "image"
                 db.execute("INSERT INTO shared_tasks(room_id,id,title,description,acceptance,dependencies_json,"
                            "write_paths_json,capability,status,blocked_reason,run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -2034,6 +2121,16 @@ class TeamStore:
                        (json.dumps(dependencies), room_id, context["run_id"], parent["id"]))
             self.store._event(db, room_id, "internal_replan_proposed", sender=provider, job_id=job["id"],
                               task_id=parent["id"], prerequisite_ids=[item["id"] for item in proposed])
+        if mid_run and (proposed or adjusted):
+            # Every member sees this in the timeline and in its next context.
+            self.store._event(db, room_id, "plan_adjusted", sender=provider, job_id=job["id"], run_id=context["run_id"],
+                              revision=self.team(db, room_id)["revision"],
+                              added=[{"task_id": item["id"], "title": item["title"], "dependencies": item["dependencies"],
+                                      "write_paths": item["write_paths"]} for item in proposed],
+                              adjusted=adjusted)
+            # Work that no longer waits may sit with a partner busy on something
+            # else; balance unstarted tasks so an idle partner can take it now.
+            self._rebalance_unstarted(db, room_id)
         if context["job_phase"] in {"plan", "coordinate"}:
             db.execute("UPDATE team_members SET planned=1 WHERE room_id=? AND provider=?", (room_id, provider))
         elif context["job_phase"] == "help":
@@ -2758,6 +2855,22 @@ class TeamStore:
         self.stop(db, room_id, (row and row[0]) or "team_plan_stalled")
         return True
 
+    def _owns_ready_work(self, db, room_id, provider):
+        """Whether the member has work it can do now.
+
+        A task that still waits for another task's result does not occupy its
+        owner, so an open task (for example one split off mid-run) is offered
+        to that idle member too.
+        """
+        rows = {row["id"]: row for row in db.execute(
+            "SELECT * FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?",
+            (room_id,))}
+        return any(task["owner"] == provider and (
+            task["status"] in {"working", "waiting_peer"}
+            or task["status"] == "assigned" and all(value in rows and task_settled(rows[value])
+                                                    for value in json.loads(task["dependencies_json"])))
+            for task in rows.values())
+
     def _coordinate(self, db, room_id, providers):
         providers = self.coordination_members(db, room_id, providers)
         team = self.team(db, room_id)
@@ -2821,8 +2934,7 @@ class TeamStore:
         for confirmed, provider, row in sorted(candidates):
             if not calls_available(self._remaining(db, room_id)):
                 break
-            owns_pending = db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND owner=? "
-                                      "AND status IN ('assigned','working','waiting_peer')", (room_id, provider)).fetchone()
+            owns_pending = self._owns_ready_work(db, room_id, provider)
             needs_confirmation = not confirmed
             can_claim_task = ((missing_plan and provider == team["plan_author"]) or len(open_tasks) > coordinating
                               and (team["phase"] == "planning" or not owns_pending))

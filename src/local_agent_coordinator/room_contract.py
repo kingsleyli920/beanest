@@ -31,6 +31,10 @@ COMMAND_FIELDS = {
     "plan_ready": {"type"},
     "checkpoint": {"type", "decision", "summary", "next_goal", "scope_reference", "question"},
     "checkpoint_review": {"type", "verdict", "reason", "proposal_digest"},
+    # The plan author's mid-run edit of a task nobody has started: its full new
+    # dependency list and a narrowed write_paths. It reuses existing field names,
+    # so the stable union schema keeps its fields and only gains this kind.
+    "adjust": {"type", "task_id", "dependencies", "write_paths"},
 }
 
 
