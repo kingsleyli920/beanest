@@ -42,6 +42,7 @@ class WorkQuotaFixture(OutcomeFixture):
         self.release_peer.set()
         self.legacy, self.quota, self.fault = legacy, quota, fault
         self.kimi_model = 'kimi-code/fictional-0'
+        self.t2_paths = ['second.md']
         self.failed_work = None
         self.release_inspection = threading.Event()
         if not hold_inspection:
@@ -192,7 +193,7 @@ class WorkQuotaFixture(OutcomeFixture):
         if phase in {'plan', 'coordinate'}:
             commands = []
             if agent == 'kimi' and not context['team']['tasks']:
-                commands = [proposal('T1', paths=['first.md']), proposal('T2', paths=['second.md'], dependencies=['T1']),
+                commands = [proposal('T1', paths=['first.md']), proposal('T2', paths=self.t2_paths, dependencies=['T1']),
                             proposal('T3', paths=['final.md'], dependencies=['T1', 'T2']), {'type': 'claim', 'task_id': 'T2'}]
             else:
                 target = {'claude': 'T1', 'codex': 'T3'}.get(agent)
@@ -200,7 +201,8 @@ class WorkQuotaFixture(OutcomeFixture):
                     commands = [{'type': 'claim', 'task_id': target}]
             return native_reply(context, commands + [{'type': 'plan_ready'}])
         if context.get('native_partial_inspection'):
-            self.inspections.append({'agent': agent, 'bytes': (Path(cwd) / 'second.md').read_bytes(), 'context': context})
+            second = Path(cwd) / 'second.md'
+            self.inspections.append({'agent': agent, 'bytes': second.read_bytes() if second.exists() else None, 'context': context})
             return native_reply(context, [{'type': 'complete', 'task_id': task['id'], 'result': 'Read retained bytes without editing or replay.'}])
         if phase == 'work':
             self.work_tasks.append((agent, task['id']))
@@ -292,6 +294,25 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
     def test_quota_handoff_works_when_kimi_follows_its_tool_default_model(self):
         # Catches the handoff never starting because no model was chosen for Kimi ("跟随工具"), which left a real room stopped.
         self.assert_automatic_recovery(legacy=False, kimi_model=None)
+
+    def test_a_task_that_writes_no_files_is_handed_over_when_kimi_runs_out_of_quota(self):
+        # Catches the real 九烛 stop: Kimi hit its quota on a measurement task with no write paths, the
+        # handoff found no candidate, and the whole objective stopped as native_side_effects_unconfirmed.
+        fixture = self.fixture(legacy=False)
+        fixture.t2_paths = []
+        fixture.create()
+        final = fixture.wait(lambda value: value['objective']['status'] in {'complete', 'needs_user'}
+                             or value['objective']['status'] == 'stopped' and fixture.service._quota_handoffs.get(fixture.room_id, {}).get('state') != 'in_progress')
+        self.assertTrue(fixture.failed_work, final['team'])
+        failed_id = fixture.failed_work['job_id']
+        self.assertEqual(fixture.failed_work['result']['failure_code'], 'subscription_limit_reached')
+        self.assertEqual(final['objective']['status'], 'complete', (final['team'], final['objective']))
+        failure_index = next(i for i, call in enumerate(fixture.calls) if call['job_id'] == failed_id)
+        self.assertFalse(any(call['agent'] == 'kimi' for call in fixture.calls[failure_index + 1:]))
+        self.assertTrue(any(event['kind'] == 'native_recovery_started' and event['sender'] == 'system' for event in final['events']))
+        second = next(task for task in final['team']['tasks'] if task['id'] == 'T2')
+        self.assertNotEqual(second['owner'], 'kimi')
+        self.assertIn(second['status'], {'accepted', 'self_checked'})
 
     def test_account_query_unavailable_but_selectable_receivers_automatically_take_retained_work(self):
         self.assert_automatic_recovery(legacy=True, receiver_account_failure=True)
