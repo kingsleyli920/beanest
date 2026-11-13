@@ -44,6 +44,7 @@ class WorkQuotaFixture(OutcomeFixture):
         self.kimi_model = 'kimi-code/fictional-0'
         self.t2_paths = ['second.md']
         self.coordination_block = False
+        self.block_cause = 'coordination_required'
         self.failed_work = None
         self.release_inspection = threading.Event()
         if not hold_inspection:
@@ -220,8 +221,9 @@ class WorkQuotaFixture(OutcomeFixture):
                 and not getattr(self, 't4_blocked', False):
             # A partner asks the team to re-split file ownership; the room replans by itself.
             self.t4_blocked = True
-            return native_reply(context, [{'type': 'block', 'task_id': 'T4', 'cause': 'coordination_required',
-                                           'reason': 'Needs ownership of a file no task holds.'}])
+            return native_reply(context, [{'type': 'block', 'task_id': 'T4', 'cause': self.block_cause,
+                                           'reason': 'Needs ownership of a file no task holds.' if self.block_cause == 'coordination_required'
+                                           else 'Which of two fictional layouts should the side page use?'}])
         if phase == 'work':
             self.work_tasks.append((agent, task['id']))
             for path in task['write_paths']:
@@ -351,6 +353,21 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         self.assertEqual(final['objective']['status'], 'complete', (final['objective']['stop_reason'], final['team']['tasks']))
         failure_index = next(i for i, call in enumerate(fixture.calls) if call['job_id'] == failed_id)
         self.assertFalse(any(call['agent'] == 'kimi' for call in fixture.calls[failure_index + 1:]))
+
+    def test_a_task_waiting_for_the_user_queues_while_the_quota_work_is_handed_over(self):
+        # Catches a block that waits for the user holding everything: the exhausted partner's work must still
+        # move on, the other tasks finish, and only then does the room ask about the blocked task.
+        fixture = self.fixture(legacy=False)
+        fixture.coordination_block, fixture.block_cause = True, 'user_decision'
+        fixture.create()
+        final = fixture.wait(lambda value: fixture.failed_work and value['objective']['status'] in {'complete', 'needs_user', 'stopped'}
+                             and any(event['kind'] == 'native_recovery_started' for event in value['events'])
+                             and not any(job['status'] in {'queued', 'working'} for job in value['jobs']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual({key: tasks[key]['status'] for key in ('T1', 'T2', 'T3', 'T4')},
+                         {'T1': 'accepted', 'T2': 'accepted', 'T3': 'accepted', 'T4': 'blocked'})
+        self.assertNotEqual(tasks['T2']['owner'], 'kimi')
+        self.assertEqual(final['objective']['status'], 'needs_user', final['objective'])
 
     def test_account_query_unavailable_but_selectable_receivers_automatically_take_retained_work(self):
         self.assert_automatic_recovery(legacy=True, receiver_account_failure=True)

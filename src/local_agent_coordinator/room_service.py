@@ -4919,12 +4919,9 @@ class RoomService(RoomPromptMixin):
                 return
             candidates, quota = [checkpoint], [checkpoint]
         sources = {item["job_id"] for item in quota}
-        retained_tasks = {item["task_id"] for item in candidates}
-        # A block that waits for the user wins over an automatic handoff. A
-        # coordination block does not: the room re-splits files by itself.
-        if any(task["status"] == "blocked" and task["id"] not in retained_tasks
-               and task.get("block_cause") != "coordination_required" for task in snapshot["team"]["tasks"]):
-            return
+        # Another blocked task never holds the handoff: it keeps its place and
+        # waits (for the user, or for the room's own re-split) while the
+        # exhausted partner's work moves on.
         if any(not item.get("requires_quota_failure_audit") and item.get("phase") not in {"checkpoint", "checkpoint_review"}
                and item.get("peer_failure_job_id") not in sources for item in candidates):
             return
