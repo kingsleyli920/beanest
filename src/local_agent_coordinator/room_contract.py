@@ -35,6 +35,10 @@ COMMAND_FIELDS = {
     # dependency list and a narrowed write_paths. It reuses existing field names,
     # so the stable union schema keeps its fields and only gains this kind.
     "adjust": {"type", "task_id", "dependencies", "write_paths"},
+    # A work call adding files to its own task's write_paths when no unfinished
+    # task holds them, applied before its result is imported. Existing field
+    # names again, so the stable union schema only gains this kind.
+    "extend": {"type", "task_id", "write_paths"},
 }
 
 

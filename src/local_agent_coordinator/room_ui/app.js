@@ -352,7 +352,7 @@ const replyCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked',
   'team_capability_unavailable', 'native_json_files_forbidden', 'team_write_path_conflict', 'invalid_agent_response',
   'invalid_team_commands', 'invalid_team_task', 'invalid_team_dependencies', 'invalid_project_files', 'invalid_text',
   'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required',
-  'team_plan_adjusted_meanwhile']);
+  'team_plan_adjusted_meanwhile', 'team_extend_path_held', 'team_extend_path_owned']);
 // A scope conflict is a state conflict, so the service never corrects it inside
 // the call. It still asks nothing of the user: stop_policy continues the
 // objective, so the page words it the same way.

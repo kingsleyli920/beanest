@@ -1100,6 +1100,8 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "{p0} 新增了{p1}，进行中的工作照常继续。": "{p0} added {p1}. Work in progress carries on.",
   "{p0} 改了还没开始的{p1}的前置任务或修改范围，进行中的工作照常继续。": "{p0} changed what {p1} waits for or which files it covers before it started. Work in progress carries on.",
   "{p0} 调整了还没开始的任务，进行中的工作照常继续。": "{p0} changed work nobody had started. Work in progress carries on.",
+  "{p0} 把 {p1} 加进了{p2}的修改范围，继续工作。": "{p0} added {p1} to the files {p2} may change and kept working.",
+  "{p0} 等 {p1} 个文件": "{p0} and others ({p1} {p1:file|files})",
   "你撤掉了 {p0}": "You withdrew {p0}",
   "已经完成的任务不受影响。这个操作不会启动模型。": "Tasks already done are not affected. This does not start a model.",
   "{p0} 上次没回完你的消息，已重新发给它。": "{p0} did not finish replying to your message, so it was sent again.",

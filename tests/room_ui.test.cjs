@@ -5642,6 +5642,25 @@ test('a mid-run change to unstarted tasks is named in the chat in both languages
   const changedOnly = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
   assert.match(changedOnly.get('events').textContent, /Claude Code changed what “对比回归结果” waits for or which files it covers before it started\./);
 });
+test('a partner taking extra files into its own task is named in the chat in both languages', async () => {
+  // Catches the scope extension staying invisible, losing the file or task names, a long list flooding the line, or untranslated text.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [
+    { id: 'R4', title: '修护送任务交互', owner: 'codex', status: 'working' }] };
+  saved.jobs = [];
+  const event = { seq: 1, kind: 'task_scope_extended', sender: 'codex', run_id: saved.current_run.id, created_at: 1100,
+    task_id: 'R4', title: '修护送任务交互', paths: ['scripts/interaction_point.gd', 'scripts/escort_service.gd'],
+    taken_from: [], dependencies_added: [] };
+  saved.events = [event];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(ui.get('events').textContent, /Codex 把 「scripts\/interaction_point\.gd」、「scripts\/escort_service\.gd」 加进了「修护送任务交互」的修改范围，继续工作。/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(english.get('events').textContent, /Codex added “scripts\/interaction_point\.gd”, “scripts\/escort_service\.gd” to the files “修护送任务交互” may change and kept working\./);
+  saved.events = [{ ...event, paths: ['a.gd', 'b.gd', 'c.gd', 'd.gd', 'e.gd'] }];
+  const many = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(many.get('events').textContent, /Codex 把 「a\.gd」、「b\.gd」、「c\.gd」 等 5 个文件 加进了/);
+  assert.doesNotMatch(many.get('events').textContent, /d\.gd/);
+});
 test('work that reached the repository from outside the room is shown in the chat in both languages', async () => {
   // Catches: the host detecting outside commits but the user seeing nothing,
   // or "1 commits" / untranslated Chinese in the English interface.
