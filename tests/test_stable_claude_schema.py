@@ -18,7 +18,7 @@ PHASES = ("plan", "coordinate", "work", "review", "help", "user", "checkpoint", 
 MEMBERS = ("claude", "codex")
 SESSION = "42619ac2-4bfa-446c-a773-5193109566ae"
 ALL_KINDS = ["propose", "claim", "complete", "block", "review", "request_help", "plan_ready",
-             "checkpoint", "checkpoint_review", "adjust"]
+             "checkpoint", "checkpoint_review", "adjust", "extend"]
 
 
 def claude_bytes(phase, can_propose, members=MEMBERS):
@@ -119,7 +119,7 @@ class ServerSideRejections(unittest.TestCase):
         # Catches the parser inheriting the schema's wider enum instead of the job's phase.
         self.assert_rejected("work", flat(type="propose", id="T1", title="t", description="d", acceptance="a",
                                           dependencies=[], write_paths=[], capability="text"),
-                             "allowed_operations", ["block", "complete", "request_help"])
+                             "allowed_operations", ["block", "complete", "extend", "request_help"])
         self.assert_rejected("review", flat(type="complete", task_id="T1", result="done"),
                              "allowed_operations", ["block", "review"])
         self.assert_rejected("checkpoint", flat(type="checkpoint_review", verdict="accept", reason="ok", proposal_digest="a" * 64),
@@ -141,7 +141,7 @@ class ServerSideRejections(unittest.TestCase):
         # Catches the roster rule being lost alongside the phase rules.
         self.assert_rejected("work", {"type": "request_help", "task_id": "T1", "to": None, "text": "help",
                                       "capability": "text", "repair_paths": None},
-                             "allowed_operations", ["block", "complete"], members=("claude",))
+                             "allowed_operations", ["block", "complete", "extend"], members=("claude",))
 
     def test_unused_field_must_be_null(self):
         # Catches widened transport fields letting another phase's values through.
@@ -323,7 +323,7 @@ class ServiceDispatch(unittest.IsolatedAsyncioTestCase):
 
     def test_prompt_names_the_phase_commands_only_for_claude(self):
         # Catches Claude losing the phase contract that used to live in the schema enum.
-        self.assertIn("The only command types allowed now are complete, block, request_help.", self.schema_sentence("claude", "work"))
+        self.assertIn("The only command types allowed now are complete, block, request_help, extend.", self.schema_sentence("claude", "work"))
         self.assertIn("This job_phase is work.", self.schema_sentence("claude", "work"))
         self.assertIn("are propose, claim, plan_ready.", self.schema_sentence("claude", "plan"))
         self.assertIn("are claim, plan_ready.", self.schema_sentence("claude", "plan", author="codex"))

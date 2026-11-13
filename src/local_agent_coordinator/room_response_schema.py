@@ -16,7 +16,7 @@ _TEAM_PHASES = frozenset({"plan", "coordinate", "work", "review", "help", "user"
 _PHASE_COMMANDS = {
     "plan": {"propose", "claim", "plan_ready"},
     "coordinate": {"propose", "claim", "plan_ready"},
-    "work": {"complete", "request_help", "block"},
+    "work": {"complete", "request_help", "block", "extend"},
     "review": {"review", "block"},
     "help": set(),
     # Any partner answering the user may change the unstarted part of a working
@@ -138,7 +138,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
         for field in {"id", "task_id"} & fields:
             command_properties[field].update(pattern=r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                 description=("REQUIRED non-null task identifier when type is propose (id) or claim/complete/"
-                             "block/review/request_help/adjust (task_id), for example T1. Null only when unused."))
+                             "block/review/request_help/adjust/extend (task_id), for example T1. Null only when unused."))
         command_properties["type"]["description"] = (
             "Choose an allowed operation. All fields used by that operation must be non-null; "
             "propose requires id such as T1. Optional request_help repair_paths may be null "

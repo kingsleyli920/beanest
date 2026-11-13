@@ -5166,6 +5166,20 @@ class RoomStore:
                       for task_id, paths in scopes.items()}
             db.execute("UPDATE team_jobs SET claim_grants_json=? WHERE job_id=?", (json.dumps(grants), job_id))
 
+    def authorize_extension(self, job_id, paths, files, revision):
+        """Grants for files a work call's extend takes, by the same rule as a claim.
+
+        A file another partner owns moves only from a retired, clean owner;
+        otherwise make_grant refuses with team_scope_conflict.
+        """
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            self._team.validate_assignment(db, job)
+            context = self._team.job_context(db, job_id)
+            task = self._team.task(db, job["room_id"], context["task_id"])
+            grants = self._team.make_grant(db, job["room_id"], job["provider"], paths, files, revision, task["assignment_epoch"])
+            db.execute("UPDATE team_jobs SET extension_grants_json=? WHERE job_id=?", (json.dumps(grants), job_id))
+
     @staticmethod
     def _task_ownership_grants(task):
         """Validate the owner's transfer proof without assigning it to a reader."""
@@ -5194,7 +5208,9 @@ class RoomStore:
                 return {}
             if task["owner"] != job["provider"]:
                 raise RoomError("team_assignment_changed")
-            return grants
+            # Files this call's own extend took, granted for its submission only.
+            extension = db.execute("SELECT extension_grants_json FROM team_jobs WHERE job_id=?", (job_id,)).fetchone()
+            return {**grants, **json.loads(extension[0] or "{}")}
 
     def accept_request_seen(self, room_id, request_id, *, run_id, revision, digest):
         self._run_parameters(room_id,"accept","all",run_id,revision,digest,False,"user")

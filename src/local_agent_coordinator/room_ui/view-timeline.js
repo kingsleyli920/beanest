@@ -260,6 +260,13 @@ function progressText(event, jobs, archive = false) {
     if (changed.length) return t("{p0} 改了还没开始的{p1}的前置任务或修改范围，进行中的工作照常继续。", { p0: who, p1: interfaceList(changed) });
     return t("{p0} 调整了还没开始的任务，进行中的工作照常继续。", { p0: who });
   }
+  if (event.kind === 'task_scope_extended') {
+    // A partner took files no unfinished task held into its own task and kept working instead of replanning.
+    const paths = (Array.isArray(event.paths) ? event.paths : []).filter((path) => typeof path === 'string' && path);
+    const shown = interfaceList(paths.slice(0, 3).map((path) => interfaceQuote(path)));
+    const files = paths.length > 3 ? t("{p0} 等 {p1} 个文件", { p0: shown, p1: paths.length }) : shown;
+    return t("{p0} 把 {p1} 加进了{p2}的修改范围，继续工作。", { p0: displayName(event.sender), p1: files, p2: taskTitle });
+  }
   if (event.kind === 'task_rebalanced') return t("为均衡工作量，{p0}已从 {p1} 改由 {p2} 负责。", { p0: taskTitle, p1: displayName(event.previous_owner), p2: displayName(event.owner) });
   if (event.kind === 'task_withdrawn') {
     const named = (Array.isArray(event.tasks) ? event.tasks : []).filter((item) => typeof item?.id === 'string' && typeof item.title === 'string')
@@ -375,7 +382,7 @@ function eventNode(event, jobs, sourceMembers = null) {
       || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated', 'user_message_redelivered'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
-      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'plan_adjusted' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
+      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'plan_adjusted' || event.kind === 'task_scope_extended' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
       || executionNeedsAttention
       || typeof event.cancellation_confirmed === 'boolean'
       || (event.kind === 'job_created' && jobKind(event, jobs) === 'feedback');

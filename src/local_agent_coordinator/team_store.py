@@ -210,7 +210,8 @@ class TeamStore:
             "shared_tasks": {"assignment_epoch": "INTEGER NOT NULL DEFAULT 0", "ownership_grant_json": "TEXT",
                              "review_kind": "TEXT NOT NULL DEFAULT 'independent_review'", "inherited_from_run": "TEXT",
                              "block_cause": "TEXT", "internal_replan_revision": "INTEGER"},
-            "team_jobs": {"assignment_epoch": "INTEGER NOT NULL DEFAULT 0", "claim_grants_json": "TEXT"},
+            "team_jobs": {"assignment_epoch": "INTEGER NOT NULL DEFAULT 0", "claim_grants_json": "TEXT",
+                          "extension_grants_json": "TEXT"},
         }.items():
             existing = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
             for name, declaration in columns.items():
@@ -1450,6 +1451,14 @@ class TeamStore:
             "team_capability_unavailable": " The requested capability is unavailable in this room; use text.",
             "native_json_files_forbidden": (" Native calls write files directly in the private project tree; leave "
                                             "files and edits empty in the JSON reply."),
+            "team_extend_path_held": (" An extend named a path that another task on the board still holds and has not "
+                                      "finished. Nothing was imported, including your private changes to it. Restore that "
+                                      "file to its shared version, then finish within your task's scope, or block with cause "
+                                      "coordination_required naming the file, the task holding it and the change needed."),
+            "team_extend_path_owned": (" An extend named an existing file another active partner owns; only its owner changes "
+                                       "it. Nothing was imported, including your private changes to it. Restore that file to "
+                                       "its shared version, then finish within your scope, or request_help with repair_paths "
+                                       "naming it so its owner makes the change."),
             "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
                                          "neither depends on the other. Add that existing task to the new task's dependencies, "
                                          "or choose write_paths no other task writes. When splitting a task nobody has started, "
@@ -1673,6 +1682,52 @@ class TeamStore:
                 and not row["inherited_from_run"] and not row["repair_execution_id"] and not row["review_reason"]
                 and not json.loads(row["ownership_grant_json"] or "{}")}
 
+    @staticmethod
+    def _scope_extension(tasks, task_id, commands):
+        """Paths this work call's extend commands add to its own task.
+
+        Maps each new path to the finished tasks that held it. A path another
+        unfinished task holds still needs coordination, so the reply is refused.
+        """
+        own = {path.casefold() for path in json.loads(tasks[task_id]["write_paths_json"])}
+        added = {}
+        for command in commands:
+            if command["type"] != "extend":
+                continue
+            for path in command["write_paths"]:
+                if path.casefold() in own:
+                    continue
+                holders = [key for key, row in tasks.items() if key != task_id
+                           and path.casefold() in {value.casefold() for value in json.loads(row["write_paths_json"])}]
+                if any(not task_settled(tasks[key]) for key in holders):
+                    raise RoomError("team_extend_path_held")
+                own.add(path.casefold())
+                added[path] = holders
+        return added
+
+    @staticmethod
+    def _ordering_dependencies(tasks, task_id, added):
+        """Finished holders the extended task must list so two writers of a path stay ordered.
+
+        Such a holder is already settled, so this never makes the task wait; it
+        keeps the board's rule that unrelated tasks never share a path.
+        """
+        graph = {key: json.loads(row["dependencies_json"]) for key, row in tasks.items()}
+
+        def reaches(start, target):
+            pending, seen = list(graph.get(start, ())), set()
+            while pending:
+                value = pending.pop()
+                if value == target:
+                    return True
+                if value not in seen and value in graph:
+                    seen.add(value)
+                    pending.extend(graph[value])
+            return False
+
+        return [holder for holder in dict.fromkeys(holder for holders in added.values() for holder in holders)
+                if not reaches(task_id, holder) and not reaches(holder, task_id)]
+
     def validate(self, db, job, commands):
         """Validate without mutations, including task-bound response permissions."""
         context = self.job_context(db, job["id"])
@@ -1750,6 +1805,7 @@ class TeamStore:
         mid_run = team["phase"] == "working" and context["job_phase"] == "user"
         unstarted = self._unstarted_task_ids(db, job["room_id"], context["run_id"], rows) if mid_run else set()
         task_terminal_commands = 0
+        extends = False
         for command in commands:
             if (not isinstance(command, dict) or not isinstance(command.get("type"), str)
                     or command["type"] not in _COMMAND_FIELDS):
@@ -1802,6 +1858,17 @@ class TeamStore:
                 if any(path.casefold() not in held for path in command["write_paths"]):
                     raise RoomError("invalid_team_task")
                 adjustments[task_id] = command
+            elif kind == "extend":
+                # Only the owner's own work call widens its own task.
+                task_id = _task_id(command["task_id"])
+                # An execution repair is bound to its original paths.
+                if (context["job_phase"] != "work" or task_id != context["task_id"] or task_id not in tasks
+                        or tasks[task_id]["repair_execution_id"]):
+                    raise RoomError("team_task_permission")
+                _paths(command["write_paths"], max_length=1024 if room["mode"] in {"project_folder", "native_project"} else 240)
+                if command["write_paths"] and read_only(room["work_mode"], json.loads(room["runtime_settings_json"] or "null")):
+                    raise RoomError("team_files_forbidden")
+                extends = True
             elif kind == "plan_ready":
                 same_plan_in_progress = (team["phase"] == "working"
                                          and context["revision"] == team["revision"])
@@ -1873,6 +1940,11 @@ class TeamStore:
                 raise RoomError("team_plan_adjusted_meanwhile")
         combined.update({key: item["dependencies"] for key, item in adjustments.items()})
         combined.update({item["id"]: item["dependencies"] for item in proposals})
+        extended = self._scope_extension(tasks, context["task_id"], commands) if extends else {}
+        if extended:
+            # The task as it will stand once extended must pass the same checks.
+            combined[context["task_id"]] = (combined[context["task_id"]]
+                                            + self._ordering_dependencies(tasks, context["task_id"], extended))
         # Proposed prerequisites and their parent must pass the same DAG check.
         for parent in self._replan_parents(db, job["room_id"]):
             if proposals:
@@ -1896,6 +1968,8 @@ class TeamStore:
         task_paths = {key: json.loads(row["write_paths_json"]) for key, row in tasks.items()}
         task_paths.update({key: item["write_paths"] for key, item in adjustments.items()})
         task_paths.update({item["id"]: item["write_paths"] for item in proposals})
+        if extended:
+            task_paths[context["task_id"]] = task_paths[context["task_id"]] + list(extended)
 
         def depends_on(task_id, other):
             return any(value == other or depends_on(value, other) for value in combined[task_id])
@@ -1989,6 +2063,8 @@ class TeamStore:
                                               verdict=commands[0]["verdict"], reason=commands[0]["reason"])
             return
         self._record_task_handoff(db, job, context, commands, usage)
+        if any(command["type"] == "extend" for command in commands):
+            self._extend_scope(db, job, context, commands)
         proposed = [command for command in commands if command["type"] == "propose"]
         replan_parents = self._replan_parents(db, room_id) if proposed else []
         # A mid-run adjustment answers the user's own message and touches only
@@ -2012,7 +2088,7 @@ class TeamStore:
                              "previous_write_paths": json.loads(before["write_paths_json"]), "write_paths": command["write_paths"]})
         for command in commands:
             kind = command["type"]
-            if kind == "adjust":
+            if kind in {"adjust", "extend"}:
                 pass  # applied above
             elif kind == "propose":
                 blocked = command["capability"] == "image"
@@ -2141,6 +2217,34 @@ class TeamStore:
                 return
             db.execute("UPDATE shared_tasks SET status='blocked',blocked_reason='team_result_missing' WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND id=?",
                        (room_id, context["task_id"]))
+
+    def _extend_scope(self, db, job, context, commands):
+        """Add the paths a work call took into its own task, before its result lands.
+
+        The import that follows already treats them as this task's paths (the
+        service authorized them for this very submission); here they become
+        part of the task for review, later revisions and every later reply.
+        """
+        room_id, task_id = job["room_id"], context["task_id"]
+        tasks = {row["id"]: dict(row) for row in db.execute(
+            "SELECT * FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, context["run_id"]))}
+        added = self._scope_extension(tasks, task_id, commands)
+        if not added:
+            return
+        task = tasks[task_id]
+        ordering = self._ordering_dependencies(tasks, task_id, added)
+        grants = json.loads(task["ownership_grant_json"] or "{}")
+        row = db.execute("SELECT extension_grants_json FROM team_jobs WHERE job_id=?", (job["id"],)).fetchone()
+        grants.update({path: grant for path, grant in json.loads(row[0] or "{}").items() if path in added})
+        db.execute("UPDATE shared_tasks SET write_paths_json=?,dependencies_json=?,ownership_grant_json=? "
+                   "WHERE room_id=? AND run_id=? AND id=? AND status='working' AND owner=?",
+                   (json.dumps(json.loads(task["write_paths_json"]) + list(added)),
+                    json.dumps(json.loads(task["dependencies_json"]) + ordering),
+                    json.dumps(grants) if grants else None, room_id, context["run_id"], task_id, job["provider"]))
+        self.store._event(db, room_id, "task_scope_extended", sender=job["provider"], job_id=job["id"],
+                          run_id=context["run_id"], task_id=task_id, title=task["title"], paths=list(added),
+                          taken_from=[{"path": path, "task_ids": holders} for path, holders in added.items() if holders],
+                          dependencies_added=ordering)
 
     def _record_round_handoff(self, db, job, context, value, usage):
         """Keep a Claude checkpoint's handoff. A bad one is noted, never corrected:

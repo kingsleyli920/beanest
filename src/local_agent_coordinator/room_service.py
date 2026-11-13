@@ -31,7 +31,7 @@ from .folder_protocol import FOLDER_INSTRUCTION, prompt_context, validate_reques
 from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
-from .team_store import _COMMAND_FIELDS
+from .team_store import _COMMAND_FIELDS, _paths as _task_paths
 from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, reply_call_died
 from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission, model_choice
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
@@ -153,6 +153,16 @@ def _field_strings(value, keys):
     elif isinstance(value, list):
         for item in value:
             yield from _field_strings(item, keys)
+
+
+def _with_extension(paths, extension):
+    """A task's paths plus the ones its extend adds, compared ignoring case like write_paths."""
+    combined, held = list(paths), {path.casefold() for path in paths}
+    for path in extension:
+        if path.casefold() not in held:
+            held.add(path.casefold())
+            combined.append(path)
+    return combined
 
 
 class ResponseValidationError(RoomError):
@@ -5579,6 +5589,32 @@ class RoomService(RoomPromptMixin):
                 "resolved_conflicts": sorted(resolved),
                 **({"unpublished_generated": collected["generated"]} if collected.get("generated") else {})}
 
+    @staticmethod
+    def _extension_paths(job, parsed):
+        """Well-formed paths this work call's own extend adds to its task.
+
+        They count as the task's paths for this very submission, so the files
+        changed there are collected and imported like any owned path. Whether
+        the extension is allowed is still decided by team validation, which
+        refuses the whole reply before anything is imported.
+        """
+        team = job.get("team") or {}
+        if (team.get("job_phase") != "work" or not isinstance(parsed, dict)
+                or read_only(job.get("work_mode"), job.get("runtime_settings"))):
+            return []
+        limit = 1024 if job.get("mode") in {"project_folder", "native_project"} else 240
+        paths = []
+        for command in parsed.get("commands") or []:
+            if (isinstance(command, dict) and command.get("type") == "extend" and command.get("task_id") == team.get("task_id")
+                    and isinstance(command.get("write_paths"), list)):
+                for path in command["write_paths"]:
+                    try:
+                        _task_paths([path], max_length=limit)
+                    except RoomError:
+                        continue
+                    paths.append(path)
+        return list(dict.fromkeys(paths))
+
     def _collect_native_changes(self, job, parsed):
         if parsed["files"] or parsed.get("edits"):
             raise RoomError("native_json_files_forbidden")
@@ -5588,6 +5624,8 @@ class RoomService(RoomPromptMixin):
         parsed["base_revision"] = job["artifact_base_revision"]
         task = next((task for task in self.store.snapshot(job["room_id"])["team"]["tasks"] if task["id"] == job["team"]["task_id"]), None)
         allowed = task["write_paths"] if task and job["team"]["job_phase"] == "work" and not read_only(job.get("work_mode"),job.get("runtime_settings")) else []
+        if task:
+            allowed = _with_extension(allowed, self._extension_paths(job, parsed))
         if set(parsed["resolved_conflicts"]) - set(allowed):
             raise RoomError("team_scope_conflict")
         state = self.store.native_workspace(job["room_id"], job["provider"])
@@ -6104,13 +6142,17 @@ class RoomService(RoomPromptMixin):
         files = parsed["files"]
         if files and (job["team"]["job_phase"] != "work" or task is None):
             raise RoomError("team_files_forbidden")
-        allowed = set(task["write_paths"]) if task else set()
+        # Validation above accepted this call's extend, so its paths are the task's own for this submission.
+        extension = [path for path in _with_extension(task["write_paths"], self._extension_paths(job, parsed))
+                     if path not in task["write_paths"]] if task else []
+        allowed = set(task["write_paths"]) | set(extension) if task else set()
         if any(not isinstance(file, dict) or file.get("path") not in allowed for file in files):
             raise RoomError("team_scope_conflict")
         project = self._project(job["room_id"]).snapshot()
         if job["mode"] == "native_project":
             paths = sorted({path for item in snapshot["team"]["tasks"] for path in item["write_paths"]} |
-                           {path for command in parsed["commands"] if command["type"] == "propose" for path in command["write_paths"]})
+                           {path for command in parsed["commands"] if command["type"] == "propose" for path in command["write_paths"]}
+                           | set(extension))
             metadata = {entry["path"]: entry for entry in project["files"]}
             for offset in range(0, len(paths), 16):
                 metadata.update({entry["path"]: entry for entry in self._project(job["room_id"]).metadata_for_paths(paths[offset:offset + 16])})
@@ -6126,10 +6168,19 @@ class RoomService(RoomPromptMixin):
             scopes = {command["task_id"]: task_scopes[command["task_id"]]["write_paths"]
                       for command in parsed["commands"] if command["type"] == "claim"}
             self.store.authorize_claims(job["id"], scopes, project["files"], project["revision"])
+        if extension:
+            try:
+                self.store.authorize_extension(job["id"], extension, project["files"], project["revision"])
+            except RoomError as error:
+                if error.code != "team_scope_conflict":
+                    raise
+                # Another active partner's file: its owner changes it (request_help
+                # repair_paths). Nothing is imported, so the partner corrects its reply.
+                raise RoomError("team_extend_path_owned") from None
         if job["mode"] == "project_files":
             selected = {file["path"] for file in project["files"]}
             if any(path not in selected for command in parsed["commands"] if command["type"] == "propose"
-                   for path in command["write_paths"]):
+                   for path in command["write_paths"]) or any(path not in selected for path in extension):
                 raise RoomError("team_scope_conflict")
         if job["mode"] != "native_project" and any(command["type"] == "complete" for command in parsed["commands"]):
             proposed = {file["path"] for file in files}
@@ -6294,6 +6345,10 @@ class RoomService(RoomPromptMixin):
                              if item["id"] == job["team"]["task_id"]), None)
                 paths = (task["write_paths"] if task and job["team"]["job_phase"] == "work"
                          and not read_only(job.get("work_mode"), job.get("runtime_settings")) else [])
+                # Files the reply itself named in an extend are accounted for, even
+                # when the extension was refused: the correction says to restore them.
+                if task:
+                    paths = _with_extension(paths, self._extension_paths(job, parsed))
                 changes = self._audited_native_changes(job, state, paths, [])
                 if changes["blocked"]:
                     self.store.finish_job(job["id"], session_id=identity, usage=usage,
@@ -6351,7 +6406,8 @@ class RoomService(RoomPromptMixin):
                     artifact_digest = _project_digest(actual)
                     task = next((item for item in self.store.snapshot(job["room_id"])["team"]["tasks"]
                                  if item["id"] == job["team"]["task_id"]), None)
-                    paths = set(task["write_paths"]) if task else set()
+                    # The task's paths include those its extend adds in finish_job below.
+                    paths = set(_with_extension(task["write_paths"], self._extension_paths(job, parsed))) if task else set()
                     # Folder snapshots list the files actually changed so far.
                     # A work message or help request may precede creation of a
                     # declared output; reading every write_path would reject it.

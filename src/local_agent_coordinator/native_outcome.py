@@ -12,14 +12,15 @@ NATIVE_RECOVERY_ERRORS = frozenset({
 # does not hold, a proposal outside planning, a wrong help target, files from
 # a non-work call, JSON file bodies from a native call, an unavailable
 # capability, a proposal writing another task's path without depending on it,
-# a mid-run plan change made from a board another partner adjusted meanwhile.
-# Nothing was applied, so the caller corrects its reply instead of the whole
+# a mid-run plan change made from a board another partner adjusted meanwhile,
+# an extend naming a path another unfinished task holds or another active
+# partner owns. Nothing was applied, so the caller corrects its reply instead of the whole
 # objective stopping. State conflicts (reassignment, changed results, scope
 # trespass) stay terminal.
 REPLY_MISTAKES = frozenset({
     "team_task_permission", "team_plan_locked", "invalid_target", "team_files_forbidden",
     "team_capability_unavailable", "native_json_files_forbidden", "team_write_path_conflict",
-    "team_plan_adjusted_meanwhile",
+    "team_plan_adjusted_meanwhile", "team_extend_path_held", "team_extend_path_owned",
 })
 FORMAT_ERRORS = frozenset({
     "invalid_agent_response", "invalid_team_commands", "invalid_team_task",

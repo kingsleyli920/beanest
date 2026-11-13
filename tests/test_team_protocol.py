@@ -67,11 +67,13 @@ class TeamPhaseSchemaTests(unittest.TestCase):
             "request_help": {"type": "request_help", "task_id": "main", "to": "codex", "capability": "text", "text": "Check this edge."},
             "review": {"type": "review", "task_id": "main", "verdict": "accept", "reason": "Checked the exact result."},
             "block": {"type": "block", "task_id": "main", "reason": "Missing required information."},
+            "extend": {"type": "extend", "task_id": "main", "write_paths": ["shared/util.py"]},
         }
         allowed = {
             "plan": {"propose", "claim", "plan_ready"},
             "coordinate": {"propose", "claim", "plan_ready"},
-            "work": {"complete", "request_help", "block"},
+            # A work call may take files no unfinished task holds into its own task instead of stopping to replan.
+            "work": {"complete", "request_help", "block", "extend"},
             "review": {"review", "block"},
             "help": set(),
             # The plan author's reply to the user may change unstarted work mid-run; the store checks the rest.

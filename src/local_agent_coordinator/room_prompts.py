@@ -24,7 +24,8 @@ _BLOCK_PROTOCOL = (
     "Use technical for an implementation, test or environment failure that can be investigated within the current "
     "goal and permissions; the host will seek peer help or resume the owner for diagnosis, not ask the user to "
     "choose routine engineering steps. Use coordination_required only to request internal replanning within the "
-    "existing goal and permissions; it grants no file access. The plan author must propose concrete work, "
+    "existing goal and permissions: the work needs a file another unfinished task holds, or must be split differently; "
+    "it grants no file access. A file no unfinished task holds needs no replanning: extend your own task with it. The plan author must propose concrete work, "
     "members must claim it and confirm the exact revised plan before any new scope can run. Use the other causes only for a specific unresolved business choice, "
     "new permission, or a concrete missing external condition, with the relevant evidence. A cause label never "
     "overrides a user prohibition, withdrawn work, ownership or frozen permissions. Do not relabel a host safety "
@@ -44,6 +45,15 @@ MID_RUN_ADJUSTMENT_INSTRUCTION = (
     "Claim a new task yourself only if you will do it; otherwise an idle partner is offered it. If any command breaks a "
     "rule, the whole response is rejected and nothing changes. context.plan_adjustments lists such changes made in this "
     "round; the current board is what counts. ")
+
+
+EXTEND_INSTRUCTION = (
+    "When your work task must also change files outside its write_paths, add them to your own task with "
+    "extend{type,task_id,write_paths:[the new paths]} in the same response as its complete, request_help or block, and keep "
+    "working: the files you change there are imported like the rest of your task and reviewed with it. You may add a file no "
+    "unfinished task on the board lists (a finished task's file is fine) unless another active partner owns it; those go to "
+    "their owner through request_help repair_paths. A file another unfinished task holds still needs block "
+    "coordination_required. If extend breaks a rule, the whole response is rejected and nothing is imported. ")
 
 
 WITHDRAWN_INSTRUCTION = (
@@ -483,7 +493,7 @@ class RoomPromptMixin:
                 "old_text and new_text must differ; no change should use edits:null and files:[]. "
                 "Use literal text, never regex/diff syntax. At most 16 edits, old/new combined at most 32KiB UTF-8. "
                 "Multiple edits use the same original snapshot and must not overlap; no sequential matching. "
-                "Only a work job may change files, only its task.write_paths, and only files owned by you. "
+                "Only a work job may change files, only its task.write_paths plus files its extend adds, and only files owned by you. "
                 "All plan/coordinate/review/help/user jobs must return files:[] and edits:null or []; "
                 "they never write a peer's file. "
                 "A work response may submit an intermediate artifact with request_help, then consume help_result "
@@ -546,7 +556,7 @@ class RoomPromptMixin:
             "Logical commands and their used fields: propose{type,id,title,description,acceptance,dependencies:[task IDs],write_paths:[paths],capability:text|python|image}; "
             "claim{type,task_id}; plan_ready{type}; complete{type,task_id,result}; block{type,task_id,reason,cause}; "
             "request_help{type,task_id,to,capability,text,repair_paths?:[existing relative paths]}; review{type,task_id,verdict:accept|changes_requested,reason}; "
-            "adjust{type,task_id,dependencies:[task IDs],write_paths:[paths]}. "
+            "adjust{type,task_id,dependencies:[task IDs],write_paths:[paths]}; extend{type,task_id,write_paths:[paths]}. "
             "If the native response schema requires every command field, fill ALL unused fields with null; "
             "the coordinator unwraps that exact transport shape. Put real claim/help/review operations in commands, "
             "not just in message; saying you claim a task does not register ownership. "
@@ -573,7 +583,7 @@ class RoomPromptMixin:
             "All peers confirm the exact plan before work. Do not manufacture extra tasks just to use all peers. "
             "In work: do only the assigned task, use dependency results, then complete with its concrete result. "
             "A work response must contain exactly one complete, request_help or block command for its task. "
-            + _BLOCK_PROTOCOL +
+            + EXTEND_INSTRUCTION + _BLOCK_PROTOCOL +
             "If specific assistance is needed, request_help instead of complete; your task waits and resumes with help_result. "
             "For an existing-goal engineering repair outside your task paths, request_help may name exact existing repair_paths. "
             "The host routes these to their canonical file owners as normal work and independent review, then resumes your task. "
@@ -852,7 +862,7 @@ class RoomPromptMixin:
             "In work, implement your owned task.write_paths, run appropriate real checks and return one complete, request_help or block. "
             "This call ends when you reply, and processes you started are stopped then; wait for checks to finish within "
             "the call instead of replying with a progress update. "
-            + _BLOCK_PROTOCOL +
+            + EXTEND_INSTRUCTION + _BLOCK_PROTOCOL +
             "In help, answer the bound question; in review, inspect the exact exported result and run meaningful checks if permitted, "
             "then return one review accept/changes_requested or block. Do not change another owner's files. "
             "Return structured {message,state,commands,base_revision,files:[],edits:[],unchanged_paths:[],resolved_conflicts:[]}. "
