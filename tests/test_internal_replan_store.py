@@ -1,6 +1,7 @@
 """Explicit internal coordination preserves the normal task/permission DAG."""
 import unittest
 from tests import test_team_store as fixtures
+from tests import test_native_room_service as native
 proposal = fixtures.proposal
 
 
@@ -70,7 +71,7 @@ class InternalReplanStoreTests(unittest.TestCase):
     def test_ready_work_keeps_going_while_a_replan_waits_for_running_calls(self):
         # Catches the real room where Codex blocked R3 for coordination and then sat idle with three
         # ready tasks: every dispatch stopped until the other partner's running call ended.
-        self.store.task_capabilities = lambda provider: ()  # planned owners stay put
+        native.planned_owners(self.store)  # planned owners stay put
         room = self.room()
         author, peer = self.store.claim(room, 'claude'), self.store.claim(room, 'codex')
         self.finish(author, [proposal('main', paths=['main.py']), proposal('side', paths=['side.py']),

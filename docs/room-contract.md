@@ -5,7 +5,7 @@
 ## 单源与分工
 
 - `room_store.py` / `room_service.py`：房间、稳定成员身份、全局有序事件、事务认领、有限自动路由与取消。直接复用 `adapters.invoke`。
-- `team_store.py`：同一房间的 run 历史、用户验收、共享任务、版本化分工确认、自主认领、DAG依赖、具体求助及独立结果互审；任务交付与单次模型调用分别存储。`collaboration_view.py`根据实际任务、文件与执行记录生成交付展示，不采用模型自称“完成”作为验收。
+- `team_store.py`：同一房间的 run 历史、用户验收、共享任务、版本化分工确认、任务池派发、DAG依赖、具体求助及独立结果互审；任务交付与单次模型调用分别存储。`collaboration_view.py`根据实际任务、文件与执行记录生成交付展示，不采用模型自称“完成”作为验收。
 - `room_server.py`：复用既有 loopback HTTP 安全壳，提供房间 API；浏览器和桌面窗口使用同一服务。
 - `room_ui/`：统一群聊界面，展示真实成员/任务/状态与消息来源；没有手动“转交审核”阶段按钮。
 - `project_catalog.py` / `folder_workspace.py` / `folder_protocol.py`：项目metadata登记、默认文件夹模式的显式捕获、SHA blobs/不可变index与宿主按需查找/读取/搜索。`project_workspace.py`保留高级指定文件及新建文本/Python的完整JSON快照。源目录不写入，主机不导入生成文件。
@@ -206,11 +206,11 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 `team`是共享任务单源，旧房为null；新房包含run_id、plan_author、phase、revision、stop_reason、成员对确切清单版本的确认，以及tasks。每项任务包含稳定id、title、description、acceptance、dependencies、write_paths、capability、owner、状态、具体求助及result/result_version/result_revision/result_digest/result_files和审核记录。任务状态open → assigned → working → review → accepted；单人自检明确为self_checked、review_kind:self_check，独立审核为review_kind:independent_review。任务亦可waiting_peer、blocked、unknown、interrupted或cancelled；模型单次返回done不改变整个目标的验收状态。
 
-团队响应为`{message,state:"done|working|needs_user",commands:[...]}`，文件模式另带base_revision/files。commands每次最多100项（`MAX_RESPONSE_COMMANDS`），只允许propose、claim、plan_ready、complete、block、request_help、review，以及运行中调整用的adjust和work调用扩大自己任务范围用的extend（见下文）。初始plan_author提出完整清单与验收条件，成员各自claim适合自己的任务，不能替另一成员认领；所有成员对同一revision执行plan_ready后才进入工作。子任务数量不设上限，按工作本身拆；依赖必须指向存在任务、无自依赖或环，依赖任务accepted或self_checked后才排下游，审核方式仍分别保留。不能为用满成员或延长时间制造确认、寒暄或额外任务。
+团队响应为`{message,state:"done|working|needs_user",commands:[...]}`，文件模式另带base_revision/files。commands每次最多100项（`MAX_RESPONSE_COMMANDS`），只允许propose、claim、plan_ready、complete、block、request_help、review，以及运行中调整用的adjust和work调用扩大自己任务范围用的extend（见下文）。初始plan_author提出完整清单与验收条件，所有成员对同一revision执行plan_ready后进入工作，规划时不认领任务（规划阶段的claim不生效、不记录）。确认后的任务组成任务池，开始前不归任何人：成员手上没有排队或在途调用时，服务把下一项就绪任务交给它，绑定负责人和排队work调用在同一事务里完成，且只在任务仍为open时生效，两名成员不会拿到同一项。就绪指依赖已accepted或self_checked，不管是谁做的。选择顺序：先给做过它某项依赖的成员（接着做同一条链，保留上下文），其余按计划顺序取最早的一项；同时空闲的成员中，按工作量份额最少用的先拿（`workload.fair_order`），额度只剩约15%的账号和角色不做开发的成员只在没有别人能做时才拿；能力须匹配。文件负责人只防两人同时改一个文件：另一位伙伴本轮还有未完成任务列着某个路径时，含该路径的任务不交给别人（计划的写路径检查本就不允许，这里只是保护）；作者的相关任务都已完成、或作者已因额度退出且干净时，谁接都行，work调用开始时按文件当前SHA发转交授权（`task_files_granted`），导入时文件改归接手者。指定文件模式下没人改过的源文件同样按此授权给接手者。已开始的任务（working、waiting_peer、review、有结果或有过work调用）保持负责人，交接和恢复照旧。回复用户时（job_phase user）的claim把open任务留给该成员，别人不拿。额度用完退出的成员不再领取，它名下还没跑过的任务回到池里（`task_returned_to_pool`），恢复后直接继续领取。就绪任务没有任何在场伙伴能接时记`team_plan_stalled`。时间线以`task_taken`显示每次领取。子任务数量不设上限，按工作本身拆；依赖必须指向存在任务、无自依赖或环，依赖任务accepted或self_checked后才排下游，审核方式仍分别保留。不能为用满成员或延长时间制造确认、寒暄或额外任务。
 
-独立互审由任务状态机安排，不必另建重复审核任务。若同一规划版本仍有未认领项，常规协调后可再给每位成员一次明确补救，要求实际认领或说明阻碍；补救签名持久保存，计入原调用与期限。仍无进展时明确记录`team_plan_stalled`及缺少的负责人/确认，不自动替成员认领，也不无限重复唤醒。
+独立互审由任务状态机安排，不必另建重复审核任务。若同一规划版本仍有成员未确认，常规协调后可再给它一次明确补救，要求确认或说明阻碍；补救签名持久保存，计入原调用与期限。仍无进展时明确记录`team_plan_stalled`及缺少的确认，不替成员确认，也不无限重复唤醒。
 
-上述commands是存储的逻辑形状。原生严格schema按当前作业阶段限制type，采用14字段的固定封闭对象，未使用的字段必须为null；服务只剥离这份确切传输形状，随后仍按逻辑命令的完整键集、权限和任务版本校验。Claude原生调用例外：同一房间各阶段发送字节相同的并集schema，否则每次换阶段续接都会让整段提示词缓存失效；命令类型、can_propose和review/checkpoint_review的reason、checkpoint的summary非空，改由服务按作业真实阶段校验，违反时仍返回invalid_team_commands。自定义适配器可继续返回精简逻辑形状，未知、缺失或非空的多余字段不会被静默丢弃。Claude 并集schema的命令对象多一个传输字段 `handoff`（可为null），不进入逻辑命令；只有 checkpoint 命令携带时才被服务读取，其他命令即使填了也直接忽略，不触发格式纠错。消息不能为空且最多100000字符（`MAX_PARTNER_TEXT`）；propose.id必须是非空稳定标识，claim等task_id须引用同一标识，例如T1；仅未使用字段为null。规划阶段按确切清单版本及尚未认领的任务集合去重，允许分批认领；同一状态无进展不会无限唤醒成员。这里只描述协议，真实模型效果须单独记录。
+上述commands是存储的逻辑形状。原生严格schema按当前作业阶段限制type，采用14字段的固定封闭对象，未使用的字段必须为null；服务只剥离这份确切传输形状，随后仍按逻辑命令的完整键集、权限和任务版本校验。Claude原生调用例外：同一房间各阶段发送字节相同的并集schema，否则每次换阶段续接都会让整段提示词缓存失效；命令类型、can_propose和review/checkpoint_review的reason、checkpoint的summary非空，改由服务按作业真实阶段校验，违反时仍返回invalid_team_commands。自定义适配器可继续返回精简逻辑形状，未知、缺失或非空的多余字段不会被静默丢弃。Claude 并集schema的命令对象多一个传输字段 `handoff`（可为null），不进入逻辑命令；只有 checkpoint 命令携带时才被服务读取，其他命令即使填了也直接忽略，不触发格式纠错。消息不能为空且最多100000字符（`MAX_PARTNER_TEXT`）；propose.id必须是非空稳定标识，claim等task_id须引用同一标识，例如T1；仅未使用字段为null。规划阶段按确切清单版本去重；同一状态无进展不会无限唤醒成员。这里只描述协议，真实模型效果须单独记录。
 
 
 ### 轮次交接与换新会话
@@ -221,15 +221,15 @@ Claude 原生会话长期续接会把全部上下文带进每次调用。checkpo
 
 被换会话的成员下一个 job（无论阶段）在 context 带 `round_handoff`，提示词写明它只是上一轮记录，要按仓库现状核对，不增加权限也不扩大范围；目标、任务板、项目路径等其余上下文与平常相同。同一会话建立之后的 job 不再携带；首个 job 失败没建立会话时会再带一次。事件落在 SQLite，服务重启后交接和待带状态都保留。
 
-服务按成员单在途调用派发，不同成员可并行处理互不冲突的路径。write_paths按大小写折叠检查：无依赖关系的任务不能共用路径；即使有先后依赖，不同负责人也不能认领同一路径。已有文本基线仅首轮在规划确认后按任务范围分配负责人；后续轮不得换掉既有路径负责人。只有该任务的work响应能提交其write_paths内（含同一回复 extend 新加的路径）、归自己的文件，plan/coordinate/review/help/user只能返回空files。协调层以owner、逐文件hash、base_revision和不可变快照提交，允许不相交文件的安全合并，冲突不自动覆盖或重试。这里不开放原生编辑器、shell或任意目录。
+服务按成员单在途调用派发，不同成员可并行处理互不冲突的路径。write_paths按大小写折叠检查：无依赖关系的任务不能共用路径；有先后依赖的任务可以由不同伙伴依次改同一路径，前一项完成后文件按授权转给后一项的负责人。指定文件模式的文本基线在首个work调用时按已领取任务一次性分配负责人，之后领取的任务按上文授权；后续轮不得换掉既有路径负责人。只有该任务的work响应能提交其write_paths内（含同一回复 extend 新加的路径）、归自己的文件，plan/coordinate/review/help/user只能返回空files。协调层以owner、逐文件hash、base_revision和不可变快照提交，允许不相交文件的安全合并，冲突不自动覆盖或重试。这里不开放原生编辑器、shell或任意目录。
 
-工作中发现还要改任务 write_paths 以外的文件时，伙伴在同一个 work 回复里用 `extend{type,task_id,write_paths}` 把这些路径加进自己的任务，接着干活，不用停下来重新规划。只有该任务的负责人在它自己的 work 调用里能这样做；审核、协助、用户回复等调用不行，执行修复重开的任务也不行（它只改原路径）。路径校验和 propose 一样。extend 在同一回复的 complete、request_help 或 block 之前生效：服务收集原生改动、核对文件归属、导入、记录交付文件时都把新路径当作这项任务自己的路径，所以伙伴在这些路径上改的文件随这次提交一起导入，也随结果一起交给审核。以下情况整个回复被退回、什么都不导入，伙伴按纠错提示改正（都算回复错误，不会停下目标）：路径列在另一项还没完成的任务里（除 accepted、self_checked、withdrawn 以外的任何状态），返回 `team_extend_path_held`，这时仍要用 coordination_required；文件已经归另一位在场伙伴所有，返回 `team_extend_path_owned`，按既有规则由文件负责人改，伙伴改用 request_help 的 repair_paths。已完成任务的路径可以拿：文件负责人是自己或没人时直接用；负责人是已退出且干净的伙伴时，按认领时同样的规则给这次提交发转交授权，并记进任务的 ownership_grant。拿了已完成任务的路径时，服务把那项任务补进本任务的 dependencies（它已完成，不会让本任务等待），让写同一路径的两个任务保持先后关系，之后的回复照常通过写路径冲突检查。服务写 `task_scope_extended` 事件（任务、伙伴、新增路径、从哪些已完成任务拿的、补了哪些依赖），时间线显示这条变化。被拒的回复里，extend 点名的文件不算来路不明的私有改动：纠错调用照常排上，提示伙伴先把这些文件恢复成共享版本。
+工作中发现还要改任务 write_paths 以外的文件时，伙伴在同一个 work 回复里用 `extend{type,task_id,write_paths}` 把这些路径加进自己的任务，接着干活，不用停下来重新规划。只有该任务的负责人在它自己的 work 调用里能这样做；审核、协助、用户回复等调用不行，执行修复重开的任务也不行（它只改原路径）。路径校验和 propose 一样。extend 在同一回复的 complete、request_help 或 block 之前生效：服务收集原生改动、核对文件归属、导入、记录交付文件时都把新路径当作这项任务自己的路径，所以伙伴在这些路径上改的文件随这次提交一起导入，也随结果一起交给审核。以下情况整个回复被退回、什么都不导入，伙伴按纠错提示改正（都算回复错误，不会停下目标）：路径列在另一项还没完成的任务里（除 accepted、self_checked、withdrawn 以外的任何状态），返回 `team_extend_path_held`，这时仍要用 coordination_required。`team_extend_path_owned`（文件负责人本轮还有未完成任务列着它）仍保留在纠错表里，但这种情况已先按 `team_extend_path_held` 退回，实际不会再出现。已完成任务的路径可以拿：文件负责人是自己或没人时直接用；负责人是别的伙伴（在场但相关任务都已完成，或已退出且干净）时，给这次提交发转交授权，并记进任务的 ownership_grant。拿了已完成任务的路径时，服务把那项任务补进本任务的 dependencies（它已完成，不会让本任务等待），让写同一路径的两个任务保持先后关系，之后的回复照常通过写路径冲突检查。服务写 `task_scope_extended` 事件（任务、伙伴、新增路径、从哪些已完成任务拿的、补了哪些依赖），时间线显示这条变化。被拒的回复里，extend 点名的文件不算来路不明的私有改动：纠错调用照常排上，提示伙伴先把这些文件恢复成共享版本。
 
-需要改另一项未完成任务的文件，或者整块工作要重新拆分时，伙伴须用结构化 `block.cause: coordination_required` 请求调整计划，不能仅在正文要求宿主重规划。该原因只请求正常计划协调，不授予文件、shell或额外业务权限；真实 `permission_required`、`user_decision`、外部依赖与旧未分类阻塞继续保留原等待规则，不能按正文关键词自动降级。自主目标在清理边界回到规划，新增任务仍由计划作者提出、成员本人认领、全员确认确切清单；已有成果、负责人及原写入范围保留。新增依赖、取消/暂停和无进展保护仍须校验。
+需要改另一项未完成任务的文件，或者整块工作要重新拆分时，伙伴须用结构化 `block.cause: coordination_required` 请求调整计划，不能仅在正文要求宿主重规划。该原因只请求正常计划协调，不授予文件、shell或额外业务权限；真实 `permission_required`、`user_decision`、外部依赖与旧未分类阻塞继续保留原等待规则，不能按正文关键词自动降级。自主目标在清理边界回到规划，新增任务仍由计划作者提出、全员确认确切清单，之后进任务池；已有成果、负责人及原写入范围保留。新增依赖、取消/暂停和无进展保护仍须校验。
 
 运行中调整未开始的任务：团队处于 working 时，任何正在回复用户消息（job_phase `user`）的伙伴都可以直接改任务板上还没人开始的部分（不限计划作者：计划作者常常正在做最长的那个任务，用户的话不该等它做完），不用等在途工作结束，也不回到 planning。能做两件事：用 propose 新增任务，校验和规划阶段一样（id、文字、路径、能力、依赖、和其他任务的写路径冲突）；用 `adjust{type,task_id,dependencies,write_paths}` 给一个未开始的任务换上完整的新依赖列表，并从它的 write_paths 里去掉要移走的路径（只能删，不能加）。未开始指：状态 open 或 assigned，result_version 为 0，没被审核过，不是上一轮带来的或执行修复重开的，没有宿主转交的路径授权，而且从没有任何调用绑定过它；排队中的 work 调用也算已开始。已开始、审核中或有结果的任务一律不能改。拆分时在同一个回复里 propose 新任务带上移走的路径，再 adjust 原任务，写路径冲突和环检查都按调整后的任务板算。一个回复里的命令要么全部生效，要么全部不生效；被拒时沿用原有纠错提示，告诉伙伴违反了哪条（`team_plan_locked`、`invalid_team_task`、`invalid_team_dependencies`、`team_write_path_conflict`）。不是用户回复、或团队不在 working 时，仍返回 `team_plan_locked`。几个伙伴同时回复同一条用户消息时，如果这次调用开始之后别人已经调整过任务板（出现了本轮的 `plan_adjusted`），这次的调整会以 `team_plan_adjusted_meanwhile` 退回，伙伴看着最新任务板重新回复，避免重复拆分。只读房间的用户回复照旧不能带命令。
 
-调整不改 team.revision，成员不用重新确认：调整来自用户本人的消息，只碰没人开始的任务，在途调用绑定的任务、result_version 和 assignment_epoch 都不变，也不会被取消或重新规划。服务写一条 `plan_adjusted` 事件，带 run_id、新增的任务，以及每个被调整任务改前改后的依赖和写路径；时间线显示这条变化，之后每个成员的 `context.plan_adjustments` 里也能看到本轮的调整。调整生效后服务会对还没开始的任务重新均衡一次（规则同计划确认时），所以被放出来的任务如果挂在正忙的成员名下，会挪给空闲的成员。新任务是 open，按正常协调交给成员认领；手上只有在等别的任务结果的成员也算空闲，会被问到。做调整的伙伴也可以在同一个回复里认领自己要做的新任务。
+调整不改 team.revision，成员不用重新确认：调整来自用户本人的消息，只碰没人开始的任务，在途调用绑定的任务、result_version 和 assignment_epoch 都不变，也不会被取消或重新规划。服务写一条 `plan_adjusted` 事件，带 run_id、新增的任务，以及每个被调整任务改前改后的依赖和写路径；时间线显示这条变化，之后每个成员的 `context.plan_adjustments` 里也能看到本轮的调整。新任务是 open，进任务池，下一个空闲的成员就会拿到；被放开依赖的任务也一样。做调整的伙伴可以在同一个回复里认领自己要做的新任务，它就留给这位伙伴。
 
 `request_help{type,task_id,to,capability,text}`绑定当前工作任务和本间另一成员的具体问题，原任务进入waiting_peer；被请求者回复后，服务把message保存为help_result并排回原负责人继续，协助者不能改对方文件。`image`能力对所有当前成员明确不可用；提案或求助需要image时记录capability_unavailable并阻塞等待用户，不虚构图片、不换新API或计费路径。python能力仅文件模式可用，并不授予模型执行权限。
 
@@ -241,7 +241,7 @@ complete必须有具体result，文件任务还要有其声明路径的实际交
 
 `collaboration_view`向snapshot添加`collaboration:{mode,phase,summary,tasks,outcome}`。tasks投影仅含id/title/owner/status/waiting_for/result；outcome含state、reason、next_action、validation、artifacts、remaining。state取in_progress、needs_user、ready_for_user、accepted、stopped、unknown或旧协议round_finished，不产生goal_achieved。所有任务accepted或self_checked且无活跃worker/执行，投影才可显示阶段交付；self_checked不代表独立审核，checkpoint-only轮可由绑定objective的检查结果展示阶段或目标结论。文件hash后来变化会降为需核对。python_sandbox还要求当前revision与snapshot_sha256精确匹配、执行退出码为整数0并确认清理；否则仍需处理。validation区分not_run、static_review、self_check、mixed_review和sandbox_execution，保留真实检查范围；静态互审不证明集成、测试或用户验收。
 
-共享任务单次调用最多600秒，并受本轮剩余期限约束。到限、失败、未知、取消或重启保留具体原因与未完成项，不自动重放或为凑时长等待。非终止态的补充信息可让当前owner重新认领自己的blocked文字/Python任务；不恢复未知调用、不重开已accepted工作或重置预算。
+共享任务单次调用最多600秒，并受本轮剩余期限约束。到限、失败、未知、取消或重启保留具体原因与未完成项，不自动重放或为凑时长等待。非终止态的补充信息可让当前owner用claim恢复自己的blocked文字/Python任务；不恢复未知调用、不重开已accepted工作或重置预算。
 
 模型上下文的`runtime_budget`来自协调层当前run快照，包含已用/上限、排队/在途数、剩余调用、扣除排队后的可用调用和剩余时间；已用包含本次已认领调用。可用调用不多于8次或剩余时间不多于120秒时，收尾提示要求停止宽泛探索，保留具体帮助、交付与独立审核机会。该提示不提高硬限额、不在聊天播报预算，也不把有证据的部分成果或已说明的证据缺口算作满足未完成验收；静态检查不冒充实际运行。
 

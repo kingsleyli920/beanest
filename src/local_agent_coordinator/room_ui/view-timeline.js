@@ -3,7 +3,7 @@
 // Progress pane, the message timeline, and history paging.
 
 const progressChipLabels = localizedLabels({
-  open: '待认领', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '伙伴检查中', accepted: '伙伴看过',
+  open: '待领取', assigned: '等待开始', working: '进行中', waiting_peer: '等伙伴', review: '伙伴检查中', accepted: '伙伴看过',
   self_checked: '只做了自查', unknown: '结果待确认', interrupted: '待继续', cancelled: '待继续', withdrawn: '已撤掉',
 });
 // Only the user's own stop really cancels unfinished tasks; any other stop carries them into the next attempt.
@@ -119,7 +119,7 @@ function renderProgressPane() {
       const who = element('span', '', 'task-who');
       const member = (id) => snapshot.members.find((entry) => entry.id === id);
       if (agentPattern.test(task.owner || '')) { who.append(avatar(task.owner, member(task.owner))); who.title = displayName(task.owner); }
-      else who.append(element('span', t("待认领")));
+      else who.append(element('span', t("待领取")));
       if (agentPattern.test(task.reviewer || '') && task.reviewer !== task.owner) {
         who.append(element('span', '→'), avatar(task.reviewer, member(task.reviewer)));
         who.title = t("{p0} 负责，{p1} 审核", { p0: displayName(task.owner), p1: displayName(task.reviewer) });
@@ -242,8 +242,8 @@ function progressText(event, jobs, archive = false) {
       block: t("说明了当前阻碍，待处理项见任务清单") }[event.command];
     return `${displayName(event.sender)} ${action || t("已更新任务清单")}`;
   }
-  if (event.kind === 'team_plan') return t("伙伴已整理任务分工，认领与进展见上方任务清单。");
-  if (event.kind === 'team_task_created') return t("已登记{p0}，等待伙伴认领", { p0: taskTitle });
+  if (event.kind === 'team_plan') return t("伙伴已整理好任务，谁在做什么见上方任务清单。");
+  if (event.kind === 'team_task_created') return t("已登记{p0}，等空闲的伙伴领取", { p0: taskTitle });
   if (event.kind === 'team_task_claimed') return t("{p0} 已认领{p1}", { p0: displayName(event.sender), p1: taskTitle });
   if (event.kind === 'team_task_completed') return t("{p0} 已提交{p1}，等伙伴检查", { p0: displayName(event.sender), p1: taskTitle });
   if (event.kind === 'team_task_reviewed') return t("{p0} 已提交{p1}的审核结果", { p0: displayName(event.sender), p1: taskTitle });
@@ -267,6 +267,10 @@ function progressText(event, jobs, archive = false) {
     const files = paths.length > 3 ? t("{p0} 等 {p1} 个文件", { p0: shown, p1: paths.length }) : shown;
     return t("{p0} 把 {p1} 加进了{p2}的修改范围，继续工作。", { p0: displayName(event.sender), p1: files, p2: taskTitle });
   }
+  // A free partner took the next ready task from the pool; a chain step goes to whoever did the step before.
+  if (event.kind === 'task_taken') return event.reason === 'chain' ? t("{p0} 接着做{p1}", { p0: displayName(event.owner), p1: taskTitle }) : t("{p0} 领取了{p1}", { p0: displayName(event.owner), p1: taskTitle });
+  if (event.kind === 'task_returned_to_pool') return t("{p0} 额度用完，{p1}放回任务池，等空闲的伙伴领取。", { p0: displayName(event.previous_owner), p1: taskTitle });
+  // Older rounds may still carry the removed up-front rebalancing.
   if (event.kind === 'task_rebalanced') return t("为均衡工作量，{p0}已从 {p1} 改由 {p2} 负责。", { p0: taskTitle, p1: displayName(event.previous_owner), p2: displayName(event.owner) });
   if (event.kind === 'task_withdrawn') {
     const named = (Array.isArray(event.tasks) ? event.tasks : []).filter((item) => typeof item?.id === 'string' && typeof item.title === 'string')
@@ -382,7 +386,7 @@ function eventNode(event, jobs, sourceMembers = null) {
       || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated', 'user_message_redelivered'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
-      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'plan_adjusted' || event.kind === 'task_scope_extended' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
+      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'task_taken' || event.kind === 'task_returned_to_pool' || event.kind === 'plan_adjusted' || event.kind === 'task_scope_extended' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
       || executionNeedsAttention
       || typeof event.cancellation_confirmed === 'boolean'
       || (event.kind === 'job_created' && jobKind(event, jobs) === 'feedback');

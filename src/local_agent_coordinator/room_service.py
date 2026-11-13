@@ -5420,24 +5420,66 @@ class RoomService(RoomPromptMixin):
                 "files": files}
 
     def _prepare_team_workspace(self, job, team):
+        self._assign_source_owners(job, team)
+        self._grant_taken_files(job, team)
+
+    def _assign_source_owners(self, job, team):
         if job["mode"] != "project_files" or team["phase"] != "working" or job["team"].get("run_number",1) > 1:
             return
-        snapshot = self.store.snapshot(job["room_id"])
-        if (snapshot.get("objective") and snapshot["objective"]["retired_partners"]
-                and self._project(job["room_id"]).snapshot()["revision"] > 1):
-            # Initial source assignment is immutable. A later quota transfer
-            # uses the task's exact SHA grant at apply, never rewrites that
-            # earlier ownership commit or replays it with a different mapping.
+        project = self._project(job["room_id"])
+        # Initial source assignment is immutable and made once, before any
+        # change. A task taken from the pool later, or a quota transfer, gets
+        # the exact SHA grant at apply instead (_grant_taken_files), never a
+        # rewrite of that ownership commit.
+        if project.snapshot()["revision"] > 1:
             return
         owners = {}
         for task in team["tasks"]:
+            if not task["owner"]:
+                continue  # still in the pool
             for path in task["write_paths"]:
-                if not task["owner"] or (path in owners and owners[path] != task["owner"]):
+                if path in owners and owners[path] != task["owner"]:
                     raise RoomError("team_scope_conflict")
                 owners[path] = task["owner"]
         if owners:
-            self._project(job["room_id"]).assign_source_owners(
-                owners, allowed_owners=self.store.member_ids(job["room_id"]))
+            try:
+                project.assign_source_owners(owners, allowed_owners=self.store.member_ids(job["room_id"]))
+            except ProjectWorkspaceError as error:
+                # Two calls starting together: the other one already made the assignment.
+                if error.code not in {"project_revision_conflict", "project_proposal_conflict"}:
+                    raise
+
+    def _grant_taken_files(self, job, team):
+        """Let a work call change its own task's files that another partner wrote.
+
+        Whoever is free takes a task, so a file in its scope may belong to a
+        partner who wrote it in a finished task, retired on quota, or (selected-
+        files mode) was first given the untouched source. The store grants
+        those by exact SHA before anything is imported; a file another partner
+        is still changing in unfinished work stays theirs.
+        """
+        if job["mode"] not in PROJECT_MODES or job["team"]["job_phase"] != "work" or not job["team"]["task_id"]:
+            return
+        task = next((item for item in team["tasks"] if item["id"] == job["team"]["task_id"]), None)
+        if task is None or task["owner"] != job["provider"] or not task["write_paths"]:
+            return
+        try:
+            project = self._project(job["room_id"])
+            if hasattr(project, "metadata_for_paths"):
+                files = []
+                for offset in range(0, len(task["write_paths"]), 16):
+                    files += project.metadata_for_paths(task["write_paths"][offset:offset + 16])
+                revision = project.snapshot()["revision"]
+            else:
+                current = project.snapshot()
+                files, revision = current["files"], current["revision"]
+            if all(file["owner"] in {None, job["provider"]} for file in files if file["path"] in task["write_paths"]):
+                return
+            baseline = ({file["path"]: (file["owner"], file["sha256"]) for file in project.snapshot(1)["files"]}
+                        if job["mode"] == "project_files" else None)
+        except ProjectWorkspaceError:
+            return  # no readable project: the submission is checked at apply as before
+        self.store.grant_taken_files(job["id"], files, revision, baseline=baseline)
 
     def _folder_context(self, job, *, task=None):
         project = self._project(job["room_id"])
@@ -6176,8 +6218,9 @@ class RoomService(RoomPromptMixin):
             task_scopes.update({command["task_id"]: {**task_scopes[command["task_id"]], "write_paths": command["write_paths"]}
                                 for command in parsed["commands"] if command["type"] == "adjust"})
             task_scopes.update(proposed)
+            # Only a claim answering the user binds a task; one sent while planning is ignored.
             scopes = {command["task_id"]: task_scopes[command["task_id"]]["write_paths"]
-                      for command in parsed["commands"] if command["type"] == "claim"}
+                      for command in parsed["commands"] if command["type"] == "claim" and job["team"]["job_phase"] == "user"}
             self.store.authorize_claims(job["id"], scopes, project["files"], project["revision"])
         if extension:
             try:

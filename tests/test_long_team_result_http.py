@@ -228,8 +228,11 @@ class LongTeamResultHTTPTests(unittest.TestCase):
         self.assertEqual(final["objective"]["id"], carried["objective"]["id"])
         self.assertEqual(final["room"]["runtime_settings"], carried["room"]["runtime_settings"])
         self.assertEqual([(job["id"], job["status"], job["error"]) for job in final["jobs"][:len(original_rows)]], original_rows)
-        self.assertEqual({task["id"]: (task["owner"], task["assignment_epoch"]) for task in final["team"]["tasks"]},
-                         {key: (task["owner"], task["assignment_epoch"]) for key, task in tasks.items()})
+        # Started work keeps its owner and epoch; K3 had never started, so it waited in the pool until its inputs were ready.
+        self.assertIsNone(tasks["K3"]["owner"])
+        self.assertEqual({task["id"]: (task["owner"], task["assignment_epoch"]) for task in final["team"]["tasks"] if task["id"] != "K3"},
+                         {key: (task["owner"], task["assignment_epoch"]) for key, task in tasks.items() if key != "K3"})
+        self.assertIsNotNone(next(task for task in final["team"]["tasks"] if task["id"] == "K3")["owner"])
         resumed = self.phases[prior_phases:]
         self.assertNotIn(("work", "K1", 1), resumed)
         self.assertNotIn("plan", [phase[0] for phase in resumed])

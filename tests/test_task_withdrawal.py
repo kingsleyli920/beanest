@@ -68,7 +68,7 @@ class TaskWithdrawal(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await native.NativeRoomServiceTests.asyncSetUp(self)
         self.fake.handler = self.handler
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
         self.worked, self.checkpoints, self.holds = [], [], {}
         # Holding a partner before it claims leaves its next call queued, as when it is still busy elsewhere.
         self.gated = {}

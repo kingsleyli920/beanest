@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from local_agent_coordinator import native_adapters
 from test_kimi_fenced_http import FencedACPFixture
-from test_native_room_service import native_reply
+from test_native_room_service import native_reply, planned_owners
 from test_team_store import proposal
 from wait_support import poll
 
@@ -24,6 +24,8 @@ CORPUS = json.loads((Path(__file__).parent / 'fixtures/native_protocol_v1.json')
 class OutcomeFixture(FencedACPFixture):
     def __init__(self, case, *, bad_phase='plan', repeated=False, native_case=None):
         super().__init__()
+        # These outcome and recovery cases are built on the owners each partner claims while planning.
+        planned_owners(self.service)
         self.presentation = case
         self.bad_phase, self.repeated, self.native_case = bad_phase, repeated, native_case
         self.calls = []

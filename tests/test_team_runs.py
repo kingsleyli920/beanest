@@ -212,15 +212,20 @@ class TeamRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(event["kind"] == "run_started" for event in second["events"]), 1)
 
     async def test_new_round_cannot_transfer_an_existing_file_owner(self):
+        # Catches a later round handing a file to someone other than its author: the partners' swapped
+        # claims are ignored and each task goes back to whoever wrote its file.
         first = await self.create()
         scenario = self.scenario(2)
         scenario.owners = {"main":"codex", "checks":"claude"}
         await self.next_run(first, 2)
         await self.settle()
         second = await self.service.read_room(first["room"]["id"])
-        self.assertEqual(second["team"]["stop_reason"], "team_scope_conflict")
-        self.assertEqual(second["project"]["files"], first["project"]["files"])
-        self.assertEqual(second["project"]["revision"], first["project"]["revision"])
+        self.assertIsNone(second["team"]["stop_reason"])
+        self.assertEqual(second["team"]["phase"], "ready_for_user")
+        self.assertEqual({task["id"]: task["owner"] for task in second["team"]["tasks"]}, {"main": "claude", "checks": "codex"})
+        self.assertEqual({file["path"]: file["owner"] for file in second["project"]["files"]},
+                         {file["path"]: file["owner"] for file in first["project"]["files"]})
+        self.assertGreater(second["project"]["revision"], first["project"]["revision"])
         previous = await self.service.read_run(first["room"]["id"], first["current_run"]["id"])
         self.assertEqual(previous["team"]["tasks"], first["team"]["tasks"])
 

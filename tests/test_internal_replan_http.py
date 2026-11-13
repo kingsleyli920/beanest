@@ -122,11 +122,9 @@ class InternalReplanHTTPTests(unittest.TestCase):
         self.assertEqual(fixture.before_replan_metadata[0]['sha256'], fixture.original_readme_hash)
         self.assertEqual(fixture.new_private_baseline_hash, fixture.original_readme_hash)
         grants = fixture.service.store.ownership_grant(fixture.new_context['job']['id'])
-        # An unowned baseline needs an ordinary claim, not a foreign-owner transfer grant.
+        # An unowned baseline goes to whoever does the new task without a foreign-owner transfer grant.
         self.assertEqual(grants, {})
-        self.assertTrue(any(event['kind'] == 'team_command' and event.get('command') == 'claim'
-                            and event.get('task_id') == 'T4' and event.get('sender') == 'kimi'
-                            for event in held['events']))
+        self.assertEqual(tasks['T4']['owner'], fixture.new_context['self'])
         self.assertNotIn('README.md', fixture.service.store.ownership_grant(fixture.t3_calls[0]['job_id']))
         self.assertTrue(fixture.replan_prompts)
         self.assertFalse(any(event['kind'] == 'objective_decision_required' for event in held['events']))

@@ -44,9 +44,8 @@ class ReadinessFixture(FencedACPFixture):
                 await asyncio.sleep(.005)
         if agent == 'kimi' and phase == 'coordinate':
             text = context['job']['text']
-            awaiting_owners = 'Unclaimed task IDs: []' not in text
             awaiting_repair = self.repair and 'The shared plan is stalled' not in text
-            if awaiting_owners or awaiting_repair:
+            if awaiting_repair:
                 self.skip_ready_job = context['job']['id']
             else:
                 self.confirmation_held.set()
@@ -62,16 +61,13 @@ class ReadinessFixture(FencedACPFixture):
         if phase in {'plan', 'coordinate'}:
             tasks = context['team']['tasks']
             if agent == 'kimi' and not tasks:
+                # The author's first reply proposes without confirming, so a confirmation is still missing.
                 commands = [proposal('T1', paths=[]), proposal('T2', paths=[]),
-                            proposal('T3', paths=[], dependencies=['T1', 'T2']),
-                            {'type': 'claim', 'task_id': 'T1'}]
+                            proposal('T3', paths=[], dependencies=['T1', 'T2'])]
             elif agent == 'kimi' and context['job']['id'] == self.skip_ready_job:
                 commands = []
             else:
-                owned = {'kimi': 'T1', 'claude': 'T2', 'codex': 'T3'}[agent]
-                commands = ([{'type': 'claim', 'task_id': owned}]
-                            if any(item['id'] == owned and item['owner'] is None for item in tasks) else [])
-                commands.append({'type': 'plan_ready'})
+                commands = [{'type': 'plan_ready'}]
             return native_reply(context, commands)
         return super().reply(agent, context, cwd)
 
@@ -102,12 +98,11 @@ class CoordinationReadinessHTTPTests(unittest.TestCase):
         fixture = ReadinessFixture(repair=repair)
         self.addCleanup(fixture.close)
         fixture.create()
-        held = fixture.wait(lambda value: fixture.confirmation_held.is_set()
-                            and all(task['owner'] is not None for task in value['team']['tasks']))
+        held = fixture.wait(lambda value: fixture.confirmation_held.is_set())
         team = held['team']
         self.assertEqual(team['phase'], 'planning')
-        self.assertEqual({task['id']: task['owner'] for task in team['tasks']},
-                         {'T1': 'kimi', 'T2': 'claude', 'T3': 'codex'})
+        # Nobody owns a task while planning; the pool hands them out once the plan is confirmed.
+        self.assertEqual({task['id']: task['owner'] for task in team['tasks']}, {'T1': None, 'T2': None, 'T3': None})
         members = {item['id']: item for item in team['members']}
         self.assertFalse(members['kimi']['plan_ready'])
         self.assertTrue(members['claude']['plan_ready'])
@@ -118,8 +113,8 @@ class CoordinationReadinessHTTPTests(unittest.TestCase):
         self.assertIn(json.dumps(text, ensure_ascii=False), correction['prompt'])
         self.assertIn('plan_ready', text)
         self.assertIn('Unconfirmed members:', text)
-        self.assertIn('Unclaimed task IDs: []', text)
-        self.assertIn('Do not issue claim commands or repeat existing claims.', text)
+        self.assertIn('Tasks are not claimed', text)
+        self.assertNotIn('Unclaimed task IDs', text)
         self.assertIn('Your only missing action is the command {"type":"plan_ready"}', text)
         if repair:
             self.assertIn('The shared plan is stalled', text)
@@ -133,8 +128,9 @@ class CoordinationReadinessHTTPTests(unittest.TestCase):
         self.assertEqual(ready['team']['phase'], 'working')
         self.assertEqual(ready['team']['revision'], team['revision'])
         self.assertTrue(all(item['plan_ready'] for item in ready['team']['members']))
+        # Free partners in room order take the two ready tasks; T3 waits for both in the pool.
         self.assertEqual({task['id']: task['owner'] for task in ready['team']['tasks']},
-                         {'T1': 'kimi', 'T2': 'claude', 'T3': 'codex'})
+                         {'T1': 'kimi', 'T2': 'claude', 'T3': None})
         work_jobs = [job for job in ready['jobs'] if job['kind'] == 'team_work' and job['status'] in {'queued', 'working'}]
         self.assertEqual({job['provider'] for job in work_jobs}, {'kimi', 'claude'})
         self.assertEqual(len(work_jobs), 2)

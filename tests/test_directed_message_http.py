@@ -191,7 +191,7 @@ class DirectedMessageHTTPTests(unittest.TestCase):
 
 class DirectedNativeRecoveryHTTPTests(unittest.TestCase):
     request = http.LongTeamResultHTTPTests.request
-    setUp = http.LongTeamResultHTTPTests.setUp
+    setUp = repair.NativeHelpRepairHTTPTests.setUp
     tearDown = http.LongTeamResultHTTPTests.tearDown
     settled = http.LongTeamResultHTTPTests.settled
     handler = repair.NativeHelpRepairHTTPTests.handler

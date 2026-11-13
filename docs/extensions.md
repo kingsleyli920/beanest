@@ -142,7 +142,7 @@ helper = AgentSpec(
 
 UI新建并选择2–8位成员时使用`collaboration:true`，HTTP/MCP调用者也可显式选择；省略或false保持旧actions协议，单工具房间不使用共享协议。新协议不是新的供应商适配器：仍调用各成员的原生CLI专用会话；文字和文件模式下工具关闭（`native_project` 另见[项目协作](projects.md)），完整响应改为`{message,state,commands}`，文件模式另带base_revision/files。结构化hook收到对应schema，自定义invoke仍由服务严格校验，不能把任意工具事件当作协作命令。
 
-`team_store.py`是共享清单和状态单源：初始接收者提出最多8项真实交付，各成员对确切清单revision确认并各自claim；依赖必须构成DAG。每成员最多一个在途调用，不同成员可在不同路径并行；同路径不能跨负责人覆盖，文件提交仍由协调层检查owner、hash及版本。request_help绑定具体task、接收者、能力和问题，回答作为help_result返回原负责人；complete记录具体result及其实际结果版本/文件hash，再安排非作者review，不能凭模型正文自称完成。
+`team_store.py`是共享清单和状态单源：初始接收者提出最多8项真实交付，各成员对确切清单revision确认后，任务进任务池，成员空闲时由服务交给它下一项就绪任务；依赖必须构成DAG。每成员最多一个在途调用，不同成员可在不同路径并行；同路径不能跨负责人覆盖，文件提交仍由协调层检查owner、hash及版本。request_help绑定具体task、接收者、能力和问题，回答作为help_result返回原负责人；complete记录具体result及其实际结果版本/文件hash，再安排非作者review，不能凭模型正文自称完成。
 
 所有子任务accepted只是ready_for_user，表示交付并互审、等待用户验收。`collaboration_view.py`基于记录生成tasks和outcome，保留具体原因、下一步、未完成项、文件版本与检查范围；只有当前版本精确匹配的隔离进程退出0且清理确认，才展示sandbox_execution，仍不等于目标验收。旧room保留team:null与round_finished语义，不补造共享分工或全局验收。
 

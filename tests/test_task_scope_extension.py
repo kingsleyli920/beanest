@@ -33,7 +33,7 @@ class ScopeExtensionStore(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.store = RoomStore(Path(self.directory.name) / "rooms.sqlite3", clock=lambda: 1000.0,
                                agents={"claude": "Claude", "codex": "Codex", "kimi": "Kimi"})
-        self.store.task_capabilities = lambda provider: ()  # planned owners stay put
+        native.planned_owners(self.store)  # planned owners stay put
         self.room_id = self.store.create_room("Ship the ledger tool", "claude", str(uuid4()), collaboration=True)[0]
         plans = {provider: self.store.claim(self.room_id, provider) for provider in ("claude", "codex", "kimi")}
         self.finish(plans["claude"], [proposal("T0", paths=["base.py"]), proposal("T1", paths=["a.py"]),
@@ -137,7 +137,7 @@ class ScopeExtensionService(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await native.NativeRoomServiceTests.asyncSetUp(self)
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
         self.fake.handler = self.handler
         self.plan = [("T1", "claude", ["main.py"], []), ("T2", "codex", ["notes.md"], ["T1"])]
         self.work = {}
@@ -236,27 +236,25 @@ class ScopeExtensionService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event for event in state["events"] if event["kind"] == "task_scope_extended"], [])
         self.assertEqual(self.canonical(room_id, "notes.md")[0], "codex", "only T2's owner wrote notes.md")
 
-    async def test_a_finished_tasks_file_another_active_partner_owns_goes_back_to_its_owner(self):
-        # Catches an extension overriding a file's canonical owner (the import would fail on ownership and stop the room).
+    async def test_a_finished_tasks_file_another_present_partner_wrote_moves_with_the_extension(self):
+        # Catches extend refusing a file only because a present partner wrote it in finished work:
+        # nobody else is editing it, so it moves to the extending task by grant and imports.
         self.plan = [("T1", "codex", ["notes.md"], []), ("T2", "claude", ["main.py"], ["T1"])]
 
         def work(task, cwd, attempt, context):
-            if task["id"] == "T2" and attempt == 1:
+            if task["id"] == "T2":
                 (cwd / "main.py").write_text("VALUE = 2\n")
                 (cwd / "notes.md").write_text("Claude's take.\n")
                 return native_reply(context, [extend("T2", ["notes.md"]), complete("T2")])
-            if task["id"] == "T2":
-                (cwd / "notes.md").write_text("# T1 attempt 1\n")
-                (cwd / "main.py").write_text("VALUE = 2\n")
-                return native_reply(context, [complete("T2")])
             return ScopeExtensionService.do_work(self, task, cwd, attempt, context)
         self.do_work = work
         room_id, state = await self.run_room()
         self.assertEqual(state["objective"]["status"], "complete", state["team"])
         tasks = {task["id"]: task for task in state["team"]["tasks"]}
-        self.assertEqual((tasks["T2"]["status"], tasks["T2"]["write_paths"]), ("accepted", ["main.py"]))
-        self.assertIn("team_extend_path_owned", self.work["T2"][1]["job"]["text"])
-        self.assertEqual(self.canonical(room_id, "notes.md"), ("codex", hashlib.sha256(b"# T1 attempt 1\n").hexdigest()))
+        self.assertEqual((tasks["T2"]["status"], tasks["T2"]["write_paths"]), ("accepted", ["main.py", "notes.md"]))
+        self.assertEqual(len(self.work["T2"]), 1, "no correction round")
+        self.assertFalse(any(event["kind"] == "native_response_rejected" for event in state["events"]))
+        self.assertEqual(self.canonical(room_id, "notes.md"), ("claude", hashlib.sha256(b"Claude's take.\n").hexdigest()))
 
 
 if __name__ == "__main__":

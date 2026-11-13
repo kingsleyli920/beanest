@@ -401,7 +401,7 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await native.NativeRoomServiceTests.asyncSetUp(self)
-        native.no_rebalance(self.service)
+        native.planned_owners(self.service)
         self.fake.handler = self.handler
         self.task_ids = ["T1", "T2"]
         self.usage = lambda phase, task_id: LARGE   # what each Claude call reports having sent

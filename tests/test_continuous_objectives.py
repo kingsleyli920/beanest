@@ -97,8 +97,11 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['objective']['original_goal'], before['objective']['original_goal'])
         self.assertEqual(result['objective']['status'], 'complete')
         task = result['team']['tasks'][0]
-        for key in ('id','title','owner','write_paths','dependencies'):
+        for key in ('id','title','write_paths','dependencies'):
             self.assertEqual(task[key], old_task[key])
+        # Nobody had started it, so it waited in the pool and the restarted round handed it out.
+        self.assertIsNone(old_task['owner'])
+        self.assertEqual(task['owner'], 'claude')
         self.assertGreater(task['assignment_epoch'], old_task['assignment_epoch'])
         self.assertFalse(any(call['context']['job']['job_phase'] in {'plan','coordinate'} for call in self.fake.calls[count:]))
         archived = await self.service.read_run(created['room']['id'], old_id)
