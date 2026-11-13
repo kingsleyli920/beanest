@@ -3795,7 +3795,7 @@ test('任务选项 sets each chosen partner\'s model, role and workload in place
   } });
   const ui = await open();
   await ui.click('task-options-partners');
-  assert.equal(ui.get('task-partner-summary-claude').textContent, '默认模型 · 默认 · 全能');
+  assert.equal(ui.get('task-partner-summary-claude').textContent, '默认模型 · 默认强度 · 全能');
   assert.equal(ui.get('task-partner-panel-claude').hidden, true);
   await ui.click('task-partner-toggle-claude');
   const panel = ui.get('task-partner-panel-claude');

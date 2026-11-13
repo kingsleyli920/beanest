@@ -2569,10 +2569,10 @@ function renderTaskPartnerRows() {
       const panel = element('div', '', 'task-partner-panel'); panel.id = `task-partner-panel-${id}`;
       row.append(line, panel);
     }
-    const { modelLabel, shortEffort, role, workloadName, historical } = partnerRuntimeLabels(id, context);
+    const { modelLabel, effort, role, workloadName, historical } = partnerRuntimeLabels(id, context);
     const [, name, summary, toggle] = row.firstChild.children;
     const expanded = state.taskPartnerExpanded === id;
-    const text = `${modelLabel} · ${shortEffort} · ${role}${workloadName ? t(" · 工作量{p0}", { p0: workloadName }) : ''}${historical ? t(" · 仅查看") : ''}`;
+    const text = `${modelLabel} · ${effort} · ${role}${workloadName ? t(" · 工作量{p0}", { p0: workloadName }) : ''}${historical ? t(" · 仅查看") : ''}`;
     if (name.textContent !== displayName(id)) name.textContent = displayName(id);
     if (summary.textContent !== text) summary.textContent = text;
     const label = expanded ? t("收起") : t("设置");
