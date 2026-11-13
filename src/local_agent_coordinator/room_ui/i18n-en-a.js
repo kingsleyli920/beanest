@@ -638,6 +638,8 @@ Object.assign(window.BeanestI18nEnglish, {
   "伙伴提交的任务操作无效，协作已停止。": "The submitted task operations were invalid. Collaboration has stopped.",
   "伙伴提交的任务清单缺少有效信息，尚未接受这次交付。": "The submitted task board lacks required information. This delivery was not accepted.",
   "伙伴正在按共享清单推进。": "Partners are working from the shared task board.",
+  "等伙伴重新分配文件后继续": "Continues once partners re-split the files",
+  "：需要调整文件分工。手头的工作做完后，伙伴会重新分配，不用你操作。": ": needs its files re-split. Partners will reassign them once current work finishes; nothing for you to do.",
   "伙伴的精确修改格式无效，未接受这批修改。": "The precise edit format was invalid. These changes were not accepted.",
   "伙伴遇到额度限制，原生工具可能已修改私有文件；已保留现场，核对后再重新分派。": "A partner reached a quota limit and may have changed private files. Work is preserved; reassignment requires checking the current state.",
   "你已停止任务，已保留现有交付。": "You stopped the task. Existing deliveries are preserved.",

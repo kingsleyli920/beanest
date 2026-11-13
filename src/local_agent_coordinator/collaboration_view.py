@@ -165,13 +165,18 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     names = {member["id"]: member["name"] for member in snapshot.get("members", [])}
     current_files = {file["path"]: file for file in project.get("files", [])}
     stale = False
+    # A partner asked the team to re-split file ownership. The room replans by
+    # itself once current work settles, so this is not a question for the user.
+    replanning = {task["id"]: task["title"] for task in team["tasks"]
+                  if task["status"] == "blocked" and task.get("block_cause") == "coordination_required"
+                  and task.get("internal_replan_revision") is not None}
     for task in team["tasks"]:
         if task["status"] == WITHDRAWN:
             # Listed so the board stays true, but never remaining, delivered or reviewed work.
             tasks.append({"id": task["id"], "title": task["title"], "owner": task["owner"],
                           "status": task["status"], "waiting_for": "", "result": ""})
             continue
-        waiting = (task.get("blocked_reason") or
+        waiting = (_system("等伙伴重新分配文件后继续") if task["id"] in replanning else task.get("blocked_reason") or
                    (_system("等待 {p0} 的协助", names.get(task.get("help_to"), task.get("help_to"))) if task["status"] == "waiting_peer" else
                     _system("等待独立审核") if task["status"] == "review" else
                     _system("等待依赖：") + _listed(task["dependencies"]) if task["status"] == "assigned" and task["dependencies"] else ""))
@@ -202,7 +207,7 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
         next_action = (_system("不用你操作；有伙伴额度恢复后会自动继续。") if reason_code == "all_partners_quota_exhausted"
                        else _system("点“继续”再试一次；没有发出的工作不会重复。") if reason_code == "native_preflight_failed"
                        else _system("先核对停止原因和现有交付；未确认结果不会自动重跑。"))
-    elif stale or room["status"] == "needs_user" or any(task["status"] == "blocked" for task in tasks):
+    elif stale or room["status"] == "needs_user" or any(task["status"] == "blocked" and task["id"] not in replanning for task in tasks):
         state = "needs_user"
         reason = reason or _system("有工作尚未完成，需要补充信息或确认处理方式。")
         next_action = _system("查看未完成项，在同一聊天补充所需信息。")
@@ -242,6 +247,8 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
             reason = _system("文件提案超出容量，原负责人正在精简后重新提交，仍需独立互审。")
         if team.get("execution_repair_id") and phase == "working":
             reason = _system("隔离检查发现问题，伙伴正在按原分工修正并重新互审。")
+        if replanning:
+            reason = _listed(list(replanning.values())) + _system("：需要调整文件分工。手头的工作做完后，伙伴会重新分配，不用你操作。")
         next_action = _system("可以继续补充信息；需要你决定时会在这里说明。")
     objective = snapshot.get("objective")
     if objective and objective["status"] == "paused":

@@ -145,6 +145,24 @@ class CollaborationViewTests(unittest.TestCase):
                 if not empty:
                     self.assertTrue(projected["outcome"]["remaining"])
 
+    def test_a_task_waiting_for_the_team_to_re_split_files_does_not_ask_the_user(self):
+        # Catches the real room where Codex blocked R3 for coordination, the room replanned by itself,
+        # yet the headline told the user that information or a decision was needed from them.
+        value = snapshot(mode="native_project", status="working", phase="working")
+        value["team"]["tasks"].append({"id": "R3", "title": "Fix the wait budget", "owner": "codex", "status": "blocked",
+                                       "dependencies": [], "result": None, "result_files": None,
+                                       "blocked_reason": "Needs ownership of two more files.",
+                                       "block_cause": "coordination_required", "internal_replan_revision": -1})
+        outcome = collaboration_view(value)["outcome"]
+        self.assertEqual(outcome["state"], "in_progress")
+        self.assertEqual(outcome["reason"], "Fix the wait budget：需要调整文件分工。手头的工作做完后，伙伴会重新分配，不用你操作。")
+        self.assertIn("Fix the wait budget：等伙伴重新分配文件后继续", outcome["remaining"])
+        # A block for the user, or a coordination block nobody has asked to replan, still asks the user.
+        for cause, replan in (("user_decision", -1), ("coordination_required", None)):
+            with self.subTest(cause=cause, replan=replan):
+                value["team"]["tasks"][1].update(block_cause=cause, internal_replan_revision=replan)
+                self.assertEqual(collaboration_view(value)["outcome"]["state"], "needs_user")
+
     def test_stop_and_unknown_preserve_actionable_subscription_failure_reason(self):
         for phase, expected in (("stopped", "stopped"), ("unknown", "unknown")):
             with self.subTest(phase=phase):
