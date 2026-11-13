@@ -15,13 +15,28 @@
 ## 能做什么
 
 - **接入 Claude Code、Codex 和 Kimi Code**：使用你安装并登录的官方工具，不捆绑账号、不代售会员、不静默改用付费 API key。
-- **共享任务与互审**：伙伴提出方案、认领任务、互相求助并审核成果。没有依赖和文件冲突的任务可以并行，有依赖的任务仍需等待。
+- **共享任务与互审**：伙伴提出方案、认领任务、互相求助并审核成果。伙伴按任务之间真实的依赖并行，你列要求时的先后顺序不算依赖。做到一半你也可以说哪些任务不用等，伙伴会把还没开始的任务调开，交给空着的伙伴，正在做的不受影响。
 - **保留工作进度**：聊天和成果保存在本机，可以暂停、停止，也可以在已有结果上继续。某个伙伴额度用完，它手上的活会交给其他可用的伙伴；只剩一位时会标明是自检。所有伙伴额度都用完时，自主任务会等到确认有伙伴额度恢复，再自动继续。
+- **角色与工作量**：给每个伙伴定角色（开发、审查、规划或自定义）和这次的工作量，角色显示在卡片和对话里。某个账号额度只剩 15% 左右时，豆窝先把活派给别人。
 - **项目与权限**：关联本机文件夹，先只读讨论，或在开发副本中修改。显式选择 Full Access 后，原生 Agent 可以执行本机命令和联网。
 - **直接查看交付**：在聊天里阅读文档、代码、图片和视频；查看成果有没有提交、合入 main、推到 GitHub，也可以让伙伴去提交、合入和同步。
 - **中英文界面**：切换 English 或简体中文，聊天原文、项目名称和文件内容保持原样。
 
-## 快速开始
+## 安装
+
+系统要 macOS 13 或更新，还要有 Claude、ChatGPT、Kimi 中至少一家的会员。打开“终端”（在“应用程序 → 实用工具”里），粘贴这一行，按回车：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
+```
+
+它会按你这台 Mac 的芯片下载对应的包，核对校验和与签名，装进“应用程序”并打开，不会弹出“无法验证”的提示。以后再运行同一行就是升级，对话和设置都会保留。
+
+也可以到 [Releases](https://github.com/kingsleyli920/beanest/releases) 手动下载 zip。这个版本没有经过 Apple 公证，手动下载的版本第一次打开时，要到“系统设置 → 隐私与安全性”里点“仍要打开”。
+
+App 自带运行要用的 Python，不用另装 Python 或 Node.js。还没装 Claude Code、Codex 或 Kimi Code 也没关系：首页可以一键运行各家的官方安装脚本，再用你自己的账号登录。
+
+## 从源码运行
 
 需要 **Python 3.12+**；桌面启动还需要 **Node.js 22.12+**。至少安装并登录一个已支持的官方 Agent CLI。模型权限、会员额度及使用条款由各供应商管理。macOS 自带的 `python3` 是 3.9，用不了；请先装新版本，例如 `brew install python`，再用它创建 `.venv`。
 
@@ -59,15 +74,8 @@ npm --prefix desktop run build:release                 # 本机芯片
 npm --prefix desktop run build:release -- --arch x64   # Intel 版
 ```
 
-打开这个 App 后，没有装 Claude Code、Codex 或 Kimi Code 也没关系：首页可以一键运行各家的官方安装脚本，再用你自己的账号登录。
 
 构建时需要 [uv](https://docs.astral.sh/uv/) 和网络，可以在 Apple 芯片的 Mac 上同时构建 Apple 芯片版和 Intel 版，App 要求 macOS 13 或更新。App 和 zip 按芯片生成在 `runtime/desktop-release/arm64/` 或 `runtime/desktop-release/x64/`。App 自带 Python 和后端，用户数据放在 `~/Library/Application Support/io.github.kingsleyli920.beanest`。Agent CLI 仍需用户自己安装并登录。这个构建只做了临时签名，没有公证，从浏览器下载的 zip 第一次打开时 macOS 会要求到系统设置里允许。
-
-已发布的版本也可以在终端用一条命令安装或升级，它会按芯片下载对应的包、核对校验和与签名，不会弹出无法验证的提示：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
-```
 
 ## 怎么使用
 

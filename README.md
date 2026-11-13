@@ -15,13 +15,28 @@ Beanest is an independent, early-stage project for a single user on their own co
 ## What it does
 
 - **Claude Code, Codex, and Kimi Code:** connect locally installed official tools using their existing sign-in. Beanest does not bundle accounts, sell subscriptions, or silently switch to paid API keys.
-- **Shared tasks:** agents propose work, claim tasks, ask for help, and review each other's results. Independent tasks can run in parallel; dependencies and ownership can require a task to wait.
+- **Shared tasks:** agents propose work, claim tasks, ask for help, and review each other's results. They work in parallel by the real dependencies between tasks; the order you list requests in is not taken as an order they must follow. Partway through, you can say some tasks need not wait, and tasks nobody has started are rearranged and handed to an idle partner.
 - **Persistent work:** keep conversations and deliverables locally, pause or stop work, and continue with existing results. When a partner's quota runs out, its work goes to another available partner; a single remaining partner is labeled "Self-check only". If every partner is out of quota, an autonomous task waits and continues once a partner's quota is confirmed back.
+- **Roles and workload:** give each partner a role (builder, reviewer, planner, or your own) and a workload for this task; roles show on cards and in the conversation. When an account is down to about 15% of its quota, Beanest gives work to others first.
 - **Projects and permissions:** associate a folder, discuss it read-only, or work on a development copy. Explicit Full Access permits local commands and network access.
 - **Readable deliveries:** view documents, code, images, and videos in the conversation. Check whether the work is committed, merged into main, and pushed to GitHub, and ask an agent to commit, merge, and sync it.
 - **English and 简体中文:** switch the interface language without translating or rewriting your conversations, project names, or files.
 
-## Quick start
+## Install
+
+You need macOS 13 or later and a paid plan with at least one of Claude, ChatGPT or Kimi. Open Terminal (in Applications → Utilities), paste this line and press Return:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
+```
+
+It downloads the package for your Mac's chip, checks its checksum and signature, puts the app in Applications and opens it, without the cannot-verify prompt. Run the same line again to update; your conversations and settings are kept.
+
+You can also download a zip from [Releases](https://github.com/kingsleyli920/beanest/releases). This version is not notarized by Apple, so the first time you open a manual download, allow it under System Settings → Privacy & Security with Open Anyway.
+
+The app carries the Python it needs, so you don't install Python or Node.js. If you don't have Claude Code, Codex or Kimi Code yet, the first screen can run each provider's official install script in one click, and you then sign in with your own account.
+
+## Run from source
 
 You need **Python 3.12+**, **Node.js 22.12+** for the desktop launcher, and at least one supported agent CLI installed and signed in. Provider access, supported models, subscription limits, and terms are managed by each provider. The `python3` that ships with macOS is 3.9 and will not work; install a newer one, for example with `brew install python`, and use it to create `.venv`.
 
@@ -59,15 +74,8 @@ npm --prefix desktop run build:release                 # this Mac's chip
 npm --prefix desktop run build:release -- --arch x64   # Intel
 ```
 
-Once the app is open, you don't need Claude Code, Codex or Kimi Code installed already: the first screen can run each provider's official install script in one click, and you then sign in with your own account.
 
 This needs [uv](https://docs.astral.sh/uv/) and network access at build time. An Apple silicon Mac can build both the Apple silicon and the Intel app, and the app needs macOS 13 or later. The app and a zip land in `runtime/desktop-release/arm64/` or `runtime/desktop-release/x64/`. The app carries its own Python and backend and keeps user data in `~/Library/Application Support/io.github.kingsleyli920.beanest`. Users still install and sign in to their agent CLIs. The build is ad-hoc signed and not notarized, so a zip downloaded in a browser has to be allowed in System Settings the first time.
-
-A published release can also be installed or updated with one Terminal command. It picks the package for the Mac's chip, checks its checksum and signature, and does not trigger the cannot-verify prompt:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kingsleyli920/beanest/main/scripts/install-macos.sh | bash
-```
 
 ## Using Beanest
 
