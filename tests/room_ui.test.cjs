@@ -11626,3 +11626,124 @@ test('the English interface words withdrawal in English, in the board, the dialo
   await ui.click('tab-discussion');
   assert.match(ui.get('events').textContent, /You withdrew T4 “Old notes”/);
 });
+
+function apiPartnerFixture(overrides = {}) {
+  const prices = { input: 0.66, output: 1.98, cache_read: 0.022, cache_write: 0.66 };
+  return { id: 'ds', name: 'DeepSeek', avatar: 'D', adapter: 'dsh', provider: 'api_endpoint', connection_state: 'api_model',
+    enabled: true, builtin: false, lifecycle_state: 'active', selectable: true, installation: { state: 'found' },
+    account: { state: 'ready', source: 'api_endpoint', auth_method: 'api_key', reason: null, checked_at: 1000, stale: false },
+    availability: { state: 'available', selectable: true, reason: null, source: 'api_spend_ledger', observed_at: 1000, stale: false, scope: 'api_endpoint' },
+    api_model: { host: 'dsh', host_name: 'DeepSeek Harness', currency: 'USD', timezone: 'UTC',
+      key: { kind: 'env_file', path: '/Users/fictional/keys.env', variable: 'DEEPSEEK_API_KEY' }, default_model: 'deepseek-v4-pro',
+      peak_windows: [{ start: '01:00', end: '04:00', days: [0, 1, 2, 3, 4] }],
+      models: [{ id: 'deepseek-v4-pro', ...prices, peak: { input: 1.32, output: 3.96, cache_read: 0.044, cache_write: 1.32 } }],
+      caps: { daily: 1, monthly: null } },
+    spend: { currency: 'USD', day: '2027-01-16', day_spent: 0.66, month: '2027-01', month_spent: 0.66, month_calls: 1, month_unpriced_calls: 0,
+      caps: { daily: 1, monthly: null }, capped: [], left_percent: 34, state: 'available' }, quota_reserve: null, ...overrides };
+}
+const apiPresetsFixture = [
+  { id: 'deepseek_harness', name: 'DeepSeek Harness', host: 'dsh', currency: 'USD', timezone: 'UTC',
+    key: { kind: 'env_file', path: '', variable: 'DEEPSEEK_API_KEY' }, default_model: 'deepseek-flash',
+    peak_windows: [{ start: '01:00', end: '04:00', days: [0, 1, 2, 3, 4] }, { start: '06:00', end: '10:00', days: [0, 1, 2, 3, 4] }],
+    models: [{ id: 'deepseek-flash', input: 0.15, output: 0.6, cache_read: 0.003, cache_write: 0.15, peak: { input: 0.3, output: 1.2, cache_read: 0.006, cache_write: 0.3 } },
+      { id: 'deepseek-v4-pro', input: 0.66, output: 1.98, cache_read: 0.022, cache_write: 0.66 }],
+    caps: { daily: 5, monthly: 50 } },
+];
+const apiCatalog = [catalog[0], { id: 'ds', name: 'DeepSeek', avatar: 'D', adapter: 'dsh', provider: 'api_endpoint' }];
+const dshAdapter = (state) => ({ id: 'dsh', name: 'DeepSeek Harness', pay_per_use: true,
+  setup: { state, install_url: 'https://github.com/deepseek-ai/deepseek-harness', install_supported: false, login_supported: false } });
+
+test('an API partner card shows spend against its cap, needs no sign-in, and is not hidden as an extra session', async () => {
+  // Catches the card showing an empty quota, an API partner blocked by a missing sign-in, or it being filed under 更多会话.
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true }, apiPartnerFixture()];
+  const saved = snapshot({ agents: apiCatalog });
+  const ui = await browser({ agents: apiCatalog, rooms: [saved.room], saved, partners, route(request) {
+    if (request.path === '/api/partners' && request.method === 'GET') return { partners, api_model_presets: apiPresetsFixture,
+      supported_adapters: [{ id: 'claude', name: 'Claude Code', setup: { state: 'login_required' } }, { id: 'codex', name: 'Codex' }, dshAdapter('ready')] };
+  } });
+  await settle();
+  assert.match(ui.get('member-quota-ds').textContent, /今天.*US\$0\.66 \/ US\$1\.00/);
+  assert.deepEqual(descendants(ui.get('member-quota-ds')).filter((node) => node.tagName === 'PROGRESS').map((node) => node.value), [34]);
+  await ui.click('open-partners');
+  const card = ui.get('partners-list').children.find((node) => node.dataset.partner === 'ds');
+  assert.ok(card, 'listed with the main partners, not under the extra sessions');
+  assert.match(card.textContent, /用你自己的 API key 按量计费/);
+  assert.match(card.textContent, /DeepSeek Harness · API 按量计费/);
+  assert.doesNotMatch(card.textContent, /还差登录|接口地址/);
+  const footer = ui.get('manager-provider-account-ds'); footer.open = true;
+  assert.match(footer.textContent, /今天已花US\$0\.66 \/ US\$1\.00/);
+  assert.match(footer.textContent, /运行工具DeepSeek Harness/);
+  assert.match(footer.textContent, /\/Users\/fictional\/keys\.env 里的 DEEPSEEK_API_KEY/);
+  assert.match(footer.textContent, /高峰 输入 US\$1\.32/);
+  assert.equal(descendants(footer).some((node) => node.dataset.focusKey === 'account-refresh'), false, 'no subscription account refresh');
+  assert.equal(ui.get('first-run-cards').children.some((node) => node.dataset.adapterSetup === 'dsh'), false, 'dsh has no sign-in step');
+});
+
+test('a capped API partner waits like a used-up quota instead of asking the user to act', async () => {
+  // Catches a reached cap reading as a status in doubt, which outlines the card and asks for a refresh that cannot help.
+  const capped = apiPartnerFixture({ availability: { state: 'blocked', selectable: false, reason: 'spend_cap_reached', source: 'api_spend_ledger', observed_at: 1000, stale: false, scope: 'api_endpoint' },
+    spend: { ...apiPartnerFixture().spend, day_spent: 1.32, capped: ['daily'], left_percent: 0, state: 'capped' } });
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true }, capped];
+  const saved = snapshot({ agents: apiCatalog });
+  const ui = await browser({ agents: apiCatalog, rooms: [saved.room], saved, partners });
+  await settle();
+  assert.match(ui.get('availability-ds').textContent, /已到花费上限/);
+  assert.equal(ui.get('availability-ds').classList.contains('waiting'), true);
+  assert.equal(ui.get('member-quota-ds').parentNode.classList.contains('quota-blocked'), false);
+});
+
+test('an empty balance or a refused key says what to do, not that the quota ran out', async () => {
+  // Catches a 402 or 401 from DeepSeek shown as a used-up subscription the user can only wait out.
+  for (const [reason, line, caption] of [['api_balance_exhausted', /余额不足 · 充值后点“检查连接”/, /余额不足/],
+    ['api_key_rejected', /密钥不可用 · 换好后点“检查连接”/, /密钥不可用/]]) {
+    const faulty = apiPartnerFixture({ availability: { state: 'blocked', selectable: false, reason, source: 'api_spend_ledger', observed_at: 1000, stale: false, scope: 'api_endpoint' },
+      account: { ...apiPartnerFixture().account, state: 'unavailable', reason }, health: { state: 'unavailable', reason } });
+    const partners = [{ ...catalog[0], adapter: 'claude', enabled: true }, faulty];
+    const saved = snapshot({ agents: apiCatalog });
+    const ui = await browser({ agents: apiCatalog, rooms: [saved.room], saved, partners });
+    await settle();
+    assert.match(ui.get('availability-ds').textContent, line, reason);
+    assert.doesNotMatch(ui.get('availability-ds').textContent, /额度用完/, reason);
+    await ui.click('open-partners');
+    const card = ui.get('partners-list').children.find((node) => node.dataset.partner === 'ds');
+    assert.match(card.textContent, caption, reason);
+  }
+});
+
+test('adding DeepSeek Harness sends dsh, the editable prices and only the key location', async () => {
+  // Catches the preset sending its own name as the adapter, dsh offered as a plain sign-in tool, or saving without a key location.
+  let partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true }));
+  let dsh = dshAdapter('not_installed');
+  const response = () => ({ partners, api_model_presets: apiPresetsFixture,
+    supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }, dsh] });
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/partners' && request.method === 'GET') return response();
+    if (request.path === '/api/partners' && request.method === 'POST') { partners = [...partners, { ...request.body, connection_state: 'api_model' }]; return response(); }
+  } });
+  await ui.click('open-partners');
+  const choices = ui.get('partner-adapter').children.map((option) => option.value);
+  assert.equal(choices.includes('dsh'), false, 'dsh joins only through its API entry');
+  assert.deepEqual(choices.filter((value) => value.startsWith('api:')), ['api:deepseek_harness']);
+  assert.match(ui.get('partner-adapter').children.find((option) => option.value === 'api:deepseek_harness').textContent, /DeepSeek Harness（API 按量计费）/);
+  ui.get('partner-adapter').value = 'api:deepseek_harness'; ui.get('partner-adapter').fire('change');
+  assert.equal(ui.get('partner-api').hidden, false);
+  assert.match(ui.get('api-host-status').textContent, /还没找到 DeepSeek Harness（dsh）.*npm install -g @deepseek-ai\/dsh/);
+  assert.equal(ui.get('api-peak').value, '01:00-04:00 1-5\n06:00-10:00 1-5');
+  ui.get('partner-form').fire('submit'); await settle();
+  assert.match(ui.get('manager-notice').textContent, /完整路径和变量名/, 'no key location, nothing sent');
+  assert.equal(ui.posts().filter((request) => request.path === '/api/partners').length, 0);
+  ui.get('api-key-path').value = '/Users/fictional/keys.env'; ui.get('api-cap-daily').value = '2.5'; ui.get('api-cap-monthly').value = '';
+  ui.get('partner-form').fire('submit'); await settle();
+  const sent = ui.posts().filter((request) => request.path === '/api/partners');
+  assert.equal(sent.length, 1, 'the filled form is sent once');
+  const body = sent[0].body;
+  assert.equal(body.adapter, 'dsh');
+  assert.match(body.id, /^deepseek-harness-[a-z0-9]+$/);
+  assert.equal(body.api_model.host, 'dsh');
+  assert.equal('base_url' in body.api_model, false, 'dsh owns its endpoint');
+  assert.deepEqual(body.api_model.key, { kind: 'env_file', path: '/Users/fictional/keys.env', variable: 'DEEPSEEK_API_KEY' });
+  assert.deepEqual(body.api_model.caps, { daily: 2.5, monthly: null });
+  assert.deepEqual(body.api_model.models.map((model) => [model.id, model.input, !!model.peak]), [['deepseek-flash', 0.15, true], ['deepseek-v4-pro', 0.66, false]]);
+  assert.deepEqual(body.api_model.peak_windows[1], { start: '06:00', end: '10:00', days: [0, 1, 2, 3, 4] });
+  assert.equal(body.api_model.default_model, 'deepseek-flash');
+});

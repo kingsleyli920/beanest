@@ -1263,6 +1263,13 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                                  on_activity=on_activity, receipt_dir=receipt_dir,
                                  progress_fingerprint=progress_fingerprint, progress_file=progress_file,
                                  sandbox=True)
+    if agent == 'dsh':
+        from .dsh_acp import invoke_native as invoke_dsh
+        # dsh enforces its own sandbox per permission mode; no extra wrapper.
+        return await invoke_dsh(prompt, cwd, session_id, timeout, permission=permission,
+                                response_schema=response_schema, runtime_settings=runtime_settings,
+                                on_activity=on_activity, receipt_dir=receipt_dir,
+                                progress_fingerprint=progress_fingerprint, progress_file=progress_file)
 
     def not_started(error, cleanup_confirmed):
         error.native_execution = {'agent': agent, 'permission': permission,

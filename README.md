@@ -94,11 +94,27 @@ When an account is down to about 15% of its quota, Beanest gives work to other p
 
 A partner's current quota and the task's token usage are separate observations. Unknown quota is shown as unknown; it is not zero. Several partner profiles using the same CLI sign-in do not create separate accounts or quota pools.
 
+### DeepSeek Harness (pay-per-use)
+
+DeepSeek's own coding agent, [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), joins as a partner billed per call to your own DeepSeek API key. Install it first (`npm install -g @deepseek-ai/dsh`). In **Partners**, open **Add a tool or separate session**, choose **DeepSeek Harness (pay-per-use API)**, and fill in:
+
+- where the key lives: a local `.env` file and the variable name in it, or a macOS Keychain item;
+- the models you want to use and your price for each, per 1M tokens (input, output, cache read, cache write), with optional peak-hour prices and the hours they apply;
+- a daily and/or monthly spending cap.
+
+**Beanest never stores the key.** It saves only where the key lives, reads it just before each call, and passes it to that one `dsh` process as `DEEPSEEK_API_KEY`, the variable dsh reads. No other partner receives it, and dsh does not pass it on to the commands it runs. If the key ever appears in what dsh returns, Beanest removes it before recording anything. Each DeepSeek Harness partner has its own dsh home folder, separate from your own `~/.dsh`.
+
+Beanest runs dsh through dsh's own ACP server and its own permission modes: Full Access is dsh's `danger-full-access`, the other permissions are its `read-only` or `workspace-write` sandbox, and a request to widen that sandbox is refused because nobody can answer it mid-call.
+
+The preset's prices are copied from DeepSeek's price page (weekday peak hours in UTC cost twice the off-peak price). They are your numbers: check them and edit them at any time. After each call Beanest prices the tokens dsh recorded for it, subagents included, and adds them to the partner's spend for the day and the month, which the partner card shows against your caps. Below about 15% of a cap the partner is used only when nobody else can take the work. At the cap it gets no new work and the task continues with the other partners; if it is the only partner, the task waits as it does for an exhausted quota and continues when a new day or month starts. If DeepSeek reports an empty balance or refuses the key, the partner stops taking work and its task goes to the others; top up or fix the key, then run its check. These figures are estimates; DeepSeek's bill is the record.
+
 ## Permissions and privacy
 
 Beanest stores its own runtime data on your machine. **Local storage does not mean offline inference:** your goal and relevant context are sent to the agents and providers you select.
 
 A development copy is **not an operating-system sandbox**. With Full Access, a native agent may read or write other accessible files, execute commands, and use the network. Choose this mode only for agents and work you trust. Full Access is each tool's own highest permission, and Beanest adds no limits of its own: partners write the changes they own into your project, as when you use them directly. With other permissions, Beanest does not merge a development copy into your source project. Beanest never publishes to GitHub by itself.
+
+A DeepSeek Harness partner's key stays where you put it. Beanest's own files hold only its location.
 
 Runtime databases, conversations, credentials, connection files, logs, screenshots, and local configuration are excluded from this source release. Do not attach them to public issues. See [Security](SECURITY.md) and [Third-party notices](THIRD_PARTY_NOTICES.md).
 

@@ -5,13 +5,33 @@
 // Partner cards show the account-wide quota windows as bars; model-specific
 // windows stay in the detailed account panel.
 function quotaShortLabel(window) {
-  const named = ({ 'kimi:limit5h': t("5 小时"), 'kimi:limit7d': t("7 天"), 'kimi:monthTotal': t("本月"), 'kimi:monthCode': t("本月代码") })[window.name];
+  const named = ({ 'kimi:limit5h': t("5 小时"), 'kimi:limit7d': t("7 天"), 'kimi:monthTotal': t("本月"), 'kimi:monthCode': t("本月代码"),
+    'api:daily': t("今天"), 'api:monthly': t("本月") })[window.name];
   if (named) return named;
   const minutes = window.window_minutes;
   if (!Number.isFinite(minutes) || minutes <= 0) return t("额度");
   return minutes % 1440 === 0 ? t("{p0} 天", { p0: minutes / 1440 }) : minutes % 60 === 0 ? t("{p0} 小时", { p0: minutes / 60 }) : t("{p0} 分钟", { p0: minutes });
 }
+// An API partner has no provider quota windows: its limits are the caps the
+// user set, shown as the share of each cap still left.
+function apiSpendEntries(partner) {
+  const spend = partner?.spend;
+  if (!isApiPartner(partner) || !spend || typeof spend !== 'object') return [];
+  return [['daily', 'day_spent'], ['monthly', 'month_spent']].filter(([cap]) => Number.isFinite(spend.caps?.[cap]) && spend.caps[cap] > 0)
+    .map(([cap, field]) => {
+      const spent = Number.isFinite(spend[field]) ? spend[field] : 0;
+      const remaining = Math.max(0, Math.round((1 - spent / spend.caps[cap]) * 1000) / 10);
+      return { window: { name: `api:${cap}` }, remaining, stale: false, spend: { spent, cap: spend.caps[cap], currency: spend.currency } };
+    });
+}
+function moneyText(amount, currency) {
+  const digits = Math.abs(amount) > 0 && Math.abs(amount) < 0.1 ? 4 : 2;
+  try { return new Intl.NumberFormat(window.BeanestI18n.getLocale(), { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: digits }).format(amount); }
+  catch { return `${currency} ${amount.toFixed(digits)}`; }
+}
 function memberQuotaWindows(id) {
+  const partner = state.partners.find((entry) => entry.id === id);
+  if (isApiPartner(partner)) return apiSpendEntries(partner);
   const quota = currentAccount(id).account?.quota;
   const windows = (quota?.state === 'available' || quota?.stale === true) && Array.isArray(quota.windows) ? quota.windows : [];
   return windows.filter((window) => window && typeof window === 'object' && !window.model && !window.surface)
@@ -29,10 +49,12 @@ function renderMemberWorkload(id, workload, role = partnerRuntimeLabels(id).role
   const share = !Number.isInteger(account?.actual_percent) ? ''
     : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
       : t("本轮工作量 {p0}%", { p0: account.actual_percent });
-  const reserve = state.partners.find((partner) => partner.id === id)?.quota_reserve;
+  const partner = state.partners.find((entry) => entry.id === id);
+  const reserve = partner?.quota_reserve;
   // Always named, the default too, so every card shows that a role is set and what it is.
   const text = [t("角色：{p0}", { p0: role }), share,
-    Number.isFinite(reserve) ? t("额度只剩约 {p0}%，先派给别人", { p0: reserve }) : ''].filter(Boolean).join(' · ');
+    Number.isFinite(reserve) ? isApiPartner(partner) ? t("花费上限只剩约 {p0}%，先派给别人", { p0: reserve })
+      : t("额度只剩约 {p0}%，先派给别人", { p0: reserve }) : ''].filter(Boolean).join(' · ');
   if (holder.textContent !== text) holder.textContent = text;
 }
 function renderMemberQuota(id) {
@@ -44,11 +66,17 @@ function renderMemberQuota(id) {
   holder.parentNode?.classList.toggle('quota-blocked', blocked);
   if (holder.dataset.fingerprint === fingerprint) return;
   holder.dataset.fingerprint = fingerprint;
-  holder.replaceChildren(...entries.map(({ window, remaining, stale }) => {
+  holder.replaceChildren(...entries.map(({ window, remaining, stale, spend }) => {
     const level = remaining <= 0 ? ' zero' : remaining < 20 ? ' low' : '';
     const row = element('div', '', `quota-row${level}`);
     const label = quotaShortLabel(window);
     const meter = element('progress'); meter.max = 100; meter.value = remaining; meter.textContent = `${remaining}%`;
+    if (spend) {
+      // Spent against the cap, in the user's own currency, instead of a provider quota percentage.
+      meter.setAttribute('aria-label', t("{p0}花费上限剩余 {p1}%", { p0: label, p1: remaining }));
+      row.append(element('span', label), meter, element('span', `${moneyText(spend.spent, spend.currency)} / ${moneyText(spend.cap, spend.currency)}`, 'quota-value'));
+      return row;
+    }
     meter.setAttribute('aria-label', t("{p0}额度剩余 {p1}%", { p0: label, p1: remaining }));
     const reset = Number.isFinite(window.resets_at) && remaining < 20 ? t(" · {p0} 重置", { p0: timeLabel(window.resets_at, true) }) : '';
     const value = element('span', `${stale ? t("上次 ") : ''}${remaining}%${reset}`, 'quota-value');
@@ -83,7 +111,7 @@ function currentAccount(id) {
   return { partner, account: value && typeof value === 'object' && !Array.isArray(value) ? value : null };
 }
 function canRefreshAccount(partner, account) {
-  return !!partner && activeEntry(partner) && account?.source !== 'unsupported' && account?.reason !== 'account_adapter_unsupported';
+  return !!partner && activeEntry(partner) && !isApiPartner(partner) && account?.source !== 'unsupported' && account?.reason !== 'account_adapter_unsupported';
 }
 function accountEmail(account) {
   return typeof account?.email === 'string' && account.email.trim() ? account.email.trim().slice(0, 254) : null;
@@ -105,6 +133,9 @@ function accountFieldText(account, field) {
   return field === 'email' ? t("邮箱未获取") : t("本次查询未提供");
 }
 function accountLoginText(account) {
+  // A pay-per-use partner has no sign-in: say how it is billed, or what its last call proved wrong.
+  if (account?.source === 'api_endpoint') return account.reason === 'api_balance_exhausted' ? t("余额不足")
+    : ['api_key_unavailable', 'api_key_rejected'].includes(account.reason) ? t("密钥不可用") : t("用你自己的 API key 按量计费");
   const email = accountEmail(account); if (email) return email;
   const display = account?.source === 'kimi_managed_oauth' ? account.display_identity : null;
   const nickname = typeof display?.nickname === 'string' && display.nickname.trim() ? display.nickname.trim().slice(0, 100) : null;
@@ -176,8 +207,72 @@ function quotaWindowLabel(minutes) {
   if (!Number.isFinite(minutes) || minutes <= 0) return '';
   return minutes % 1440 === 0 ? t("{p0}天窗口", { p0: minutes / 1440 }) : minutes % 60 === 0 ? t("{p0}小时窗口", { p0: minutes / 60 }) : t("{p0}分钟窗口", { p0: minutes });
 }
+function apiKeyLocation(key) {
+  if (key?.kind === 'env_file') return t("{p0} 里的 {p1}", { p0: key.path, p1: key.variable });
+  if (key?.kind === 'keychain') return key.account ? t("钥匙串：{p0} · 账户 {p1}", { p0: key.service, p1: key.account }) : t("钥匙串：{p0}", { p0: key.service });
+  return t("未提供");
+}
+function apiPriceText(prices, currency) {
+  return t("输入 {p0} · 输出 {p1} · 缓存读 {p2} · 缓存写 {p3}", { p0: moneyText(prices.input, currency), p1: moneyText(prices.output, currency),
+    p2: moneyText(prices.cache_read, currency), p3: moneyText(prices.cache_write, currency) });
+}
+function apiWindowText(window) {
+  const listed = Array.isArray(window.days) && window.days.length < 7 ? window.days.map((day) => day + 1) : [];
+  const days = listed.length > 1 && listed.every((day, index) => !index || day === listed[index - 1] + 1) ? `${listed[0]}-${listed.at(-1)}` : listed.join(',');
+  return days ? t("{p0}–{p1}（每周第 {p2} 天）", { p0: window.start, p1: window.end, p2: days }) : `${window.start}–${window.end}`;
+}
+function updateApiAccountFooter(details, id, partner) {
+  const settings = partner.api_model || {}; const spend = partner.spend;
+  const currency = typeof spend?.currency === 'string' ? spend.currency : settings.currency || 'USD';
+  const capText = (cap) => Number.isFinite(cap) ? moneyText(cap, currency) : t("不设上限");
+  details.firstChild.firstChild.textContent = t("密钥与花费");
+  const monthOnly = spend && !Number.isFinite(spend.caps?.daily) && Number.isFinite(spend.caps?.monthly);
+  details.firstChild.lastChild.textContent = !spend ? t("花费记录不可用") : monthOnly
+    ? t("本月 {p0} / {p1}", { p0: moneyText(spend.month_spent, currency), p1: capText(spend.caps.monthly) })
+    : t("今天 {p0} / {p1}", { p0: moneyText(spend.day_spent, currency), p1: capText(spend.caps?.daily) });
+  const body = details.lastChild;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), partner.api_model, spend, partner.availability, partner.workload_level, partner.quota_reserve,
+    state.workloadSavingId, state.workloadRevision, state.managementBusy, state.editingApiPartnerId]);
+  if (body.dataset.fingerprint === fingerprint) return;
+  body.dataset.fingerprint = fingerprint;
+  body.replaceChildren();
+  body.append(element('h4', t("密钥与花费")), element('p', t("按量计费：豆窝按你填的价格和每次调用报告的 Token 估算花费，到上限就不再给它派活。实际金额以供应商账单为准。"), 'detail-caption'));
+  const facts = element('dl', '', 'monitor-facts');
+  const fact = (label, value) => facts.append(element('dt', label), element('dd', value));
+  fact(t("运行工具"), settings.host_name || partner.adapter);
+  fact(t("默认模型"), settings.default_model || t("未提供"));
+  fact(t("密钥位置"), apiKeyLocation(settings.key));
+  if (spend) {
+    fact(t("今天已花"), `${moneyText(spend.day_spent, currency)} / ${capText(spend.caps?.daily)}`);
+    fact(t("本月已花"), `${moneyText(spend.month_spent, currency)} / ${capText(spend.caps?.monthly)}`);
+    fact(t("本月调用"), spend.month_unpriced_calls ? t("{p0} 次，其中 {p1} 次没有报告用量，未计入花费", { p0: spend.month_calls, p1: spend.month_unpriced_calls })
+      : t("{p0} 次", { p0: spend.month_calls }));
+  } else fact(t("花费"), t("花费记录读不出来，为免超支先不派活"));
+  fact(t("计价时区"), settings.timezone || 'UTC');
+  body.append(facts);
+  const availability = availabilityInfo(id);
+  if (availability.blocked) body.append(element('p', availabilityText(availability), 'availability-note blocked'));
+  else if (Number.isFinite(partner.quota_reserve)) body.append(element('p', t("花费上限只剩约 {p0}%，豆窝先把活派给其他伙伴，没人能接时才用它。", { p0: partner.quota_reserve }), 'availability-note quota-reserve'));
+  const prices = element('section', '', 'api-price-list');
+  prices.append(element('strong', t("你的价格表（每百万 Token）")));
+  for (const model of Array.isArray(settings.models) ? settings.models : []) {
+    const row = element('p', '', 'detail-caption');
+    row.textContent = `${model.id}${model.id === settings.default_model ? t("（默认）") : ''}${interfaceColon()}${apiPriceText(model, currency)}`
+      + (model.peak ? t("；高峰 {p0}", { p0: apiPriceText(model.peak, currency) }) : '');
+    prices.append(row);
+  }
+  const windows = Array.isArray(settings.peak_windows) ? settings.peak_windows : [];
+  prices.append(element('p', windows.length ? t("高峰时段：{p0}", { p0: windows.map(apiWindowText).join(interfaceSemicolon()) }) : t("没有高峰时段，全天同价。"), 'detail-caption'));
+  body.append(prices);
+  const edit = element('button', state.editingApiPartnerId === id ? t("正在编辑…") : t("编辑价格与上限"), 'quiet-button'); edit.type = 'button'; edit.dataset.focusKey = 'api-edit';
+  edit.disabled = !activeEntry(partner) || state.managementBusy || !!state.pendingPartner;
+  edit.addEventListener('click', () => beginApiEdit(partner));
+  body.append(edit, element('p', t("豆窝只保存密钥放在哪里，不保存密钥本身；每次调用前读一次，只交给这一次运行的工具。"), 'account-scope-note'));
+  body.append(workloadControl(id, partner));
+}
 function updateAccountFooter(details, id) {
   const { partner, account } = currentAccount(id);
+  if (isApiPartner(partner)) { updateApiAccountFooter(details, id, partner); return; }
   const compact = details.dataset.compact === 'true';
   const quota = account?.quota;
   const windows = (quota?.state === 'available' || quota?.stale === true) && Array.isArray(quota.windows) ? quota.windows.filter((entry) => entry && typeof entry === 'object') : [];
