@@ -213,6 +213,20 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
         await self.finished()
         self.assertEqual(self.workers(), {"T1": "claude", "T2": "claude"})
 
+    async def test_members_are_told_who_takes_build_work_and_never_to_block_on_the_implementer(self):
+        # Catches the real stall: planners named an implementer the reserve kept idle, and the members holding
+        # those tasks refused them; they must see who builds now and be told the implementer is the host's call.
+        self.profiles = {"codex": ("codex", "normal", True)}
+        self.plan = [plan("T1"), plan("T2")]
+        created = await self.create(["claude", "codex"])
+        await self.finished()
+        members = {member["id"]: member["takes_build_work"]
+                   for member in (await self.service.read_room(created["room"]["id"]))["team"]["members"]}
+        self.assertEqual(members, {"claude": True, "codex": False})
+        from local_agent_coordinator.room_prompts import IMPLEMENTER_RULE
+        prompts = [call["prompt"] for call in self.fake.calls]
+        self.assertTrue(prompts and all(IMPLEMENTER_RULE in prompt for prompt in prompts))
+
     async def test_a_reviewer_role_does_not_take_build_work(self):
         # Catches a free reviewer taking build work from the pool while a builder can do it.
         self.plan = [plan("T1"), plan("T2")]

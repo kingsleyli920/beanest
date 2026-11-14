@@ -3187,9 +3187,19 @@ class TeamStore:
             if row["id"] in running:
                 value["call_running"] = True
             tasks.append(value)
+        # Who can take build work now, so planners never name an implementer the
+        # quota reserve, an exhausted quota or a role keeps idle.
+        available = self.objectives.available_members(db, room_id)
+        reserved = self._reserved(db, room_id, members=available) if team["current_run_id"] else set()
+        abilities = self._abilities(db, room_id)
+        builders = [member for member in available if roles.can(abilities, member, "work")]
+        def takes_build_work(provider):
+            return (provider in available and (provider in builders or not builders)
+                    and (provider not in reserved or all(other in reserved for other in builders or available)))
         members = [{"id": row["provider"], "planned": bool(row["planned"]),
                     "plan_ready": row["plan_ready_revision"] == team["revision"],
-                    "plan_ready_revision": row["plan_ready_revision"]} for row in
+                    "plan_ready_revision": row["plan_ready_revision"],
+                    "takes_build_work": takes_build_work(row["provider"])} for row in
                    db.execute("SELECT * FROM team_members WHERE room_id=? ORDER BY rowid", (room_id,))]
         repair = db.execute("SELECT repair_execution_id FROM team_runs WHERE id=?", (team["current_run_id"],)).fetchone()
         return {"execution_repair_id": repair[0] if repair else None, "plan_author": team["plan_author"], "phase": team["phase"], "revision": team["revision"], "run_id": team["current_run_id"],
