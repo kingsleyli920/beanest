@@ -251,13 +251,51 @@ def native_home(agent, home=None) -> Path:
     return bound_account_home(agent) or Path.home() / _DEFAULT_HOME_NAMES[agent]
 
 
-def _environment() -> dict[str, str]:
-    # Keep OS essentials, not arbitrary agent/provider overrides. In particular,
-    # ANTHROPIC_API_KEY, OPENAI_API_KEY, OAuth-token overrides, provider routing
-    # such as *_BASE_URL and cloud credentials never reach the child.
-    allowed = {'HOME', 'PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL',
-               'USER', 'LOGNAME', 'SHELL', 'SYSTEMROOT'} | _NETWORK_ENVIRONMENT
-    environment = {k: v for k, v in os.environ.items() if k in allowed}
+# What a full access call does not inherit. Each CLI reads its own vendor's
+# variables to pick a key, a token, an endpoint or a login home, and those
+# would turn a subscription call into metered usage or another account's:
+# ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK,
+# CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CONFIG_DIR, OPENAI_API_KEY, OPENAI_BASE_URL,
+# CODEX_API_KEY, CODEX_HOME, KIMI_API_KEY, KIMI_CODE_HOME, MOONSHOT_API_KEY, ...
+# CLAUDE* also covers the markers a Claude Code session leaves on a host
+# started from inside it. BEANEST_* is this host's own.
+# Deliberately not by suffix: NODE_AUTH_TOKEN, a project's own *_API_KEY or
+# *_BASE_URL belong to the user's build, which is what this call is for.
+_ACCOUNT_ENVIRONMENT_PREFIXES = ('ANTHROPIC_', 'CLAUDE', 'OPENAI_', 'CODEX_', 'KIMI_', 'MOONSHOT_', 'BEANEST_')
+
+
+def _environment(*, inherit: bool = False) -> dict[str, str]:
+    """The environment of a child this host starts.
+
+    By default only OS essentials and the network path: enough for the host's
+    own probes and for restricted calls, and nothing that selects an account.
+
+    ``inherit`` is for a full access model call, which builds and runs the
+    user's project as their terminal would. It passes everything the host has
+    (JAVA_HOME, ANDROID_HOME, a toolchain's own variables) except what would
+    select another account, so the call is never stricter than the native
+    tool. The bound profile home is applied either way.
+    """
+    if inherit:
+        environment = {k: v for k, v in os.environ.items()
+                       if not k.upper().startswith(_ACCOUNT_ENVIRONMENT_PREFIXES)}
+        # A source checkout runs this host with its own src on PYTHONPATH. The
+        # user's Python must not import the host's code instead of its own.
+        own = os.path.realpath(Path(__file__).parents[1])
+        entries = environment.get('PYTHONPATH', '').split(os.pathsep)
+        kept = [entry for entry in entries if not entry or os.path.realpath(entry) != own]
+        if len(kept) != len(entries):
+            if any(kept):
+                environment['PYTHONPATH'] = os.pathsep.join(kept)
+            else:
+                del environment['PYTHONPATH']
+    else:
+        # Keep OS essentials, not arbitrary agent/provider overrides. In particular,
+        # ANTHROPIC_API_KEY, OPENAI_API_KEY, OAuth-token overrides, provider routing
+        # such as *_BASE_URL and cloud credentials never reach the child.
+        allowed = {'HOME', 'PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL',
+                   'USER', 'LOGNAME', 'SHELL', 'SYSTEMROOT'} | _NETWORK_ENVIRONMENT
+        environment = {k: v for k, v in os.environ.items() if k in allowed}
     bound = _ACCOUNT_HOME.get()
     if bound is not None:
         environment[ACCOUNT_HOME_VARIABLES[bound[0]]] = bound[1]
