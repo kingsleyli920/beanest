@@ -1213,8 +1213,8 @@ class RoomStore:
             return resumed
 
     def auto_continue_state(self, room_id):
-        """The board's progress fingerprint, and whether the host already
-        continued this exact state since the user last spoke."""
+        """The board's progress fingerprint, and how many times the host has
+        already continued this exact state since the user last spoke."""
         with self._connection() as db:
             team = self._team.team(db, room_id)
             objective = self._team.objectives.current(db, room_id)
@@ -1228,11 +1228,11 @@ class RoomStore:
                 # before a task finished must still resume.
                 board.append(team["current_run_id"])
             fingerprint = hashlib.sha256(json.dumps(board, sort_keys=True).encode()).hexdigest()
-            repeated = db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
-                                  "AND json_extract(value_json,'$.kind')='objective_auto_continued' "
-                                  "AND json_extract(value_json,'$.fingerprint')=? LIMIT 1",
-                                  (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()
-            return fingerprint, repeated is not None
+            repeats = db.execute("SELECT count(*) FROM events WHERE room_id=? AND seq>? "
+                                 "AND json_extract(value_json,'$.kind')='objective_auto_continued' "
+                                 "AND json_extract(value_json,'$.fingerprint')=?",
+                                 (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()[0]
+            return fingerprint, repeats
 
     def host_continued_from(self, room_id, binding):
         """Whether only the host's own automatic continues, since the user last

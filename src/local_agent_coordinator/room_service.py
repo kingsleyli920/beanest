@@ -72,6 +72,20 @@ _QUOTA_WAIT_RECHECK_SECONDS = 300
 # A recoverable stop is continued after this pause, so cleanup receipts and
 # the dedicated quota recoveries settle first.
 _AUTO_CONTINUE_DELAY_SECONDS = 15
+# A stop that comes back with no progress is continued again, after a pause
+# that grows with each repeat. The host never gives the stop up to the user:
+# a failure it cannot fix at once (a provider outage, a broken tool) usually
+# passes, and each attempt gives the partners another chance to work around it.
+_AUTO_CONTINUE_BACKOFF_SECONDS = (60, 300, 900, 1800, 3600)
+# An attempt that could not start (the continue was refused just then) is
+# tried again no sooner than this.
+_AUTO_CONTINUE_RETRY_SECONDS = 60
+
+
+def _auto_continue_delay(repeats):
+    if repeats <= 0:
+        return _AUTO_CONTINUE_DELAY_SECONDS
+    return _AUTO_CONTINUE_BACKOFF_SECONDS[min(repeats, len(_AUTO_CONTINUE_BACKOFF_SECONDS)) - 1]
 # A poll read reuses the last private-tree recovery audit behind
 # can_recover_native while nothing it reads has visibly moved, for at most this
 # long. recover-native, automatic or not, always audits afresh before acting.
@@ -1598,6 +1612,13 @@ class RoomService(RoomPromptMixin):
                 snapshot["continuation"]["recipients"][member["id"]] = {
                     key: recipient[key] for key in ("can_send", "reason")}
         snapshot["stop_kind"] = self._stop_kind(snapshot, continuation)
+        if snapshot["stop_kind"] == "auto":
+            # How often this same stop has already been continued, and when the next attempt is due.
+            scheduled = self._auto_continues.get(snapshot["room"]["id"])
+            current = scheduled is not None and scheduled["key"][0] == (snapshot.get("current_run") or {}).get("id")
+            snapshot["auto_continue"] = {
+                "repeats": self.store.auto_continue_state(snapshot["room"]["id"])[1],
+                "next_at": scheduled["at"] + scheduled["delay"] if current and scheduled["delay"] is not None else None}
         self._stop_kinds[snapshot["room"]["id"]] = (self._stop_kind_key(snapshot), snapshot["stop_kind"])
         snapshot["room"]["work_activity"] = self._room_work_activity(snapshot, self.store.job_roles(snapshot["room"]["id"]))
         return snapshot
@@ -1623,8 +1644,7 @@ class RoomService(RoomPromptMixin):
         scheduled = getattr(self, "_auto_continues", {}).get(snapshot["room"]["id"])
         team = snapshot.get("team") or {}
         if (scheduled and snapshot.get("current_run") and scheduled["key"] == (snapshot["current_run"]["id"], team.get("stop_reason"))
-                and (scheduled["task"] is None or not scheduled["task"].done())
-                and not self.store.auto_continue_state(snapshot["room"]["id"])[1]):
+                and (scheduled["task"] is None or not scheduled["task"].done())):
             return "auto"
         return None
 
@@ -1672,8 +1692,6 @@ class RoomService(RoomPromptMixin):
         kind = self._stop_kind_candidate(snapshot)
         if kind != "auto":
             return kind
-        if self.store.auto_continue_state(snapshot["room"]["id"])[1]:
-            return None  # The same stop came back without progress: it is the user's now.
         if (snapshot["objective"]["status"] != "needs_user"
                 and (continuation is None or not continuation["can_send"]
                      or continuation["action"] not in self._auto_continue_actions(snapshot["team"].get("stop_reason")))):
@@ -5098,17 +5116,23 @@ class RoomService(RoomPromptMixin):
         key = (snapshot["current_run"]["id"], code)
         state = self._auto_continues.get(room_id)
         if state is None or state["key"] != key:
-            self._auto_continues[room_id] = {"key": key, "at": self.clock(), "task": None}
+            self._auto_continues[room_id] = {"key": key, "at": self.clock(), "task": None, "delay": None}
             return
-        if state["task"] is not None or self.clock() - state["at"] < _AUTO_CONTINUE_DELAY_SECONDS:
-            return  # One attempt per stopped state; a repeat waits for new progress.
+        if state["delay"] is None:
+            state["delay"] = _auto_continue_delay(self.store.auto_continue_state(room_id)[1])
+        if state["task"] is not None:
+            if state["task"].done():
+                # It ended without moving the room on (the continue was
+                # refused just then, or changed nothing): try again later.
+                state.update(task=None, at=self.clock(), delay=max(state["delay"], _AUTO_CONTINUE_RETRY_SECONDS))
+            return
+        if self.clock() - state["at"] < state["delay"]:
+            return
         state["task"] = asyncio.create_task(self._auto_continue(room_id, key[0], code))
         state["task"].add_done_callback(self._worker_done)
 
     async def _auto_continue(self, room_id, run_id, code):
-        fingerprint, repeated = self.store.auto_continue_state(room_id)
-        if repeated:
-            return  # The same stop came back without progress: it is the user's now.
+        fingerprint, _ = self.store.auto_continue_state(room_id)
         if code == "task_block":
             if self.store.resume_recoverable_block(room_id):
                 self.store.note_auto_continued(room_id, fingerprint, code, run_id)
