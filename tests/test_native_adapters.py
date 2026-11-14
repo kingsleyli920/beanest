@@ -226,6 +226,48 @@ for index in range(3):
         self.assertNotEqual(result['failure_code'], 'native_no_progress')
         self.assertTrue(result['cleanup_confirmed'])
 
+    def host_fingerprint(self, cwd, write_paths):
+        """The host's own fingerprint for one work task, as the room service passes it."""
+        from types import SimpleNamespace
+        from local_agent_coordinator.room_service import RoomService
+        store = SimpleNamespace(snapshot=lambda room_id: {'team': {'tasks': [{'id': 'T1', 'write_paths': write_paths}]}})
+        job = {'room_id': 'room', 'team': {'task_id': 'T1', 'job_phase': 'work'}}
+        return RoomService._native_progress_fingerprint(SimpleNamespace(store=store), job, cwd)
+
+    async def test_one_failed_command_does_not_end_a_call_whose_task_names_a_folder(self):
+        # Catches: a task listing a folder (or a link, or a file not made yet)
+        # among its write paths had its call ended as native_progress_unconfirmed
+        # by the first command that returned nonzero.
+        project = self.root / 'project'
+        (project / 'code/scripts').mkdir(parents=True)
+        (project / 'code/scripts/a.gd').write_text('a\n')
+        (project / 'own.py').write_text('old\n')
+        (project / 'link').symlink_to(project / 'own.py')
+        fingerprint = self.host_fingerprint(project, ['code/scripts', 'own.py', 'link', 'not-made-yet/out.txt'])
+        events = codex_events()
+        events[3]['item']['exit_code'] = 1
+        with self.make_stub(events):
+            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', project,
+                progress_fingerprint=fingerprint), 5)
+        self.assertEqual(result['status'], 'completed')
+        self.assertIsNone(result.get('failure_code'))
+
+    async def test_the_host_fingerprint_sees_a_change_inside_a_named_folder(self):
+        # Catches the folder tolerance blinding the repeated-failure check:
+        # unchanged files must compare equal, an edit inside the folder must not.
+        project = self.root / 'project'
+        (project / 'code/scripts/deep').mkdir(parents=True)
+        (project / 'code/scripts/deep/a.gd').write_text('a\n')
+        fingerprint = self.host_fingerprint(project, ['code/scripts'])
+        first = await fingerprint()
+        self.assertRegex(first, r'^[0-9a-f]{64}$')
+        self.assertEqual(await fingerprint(), first)
+        (project / 'code/scripts/deep/a.gd').write_text('changed\n')
+        changed = await fingerprint()
+        self.assertNotEqual(changed, first)
+        (project / 'code/scripts/deep/new.gd').write_text('new\n')
+        self.assertNotEqual(await fingerprint(), changed)
+
     async def test_structured_format_result_is_not_an_execution_or_final_source(self):
         events = [
             {'type': 'system', 'subtype': 'init', 'session_id': SESSION},

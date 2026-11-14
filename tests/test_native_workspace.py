@@ -193,6 +193,39 @@ class NativeWorkspaceTests(unittest.TestCase):
         self.assertFalse((project / "run.sh").stat().st_mode & 0o111)
         self.assertEqual(collect_changes(project, receipt, ["old.py", "run.sh"]), {"files": [], "blocked": []})
 
+    def test_a_folder_named_as_a_write_path_does_not_fail_the_audit(self):
+        # Catches: a task that listed a folder among its write paths made every
+        # later audit of that private tree raise, which locked the room as
+        # "unpublished changes" although nothing had changed.
+        source = self.export("source", {"code/scripts/a.gd": "a\n", "own.py": "old\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        (project / "empty-output").mkdir()
+        allowed = ["code/scripts", "empty-output", "missing-output", "own.py"]
+        self.assertEqual(collect_changes(project, receipt, allowed), {"files": [], "blocked": []})
+        (project / "own.py").write_text("new\n")
+        (project / "code/scripts/a.gd").write_text("changed\n")
+        result = collect_changes(project, receipt, allowed)
+        self.assertEqual([item["path"] for item in result["files"]], ["own.py"])
+        # The folder is not a grant for the files inside it; each stays under its own name.
+        self.assertEqual(result["blocked"], [{"path": "code/scripts/a.gd", "reason": "native_path_not_owned"}])
+        _, discarded = discard_paths(project, receipt, ["code/scripts", "empty-output"])
+        self.assertEqual(discarded, [])
+        self.assertEqual((project / "code/scripts/a.gd").read_text(), "changed\n")
+        self.assertTrue((project / "empty-output").is_dir())
+
+    def test_a_shared_file_replaced_by_a_folder_is_still_refused(self):
+        # Catches the folder tolerance swallowing a real, unpublishable change.
+        source = self.export("source", {"own.py": "old\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        (project / "own.py").unlink()
+        (project / "own.py").mkdir()
+        with self.assertRaisesRegex(NativeWorkspaceError, "invalid_native_file"):
+            collect_changes(project, receipt, ["own.py"])
+        with self.assertRaisesRegex(NativeWorkspaceError, "invalid_native_file"):
+            discard_paths(project, receipt, ["own.py"])
+
     def test_symlink_cannot_be_collected_as_a_candidate(self):
         source = self.export("source", {"own.py": "old\n"})
         receipt = self.prepare(source)
