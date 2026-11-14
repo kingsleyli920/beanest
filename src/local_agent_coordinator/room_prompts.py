@@ -19,7 +19,18 @@ from .roles import prompt_role
 from .runtime_settings import read_only, read_only_capabilities
 
 
+# Who builds is decided by the host, from who is free and able right now. A
+# real room stalled when the plan named an implementer the quota reserve kept
+# idle and the members refused tasks the pool had handed them.
+IMPLEMENTER_RULE = (
+    "Who implements a task is the host's call: it hands each task to whichever member is free and able, and "
+    "team.members[].takes_build_work says who can take build work now (a member near its quota reserve, out of "
+    "quota or in a role that does not build cannot). Never name an implementer in a task, never block or refuse a "
+    "task because of who holds it, and treat a request that several partners share the work as met by whoever is "
+    "available. ")
+
 _BLOCK_PROTOCOL = (
+    IMPLEMENTER_RULE +
     "A block requires reason and cause: technical, coordination_required, user_decision, permission_required or external_dependency. "
     "Use technical for an implementation, test or environment failure that can be investigated within the current "
     "goal and permissions; the host will seek peer help or resume the owner for diagnosis, not ask the user to "
@@ -572,7 +583,7 @@ class RoomPromptMixin:
             "When only part of a task needs another task's result, split off the part that does not into its own task so a partner can start it now. "
             "The order or numbering in which the user lists things is not a dependency, nor is wording like \"first\" or \"if it works\" unless the later part really needs the earlier result; only an explicit user instruction that one must come after another, or a real need for another task's output, makes one. Before plan_ready, check every dependency against that. "
             "Independent peer review is automatically scheduled for EVERY delivered task; do not add duplicate review-only "
-            "tasks just to trigger that built-in review. Nobody claims tasks while planning: the confirmed tasks form a shared pool, "
+            "tasks just to trigger that built-in review. " + IMPLEMENTER_RULE + "Nobody claims tasks while planning: the confirmed tasks form a shared pool, "
             "and whenever a member is free the host hands it the next task whose dependencies are done, by whoever did them. "
             "So independent tasks run in parallel and a chain is done step by step; do not divide the list between members. "
             "The plan author may propose the whole list and plan_ready in the SAME response. "
@@ -882,6 +893,7 @@ class RoomPromptMixin:
             "a wait-for-user/external-runner condition that a later direct update has withdrawn; use the permitted native tools "
             "and available environment instead. Report a specific remaining dependency, permission or execution blocker honestly. "
             "Do not edit or create tasks in checkpoints. A complete decision ends the goal without the host accepting for the user. "
+            "Never continue a goal only to change who did the work: who implemented is the host's call and does not make work unfinished. "
             "For single-member self_check, clearly label it as your own check, never independent peer review. "
             "Keep chat natural, specific and brief in the user's language. No internal IDs, hashes, quota or tool logs in chat. "
             "Put implementation/check evidence in complete.result; put review findings in review.reason, never result or summary. "
