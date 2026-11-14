@@ -850,7 +850,7 @@ async def _settle_cleanup(operation):
 
 
 class _Stream:
-    def __init__(self, agent, structured, callback, progress_fingerprint=None, *, expected_session=None):
+    def __init__(self, agent, structured, callback, *, expected_session=None):
         self.agent, self.structured, self.callback = agent, structured, callback
         self.expected_session = expected_session
         self.public_progress_ids = OrderedDict()
@@ -866,39 +866,7 @@ class _Stream:
         self.finished_format_tools = set()
         self.terminal_count = 0
         self.codex_closed_tools_at_terminal = None
-        self.progress_fingerprint = progress_fingerprint
-        self.tool_inputs = {}
         self.tool_summaries = {}
-        self.failed_evidence = {}
-
-    def remember_input(self, identifier, tool, value):
-        # Only hashes survive the event; native arguments never enter public
-        # progress callbacks or the repeated-failure state.
-        self.tool_inputs[identifier] = hashlib.sha256(json.dumps(
-            [tool, value], sort_keys=True, ensure_ascii=True).encode()).hexdigest()
-
-    async def failed_tool(self, identifier, result):
-        input_digest = self.tool_inputs.get(identifier)
-        if self.progress_fingerprint is None or input_digest is None:
-            return
-        signature = hashlib.sha256(json.dumps(
-            [input_digest, result], sort_keys=True, ensure_ascii=True).encode()).hexdigest()
-        try:
-            fingerprint = self.progress_fingerprint()
-            if inspect.isawaitable(fingerprint):
-                fingerprint = await fingerprint
-            if not isinstance(fingerprint, str) or re.fullmatch(r'[0-9a-f]{64}', fingerprint) is None:
-                raise ValueError('unconfirmed progress fingerprint')
-        except Exception:
-            # Unknown file state cannot prove stagnation, nor justify silently
-            # continuing an unmonitored failure loop.
-            self.failure = 'native_progress_unconfirmed'
-            return
-        previous, count = self.failed_evidence.get(signature, (None, 0))
-        count = count + 1 if previous == fingerprint else 1
-        self.failed_evidence[signature] = (fingerprint, count)
-        if count >= 3:
-            self.failure = 'native_no_progress'
 
     def identity(self, value):
         try:
@@ -1032,8 +1000,6 @@ class _Stream:
                 self.failure = 'native_protocol_invalid'
                 return
             inputs = {key: item[key] for key in ('command', 'changes', 'server', 'tool', 'arguments') if key in item}
-            if inputs:
-                self.remember_input(identifier, tool, inputs)
             if kind == 'item.started':
                 if identifier not in self.tools:
                     self.tools[identifier] = tool
@@ -1055,9 +1021,6 @@ class _Stream:
                           and item['exit_code'] != 0)
                 await self.activity(tool, 'failed' if failed else 'completed',
                                     identifier=identifier, exit_code=item.get('exit_code'), is_error=failed)
-                if failed:
-                    await self.failed_tool(identifier, {key: item[key] for key in
-                        ('status', 'exit_code', 'aggregated_output', 'result', 'error') if key in item})
         elif kind == 'tool_progress':
             identifier = event.get('tool_use_id')
             tool = self.tools.get(identifier) if isinstance(identifier, str) else None
@@ -1159,8 +1122,6 @@ class _Stream:
                     if identifier not in self.tools:
                         self.tools[identifier] = tool
                         self.tool_summaries[identifier] = _activity_summary(tool, block.get('input'))
-                        if 'input' in block:
-                            self.remember_input(identifier, tool, block['input'])
                         self.calls += 1
                         await self.activity(tool, 'started', identifier=identifier)
                 elif block.get('type') not in {'text', 'thinking', 'redacted_thinking'}:
@@ -1202,8 +1163,6 @@ class _Stream:
                 self.results += 1
                 failed = block.get('is_error') is True
                 await self.activity(tool, 'failed' if failed else 'completed', identifier=identifier, is_error=failed)
-                if failed:
-                    await self.failed_tool(identifier, {key: block[key] for key in ('is_error', 'content') if key in block})
         elif kind == 'result':
             self.terminal_count += 1
             self.identity(event.get('session_id'))
@@ -1243,7 +1202,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                         timeout: float | None = None, *, permission='read_only',
                         response_schema: dict | None = None, runtime_settings: dict | None = None,
                         on_activity=None, receipt_dir: Path | None = None,
-                        progress_fingerprint=None, progress_file: Path | None = None) -> dict:
+                        progress_file: Path | None = None) -> dict:
     """Run one cancellable native turn; no implicit time or turn-count budget.
 
     Cancellation raises CancelledError *after* owned cleanup. Other failures
@@ -1251,17 +1210,15 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
     if a quota failure or invalid final response follows. Callers must never
     blindly replay such a failed turn.
 
-    An optional sync/async progress_fingerprint returns a SHA256 of only the
-    task's authorized working files. Three identical failed tools with an
-    unchanged fingerprint stop the turn; successful tools and heartbeats do
-    not consume a count. This is not a general semantic stall detector.
+    A tool that fails is the model's to handle, however often it repeats:
+    the host never ends a turn for that, as the native tool itself would not.
     """
     if agent == 'kimi':
         from .kimi_acp import invoke_native as invoke_kimi
         return await invoke_kimi(prompt, cwd, session_id, timeout, permission=permission,
                                  response_schema=response_schema, runtime_settings=runtime_settings,
                                  on_activity=on_activity, receipt_dir=receipt_dir,
-                                 progress_fingerprint=progress_fingerprint, progress_file=progress_file,
+                                 progress_file=progress_file,
                                  sandbox=True)
 
     def not_started(error, cleanup_confirmed):
@@ -1302,8 +1259,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                      or isinstance(cause, asyncio.CancelledError) and getattr(cause, 'cleanup_confirmed', False) is True)
         not_started(error, confirmed)
         raise
-    stream = _Stream(agent, response_schema is not None, on_activity, progress_fingerprint,
-                     expected_session=session_id)
+    stream = _Stream(agent, response_schema is not None, on_activity, expected_session=session_id)
     process = None
     owned = {}
     cleanup_confirmed = False

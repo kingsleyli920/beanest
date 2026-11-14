@@ -703,7 +703,7 @@ async def set_session_mode(connection, session_id, mode, resumed):
 
 
 class TurnUpdates:
-    def __init__(self, callback, progress_fingerprint=None):
+    def __init__(self, callback):
         from .native_adapters import _Stream
         self.callback = callback
         self.active = False
@@ -713,7 +713,7 @@ class TurnUpdates:
         self.permission_required = False
         self.question = None
         self.possible_effects = False
-        self.progress = _Stream("kimi", True, None, progress_fingerprint)
+        self.progress = _Stream("kimi", True, None)
 
     async def __call__(self, params):
         if params.get("permission_required"):
@@ -747,17 +747,10 @@ class TurnUpdates:
                 self.text = ""
             tool = self.tools[identifier]
             tool["kind"] = update.get("kind", tool["kind"])
-            if "rawInput" in update:
-                self.progress.remember_input(identifier, tool["kind"], update["rawInput"])
             native_state = update.get("status", tool["state"])
             if native_state not in {"pending", "in_progress", "completed", "failed"}:
                 raise ACPError("native_protocol_invalid")
             tool["state"] = native_state
-            if native_state == "failed" and not tool.get("failure_observed", False):
-                tool["failure_observed"] = True
-                await self.progress.failed_tool(identifier, update.get("rawOutput", update.get("content")))
-                if self.progress.failure is not None:
-                    raise ACPError(self.progress.failure)
             tool_kind = {"read": "file_read", "edit": "file_write", "delete": "file_write",
                          "execute": "shell", "search": "file_search", "fetch": "network"}.get(tool["kind"], "tool")
             self.possible_effects |= tool["kind"] not in {"read", "search"}
@@ -780,7 +773,7 @@ class TurnUpdates:
 
 async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permission="plan",
                         response_schema=None, runtime_settings=None, on_activity=None,
-                        receipt_dir=None, progress_fingerprint=None, progress_file=None, sandbox=False):
+                        receipt_dir=None, progress_file=None, sandbox=False):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     from .message_capacity import MAX_PROMPT_BYTES
     if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
@@ -814,7 +807,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise ValueError("invalid_prompt")
     process, connection, owned = None, None, {}
-    updates = TurnUpdates(on_activity, progress_fingerprint)
+    updates = TurnUpdates(on_activity)
     result = {"session_id": session_id, "text": "", "status": "failed", "usage": None, "events": []}
     started = time.monotonic()
     proof, receipt_path, cancelled = None, None, None

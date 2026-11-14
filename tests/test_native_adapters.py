@@ -124,19 +124,19 @@ for event in {events!r}:
                           result['native_execution']['tool_results']), (2, 2))
         self.assertTrue(result['cleanup_confirmed'])
 
-    async def test_three_identical_failed_tools_with_unchanged_files_stop_and_clean_up(self):
-        owned = self.root / 'owned.txt'
-        owned.write_text('unchanged')
+    async def test_a_command_that_keeps_failing_the_same_way_never_ends_the_call(self):
+        # Catches the host ending a turn the native tool itself would let run:
+        # waiting on a check that fails until something finishes, or retrying
+        # a failing test, is the model's own business.
         for agent in ('codex', 'claude'):
             events = ([codex_events()[0], {'type': 'turn.started'}] if agent == 'codex' else
                       [{'type': 'system', 'subtype': 'init', 'session_id': SESSION}])
-            for index in range(3):
-                identifier = 'retry-' + str(index)
+            for index in range(6):
+                identifier = 'same-' + str(index)
                 if agent == 'codex':
                     events += [
-                        {'type': 'item.started', 'item': {'id': identifier,
-                            'type': 'command_execution', 'command': 'same failing command',
-                            'status': 'in_progress'}},
+                        {'type': 'item.started', 'item': {'id': identifier, 'type': 'command_execution',
+                            'command': 'same failing command', 'status': 'in_progress'}},
                         {'type': 'item.completed', 'item': {'id': identifier,
                             'type': 'command_execution', 'status': 'completed',
                             'exit_code': 1, 'aggregated_output': 'same actual failure'}},
@@ -150,123 +150,19 @@ for event in {events!r}:
                             'tool_use_id': identifier, 'is_error': True,
                             'content': 'same actual failure'}]}},
                     ]
-            fingerprints = []
-
-            def fingerprint():
-                value = hashlib.sha256(owned.read_bytes()).hexdigest()
-                fingerprints.append(value)
-                return value
-
-            with self.subTest(agent=agent), self.make_stub(events, agent=agent, after='time.sleep(60)'):
+            events += (codex_events()[-2:] if agent == 'codex' else [
+                {'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': SESSION,
+                 'result': json.dumps(FINAL), 'structured_output': FINAL,
+                 'usage': {'input_tokens': 1, 'output_tokens': 1}}])
+            with self.subTest(agent=agent), self.make_stub(events, agent=agent):
                 result = await asyncio.wait_for(native.invoke_native(agent, 'hello', self.root,
-                    permission='full_access', progress_fingerprint=fingerprint), 5)
-            self.assertEqual(result['failure_code'], 'native_no_progress')
-            self.assertEqual(result['status'], 'failed')
-            self.assertEqual((result['native_execution']['tool_calls'],
-                              result['native_execution']['tool_results']), (3, 3))
-            self.assertEqual(len(fingerprints), 3)
-            self.assertEqual(len(set(fingerprints)), 1)
-            self.assertTrue(result['native_execution']['side_effects_possible'])
-            self.assertTrue(result['cleanup_confirmed'])
-
-    async def test_actual_file_changes_allow_identical_failed_command_retries(self):
-        owned, acknowledgement = self.root / 'owned.txt', self.root / 'acknowledgement'
-        owned.write_text('version 0')
-        # The stub waits for each fingerprint before modifying the real file;
-        # otherwise pipe buffering could make every callback see the last one.
-        before = f'''
-print(json.dumps({codex_events()[0]!r}), flush=True)
-print(json.dumps({{'type': 'turn.started'}}), flush=True)
-for index in range(3):
-    identifier = 'retry-' + str(index)
-    print(json.dumps({{'type':'item.started','item':{{'id':identifier,
-        'type':'command_execution','command':'same failing command','status':'in_progress'}}}}), flush=True)
-    print(json.dumps({{'type':'item.completed','item':{{'id':identifier,
-        'type':'command_execution','status':'completed','exit_code':1,
-        'aggregated_output':'same actual failure'}}}}), flush=True)
-    deadline = time.monotonic() + 3
-    while not os.path.exists({str(acknowledgement)!r}) or open({str(acknowledgement)!r}).read() != str(index + 1):
-        if time.monotonic() >= deadline:
-            sys.exit(9)
-        time.sleep(0.01)
-    open({str(owned)!r}, 'w').write('version ' + str(index + 1))
-'''
-        fingerprints = []
-
-        async def fingerprint():
-            value = hashlib.sha256(owned.read_bytes()).hexdigest()
-            fingerprints.append(value)
-            acknowledgement.write_text(str(len(fingerprints)))
-            return value
-
-        with self.make_stub(codex_events()[-2:], before=before):
-            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root,
-                response_schema=SCHEMA, progress_fingerprint=fingerprint), 5)
-        self.assertEqual(result['status'], 'completed')
-        self.assertEqual(json.loads(result['text']), FINAL)
-        self.assertEqual((result['native_execution']['tool_calls'],
-                          result['native_execution']['tool_results']), (3, 3))
-        self.assertEqual(len(set(fingerprints)), 3)
-        self.assertEqual(owned.read_text(), 'version 3')
-        self.assertTrue(all(event['is_error'] for event in result['events']
-                            if event.get('state') == 'failed'))
-        self.assertTrue(result['cleanup_confirmed'])
-
-    async def test_fingerprint_is_only_required_on_actual_failure(self):
-        with self.make_stub(codex_events()):
-            result = await native.invoke_native('codex', 'hello', self.root,
-                progress_fingerprint=lambda: self.fail('successful tool must not query files'))
-        self.assertEqual(result['status'], 'completed')
-        events = codex_events()
-        events[3]['item']['exit_code'] = 1
-        with self.make_stub(events, after='time.sleep(60)'):
-            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root,
-                progress_fingerprint=lambda: 'unknown'), 5)
-        self.assertEqual(result['failure_code'], 'native_progress_unconfirmed')
-        self.assertNotEqual(result['failure_code'], 'native_no_progress')
-        self.assertTrue(result['cleanup_confirmed'])
-
-    def host_fingerprint(self, cwd, write_paths):
-        """The host's own fingerprint for one work task, as the room service passes it."""
-        from types import SimpleNamespace
-        from local_agent_coordinator.room_service import RoomService
-        store = SimpleNamespace(snapshot=lambda room_id: {'team': {'tasks': [{'id': 'T1', 'write_paths': write_paths}]}})
-        job = {'room_id': 'room', 'team': {'task_id': 'T1', 'job_phase': 'work'}}
-        return RoomService._native_progress_fingerprint(SimpleNamespace(store=store), job, cwd)
-
-    async def test_one_failed_command_does_not_end_a_call_whose_task_names_a_folder(self):
-        # Catches: a task listing a folder (or a link, or a file not made yet)
-        # among its write paths had its call ended as native_progress_unconfirmed
-        # by the first command that returned nonzero.
-        project = self.root / 'project'
-        (project / 'code/scripts').mkdir(parents=True)
-        (project / 'code/scripts/a.gd').write_text('a\n')
-        (project / 'own.py').write_text('old\n')
-        (project / 'link').symlink_to(project / 'own.py')
-        fingerprint = self.host_fingerprint(project, ['code/scripts', 'own.py', 'link', 'not-made-yet/out.txt'])
-        events = codex_events()
-        events[3]['item']['exit_code'] = 1
-        with self.make_stub(events):
-            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', project,
-                progress_fingerprint=fingerprint), 5)
-        self.assertEqual(result['status'], 'completed')
-        self.assertIsNone(result.get('failure_code'))
-
-    async def test_the_host_fingerprint_sees_a_change_inside_a_named_folder(self):
-        # Catches the folder tolerance blinding the repeated-failure check:
-        # unchanged files must compare equal, an edit inside the folder must not.
-        project = self.root / 'project'
-        (project / 'code/scripts/deep').mkdir(parents=True)
-        (project / 'code/scripts/deep/a.gd').write_text('a\n')
-        fingerprint = self.host_fingerprint(project, ['code/scripts'])
-        first = await fingerprint()
-        self.assertRegex(first, r'^[0-9a-f]{64}$')
-        self.assertEqual(await fingerprint(), first)
-        (project / 'code/scripts/deep/a.gd').write_text('changed\n')
-        changed = await fingerprint()
-        self.assertNotEqual(changed, first)
-        (project / 'code/scripts/deep/new.gd').write_text('new\n')
-        self.assertNotEqual(await fingerprint(), changed)
+                    permission='full_access', response_schema=SCHEMA), 5)
+                self.assertEqual(result['status'], 'completed', result.get('failure_code'))
+                self.assertEqual((result['native_execution']['tool_calls'],
+                                  result['native_execution']['tool_results']), (6, 6))
+        # The switch that used to end such a turn is gone, not merely unused.
+        with self.assertRaises(TypeError):
+            await native.invoke_native('codex', 'hello', self.root, progress_fingerprint=lambda: '0' * 64)
 
     async def test_structured_format_result_is_not_an_execution_or_final_source(self):
         events = [

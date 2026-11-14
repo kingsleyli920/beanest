@@ -1686,7 +1686,6 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["team"]["tasks"][0]["status"], "accepted")
         self.assertEqual((self.source / "main.py").read_text(), "VALUE = 1\n")
         self.assertTrue(all(call["permission"] == "full_access" and call["timeout"] is None for call in self.fake.calls))
-        self.assertTrue(all([await call["progress_fingerprint"]() for call in self.fake.calls]))
         self.assertEqual(result["collaboration"]["outcome"]["validation"]["scope"], "native_review")
         # Catches a Full Access delivery telling the user their project was not changed while partners write into it.
         self.assertIn("Full Access 下伙伴会把各自负责的改动写进原项目", result["collaboration"]["outcome"]["validation"]["summary"])

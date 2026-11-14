@@ -86,14 +86,7 @@ FAKE_ACP = textwrap.dedent(r'''
             stream.write(json.dumps(record) + "\n")
 
     def finish_prompt(identifier):
-        if case == "no_progress":
-            for index in range(3):
-                identifier = "23:failed-read-" + str(index)
-                update({"sessionUpdate": "tool_call", "toolCallId": identifier,
-                        "kind": "read", "status": "in_progress", "rawInput": {"path": "fictional-missing.txt"}})
-                update({"sessionUpdate": "tool_call_update", "toolCallId": identifier,
-                        "kind": "read", "status": "failed", "rawOutput": {"error": "fictional unchanged error"}})
-        elif case == "streamed_activity":
+        if case == "streamed_activity":
             for status in ("pending", "in_progress", "completed"):
                 for index in range(40):
                     update({"sessionUpdate": "tool_call" if status == "pending" and index == 0 else "tool_call_update",
@@ -269,12 +262,12 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
     def trace(self):
         return [json.loads(line) for line in (self.root / "trace.jsonl").read_text().splitlines()]
 
-    async def invoke(self, *, session_id=None, permission="plan", progress_fingerprint=None, sandbox=False):
+    async def invoke(self, *, session_id=None, permission="plan", sandbox=False):
         return await kimi_acp.invoke_native("Return the fictional answer.", self.cwd,
             session_id=session_id, permission=permission, timeout=8, response_schema=SCHEMA,
             runtime_settings={"model": MODEL, "effort": "high"},
             on_activity=self.activities.append, receipt_dir=self.receipts,
-            progress_fingerprint=progress_fingerprint, sandbox=sandbox)
+            sandbox=sandbox)
 
     def receipt(self, result):
         path = Path(result["native_execution"]["receipt_path"])
@@ -353,37 +346,46 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
             if raw_input is not None:
                 value["rawInput"] = raw_input
             await updates({"sessionId": SID, "update": value})
-        with patch.object(updates.progress, "remember_input", wraps=updates.progress.remember_input) as remembered:
-            await send("a", "pending", "read")
-            for index in range(10):
-                await send("a", "pending", raw_input={"path": str(index)})
-            await send("a", "in_progress")
-            await send("a", "in_progress", "execute")
-            await send("a", "completed")
-            await send("a", "completed")
-            await send("b", "pending", "read")
-            await send("b", "completed")
-        self.assertEqual(remembered.call_count, 10)
+        await send("a", "pending", "read")
+        for index in range(10):
+            await send("a", "pending", raw_input={"path": str(index)})
+        await send("a", "in_progress")
+        await send("a", "in_progress", "execute")
+        await send("a", "completed")
+        await send("a", "completed")
+        await send("b", "pending", "read")
+        await send("b", "completed")
         self.assertEqual([(event["kind"], event["state"]) for event in events],
                          [("file_read", "started"), ("file_read", "running"), ("shell", "running"),
                           ("shell", "completed"), ("file_read", "started"), ("file_read", "completed")])
         self.assertTrue(updates.possible_effects)
 
-    async def test_failed_activity_fingerprint_is_observed_once_per_tool(self):
+    async def test_tools_failing_the_same_way_again_and_again_do_not_end_the_turn(self):
+        # Catches the host ending a Kimi turn because one read failed the same way three times.
         events = []
-        updates = kimi_acp.TurnUpdates(events.append, lambda: "0" * 64)
+        updates = kimi_acp.TurnUpdates(events.append)
+        updates.session_id, updates.active = SID, True
+        for index in range(6):
+            for status in ("in_progress", "failed"):
+                await updates({"sessionId": SID, "update": {"sessionUpdate": "tool_call_update",
+                    "toolCallId": "same-" + str(index), "kind": "read", "status": status,
+                    "rawInput": {"path": "missing.txt"}, "rawOutput": {"error": "fictional unchanged error"}}})
+        self.assertEqual([event["state"] for event in events], ["running", "failed"] * 6)
+        self.assertIsNone(updates.progress.failure)
+
+    async def test_a_tool_reported_failed_twice_is_shown_failed_once(self):
+        events = []
+        updates = kimi_acp.TurnUpdates(events.append)
         updates.session_id, updates.active = SID, True
         async def send(status):
             await updates({"sessionId": SID, "update": {"sessionUpdate": "tool_call_update",
                 "toolCallId": "a", "kind": "read", "status": status, "rawInput": {"path": "missing.txt"},
                 "rawOutput": {"error": "fictional unchanged error"}}})
-        with patch.object(updates.progress, "failed_tool", wraps=updates.progress.failed_tool) as failed:
-            await send("pending")
-            await send("failed")
-            await send("failed")
-            await send("in_progress")
-            await send("failed")
-        self.assertEqual(failed.call_count, 1)
+        await send("pending")
+        await send("failed")
+        await send("failed")
+        await send("in_progress")
+        await send("failed")
         self.assertEqual([event["state"] for event in events], ["started", "failed", "running", "failed"])
 
     async def test_streamed_activity_persists_transitions_through_real_http_and_sqlite(self):
@@ -519,13 +521,12 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
                 self.assert_failed(result, "native_turn_unconfirmed")
                 self.assertIsNone(self.receipt(result)["proof"])
 
-    async def test_unclosed_tool_nonzero_exit_and_no_progress_are_rejected(self):
-        cases = {"unclosed_tool": "native_tool_unpaired", "nonzero": "cli_nonzero_exit",
-                 "no_progress": "native_no_progress"}
+    async def test_unclosed_tool_and_nonzero_exit_are_rejected(self):
+        cases = {"unclosed_tool": "native_tool_unpaired", "nonzero": "cli_nonzero_exit"}
         for case, code in cases.items():
             with self.subTest(case=case):
                 self.scenario(case)
-                result = await self.invoke(progress_fingerprint=lambda: "0" * 64)
+                result = await self.invoke()
                 self.assert_failed(result, code)
                 if case == "unclosed_tool":
                     self.assertEqual(result["native_execution"]["tool_results"], 0)

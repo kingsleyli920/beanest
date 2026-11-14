@@ -66,59 +66,6 @@ def _visible(text: str) -> str:
     return _SECRET.sub("[redacted]", text)
 
 
-# A folder named as a write path is compared by this many files' metadata.
-_PROGRESS_TREE_FILES = 20000
-
-
-def _progress_evidence(root, name):
-    """What one authorized path looks like now, to compare two moments of one call.
-
-    The value never leaves the host and is only compared with an earlier one,
-    so a path that cannot be hashed exactly (a folder, a link, an oversized,
-    unreadable or still-changing file) is described by its metadata. A failed
-    command must never end a call just because its task named such a path.
-    """
-    path, info = str(root), None
-    for part in name.split("/"):
-        path = os.path.join(path, part)
-        try:
-            info = os.lstat(path)
-        except OSError:
-            return None
-        if stat.S_ISLNK(info.st_mode):
-            return ["link", info.st_ino, info.st_mtime_ns]  # Never followed.
-    metadata = ["metadata", info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns]
-    if stat.S_ISDIR(info.st_mode):
-        files = []
-        for directory, names, leaves in os.walk(path, followlinks=False):
-            names.sort()
-            for leaf in sorted(leaves):
-                try:
-                    entry = os.lstat(os.path.join(directory, leaf))
-                except OSError:
-                    continue
-                files.append([os.path.relpath(os.path.join(directory, leaf), path), entry.st_size, entry.st_mtime_ns])
-                if len(files) >= _PROGRESS_TREE_FILES:
-                    return ["folder", files, "truncated"]
-        return ["folder", files]
-    if not stat.S_ISREG(info.st_mode) or info.st_size > FOLDER_FILE_BYTES:
-        return metadata
-    digest = hashlib.sha256()
-    try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        with os.fdopen(descriptor, "rb") as stream:
-            before = os.fstat(stream.fileno())
-            while chunk := stream.read(256 * 1024):
-                digest.update(chunk)
-            after = os.fstat(stream.fileno())
-    except OSError:
-        return metadata
-    if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
-        # Written while it was read: that is a change, whatever the bytes were.
-        return ["metadata", after.st_mode, after.st_ino, after.st_size, after.st_mtime_ns]
-    return ["file", digest.hexdigest()]
-
-
 # A room whose partners all ran out of quota rechecks this often; a check
 # refreshes account usage but never calls a model while still exhausted.
 _QUOTA_WAIT_RECHECK_SECONDS = 300
@@ -5869,18 +5816,6 @@ class RoomService(RoomPromptMixin):
             raise RoomError("native_recovery_unpublished_changes")
         self.store.finish_job(job["id"], session_id=identity, message=parsed["message"], usage=usage, team_commands=[])
 
-    def _native_progress_fingerprint(self, job, cwd):
-        """Fault-loop evidence is restricted to this task's authorized files."""
-        task = next((item for item in self.store.snapshot(job["room_id"])["team"]["tasks"]
-                     if item["id"] == job["team"]["task_id"]), None)
-        paths = task["write_paths"] if task and job["team"]["job_phase"] == "work" else []
-        def fingerprint():
-            entries = [(name, _progress_evidence(cwd, name)) for name in sorted(paths)]
-            return hashlib.sha256(json.dumps(entries).encode()).hexdigest()
-        async def observe():
-            return await asyncio.to_thread(fingerprint)
-        return observe
-
     async def _with_progress_channel(self, job, invoke):
         """Run one native call with its display-only progress file watched.
 
@@ -6011,7 +5946,7 @@ class RoomService(RoomPromptMixin):
                             spec.adapter, prompt, cwd, session_id=job["session_id"], timeout=timeout,
                             permission=permission, response_schema=schema,
                             on_activity=lambda event, bound_job=job: self._record_native_event(bound_job, event),
-                            receipt_dir=receipt_dir, progress_fingerprint=self._native_progress_fingerprint(job, cwd),
+                            receipt_dir=receipt_dir,
                             **progress_kwargs, **runtime_kwargs))
                     elif self.invoke is not None:
                         operation = self.invoke(provider, prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
