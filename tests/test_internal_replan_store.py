@@ -97,18 +97,48 @@ class InternalReplanStoreTests(unittest.TestCase):
         self.finish(side, [{'type':'complete','task_id':'side','result':'Concrete independently checked result.'}])
         self.assertNotEqual(self.task(room, 'final')['status'], 'working')
 
-    def test_ready_without_a_proposal_cannot_resume_parent_or_loop(self):
+    def test_ready_without_a_proposal_resumes_the_parent_once_and_never_loops(self):
+        # Catches the real stall: the team concluded a coordination block needed no new task, everyone confirmed,
+        # and the room stopped as team_plan_stalled; and catches the opposite risk, an endless block/replan loop.
         room = self.planning()
+        resumed_work = None
         for _ in range(8):
             changed = False
             for member in ('claude','codex'):
                 job = self.store.claim(room, member)
-                if job:
-                    self.assertEqual(job['kind'], 'team_coordinate')
+                if job and job['kind'] == 'team_coordinate':
                     self.finish(job, [{'type':'plan_ready'}]); changed = True
+                elif job and job['kind'] == 'team_work':
+                    resumed_work = job
             if not changed: break
-        self.assertEqual(self.task(room, 'main')['status'], 'blocked')
-        self.assertEqual(self.store.snapshot(room)['team']['stop_reason'], 'team_plan_stalled')
+        main = self.task(room, 'main')
+        self.assertIn(main['status'], {'assigned', 'working'})
+        self.assertEqual((main['owner'], main['block_cause']), ('claude', None))
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'working')
+        self.assertIsNone(self.store.snapshot(room)['team']['stop_reason'])
+        # The owner keeps raising the same block with unchanged evidence: the existing no-progress bound ends it
+        # (the third identical block stops the objective as objective_no_progress), so resuming cannot loop.
+        work = resumed_work
+        self.assertEqual((work['provider'], work['team']['task_id']), ('claude', 'main'))
+        for _ in range(6):
+            if work is not None:
+                self.finish(work, [{'type':'block', 'task_id':'main', 'cause':'coordination_required',
+                                    'reason':'A prerequisite has no assigned scope in the current plan.'}])
+            if self.store.snapshot(room)['team']['stop_reason']:
+                break
+            work = None
+            for _ in range(8):
+                changed = False
+                for member in ('claude','codex'):
+                    job = self.store.claim(room, member)
+                    if job and job['kind'] == 'team_coordinate':
+                        self.finish(job, [{'type':'plan_ready'}]); changed = True
+                    elif job and job['kind'] == 'team_work':
+                        work = job
+                if not changed: break
+        self.assertEqual(self.store.snapshot(room)['team']['stop_reason'], 'objective_no_progress')
+        requests = [event for event in self.store.snapshot(room)['events'] if event['kind'] == 'internal_replan_requested']
+        self.assertEqual(len(requests), 2)
         count = len(self.store.snapshot(room)['jobs'])
         self.store.reconcile_team(room)
         self.assertEqual(len(self.store.snapshot(room)['jobs']), count)
