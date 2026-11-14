@@ -419,6 +419,10 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
             self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
 
     def test_recovery_requires_exact_journal_context_and_unchanged_private_trees(self):
+        # Catches the hint-rejection recovery (which resumes the old board after
+        # a read-only re-check) being granted without the exact journal of the
+        # rejected call or over a changed private project; and the room
+        # refusing every continue once that recovery does not hold.
         stopped = self.bootstrap_legacy_stopped()
         self.assertTrue(stopped["current_run"]["can_recover_native"], stopped["current_run"]["native_recovery_reason"])
         candidate = self.legacy_candidate
@@ -426,35 +430,54 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
         journal = self.native.session_wire(state["project"], candidate["session_id"])
         original = journal.read_bytes()
         calls = len(self.native.calls)
-        rows = self.old_job_rows([job["id"] for job in stopped["jobs"]])
+        ids = [job["id"] for job in stopped["jobs"]]
+        rows = self.old_job_rows(ids)
+        private = Path(state["project"]) / DOCS[0]
+        previous = private.read_bytes()
         for invalid in ("missing_receipt", "wrong_context", "private_D"):
             with self.subTest(invalid=invalid):
-                private = Path(state["project"]) / DOCS[0]
-                previous = private.read_bytes()
-                try:
-                    if invalid == "missing_receipt":
-                        journal.unlink()
-                    elif invalid == "wrong_context":
-                        entries = [json.loads(line) for line in original.splitlines()]
-                        text = entries[1]["input"][0]["text"]
-                        prefix, payload = text.split("CONTEXT DATA:\n", 1)
-                        payload, separator, schema = payload.partition(KIMI_SCHEMA_SUFFIX)
-                        context = json.loads(payload)
-                        context["job"]["run_id"] = str(uuid4())
-                        entries[1]["input"][0]["text"] = prefix + "CONTEXT DATA:\n" + json.dumps(context) + separator + schema
-                        journal.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
-                    else:
-                        private.write_text("A real unpublished private change.\n")
-                    code, response = self.fixture.request("POST", f"/api/rooms/{self.room_id}/recover-native",
-                                                          self.recovery_body(stopped))
-                    self.assertEqual((code, response.get("error")), (409,
-                        "native_recovery_unpublished_changes" if invalid == "private_D"
-                        else "native_recovery_diagnostic_unconfirmed"))
-                    self.assertEqual(len(self.native.calls), calls)
-                    self.assertEqual(self.old_job_rows([job["id"] for job in stopped["jobs"]]), rows)
-                finally:
+                if invalid == "missing_receipt":
+                    journal.unlink()
+                elif invalid == "wrong_context":
+                    entries = [json.loads(line) for line in original.splitlines()]
+                    text = entries[1]["input"][0]["text"]
+                    prefix, payload = text.split("CONTEXT DATA:\n", 1)
+                    payload, separator, schema = payload.partition(KIMI_SCHEMA_SUFFIX)
+                    context = json.loads(payload)
+                    context["job"]["run_id"] = str(uuid4())
+                    entries[1]["input"][0]["text"] = prefix + "CONTEXT DATA:\n" + json.dumps(context) + separator + schema
+                    journal.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+                else:
+                    private.write_text("A real unpublished private change.\n")
+                # A fresh audit, as the POST makes: this recovery is refused,
+                # the room is still continuable, and looking dispatched nothing.
+                audited = self.service._snapshot(self.room_id)
+                self.assertEqual((audited["current_run"]["can_recover_native"], audited["current_run"]["native_recovery_reason"]),
+                                 (False, "native_recovery_unpublished_changes" if invalid == "private_D"
+                                  else "native_recovery_diagnostic_unconfirmed"))
+                self.assertTrue(audited["continuation"]["can_send"], audited["continuation"])
+                self.assertEqual(len(self.native.calls), calls)
+                self.assertEqual(self.old_job_rows(ids), rows)
+                if invalid != "private_D":
                     journal.write_bytes(original)
-                    private.write_bytes(previous)
+        # Continued with the private change still there: the calls are abandoned,
+        # no read-only re-check of the old board runs, and the change is reported.
+        self.release_claude.set()
+        code, response = self.fixture.request("POST", f"/api/rooms/{self.room_id}/recover-native", self.recovery_body(stopped))
+        self.assertEqual((code, response.get("error")), (200, None))
+        final = self.wait(lambda value: value["objective"]["status"] == "complete" and self.quiescent(value))
+        kinds = [event["kind"] for event in final["events"]]
+        self.assertEqual(kinds.count("native_nonwork_recovery_attestation"), 0)
+        abandoned = [event for event in final["events"] if event["kind"] == "native_unconfirmed_calls_abandoned"]
+        self.assertEqual([(event["errors"], event["unowned_private_changes"], event["old_commands_accepted"]) for event in abandoned],
+                         [(["invoke_interrupted", "team_scope_conflict"], [{"provider": "kimi", "paths": ["docs/one.md"]}], False)])
+        self.assertFalse(any(call["context"].get("native_nonwork_inspection") for call in self.native.calls[calls:]))
+        self.assertEqual(self.old_job_rows(ids), rows)
+        # The stray private bytes are kept where they were and never published.
+        self.assertEqual(private.read_text(), "A real unpublished private change.\n")
+        self.assertNotEqual(previous, b"A real unpublished private change.\n")
+        for file in self.service._project(self.room_id).files_for_paths(list(DOCS)):
+            self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
 
     def test_recovery_uses_fresh_normal_coordination_at_the_original_full_access(self):
         stopped = self.bootstrap_legacy_stopped()

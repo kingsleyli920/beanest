@@ -74,9 +74,9 @@ UI日常入口为“新任务”，默认选择Claude Code、Codex两种工具�
 
 服务通过 `status.capabilities.execution_policy:true` 声明策略能力；当前新请求统一 `mode:autonomous,max_seconds:null,max_calls:null`，额度接手开启。默认省略或 null 的总调用数与时长没有硬停；显式 autonomous 请求中的受支持 max_calls/max_seconds 约束总目标，阶段不会重置它们。旧 manual 模式兼容为自主持续推进，不恢复逐阶段审批；旧记录的底层历史计数保留。省略或 null 不把简单文字请求强制升级为 objective。运行方式、权限、成员模型和 effort 仍按现有契约冻结，持续推进不能提高权限。
 
-新目标保存`objective_id`、原始总目标、绝对期限、总已用调用数及策略。每次实际认领扣总账，排队占用剩余预算；用户设置了明确上限时，自动阶段不重置总账或绝对期限；自主模式不设默认阶段数硬停。有实质文件变化的正常返修不按次数截断，重复未变证据按无进展处理。执行/修复先于checkpoint，旧worker持久清理回执未确认时不能转段或接手。`autonomous_work_active`为供桌面读取的只读布尔状态；不发模型提示，不含账号信息。
+新目标保存`objective_id`、原始总目标、绝对期限、总已用调用数及策略。每次实际认领扣总账，排队占用剩余预算；用户设置了明确上限时，自动阶段不重置总账或绝对期限；自主模式不设默认阶段数硬停。有实质文件变化的正常返修不按次数截断。同样的证据重复出现时，宿主不替伙伴判“没进展”，也不交给用户，做法见“停止策略”里“重复的结果”一段。执行/修复先于checkpoint，旧worker持久清理回执未确认时不能转段或接手。`autonomous_work_active`为供桌面读取的只读布尔状态；不发模型提示，不含账号信息。
 
-一个阶段完成后，只允许一次只读`checkpoint`提案及一次其他可用成员的`checkpoint_review`。提案包含继续/完成/需要用户、具体下一步、原目标引用及问题；审核绑定proposal_digest。范围引用与独立核对降低误扩展风险，不是语义正确性的认证。自动模式只派发确认属于当前目标的下一步；不同意见或新范围必须停下。同一人核对明确记为self_check。模型报告目标完成不写accepted_at，仍保留用户验收动作。
+一个阶段完成后，只允许一次只读`checkpoint`提案及一次其他可用成员的`checkpoint_review`。提案包含继续/完成/需要用户、具体下一步、原目标引用及问题；审核绑定proposal_digest。范围引用与独立核对降低误扩展风险，不是语义正确性的认证。下一步是否还在原目标内由提案伙伴对照原目标判断、审核伙伴核对；提案是继续时宿主就开下一阶段，不再拿 `scope_reference` 和原目标的字面去比，也不再以 `objective_scope_confirmation` 停下等用户确认。审核不同意时提案退回作者修改。随完成一并提出的新目标建议（`scope:new_goal`）仍只在用户明确发起时开始。同一人核对明确记为self_check。模型报告目标完成不写accepted_at，仍保留用户验收动作。
 
 checkpoint上下文顶层`goal`始终为原总目标，当前阶段另列`current_stage_goal`，不能把阶段验收完成当成整个目标完成。提案和审核都绑定实际送给模型的直接用户补充水位；调用期间有新的直接补充时，旧调用记录保留，旧结论标记被更新取代，再核对原目标，不沿用旧完成结论。这个重新评估不重置预算、权限或期限，也不重放工作调用。
 
@@ -194,7 +194,9 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 ### 停止策略
 
-自主目标停下时，宿主按 `stop_policy.py` 决定是否等用户。只有两类停止码等用户：一是用户自己的停止、用户设的上限、目标本身提出的问题或无进展（`USER_STOPS`）；二是结果未知、需要保留现场的情况，例如清理、提交、会话身份或副作用无法确认（`KEEP_SCENE`）。全员额度用完（`all_partners_quota_exhausted`）走自己的等待路径：最多每 5 分钟复查，有额度恢复的证据才继续，没有任何用量数据时最多每小时试一次。其余停止码，包括以后新增的，都在约 15 秒后由宿主代用户点一次“继续”（`restart-objective` 或 `recover-native`）。宿主按“停止原因 + 任务板状态”算指纹。同样的停下再次出现且没有新进展时，宿主不交给用户，隔一段时间再继续，间隔逐次拉长（1、5、15、30 分钟，之后每 60 分钟）；某次继续当时发不出去，一分钟后再试。用户发言后计数清零。房间快照的 `auto_continue{repeats,next_at}` 给出已继续的次数和下次时间。宿主自己因调用失败加上的任务阻塞（不是模型提出的问题）会原地重开。下文各处写的“停止”“等待用户”，在自主目标下都先按本策略处理。同房间的受限 Python 隔离执行另有资源与失败回收约束，不能据此声称原生开发总目标有次数限制。
+自主目标停下时，宿主按 `stop_policy.py` 决定是否等用户。只有两类停止码等用户：一是用户自己的停止、用户设的上限（`objective_calls_exhausted`、`objective_deadline_exceeded`）、伙伴向用户提出的问题（`USER_STOPS`）；二是结果未知、需要保留现场的情况，例如清理、提交、会话身份或副作用无法确认（`KEEP_SCENE`）。全员额度用完（`all_partners_quota_exhausted`）走自己的等待路径：最多每 5 分钟复查，有额度恢复的证据才继续，没有任何用量数据时最多每小时试一次。其余停止码，包括以后新增的，都在约 15 秒后由宿主代用户点一次“继续”（`restart-objective` 或 `recover-native`）。宿主按“停止原因 + 任务板状态”算指纹。同样的停下再次出现且没有新进展时，宿主不交给用户，隔一段时间再继续，间隔逐次拉长（1、5、15、30 分钟，之后每 60 分钟）；某次继续当时发不出去，一分钟后再试。用户发言后计数清零。房间快照的 `auto_continue{repeats,next_at}` 给出已继续的次数和下次时间。宿主自己因调用失败加上的任务阻塞（不是模型提出的问题）会原地重开；这类阻塞的 `block_cause` 恒为空，任务上留着的旧 cause 会在宿主加阻塞时清掉。`deadline_exceeded` 和 `budget_exhausted` 不在等用户之列：房间级期限和调用上限恒为 0，`deadline_exceeded` 只会来自单次调用超时，按普通失败自动继续，`budget_exhausted` 已不会作为停止码产生。下文各处写的“停止”“等待用户”，在自主目标下都先按本策略处理。同房间的受限 Python 隔离执行另有资源与失败回收约束，不能据此声称原生开发总目标有次数限制。
+
+重复的结果：评审多次要求修改而交付没变、同样的求助或修复请求、同样的技术阻塞、同样的重排请求、checkpoint 原样退回，宿主都只记证据是否相同，不替伙伴下“没进展”的结论，也不交给用户。同一证据第二次出现时，事实进入每位伙伴的上下文 `objective.repeated_results[{what,task_id,times}]`，提示词要求他们换做法、重新分配或接受已经够好的结果。第三次出现时，评审、求助、修复请求和技术阻塞这几类把任务交回团队重排（任务记为 `coordination_required` 阻塞并请求内部重排，事件 `internal_replan_requested` 带 `reason:"repeated_result"`），目标不停。没有任务可交回的几类（重排请求本身重复、checkpoint 原样退回或原样继续、只读检查重复）以 `objective_no_progress` 停下，这个码由宿主自动继续，同样的停下再出现时按上面的间隔退避；继续后的新一轮在 `objective.continuation.repeated_results` 里带着上一轮重复了什么。
 
 一次调用在提示词发出之前就失败（适配器报告 `prompt_sent` 为假或 `never_started`，且进程清理已确认、没有工具活动）时，这次调用没有任何模型副作用，不算结果未知：宿主原地短暂退避重试一次；仍失败时该伙伴以 `native_preflight_failed` 退出本目标，未开工的任务交给其他伙伴，其余伙伴继续。只有没有其他可用伙伴或关闭了额度转交时才停下，停止码同样是 `native_preflight_failed`，可以继续，也会按上一段自动继续一次。提示词可能已发出、清理未确认或会话身份不符的失败仍按结果未知处理，不会重放。
 
@@ -229,13 +231,17 @@ Claude 原生会话长期续接会把全部上下文带进每次调用。checkpo
 
 原生调用结束时结果不明（进程被杀、会话身份对不上、工具没全部返回、Full Access 下可能动过私有副本以外的东西），宿主不再因此拒绝继续：只要调用的进程确认已经结束、共享副本没有结果不明的提交，就放弃这些调用、开新会话的新一轮，并把事实放进 `objective.continuation.previous_stop`（`reason`、`ended_calls[{provider,phase,task_id,error,may_have_acted_outside_private_tree}]`、`unowned_private_changes[{provider,paths}]`），由伙伴自己判断哪些已经做完、哪些要重做或重新分配。停下之前用户追加的要求随 `carried_user_request` 带进新目标。宿主自己被强杀时，下次启动按 `native_process_started` 记录的进程号结束残留进程并补记清理，房间照常继续。宿主不再因为同一条命令反复失败而结束调用。
 
-需要改另一项未完成任务的文件，或者整块工作要重新拆分时，伙伴须用结构化 `block.cause: coordination_required` 请求调整计划，不能仅在正文要求宿主重规划。该原因只请求正常计划协调，不授予文件、shell或额外业务权限；真实 `permission_required`、`user_decision`、外部依赖与旧未分类阻塞继续保留原等待规则，不能按正文关键词自动降级。自主目标在清理边界回到规划，新增任务仍由计划作者提出、全员确认确切清单，之后进任务池；已有成果、负责人及原写入范围保留。新增依赖、取消/暂停和无进展保护仍须校验。
+原生项目房间里，上面这条“放弃旧调用、开新一轮”同时是任何其它继续方式被拒时的出路（通用重启）：只要房间空闲，哪怕专用恢复的证据不成立、调用的进程没能确认退出、共享副本的提交结果不明，`continuation.can_send` 仍为真，用户的消息或宿主的自动继续都会走这条路。这时 `previous_stop.ended_calls[]` 里多出 `process_may_still_be_running`，`previous_stop.shared_commit_unconfirmed` 标明提交结果不明，由伙伴自己核对处理。专用恢复仍然只在证据成立时使用，`current_run.can_recover_native` 只反映专用恢复。“保留现场”类停止码（`KEEP_SCENE`）因此也会自动继续，但只走这条重启，不会原地重开任务板。重启时，在结束的那一轮里每次调用都证明了自己会话、且进程已确认退出的伙伴沿用原会话；同一处停止被自动继续过一次后再停，才全部换新会话。
+
+房间暂时无法继续时（例如没有可用伙伴），用户的消息不再被拒绝：服务记一条 `message` 事件（`held:true`、`held_reason`），界面照常显示；下一轮开始时这些消息放进 `objective.continuation.user_messages_while_stopped[{text,to}]`，并写 `held_messages_delivered` 事件。只有已归档的房间仍然返回 `room_archived`。
+
+需要改另一项未完成任务的文件，或者整块工作要重新拆分时，伙伴须用结构化 `block.cause: coordination_required` 请求调整计划，不能仅在正文要求宿主重规划。该原因只请求正常计划协调，不授予文件、shell或额外业务权限；只有 `user_decision` 和 `permission_required` 等用户，问题里只列这两类任务；`technical`、`external_dependency`、`coordination_required` 和没写 cause 的阻塞（记为 unclassified）都交回伙伴自己处理，不按正文关键词改判。`technical` 先找同伴诊断或让负责人自查，走不通时和另外三类一样请求内部重排，由伙伴重新规划、换人或换做法。一块板上两种阻塞并存时，交回伙伴的照常重排推进，等用户的那一项单独等：它不挡重排，也不把确认过的计划留在 planning；别的都做完后才向用户提问，期间宿主的自动继续只重开或重排其余阻塞（`task_blocks_resumed` 的 `waiting_for_user_task_ids` 列出仍在等用户的任务）。自主目标在清理边界回到规划，新增任务仍由计划作者提出、全员确认确切清单，之后进任务池；已有成果、负责人及原写入范围保留。新增依赖、取消/暂停和无进展保护仍须校验。
 
 运行中调整未开始的任务：团队处于 working 时，任何正在回复用户消息（job_phase `user`）的伙伴都可以直接改任务板上还没人开始的部分（不限计划作者：计划作者常常正在做最长的那个任务，用户的话不该等它做完），不用等在途工作结束，也不回到 planning。能做两件事：用 propose 新增任务，校验和规划阶段一样（id、文字、路径、能力、依赖、和其他任务的写路径冲突）；用 `adjust{type,task_id,dependencies,write_paths}` 给一个未开始的任务换上完整的新依赖列表，并从它的 write_paths 里去掉要移走的路径（只能删，不能加）。未开始指：状态 open 或 assigned，result_version 为 0，没被审核过，不是上一轮带来的或执行修复重开的，没有宿主转交的路径授权，而且从没有任何调用绑定过它；排队中的 work 调用也算已开始。已开始、审核中或有结果的任务一律不能改。拆分时在同一个回复里 propose 新任务带上移走的路径，再 adjust 原任务，写路径冲突和环检查都按调整后的任务板算。一个回复里的命令要么全部生效，要么全部不生效；被拒时沿用原有纠错提示，告诉伙伴违反了哪条（`team_plan_locked`、`invalid_team_task`、`invalid_team_dependencies`、`team_write_path_conflict`）。不是用户回复、或团队不在 working 时，仍返回 `team_plan_locked`。几个伙伴同时回复同一条用户消息时，如果这次调用开始之后别人已经调整过任务板（出现了本轮的 `plan_adjusted`），这次的调整会以 `team_plan_adjusted_meanwhile` 退回，伙伴看着最新任务板重新回复，避免重复拆分。只读房间的用户回复照旧不能带命令。
 
 调整不改 team.revision，成员不用重新确认：调整来自用户本人的消息，只碰没人开始的任务，在途调用绑定的任务、result_version 和 assignment_epoch 都不变，也不会被取消或重新规划。服务写一条 `plan_adjusted` 事件，带 run_id、新增的任务，以及每个被调整任务改前改后的依赖和写路径；时间线显示这条变化，之后每个成员的 `context.plan_adjustments` 里也能看到本轮的调整。新任务是 open，进任务池，下一个空闲的成员就会拿到；被放开依赖的任务也一样。做调整的伙伴可以在同一个回复里认领自己要做的新任务，它就留给这位伙伴。
 
-`request_help{type,task_id,to,capability,text}`绑定当前工作任务和本间另一成员的具体问题，原任务进入waiting_peer；被请求者回复后，服务把message保存为help_result并排回原负责人继续，协助者不能改对方文件。`image`能力对所有当前成员明确不可用；提案或求助需要image时记录capability_unavailable并阻塞等待用户，不虚构图片、不换新API或计费路径。python能力仅文件模式可用，并不授予模型执行权限。
+`request_help{type,task_id,to,capability,text}`绑定当前工作任务和本间另一成员的具体问题，原任务进入waiting_peer；被请求者回复后，服务把message保存为help_result并排回原负责人继续，协助者不能改对方文件。`image`能力对所有当前成员明确不可用。提案里出现 image 时整个回复以 `team_capability_unavailable` 退回，计划作者按纠错提示当场改计划，不会留下一个从提出就阻塞、把整板卡在 planning 的任务；求助需要image时仍记录capability_unavailable并阻塞。不虚构图片、不换新API或计费路径。计划确认后，板上还有阻塞任务也照常进入 working（只有重排后还没人提出前置任务的情况除外）；阶段还在 planning 时遇到的阻塞同样可以由宿主的自动继续重开，用户的回答也照常受理。python能力仅文件模式可用，并不授予模型执行权限。
 
 文件夹模式的普通work读取完成后，可在该安全边界先处理本间已等待的具体求助，再恢复原任务；不打断在途调用。格式纠正、容量纠正和执行修复仍绑定其确切任务与来源，不让出该续派位置。原有单成员在途、owner、版本、取消和清理门槛保持。
 

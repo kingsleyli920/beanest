@@ -5,6 +5,7 @@ from copy import deepcopy
 import re
 
 from .runtime_settings import native_permission, read_only
+from .block_contract import PARTNER_BLOCK_CAUSES
 from .execution_policy import task_finished, WITHDRAWN
 
 
@@ -88,7 +89,7 @@ _REASONS = {
     "budget_exhausted": _system("本次调用上限已到，未完成的任务保留在清单里。"),
     "objective_calls_exhausted": _system("你设置的调用预算已用完，未完成的任务保留在清单里。"),
     "objective_deadline_exceeded": _system("你设置的结束时间已到，现有成果和未完成任务已保留。"),
-    "objective_no_progress": _system("伙伴连续几次给出相同的证据或没有变化的结果，已暂停，免得空转。"),
+    "objective_no_progress": _system("伙伴连续几次给出相同的结果，推进停了一下。豆窝会把这个情况告诉伙伴，稍后自动再试。"),
     "deadline_exceeded": _system("本次任务期限已到，未继续派发工作。"),
     "capability_unavailable": _system("这项工作需要尚未接入的能力，暂时无法完成。"),
     "team_capability_unavailable": _system("当前执行方式不具备这项工作所需的能力。"),
@@ -165,10 +166,11 @@ def collaboration_view(snapshot: dict, *, active=False) -> dict:
     names = {member["id"]: member["name"] for member in snapshot.get("members", [])}
     current_files = {file["path"]: file for file in project.get("files", [])}
     stale = False
-    # A partner asked the team to re-split file ownership. The room replans by
-    # itself once current work settles, so this is not a question for the user.
+    # A partner raised a block the team resolves itself (anything but a user
+    # decision or permission). The room replans once current work settles, so
+    # this is not a question for the user.
     replanning = {task["id"]: task["title"] for task in team["tasks"]
-                  if task["status"] == "blocked" and task.get("block_cause") == "coordination_required"
+                  if task["status"] == "blocked" and task.get("block_cause") in PARTNER_BLOCK_CAUSES
                   and task.get("internal_replan_revision") is not None}
     # A later task may legitimately rework a delivered file. Only the latest
     # delivery of each path is checked, and not while unfinished work holds it.

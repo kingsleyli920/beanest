@@ -361,12 +361,13 @@ const replyCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked',
 // objective, so the page words it the same way.
 const selfCorrectedCodes = new Set([...replyCorrectedCodes, 'team_scope_conflict']);
 // Mirrors stop_policy.py: only these stops wait for the user (USER_STOPS),
-// keep the scene for inspection (KEEP_SCENE) or have their own quota wait.
-// The host continues every other stop of an autonomous objective once per
-// board state; a stop that comes back without progress is the user's.
-const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt', 'budget_exhausted', 'deadline_exceeded',
-  'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit', 'objective_no_progress',
-  'objective_decision_required', 'objective_scope_confirmation', 'objective_checkpoint_disagreed',
+// keep the scene (KEEP_SCENE, continued only by the native restart the
+// service reports as stop_kind) or have their own quota wait. The host
+// continues every other stop of an autonomous objective, again and again
+// with a growing pause; it never gives one up to the user.
+const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt',
+  'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit',
+  'objective_decision_required', 'objective_checkpoint_disagreed',
   'partner_account_home_changed']);
 const keepSceneCodes = new Set(['project_commit_unconfirmed', 'native_cleanup_unconfirmed', 'team_cleanup_unconfirmed',
   'native_recovery_cleanup_unconfirmed', 'session_identity_changed', 'session_identity_unknown',
@@ -4226,7 +4227,10 @@ function naturalContinuation(snapshot = state.snapshot, target = state.target) {
     && JSON.stringify(binding) === JSON.stringify(current);
   const recipient = target !== 'all' && target !== 'both' ? value?.recipients?.[target] : null;
   const eligibility = typeof recipient?.can_send === 'boolean' ? recipient : value;
-  return { canSend: eligibility?.can_send === true && !!valid, reason: valid ? eligibility?.reason : 'native_recovery_binding_changed', binding: valid ? binding : null };
+  // canHold: the room cannot continue right now, but the service keeps the
+  // user's words and hands them to the next run. Only an archived room has nowhere to put them.
+  return { canSend: eligibility?.can_send === true && !!valid, reason: valid ? eligibility?.reason : 'native_recovery_binding_changed', binding: valid ? binding : null,
+    canHold: !!valid && eligibility?.can_send === false && eligibility?.reason !== 'room_archived' };
 }
 function capturePendingIntent(request, snapshot = state.snapshot) {
   const source = request.roomId && snapshot?.room?.id === request.roomId && pagedRoom(snapshot) ? snapshot.through_seq : null;
@@ -4238,7 +4242,8 @@ async function submitNaturalContinuation(text, snapshot = state.snapshot) {
       || !text.trim() || !checkUserText(text)) return;
   const current = naturalContinuation(state.snapshot); const captured = naturalContinuation(snapshot);
   if (recipientProblem()) { showActionError(recipientProblem()); return; }
-  if (!current?.canSend || !captured?.canSend || JSON.stringify(current.binding) !== JSON.stringify(captured.binding)) return;
+  if (!(current?.canSend || current?.canHold) || !(captured?.canSend || captured?.canHold)
+      || JSON.stringify(current.binding) !== JSON.stringify(captured.binding)) return;
   const changes = pendingRuntimeChanges();
   if (Object.keys(changes).length && (naturalRuntimeConfiguration()?.can_edit !== true || runtimeSubmissionError())) {
     showActionError(runtimeSubmissionError() || t("当前不能修改设置，草稿已保留。"), state.selected, 'message'); return;
@@ -6136,15 +6141,16 @@ function renderControls() {
       : `${t("这轮只讨论方案，不创建或修改文件，也不运行代码。")}${interfaceWordSpace()}${planNextStepText()}`;
   }
   $('message').disabled = !canCompose;
-  $('message').placeholder = natural ? !natural.canSend ? t("当前无法发送，原因见下方") : objective?.status === 'complete' ? t("哪里还要调整？直接告诉伙伴") : t("补充要求，或说继续") : continuation === 'native_recovery' ? t("继续，或补充要求后接着做") : continuation ? t("说“继续”，接着完成原任务") : room ? t("补充要求，或告诉伙伴要调整什么") : t("说说这次想做什么");
+  $('message').placeholder = natural ? !natural.canSend ? natural.canHold ? t("可以先留言，能继续时会带给伙伴") : t("当前无法发送，原因见下方") : objective?.status === 'complete' ? t("哪里还要调整？直接告诉伙伴") : t("补充要求，或说继续") : continuation === 'native_recovery' ? t("继续，或补充要求后接着做") : continuation ? t("说“继续”，接着完成原任务") : room ? t("补充要求，或告诉伙伴要调整什么") : t("说说这次想做什么");
   const policyInputError = policySubmissionError() || runtimeSubmissionError();
-  $('send').disabled = !!recipientProblem() || !canCompose || (natural && !natural.canSend) || (!natural && !continuation && (!!policyInputError || (preparingFork ? blockedParticipants().length > 0 : submissionAvailabilityBlocked()))) || !$('message').value.trim()
+  $('send').disabled = !!recipientProblem() || !canCompose || (natural && !natural.canSend && !natural.canHold) || (!natural && !continuation && (!!policyInputError || (preparingFork ? blockedParticipants().length > 0 : submissionAvailabilityBlocked()))) || !$('message').value.trim()
     || (!room && ((!state.taskModes.includes(state.mode) && !(projectMode && state.projects.some((project) => project.id === state.selectedProject))) || (artifactMode && state.target === 'all')));
   renderRecipientControl();
   $('send-label').textContent = state.busy ? t("发送中") : natural ? t("发送") : continuation ? continuation === 'native_recovery' && $('message').value.trim() ? t("发送并继续") : t("发送") : canAnswer ? t("回答并继续") : preparingFork ? t("开始新任务") : canContinue ? t("开始下一轮") : room ? t("发送补充") : t("开始任务");
   $('character-count').hidden = true;
   const availabilityBlock = preparingFork ? availabilityBlockMessage() : submissionAvailabilityMessage();
-  $('composer-note').textContent = natural ? !state.connected ? t("本地服务未连接，草稿已保留。") : !natural.canSend ? errorLabels[natural.reason] || executionMessage(natural.reason) : state.pending ? t("结果待确认，原请求已保留。") : '' : continuation ? t("说“继续”，或点上方“继续”。已有目标和权限保持。") : policyInputError || availabilityBlock || (inactive ? t("先恢复任务，再继续聊天或开始下一轮。") : state.pending ? t("先确认上一条，避免重复发送") : (!state.connected ? t("本地服务未连接。请先刷新；如果刚重启过豆窝，请从桌面版重新打开。")
+  $('composer-note').textContent = natural ? !state.connected ? t("本地服务未连接，草稿已保留。") : !natural.canSend ? natural.canHold ? t("{p0} 可以先留言，能继续时会带给伙伴。", { p0: errorLabels[natural.reason] || executionMessage(natural.reason) })
+      : errorLabels[natural.reason] || executionMessage(natural.reason) : state.pending ? t("结果待确认，原请求已保留。") : '' : continuation ? t("说“继续”，或点上方“继续”。已有目标和权限保持。") : policyInputError || availabilityBlock || (inactive ? t("先恢复任务，再继续聊天或开始下一轮。") : state.pending ? t("先确认上一条，避免重复发送") : (!state.connected ? t("本地服务未连接。请先刷新；如果刚重启过豆窝，请从桌面版重新打开。")
     : preparingFork ? t("复用已保存文件，以新会话开始；原任务和未完成项保留，未被验收。确认目标后点“开始新任务”。")
     : canAnswer ? t("回答当前问题，沿同一目标继续。")
       : canContinue ? t("写下新的要求，在同一聊天继续下一轮；已有交付与记录保留")

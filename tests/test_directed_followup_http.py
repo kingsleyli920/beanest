@@ -154,7 +154,9 @@ print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': sid}}), fl
 Path({str(started)!r}).write_text(context['job']['id'])
 while not Path({str(release)!r}).exists():
     time.sleep(.01)
-# A new system subtype is a tolerated notice; an unknown top-level type is not.
+# An unknown top-level type is skipped like a new system subtype. The peer then
+# exits without a terminal result: that, not the unknown event, leaves the
+# call's outcome unknown.
 print(json.dumps({{'type': 'synthetic_future_event', 'subtype': 'synthetic_future_notice',
     'session_id': sid, 'uuid': {str(uuid4())!r}}}), flush=True)
 ''', encoding="utf-8")
@@ -188,12 +190,14 @@ print(json.dumps({{'type': 'synthetic_future_event', 'subtype': 'synthetic_futur
                 self.assertEqual(code, 200, {"error": value.get("error")})
                 self.wait(lambda _: self.protocol_peer_started.is_set() and started.exists())
                 release.write_text("emit the synthetic unknown notification\n")
-                stopped = self.wait(lambda value: value["team"]["stop_reason"] == "native_protocol_unknown" and self.quiescent(value))
+                stopped = self.wait(lambda value: value["team"]["stop_reason"] == "protocol_turn_incomplete" and self.quiescent(value))
         finally:
             release.touch()
             self.service.native_invoke = self.native
             self.hold_protocol_peer = False
-        self.assertEqual(self.protocol_result["failure_code"], "native_protocol_unknown")
+        # Catches: the unknown event itself ending the call (it used to, as
+        # native_protocol_unknown), or a call without a terminal passing.
+        self.assertEqual(self.protocol_result["failure_code"], "protocol_turn_incomplete")
         self.assertTrue(self.protocol_result["native_execution"]["cleanup_confirmed"])
         self.assertTrue(any(job["provider"] == "codex" and job["error"] == "invoke_interrupted" for job in stopped["jobs"]))
         self.assertEqual(len(self.cancelled_calls), 1)
@@ -419,8 +423,12 @@ print(json.dumps({{'type': 'synthetic_future_event', 'subtype': 'synthetic_futur
         self.assertEqual(self.old_rows(run_id), before)
 
     def test_protocol_unknown_directed_recovery_freshens_only_the_recipient(self):
+        # Catches a directed follow-up after an unknown protocol failure
+        # renewing more than its recipient's session, replaying interrupted
+        # work, or being started while the recipient's private project holds
+        # bytes nobody authorized.
         unknown = self.bootstrap_protocol_unknown()
-        self.assert_real_unpublished_change_rejected(unknown)
+        self.assert_real_unpublished_change_refuses_directed_recovery(unknown)
         members = {member["id"]: member for member in unknown["members"]}
         # Unknown execution does not erase confirmed owned-session identity.
         self.assertFalse(members["claude"]["identity_uncertain"])
@@ -461,19 +469,60 @@ print(json.dumps({{'type': 'synthetic_future_event', 'subtype': 'synthetic_futur
                 db.execute("RELEASE cleanup_rejection_probe")
         self.assertEqual(len(self.native.calls), calls)
 
-    def assert_real_unpublished_change_rejected(self, unknown):
+    def assert_real_unpublished_change_refuses_directed_recovery(self, unknown):
+        """While unauthorized bytes sit in the recipient's private project, the
+        addressed-scope recovery is refused; nothing is dispatched by looking."""
         state = self.service.store.native_workspace(self.room_id, "claude")
         path = Path(state["project"]) / "notes.md"
         previous = path.read_bytes()
         try:
             path.write_text("Real unauthorized private bytes.\n", encoding="utf-8")
             before, calls = self.old_rows(unknown["current_run"]["id"]), len(self.native.calls)
-            code, value = self.request("POST", f"/api/rooms/{self.room_id}/messages", self.message_body(unknown))
-            self.assertEqual((code, value.get("error")), (409, "native_recovery_unpublished_changes"))
+            dirty = self.service._snapshot(self.room_id)
+            self.assertEqual((dirty["current_run"]["can_recover_native"], dirty["current_run"]["native_recovery_reason"]),
+                             (False, "native_recovery_unpublished_changes"))
+            self.assertEqual(self.service._directed_native_recovery_reason(dirty), "native_recovery_unpublished_changes")
+            # The room is not locked meanwhile: a message to the recipient is still taken.
+            self.assertEqual(dirty["continuation"]["recipients"]["claude"], {"can_send": True, "reason": None})
             self.assertEqual(len(self.native.calls), calls)
             self.assertEqual(self.old_rows(unknown["current_run"]["id"]), before)
         finally:
             path.write_bytes(previous)
+
+    def test_directed_message_over_unauthorized_private_bytes_restarts_the_room_without_a_directed_scope(self):
+        # Catches the dead end this used to be (409 native_recovery_unpublished_changes
+        # with nothing in the app to resolve it), and the unsafe way out: starting the
+        # addressed scope, or publishing or discarding the stray bytes, anyway.
+        unknown = self.bootstrap_protocol_unknown()
+        run_id = unknown["current_run"]["id"]
+        state = self.service.store.native_workspace(self.room_id, "claude")
+        path = Path(state["project"]) / "notes.md"
+        path.write_text("Real unauthorized private bytes.\n", encoding="utf-8")
+        before, calls, since = self.old_rows(run_id), len(self.native.calls), unknown["events"][-1]["seq"]
+        self.release_followup.set()
+        code, value = self.request("POST", f"/api/rooms/{self.room_id}/messages", self.message_body(unknown))
+        self.assertEqual((code, value.get("error")), (200, None))
+        final = self.wait(lambda value: value["objective"]["status"] == "complete" and self.quiescent(value))
+        later = [event for event in final["events"] if event["seq"] > since]
+        abandoned = [event for event in later if event["kind"] == "native_unconfirmed_calls_abandoned"]
+        self.assertEqual([event["unowned_private_changes"] for event in abandoned], [[{"provider": "claude", "paths": ["notes.md"]}]])
+        self.assertEqual((abandoned[0]["errors"], abandoned[0]["old_commands_accepted"]),
+                         (["invoke_interrupted", "protocol_turn_incomplete"], False))
+        # No addressed scope was started: the original goal's unfinished board is carried.
+        self.assertNotEqual(final["current_run"]["id"], run_id)
+        self.assertEqual(final["objective"]["original_goal"], "Complete the two original dependent deliverables.")
+        self.assertEqual(final["objective"]["continuation"]["preserved_task_ids"], ["OLD1", "OLD2"])
+        self.assertNotIn("initial_recipient", final["objective"]["continuation"])
+        self.assertEqual(sorted(task["id"] for task in final["team"]["tasks"]), ["OLD1", "OLD2"])
+        # The user's words are kept once, addressed as sent, and reach the new run.
+        sent = [(event["sender"], event["recipient"]) for event in later if event["kind"] == "message" and event["text"] == FOLLOWUP]
+        self.assertEqual(sent, [("user", "claude")])
+        self.assertEqual(self.native.calls[calls]["context"]["current_user_updates"][-1]["text"], FOLLOWUP)
+        # The ended calls stay as they ended; the stray bytes are reported, kept and not published.
+        self.assertEqual(self.old_rows(run_id), before)
+        self.assertEqual(path.read_text(encoding="utf-8"), "Real unauthorized private bytes.\n")
+        self.assertEqual(self.service._project(self.room_id).files_for_paths(["notes.md"])[0]["content"],
+                         "An unchanged canonical note.\n")
 
     def test_protocol_unknown_directed_recovery_preserves_the_selected_owners_retained_work(self):
         unknown = self.bootstrap_protocol_unknown(retained_work=True)

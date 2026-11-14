@@ -5340,19 +5340,29 @@ test('completed and paused tasks accept a bound natural follow-up in the same ch
   }
 });
 
-test('natural continuation preserves blocked drafts and follows the host gate instead of inferring permission from old run flags', async () => {
+test('a room that cannot continue yet still takes the message, and only a stale page or an archived room holds it back', async () => {
+  // Catches the composer refusing the user's words while the room waits (quota, a stop still being checked).
   const saved = withNaturalContinuation(restartSnapshot(), false, 'agent_quota_exhausted');
   saved.current_run.can_recover_native = true; saved.room.mode = 'native_project';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true, naturalContinuationSupport: true, route(request) {
     if (request.path.endsWith('/messages')) return saved;
   } });
   assert.equal(ui.get('composer').hidden, false); assert.equal(ui.get('message').disabled, false);
-  ui.type('额度恢复后接着做。'); assert.equal(ui.get('send').disabled, true); await ui.submit();
-  assert.equal(ui.posts().length, 0); assert.equal(ui.document.getElementById('recover-native'), null);
-  saved.continuation.can_send = true; saved.continuation.reason = null; await ui.poll();
-  assert.equal(ui.get('send').disabled, false); assert.equal(ui.get('message').value, '额度恢复后接着做。');
+  ui.type('额度恢复后接着做。'); assert.equal(ui.get('send').disabled, false);
+  assert.match(ui.get('composer-note').textContent, /可以先留言，能继续时会带给伙伴。$/);
+  assert.equal(ui.get('message').placeholder, '可以先留言，能继续时会带给伙伴');
+  assert.equal(ui.get('continue-current').disabled, true, 'continuing without a message is still not possible');
+  // A page showing an older run than the service has is refreshed first, never sent blind.
   saved.continuation.binding.digest = 'a'.repeat(64); await ui.poll(); await ui.submit(); assert.equal(ui.posts().length, 0);
-  saved.continuation.binding.digest = saved.current_run.digest; await ui.poll(); await ui.submit(); assert.equal(ui.posts().length, 1);
+  saved.continuation.binding.digest = saved.current_run.digest; await ui.poll();
+  assert.equal(ui.get('message').value, '额度恢复后接着做。'); await ui.submit();
+  assert.equal(ui.posts().length, 1); assert.match(ui.posts()[0].path, /\/messages/);
+  assert.equal(ui.document.getElementById('recover-native'), null);
+  saved.continuation.reason = 'room_archived'; await ui.poll();
+  ui.type('还在吗'); assert.equal(ui.get('send').disabled, true);
+  assert.doesNotMatch(ui.get('composer-note').textContent, /可以先留言/);
+  saved.continuation.can_send = true; saved.continuation.reason = null; await ui.poll();
+  assert.equal(ui.get('send').disabled, false);
 });
 
 test('a failed recovery request reports that attempt without denying a fresh host continuation capability', async () => {
@@ -7662,7 +7672,9 @@ test('plain composer replies retain the bound legacy answer route and the natura
   assert.equal(post.body.objective_id, saved.objective.id); assert.equal(post.body.run_id, saved.current_run.id);
   saved.continuation.can_send = false; saved.continuation.reason = 'agent_quota_exhausted';
   const blocked = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
-  blocked.type('保留未发出的回答'); assert.equal(blocked.get('send').disabled, true); assert.equal(blocked.posts().length, 0);
+  // The room cannot act on it yet, but the user's words are still taken (and kept by the service).
+  blocked.type('保留未发出的回答'); assert.equal(blocked.get('send').disabled, false); assert.equal(blocked.posts().length, 0);
+  assert.match(blocked.get('composer-note').textContent, /可以先留言，能继续时会带给伙伴。$/);
 });
 test('switching from expanded completed results to a question closes old results without hiding the original question', async () => {
   const saved = completedSuggestionFixture();
@@ -9029,10 +9041,14 @@ test('recipient continuation follows the host projection while preserving blocke
   saved.members[1].identity_uncertain = true;
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true,
     route(request) { if (request.path.endsWith('/messages')) return saved; } });
-  ui.type('只给健康伙伴的新要求'); assert.equal(ui.get('send').disabled, true);
+  // Sending is never refused; the note says whether the message goes out now or is kept for later.
+  ui.type('只给健康伙伴的新要求'); assert.equal(ui.get('send').disabled, false);
+  assert.match(ui.get('composer-note').textContent, /可以先留言/);
   await ui.choose('claude'); assert.equal(ui.get('send').disabled, false);
-  await ui.choose('codex'); assert.equal(ui.get('send').disabled, true);
-  await ui.choose('all'); assert.equal(ui.get('send').disabled, true);
+  assert.doesNotMatch(ui.get('composer-note').textContent, /可以先留言/);
+  await ui.choose('codex'); assert.equal(ui.get('send').disabled, false);
+  assert.match(ui.get('composer-note').textContent, /可以先留言/);
+  await ui.choose('all'); assert.equal(ui.get('send').disabled, false);
   await ui.choose('claude'); await ui.submit();
   const sent = ui.posts().filter((request) => request.path.endsWith('/messages'));
   assert.equal(sent.length, 1); assert.equal(sent[0].body.target, 'claude'); assert.equal(sent[0].body.text, '只给健康伙伴的新要求');
@@ -9049,8 +9065,14 @@ test('recipient projections never bypass a stale run binding and old hosts keep 
     }
     const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
     await ui.choose('claude'); ui.type('不能由前端猜测放行'); await ui.submit();
-    assert.equal(ui.get('send').disabled, true); assert.equal(ui.posts().length, 0);
-    assert.equal(ui.get('message').value, '不能由前端猜测放行');
+    if (stale) {
+      // A page behind the service's run sends nothing, whatever a recipient entry claims.
+      assert.equal(ui.get('send').disabled, true); assert.equal(ui.posts().length, 0);
+      assert.equal(ui.get('message').value, '不能由前端猜测放行');
+    } else {
+      // The host says it cannot continue yet: the message still goes to the host, which keeps it.
+      assert.equal(ui.posts().length, 1); assert.match(ui.posts()[0].path, /\/messages$/);
+    }
   }
 });
 
@@ -10501,7 +10523,8 @@ test('automatic quota handoff stays visible without a confirmation button and ac
   saved.continuation.can_send = false; saved.continuation.reason = 'team_cleanup_unconfirmed'; await ui.poll();
   ui.type('这条先留作草稿'); assert.match(ui.get('collaboration-outcome').textContent, /自动接手暂未完成.*执行或清理尚未确认/);
   assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /点击“继续”/);
-  assert.equal(ui.get('send').disabled, true); await ui.submit(); assert.equal(ui.posts().length, initialPosts + 2);
+  assert.equal(ui.get('send').disabled, false); assert.match(ui.get('composer-note').textContent, /可以先留言/);
+  assert.equal(ui.posts().length, initialPosts + 2);
   assert.equal(ui.get('message').value, '这条先留作草稿');
   saved.current_run.native_quota_handoff.source_job_id = 'old-unrelated-job'; await ui.poll();
   assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /自动接手暂未完成|正在自动核对/);

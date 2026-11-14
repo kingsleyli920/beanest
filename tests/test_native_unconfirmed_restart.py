@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import test_native_room_service as native
 from test_native_room_service import native_reply
@@ -83,7 +84,13 @@ class UnconfirmedRestartTests(unittest.IsolatedAsyncioTestCase):
                 later = self.fake.calls[before:]
                 self.assertTrue(later)
                 self.assertFalse(any(call["context"]["job"]["id"] in failed_ids for call in later), "an old call was replayed")
-                self.assertIsNone(later[0]["session_id"], "recovery starts fresh sessions")
+                # A partner whose calls in the ended run all finished keeps its
+                # session, and with it what it knows of the work.
+                sessions = {member["id"]: member["session_id"] for member in stopped["members"]}
+                ended_by = {job["provider"] for job in stopped["jobs"] if job["id"] in failed_ids}
+                kept = [call for call in later if call["agent"] not in ended_by]
+                self.assertTrue(all(call["session_id"] == sessions[call["agent"]] for call in kept),
+                                [(call["agent"], call["session_id"]) for call in kept])
                 abandoned = [event for event in final["events"] if event["kind"] == "native_unconfirmed_calls_abandoned"]
                 self.assertEqual(len(abandoned), 1)
                 self.assertFalse(abandoned[0]["old_calls_replayed"])
@@ -159,6 +166,87 @@ class UnconfirmedRestartTests(unittest.IsolatedAsyncioTestCase):
         final = await self.service.read_room(room_id)
         self.assertEqual(final["objective"]["status"], "complete", final["team"])
 
+    async def test_a_call_whose_process_was_never_confirmed_gone_still_lets_the_room_continue(self):
+        # Catches the room locking for good (continue and composer both
+        # refused, nothing in the app to resolve it) because one call's
+        # cleanup could not be confirmed. The specific recoveries still do
+        # not trust that call; the room restarts and says what is unknown.
+        fired, base = {"done": False}, type(self.fake).__call__
+        async def transport(adapter, prompt, cwd, session_id=None, timeout=None, **options):
+            context = json.loads(prompt.split("CONTEXT DATA:\n", 1)[1])
+            if context["job"]["job_phase"] == "work" and not fired["done"]:
+                fired["done"] = True
+                self.fake.failure = {"status": "failed", "failure_code": "cli_nonzero_exit", "cleanup_confirmed": False,
+                    "native_execution": {"permission": options["permission"], "tool_calls": 1, "tool_results": 1,
+                                         "cleanup_confirmed": False, "side_effects_possible": True, "exit_code": 1,
+                                         "duration_seconds": 0.01}}
+                try:
+                    return await base(self.fake, adapter, prompt, cwd, session_id=session_id, timeout=timeout, **options)
+                finally:
+                    self.fake.failure = None
+            return await base(self.fake, adapter, prompt, cwd, session_id=session_id, timeout=timeout, **options)
+        self.service.native_invoke = transport
+        self.record_work()
+        room_id = (await self.create())["room"]["id"]
+        await self.settle()
+        stopped = await self.service.read_room(room_id)
+        self.assertFalse(stopped["current_run"]["can_recover_native"])
+        self.assertTrue(stopped["continuation"]["can_send"], stopped["continuation"])
+        self.assertEqual(stopped["stop_kind"], "auto")
+        before = len(self.fake.calls)
+        await self.service.send_message(room_id, "Carry on.", "all", "after-unconfirmed-cleanup",
+                                        intent="continue", binding=stopped["continuation"]["binding"])
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        told = self.fake.calls[before]["context"]["objective"]["continuation"]["previous_stop"]
+        self.assertEqual([(call["phase"], call["process_may_still_be_running"]) for call in told["ended_calls"]], [("work", True)])
+        self.assertIn("process_may_still_be_running", self.fake.calls[before]["prompt"])
+
+    async def test_a_message_sent_while_no_partner_can_work_is_kept_and_reaches_the_next_run(self):
+        # Catches the composer refusing the user's words (and losing them)
+        # whenever the room cannot continue at that moment.
+        self.fail_once("work", "unknown_provider_error", "failed")
+        self.record_work()
+        room_id = (await self.create())["room"]["id"]
+        await self.settle()
+        stopped = await self.service.read_room(room_id)
+        binding = stopped["continuation"]["binding"]
+        calls = len(self.fake.calls)
+        with patch.object(self.service.store, "dispatchable_member_ids", return_value=[]):
+            blocked = await self.service.read_room(room_id)
+            self.assertEqual((blocked["continuation"]["can_send"], blocked["continuation"]["reason"]), (False, "no_available_partner"))
+            kept = await self.service.send_message(room_id, "Use the short variable name instead.", "all", "said-while-stopped",
+                                                   intent="continue", binding=binding)
+            again = await self.service.send_message(room_id, "Use the short variable name instead.", "all", "said-while-stopped",
+                                                    intent="continue", binding=binding)
+        held = [event for event in kept["events"] if event["kind"] == "message" and event.get("held")]
+        self.assertEqual([(event["sender"], event["text"], event["held_reason"]) for event in held],
+                         [("user", "Use the short variable name instead.", "no_available_partner")])
+        self.assertEqual(sum(event["kind"] == "message" and event.get("held") is True for event in again["events"]), 1,
+                         "sending the same request again keeps one copy")
+        self.assertEqual(len(self.fake.calls), calls, "nothing was dispatched while no partner could work")
+        ready = await self.service.read_room(room_id)
+        await self.service.send_message(room_id, "Carry on.", "all", "partners-back", intent="continue",
+                                        binding=ready["continuation"]["binding"])
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        told = self.fake.calls[calls]["context"]["objective"]["continuation"]["user_messages_while_stopped"]
+        self.assertEqual(told, [{"text": "Use the short variable name instead.", "to": "all"}])
+        self.assertIn("user_messages_while_stopped", self.fake.calls[calls]["prompt"])
+
+    async def test_a_message_to_an_archived_room_is_still_refused(self):
+        # Catches the kept-message path swallowing a message that has nowhere to go.
+        room_id = (await self.create())["room"]["id"]
+        await self.settle()
+        done = await self.service.read_room(room_id)
+        await self.service.set_room_lifecycle(room_id, "archive", "archive-it")
+        with self.assertRaises(native.RoomError) as refused:
+            await self.service.send_message(room_id, "Hello?", "all", "to-archived", intent="continue",
+                                            binding=done["continuation"]["binding"])
+        self.assertEqual(refused.exception.code, "room_archived")
+
     async def test_unknown_canonical_commit_is_never_abandoned(self):
         # Catches: restarting over a call whose commit outcome is unknown,
         # which could duplicate or hide an already published revision.
@@ -227,7 +315,7 @@ class KilledHostTests(unittest.IsolatedAsyncioTestCase):
         room_id, orphan = await self.kill_host_during_work()
         before = await self.service.read_room(room_id)
         self.assertEqual(before["team"]["stop_reason"], "service_restarted")
-        self.assertFalse(before["continuation"]["can_send"])
+        self.assertFalse(before["current_run"]["can_recover_native"])
         self.assertIsNone(orphan.poll(), "the cut-off call's process is still running")
         await self.host_passes(room_id, 3)
         self.assertEqual(orphan.wait(timeout=5), -9)
@@ -258,7 +346,13 @@ class KilledHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(orphan.poll())
         waiting = await self.service.read_room(room_id)
         self.assertFalse(waiting["current_run"]["can_recover_native"])
-        self.assertFalse(waiting["continuation"]["can_send"])
+        # The room is still not locked: it can restart, and the next partners
+        # are told that this call's process may still be running.
+        self.assertTrue(waiting["continuation"]["can_send"], waiting["continuation"])
+        cut_off = [job["id"] for job in waiting["jobs"] if job["error"] == "service_restarted"]
+        restart = self.service.store.native_recovery_requirements(room_id, generic=True)["unconfirmed_restart"]
+        self.assertEqual(restart["possibly_running_job_ids"], cut_off)
+        self.assertEqual(len(cut_off), 1)
 
     async def test_a_reused_process_id_is_never_ended(self):
         # Catches the new host killing an unrelated program that was later given the recorded ID.

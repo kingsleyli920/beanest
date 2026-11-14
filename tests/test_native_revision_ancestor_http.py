@@ -171,7 +171,10 @@ class NativeRevisionAncestorHTTPTests(unittest.TestCase):
         self.assertNotEqual(final['objective']['status'],'complete')
         self.assertEqual(sum(phase[:2]==('work','M2')for phase in self.phases),1)
 
-    def test_later_canonical_commit_cannot_be_authorized_by_an_ancestor(self):
+    def test_later_canonical_commit_cannot_be_authorized_by_an_ancestor_but_the_room_restarts(self):
+        # Catches an ancestor run's evidence authorizing the retained-work
+        # recovery after the shared files moved on, and the room being left
+        # with continue refused because that recovery no longer holds.
         _, _, empty = self.empty_plan_failure()
         room = empty['room']['id']
         project = self.service._project(room)
@@ -181,9 +184,28 @@ class NativeRevisionAncestorHTTPTests(unittest.TestCase):
         self.assertEqual(code,200,snapshot)
         self.assertFalse(snapshot['current_run']['can_recover_native'])
         self.assertEqual(snapshot['current_run']['native_recovery_reason'],'native_recovery_binding_changed')
+        self.assertTrue(snapshot['continuation']['can_send'], snapshot['continuation'])
         code, response = self.request('POST',f'/api/rooms/{room}/messages',self.continue_body(snapshot))
-        self.assertEqual(code,409,response)
-        self.assertEqual(len(self.native.calls),calls)
+        self.assertEqual(code,200,response)
+        final = self.settled(room)
+        later = [event for event in final['events'] if event['seq'] > snapshot['events'][-1]['seq']]
+        kinds = [event['kind'] for event in later]
+        self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'),1)
+        # The retained-work recovery did not run: no attestation, no transfer
+        # and no read-only inspection of the old private report.
+        self.assertEqual(kinds.count('native_partial_recovery_attestation'),0)
+        self.assertEqual(kinds.count('native_partial_inspection_group'),0)
+        self.assertEqual(len(self.inspections),0)
+        self.assertFalse(any(call['permission']=='read_only' for call in self.native.calls[calls:]))
+        abandoned = next(event for event in later if event['kind']=='native_unconfirmed_calls_abandoned')
+        self.assertEqual((abandoned['old_calls_replayed'],abandoned['old_commands_accepted']),(False,False))
+        self.assertEqual(abandoned['unowned_private_changes'],[{'provider':'claude','paths':['results/report.md']}])
+        # Nothing the ended calls said is carried: the fresh run plans again.
+        first = self.native.calls[calls]
+        self.assertEqual((first['context']['job']['job_phase'],first['context']['team']['tasks']),('plan',[]))
+        self.assertEqual(first['context']['objective']['continuation']['preserved_task_ids'],[])
+        self.assertEqual(final['objective']['status'],'complete',final['team'])
+        self.assertEqual(project.files_for_paths(['later.md'])[0]['content'],'A newer canonical version.\n')
 
     def test_frozen_current_D_cannot_drift_during_the_new_readonly_inspection(self):
         _, _, empty = self.empty_plan_failure()

@@ -183,6 +183,10 @@ class NativeHelpScopeHTTPTests(unittest.TestCase):
         return stopped
 
     def test_explicit_continue_carries_only_legacy_rejected_task_and_rejects_new_disk_escape(self):
+        # Catches the clean-scope retry (which carries the accepted tasks and
+        # re-opens only the rejected one) being approved over new private
+        # drift or without a called peer's private project; and, when that
+        # peer's project is not registered, the room refusing to continue.
         for fault, quota in (('none', 'unknown'), ('none', 'available'),
                              ('disk_escape', 'unknown'), ('missing_peer_state', 'unknown')):
             with self.subTest(continuation_fault=fault, peer_quota=quota):
@@ -210,17 +214,41 @@ class NativeHelpScopeHTTPTests(unittest.TestCase):
                 code, response = fixture.request('POST', f'/api/rooms/{fixture.room_id}/messages', {
                     'text': '继续原任务，保留已经通过的成果。', 'target': 'all', 'request_id': str(uuid4()),
                     'intent': 'continue', 'binding': stopped['continuation']['binding']})
-                if fault != 'none':
-                    self.assertEqual(code, 409, response)
-                    self.assertEqual(response['error'], 'native_recovery_workspace_unavailable'
-                                     if fault == 'missing_peer_state' else 'native_recovery_unpublished_changes')
-                    self.assertEqual(len(fixture.calls), calls)
-                    current = fixture.read()
-                    self.assertEqual(current['current_run']['id'], stopped['current_run']['id'])
-                    self.assertEqual(current['team']['stop_reason'], 'team_scope_conflict')
+                if fault == 'missing_peer_state':
+                    # No retry is approved without that project. The room restarts
+                    # instead: the rejected call is abandoned and the unreadable
+                    # project is told to the next run. (What that run then does
+                    # with a registration removed by hand is not asserted here.)
+                    self.assertEqual(code, 200, response)
+                    current = fixture.settled()
+                    kinds = [event['kind'] for event in current['events']]
+                    self.assertEqual(kinds.count('native_scope_retry_approved'), 0)
+                    abandoned = [event for event in current['events'] if event['kind'] == 'native_unconfirmed_calls_abandoned']
+                    self.assertEqual([(event['errors'], event['unowned_private_changes'], event['old_commands_accepted']) for event in abandoned],
+                                     [(['team_scope_conflict'], [{'provider': 'claude', 'unreadable': True}], False)])
+                    self.assertNotEqual(current['current_run']['id'], stopped['current_run']['id'])
+                    self.assertEqual({job['id']: (job['status'], job['error']) for job in current['jobs'] if job['id'] in old_jobs}, old_jobs)
+                    # Accepted work is neither redone nor re-versioned by the restart.
                     self.assertEqual({task['id']: (task['owner'], task['write_paths'], task['result_version'])
-                                      for task in current['team']['tasks']}, original)
-                    self.assertEqual({job['id']: (job['status'], job['error']) for job in current['jobs']}, old_jobs)
+                                      for task in current['team']['tasks'] if task['id'] in {'T1', 'T2'}},
+                                     {key: original[key] for key in ('T1', 'T2')})
+                    self.assertEqual((fixture.work_tasks.count('T1'), fixture.work_tasks.count('T2')), (1, 1))
+                elif fault != 'none':
+                    # An edit made after the stop is not what the retry approved, so
+                    # that retry is refused. The room restarts instead and the edit
+                    # is told to the next run as a private change nobody owns.
+                    self.assertEqual(code, 200, response)
+                    current = fixture.settled()
+                    kinds = [event['kind'] for event in current['events']]
+                    self.assertEqual(kinds.count('native_scope_retry_approved'), 0)
+                    abandoned = [event for event in current['events'] if event['kind'] == 'native_unconfirmed_calls_abandoned']
+                    self.assertEqual([(event['unowned_private_changes'], event['old_commands_accepted']) for event in abandoned],
+                                     [([{'provider': 'kimi', 'paths': ['README.md']}], False)])
+                    self.assertNotEqual(current['current_run']['id'], stopped['current_run']['id'])
+                    self.assertEqual({job['id']: (job['status'], job['error']) for job in current['jobs'] if job['id'] in old_jobs}, old_jobs)
+                    self.assertEqual({task['id']: (task['owner'], task['write_paths'], task['result_version'])
+                                      for task in current['team']['tasks'] if task['id'] in {'T1', 'T2'}},
+                                     {key: original[key] for key in ('T1', 'T2')})
                 else:
                     self.assertEqual(code, 200, response)
                     current = fixture.settled()

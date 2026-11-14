@@ -303,6 +303,8 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "新建的改稿只保存在豆窝，伙伴会互相审核；暂不运行代码或测试，不会改动现有项目。结果未确认的请求不会自动重发。": "New edits are saved only in Beanest and reviewed by partners. Code and tests are not run, and existing projects are unchanged. Requests with unconfirmed results are not resent automatically.",
   "先围绕你输入的内容讨论，不会自行改动你的项目或运行代码。伙伴会在本次目标范围内协作；没有新任务时不会调用模型。结果未确认的请求不会自动重发。": "Discuss what you enter first, without modifying your project or running code. Partners collaborate within this goal; no model is called without a new task. Requests with unconfirmed results are not resent automatically.",
   "先聊方案 · 不修改文件": "Plan first · No file changes",
+  "可以先留言，能继续时会带给伙伴": "Leave a message; partners get it once work can continue",
+  "{p0} 可以先留言，能继续时会带给伙伴。": "{p0} You can still leave a message; partners get it once work can continue.",
   "当前无法发送，原因见下方": "Cannot send now; see the reason below",
   "哪里还要调整？直接告诉伙伴": "What needs adjusting? Tell your partners",
   "补充要求，或说继续": "Add requirements or say continue",

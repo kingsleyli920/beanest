@@ -83,6 +83,14 @@ _AUTO_CONTINUE_BACKOFF_SECONDS = (60, 300, 900, 1800, 3600)
 _AUTO_CONTINUE_RETRY_SECONDS = 60
 
 
+# Reasons a blocked quota handoff resolves by itself once quota or a partner is back.
+_HANDOFF_WAITS = frozenset({"agent_quota_exhausted", "agent_quota_unconfirmed", "all_partners_quota_exhausted",
+                            "no_available_partner", "partner_receiver_busy"})
+# Refusals of a specific continuation after which the last-resort restart is tried.
+_GENERIC_RESTART_AFTER = frozenset({"team_cleanup_unconfirmed", "team_scope_conflict", "objective_restart_unsafe",
+                                    "objective_restart_unavailable", "session_identity_unknown", "native_changes_not_imported"})
+
+
 def _auto_continue_delay(repeats):
     if repeats <= 0:
         return _AUTO_CONTINUE_DELAY_SECONDS
@@ -1722,7 +1730,11 @@ class RoomService(RoomPromptMixin):
                 reason = "team_cleanup_unconfirmed"
         elif ((run.get("native_quota_handoff") or {}).get("state") in {"pending", "in_progress", "blocked"}
               and (run.get("native_quota_handoff") or {}).get("reason") != "cancelled"
-              and snapshot["room"]["status"] != "cancelled"):
+              and snapshot["room"]["status"] != "cancelled"
+              # A handoff blocked for anything but quota will not move by
+              # itself: the message must start the room, not wait behind it.
+              and ((run.get("native_quota_handoff") or {}).get("state") != "blocked"
+                   or (run.get("native_quota_handoff") or {}).get("reason") in _HANDOFF_WAITS)):
             action = "handoff-message"
         elif run.get("native_recovery_kind") == "host_nonwork_permission" and not pending:
             action = "recover-native"
@@ -1775,7 +1787,26 @@ class RoomService(RoomPromptMixin):
             reason = "no_available_partner"
         if action not in {"recover-native", "directed-objective"} and any(member["identity_uncertain"] for member in snapshot["members"] if member["id"] in dispatchable):
             reason = "session_identity_unknown"
+        if reason is not None and dispatchable and self._generic_restart_available(snapshot):
+            # Whatever refused the usual way on: an idle stopped room can always
+            # abandon its ended calls and start again with the facts.
+            action, reason = "recover-native", None
         return {"can_send": reason is None, "reason": reason, "binding": binding, "action": action}
+
+    def _generic_restart_available(self, snapshot):
+        """Whether the last-resort restart can start now; judged once per snapshot."""
+        if "generic_restart_available" not in snapshot:
+            objective, team = snapshot.get("objective") or {}, snapshot.get("team") or {}
+            room_id = snapshot["room"]["id"]
+            idle = not (room_id in self._captures or any(room == room_id and not worker.done()
+                                                         for (room, _), worker in self._workers.items()))
+            available = (idle and snapshot["room"]["mode"] == "native_project" and snapshot["room"]["lifecycle_state"] == "active"
+                         and objective.get("status") in {"stopped", "interrupted"}
+                         and team.get("phase") in {"stopped", "unknown", "interrupted", "cancelled"}
+                         and not any(item["status"] in {"queued", "working"} for item in snapshot["jobs"] + snapshot["executions"])
+                         and self.store.native_recovery_requirements(room_id, generic=True)["unconfirmed_restart"] is not None)
+            snapshot["generic_restart_available"] = bool(available)
+        return snapshot["generic_restart_available"]
 
     def _directed_native_recovery_reason(self, snapshot):
         reason = snapshot["current_run"].get("native_recovery_reason")
@@ -2149,12 +2180,20 @@ class RoomService(RoomPromptMixin):
         """A user-authorized fresh-session attempt, never a replay of an unknown call."""
         if source != "user":
             raise RoomError("user_native_permission_required")
-        return await self._recover_native(room_id, request_id, run_id=run_id, revision=revision, digest=digest,
-            user_message=user_message, source=source, _request_identity=_request_identity,
-            _runtime_update=_runtime_update, _message_target=_message_target)
+        options = dict(run_id=run_id, revision=revision, digest=digest, user_message=user_message, source=source,
+                       _request_identity=_request_identity, _runtime_update=_runtime_update, _message_target=_message_target)
+        try:
+            return await self._recover_native(room_id, request_id, **options)
+        except RoomError as error:
+            # A specific recovery that turned out not to hold (its evidence
+            # moved, its audit refused) never leaves the room stopped: the
+            # ended calls are abandoned instead and nothing from them is used.
+            if not (error.code.startswith("native_recovery_") or error.code in _GENERIC_RESTART_AFTER):
+                raise
+            return await self._recover_native(room_id, request_id, **options, _generic=True)
 
     async def _recover_native(self, room_id, request_id, *, run_id, revision, digest, user_message=None, source="user",
-                              _request_identity=None, _runtime_update=None, _message_target="all"):
+                              _request_identity=None, _runtime_update=None, _message_target="all", _generic=False):
         self._available()
         if user_message is not None:
             user_message = _visible(checked_message(user_message))
@@ -2170,9 +2209,14 @@ class RoomService(RoomPromptMixin):
             directed_followup = (user_message is not None and _message_target not in {"all", "both"}
                 and snapshot["team"]["phase"] in {"stopped", "unknown", "interrupted"})
             reason = self._directed_native_recovery_reason(snapshot) if directed_followup else current["native_recovery_reason"]
-            if reason:
-                raise RoomError(reason)
-            quota_failure = current.get("native_quota_failure")
+            generic = False
+            if reason or _generic:
+                # Only the user's own continue, or the host pressing it for
+                # them, abandons calls. The host's quota handoff never does.
+                if source != "user" or not self._generic_restart_available(snapshot):
+                    raise RoomError(reason or "native_recovery_unavailable")
+                generic, directed_followup = True, False
+            quota_failure = None if generic else current.get("native_quota_failure")
             quota_returned = []
             if quota_failure and self._quota_source_back(snapshot, quota_failure["provider"], quota_failure["source_job_id"]):
                 quota_returned, quota_failure = [quota_failure["provider"]], None
@@ -2193,10 +2237,10 @@ class RoomService(RoomPromptMixin):
                 snapshot = self._snapshot(room_id)
                 self._expected_run(snapshot, **binding)
                 runtime_change = self._checked_runtime_change(snapshot, **_runtime_update)
-            receivers = ({} if directed_followup else self._partial_recovery_receivers(snapshot, blocked=quota_blocked))
-            if self.store.native_partial_recovery_candidates(room_id) and receivers is None:
+            receivers = ({} if directed_followup or generic else self._partial_recovery_receivers(snapshot, blocked=quota_blocked))
+            if not generic and self.store.native_partial_recovery_candidates(room_id) and receivers is None:
                 raise RoomError("agent_quota_exhausted")
-            help_candidate = self.store.native_help_repair_candidate(room_id)
+            help_candidate = None if generic else self.store.native_help_repair_candidate(room_id)
             if help_candidate:
                 help_repair = self._audit_native_help_repair(snapshot, help_candidate)
                 if any(file["owner"] in quota_blocked for file in help_repair["metadata"]["files"]):
@@ -2206,7 +2250,8 @@ class RoomService(RoomPromptMixin):
             else:
                 help_repair = None
             operation = (None if help_repair else
-                         asyncio.create_task(asyncio.to_thread(self._audit_native_recovery, snapshot, receivers, fresh_quota=True)))
+                         asyncio.create_task(asyncio.to_thread(self._audit_native_recovery, snapshot, receivers,
+                                                               fresh_quota=True, generic=generic)))
             try:
                 if operation:
                     await asyncio.wait({operation})
@@ -2227,6 +2272,9 @@ class RoomService(RoomPromptMixin):
             self._expected_run(self._snapshot(room_id), run_id, revision, digest)
             actual = {file["path"]: file for file in snapshot["project"]["files"]}
             files = self.store.run_result_files(room_id, run_id, include_provenance=True)
+            if generic:
+                # The new run starts from the shared files as they are now.
+                files = [file for file in files if actual.get(file["path"], {}).get("sha256") == file["sha256"]]
             if any(actual.get(file["path"], {}).get("sha256") != file["sha256"] for file in files):
                 raise RoomError("native_recovery_binding_changed")
             baseline = {**binding, "files": files, "verified": True}
@@ -2293,7 +2341,7 @@ class RoomService(RoomPromptMixin):
                                           help_repair=help_repair,
                                           quota_blocked=quota_blocked, ownership_files=ownership_files, user_message=user_message,
                                           request_identity=_request_identity, runtime_change=runtime_change, message_target=_message_target,
-                                          directed_followup=directed_followup, recovery_source=source,
+                                          directed_followup=directed_followup, recovery_source=source, generic=generic,
                                           quota_returned=quota_returned)
             except BaseException:
                 for provider, prepared in receiver_workspaces.items():
@@ -2600,8 +2648,8 @@ class RoomService(RoomPromptMixin):
                    "trees": trees, "evidence": native_workspace.tree_signature(evidence)}
         return hashlib.sha256(json.dumps(records, sort_keys=True, default=str).encode()).hexdigest()
 
-    def _audit_native_recovery(self, snapshot, receivers=None, *, fresh_quota=False):
-        requirements = self.store.native_recovery_requirements(snapshot["room"]["id"])
+    def _audit_native_recovery(self, snapshot, receivers=None, *, fresh_quota=False, generic=False):
+        requirements = self.store.native_recovery_requirements(snapshot["room"]["id"], generic=generic)
         legacy, review = requirements["legacy"], requirements["review"]
         attestation = self._legacy_native_recovery_attestation(snapshot["room"]["id"], legacy) if legacy else None
         if review:
@@ -2630,7 +2678,9 @@ class RoomService(RoomPromptMixin):
             retained = retained_by_provider.get(member["id"])
             if state is None:
                 if member["id"] in called:
-                    raise RoomError("native_recovery_workspace_unavailable")
+                    if not abandoning:
+                        raise RoomError("native_recovery_workspace_unavailable")
+                    unowned.append({"provider": member["id"], "unreadable": True})
                 continue
             try:
                 archive = state.get("partial_archive")
@@ -4334,7 +4384,8 @@ class RoomService(RoomPromptMixin):
         if identity is not None and self.store.natural_message_seen(room_id, request_id, identity):
             return self._snapshot(room_id)
         try:
-            return await self._send_message(room_id, text, target, request_id, source, intent, binding, update, identity)
+            return self._after_message(room_id,
+                await self._send_message(room_id, text, target, request_id, source, intent, binding, update, identity))
         except RoomError:
             # The user wrote against the state they saw. When the host's own
             # automatic continue moved the room on in the meantime, the message
@@ -4345,7 +4396,24 @@ class RoomService(RoomPromptMixin):
             current = self._natural_continuation(self._snapshot(room_id), target=target)
             if current is None:
                 raise
-            return await self._send_message(room_id, text, target, request_id, source, intent, current["binding"], update, identity)
+            return self._after_message(room_id,
+                await self._send_message(room_id, text, target, request_id, source, intent, current["binding"], update, identity))
+
+    def _after_message(self, room_id, snapshot):
+        """A message that got a run going also carries what was said while the room could not continue."""
+        if self.store.deliver_held_messages(room_id):
+            return self._snapshot(room_id)
+        return snapshot
+
+    def _hold_message(self, snapshot, text, target, request_id, source, reason, identity):
+        """The user's words are never refused because the room cannot continue
+        right now: they are kept, shown, and handed to the next run. An
+        archived room is the one place a message has nowhere to go."""
+        if source != "user" or reason == "room_archived" or snapshot["room"]["lifecycle_state"] != "active":
+            raise RoomError(reason)
+        checked_target(target, tuple(member["id"] for member in snapshot["members"]))
+        self.store.hold_user_message(snapshot["room"]["id"], text, target, request_id, reason, request_identity=identity)
+        return self._snapshot(snapshot["room"]["id"])
 
     async def _send_message(self, room_id, text, target, request_id, source, intent, binding, update, identity):
         if intent is not None:
@@ -4354,7 +4422,7 @@ class RoomService(RoomPromptMixin):
             if continuation is None or continuation["binding"] != binding:
                 raise RoomError("team_run_conflict")
             if not continuation["can_send"]:
-                raise RoomError(continuation["reason"])
+                return self._hold_message(snapshot, text, target, request_id, source, continuation["reason"], identity)
             checked_target(target, tuple(member["id"] for member in snapshot["members"]))
             action = continuation["action"]
             if action == "handoff-message":
@@ -4381,7 +4449,7 @@ class RoomService(RoomPromptMixin):
                 self._expected_run(snapshot, **binding)
                 continuation = self._natural_continuation(snapshot, target=target)
                 if not continuation["can_send"]:
-                    raise RoomError(continuation["reason"])
+                    return self._hold_message(snapshot, text, target, request_id, source, continuation["reason"], identity)
                 action = continuation["action"]
                 quota_recovered = self._recovered_quota_members(snapshot)
             else:
@@ -4402,9 +4470,9 @@ class RoomService(RoomPromptMixin):
         room_id = snapshot["room"]["id"]
         if target not in {"all", "both"} and action in {"restart-objective", "followup-objective"}:
             action = "directed-objective"
+        recover = dict(user_message=text, _request_identity=identity, _runtime_update=runtime_update, _message_target=target)
         if action == "recover-native":
-            return await self.recover_native(room_id, request_id, **binding, user_message=text,
-                                             _request_identity=identity, _runtime_update=runtime_update, _message_target=target)
+            return await self.recover_native(room_id, request_id, **binding, **recover)
         extra = {"user_message": text, "_request_identity": identity, "_runtime_update": runtime_update, "_message_target": target}
         if action == "answer":
             extra = {"text": text, "_request_identity": identity, "_runtime_update": runtime_update, "_message_target": target}
@@ -4412,7 +4480,16 @@ class RoomService(RoomPromptMixin):
             extra["objective_id"] = snapshot["objective"]["id"]
         if action in {"objective", "restart-objective", "directed-objective"}:
             extra["execution_policy"] = {"mode": "autonomous"}
-        return await self.objective_action(room_id, action, request_id, **binding, **extra)
+        try:
+            return await self.objective_action(room_id, action, request_id, **binding, **extra)
+        except RoomError as error:
+            # A restart whose own audit refused (private edits it cannot place,
+            # a session it cannot vouch for) falls back the same way a refused
+            # recovery does, instead of leaving the room where it was.
+            if (action not in {"restart-objective", "directed-objective"}
+                    or not (error.code.startswith("native_recovery_") or error.code in _GENERIC_RESTART_AFTER)):
+                raise
+            return await self._recover_native(room_id, request_id, **binding, **recover, _generic=True)
 
     @staticmethod
     def _expected_run(snapshot, run_id, revision, digest):
@@ -5178,6 +5255,7 @@ class RoomService(RoomPromptMixin):
         except RoomError:
             return
         self.store.note_auto_continued(room_id, fingerprint, code, run_id)
+        self.store.deliver_held_messages(room_id)
 
     def _schedule_quota_wait(self, room_id, snapshot):
         """Every partner out of quota is a wait, not the end of the objective."""
@@ -5272,6 +5350,7 @@ class RoomService(RoomPromptMixin):
         except RoomError:
             return  # Still exhausted, or the room changed; a later recheck decides again.
         self.store.note_quota_wait_resumed(room_id, run_id)
+        self.store.deliver_held_messages(room_id)
 
     def _usage_known(self, provider):
         try:
@@ -5759,12 +5838,13 @@ class RoomService(RoomPromptMixin):
 
     @staticmethod
     def _tolerated_free_paths(job, free, leftover):
-        """Free files that stay changed in the private tree without failing
-        the call. A call that publishes nothing (a plan, a review, a
-        checkpoint) is never failed for one. A work or help call is not failed
-        for one an earlier call left there; what it changed itself is its
+        """Changed files that stay in the private tree without failing the
+        call. What was already changed when the call began (leftover) is never
+        held against it, whoever's task names the file. Beyond that, a call
+        that publishes nothing (a plan, a review, a checkpoint) is not failed
+        for a file nobody holds; a work or help call's own new change is its
         task's (granted above) or its proposal (a helper keeps its own path)."""
-        return set(free) & leftover if job["team"]["job_phase"] in {"work", "help"} else set(free)
+        return leftover if job["team"]["job_phase"] in {"work", "help"} else set(free) | leftover
 
     def _grant_free_paths(self, job, parsed, task, allowed, free):
         """A work call's free files join its task, as the call's own extend
@@ -6818,6 +6898,9 @@ class RoomService(RoomPromptMixin):
                 self._schedule_quota_handoff(room["id"])
                 self._schedule_quota_wait(room["id"], snapshot)
             self._confirm_late_cleanup(room["id"], snapshot)
+            if active:
+                # However the room got going again (a button, another client).
+                self.store.deliver_held_messages(room["id"])
             self._settle_clean_stop(room["id"])
             if active:
                 self._schedule_auto_continue(room["id"], self.store.snapshot(room["id"]))

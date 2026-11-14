@@ -635,7 +635,7 @@ Object.assign(window.BeanestI18nEnglish, {
   "任务清单还有未确认的交付，尚不能验收。": "Some deliveries on the task board are unconfirmed; acceptance is pending.",
   "任务的修改范围或文件负责人冲突，需要重新确认分工。": "Task scopes or file owners conflict. The work needs to be reassigned.",
   "任务约定的交付尚未齐全，当前不能验收。": "The agreed deliveries are incomplete; acceptance is pending.",
-  "伙伴连续几次给出相同的证据或没有变化的结果，已暂停，免得空转。": "Partners kept returning the same evidence or unchanged results, so work is paused to avoid looping.",
+  "伙伴连续几次给出相同的结果，推进停了一下。豆窝会把这个情况告诉伙伴，稍后自动再试。": "Partners kept returning the same result, so work paused briefly. Beanest tells them so and retries by itself later.",
   "伙伴回复不符合协作协议，未接受这次交付。": "The partner's reply did not follow the collaboration protocol. This delivery was not accepted.",
   "伙伴尚未提交可执行的任务清单，协作已停止。": "No actionable task board was submitted. Collaboration has stopped.",
   "伙伴提交的任务操作无效，协作已停止。": "The submitted task operations were invalid. Collaboration has stopped.",

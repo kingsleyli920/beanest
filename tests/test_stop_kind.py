@@ -62,6 +62,23 @@ class StopKindTest(unittest.TestCase):
         self.assertIsNone(service()._stop_kind(snapshot(**block, tasks=[host, question]), None))
         self.assertEqual(service(repeated=True)._stop_kind(snapshot(**block, tasks=[host]), None), "auto")
 
+    def test_a_block_the_partners_resolve_resumes_by_itself_and_a_question_for_the_user_does_not(self):
+        # Catches: a technical, external or uncategorised block shown as waiting for the user,
+        # and a user decision or permission block shown as continuing by itself.
+        block = dict(status="needs_user", phase="working", reason=None, origin="task_block")
+        for cause in ("technical", "external_dependency", "unclassified", "coordination_required"):
+            task = {"status": "blocked", "block_cause": cause, "blocked_reason": "The service is not reachable."}
+            self.assertEqual(service()._stop_kind(snapshot(**block, tasks=[task]), None), "auto", cause)
+        for cause in ("user_decision", "permission_required"):
+            task = {"status": "blocked", "block_cause": cause, "blocked_reason": "May I delete the old export?"}
+            self.assertIsNone(service()._stop_kind(snapshot(**block, tasks=[task]), None), cause)
+
+    def test_a_timed_out_call_and_repeated_results_are_continued_by_the_host(self):
+        # Catches: one call running out of time, or the partners repeating themselves, being
+        # presented as a stop the user must resolve.
+        for reason in ("deadline_exceeded", "budget_exhausted", "objective_no_progress"):
+            self.assertEqual(service()._stop_kind(snapshot(reason=reason), RESTART), "auto", reason)
+
     def test_the_list_shows_an_automatic_continue_only_after_the_room_read_judged_the_same_stop(self):
         # The list poll never runs the full read, so it cannot see whether the continue can be sent.
         value, listed = service(), snapshot()

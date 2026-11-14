@@ -121,7 +121,10 @@ class TechnicalBlockNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(event["helper"] is None for event in events))
         self.assertFalse(any(call["context"]["job"]["job_phase"] == "help" for call in self.fake.calls))
 
-    async def test_same_file_evidence_stops_repeated_blocks_despite_new_wording(self):
+    async def test_same_file_evidence_hands_repeated_blocks_to_the_team_despite_new_wording(self):
+        # Catches: three technical blocks with unchanged files stopped the objective as
+        # objective_no_progress and left it for the user. Now the third one is handed to the team
+        # to replan; here nobody proposes anything, so the plan stalls and the host continues it.
         original, count = self.handler, []
         def handler(agent, context, cwd):
             phase = context["job"]["job_phase"]
@@ -140,11 +143,20 @@ class TechnicalBlockNativeTests(unittest.IsolatedAsyncioTestCase):
         final = await self.service.read_room(created["room"]["id"])
         self.assertEqual(len(count), 3)
         self.assertEqual(len(set(count)), 3)
-        self.assertEqual(final["objective"]["stop_reason"], "objective_no_progress")
+        self.assertEqual(final["objective"]["stop_reason"], "team_plan_stalled")
+        self.assertEqual(final["stop_kind"], "auto")
+        self.assertEqual(len([event for event in final["events"] if event["kind"] == "technical_block_continued"]), 2)
+        self.assertEqual(len([event for event in final["events"] if event["kind"] == "internal_replan_started"]), 1)
+        self.assertEqual((final["team"]["tasks"][0]["status"], final["team"]["tasks"][0]["block_cause"]), ("blocked", "technical"))
         self.assertEqual(final["team"]["tasks"][0]["result_version"], 0)
+        self.assertFalse(any(event.get("code") == "objective_no_progress" for event in final["events"]))
         self.assertFalse(any(event["kind"] == "objective_decision_required" for event in final["events"]))
 
-    async def test_explicit_human_causes_and_legacy_unknown_are_not_guessed_from_reason_text(self):
+    async def test_only_explicit_human_causes_wait_for_the_user_and_none_is_guessed_from_reason_text(self):
+        # Catches: guessing the cause from the reason's wording; a user decision or permission block
+        # not waiting for the user; and an external or uncategorised block still becoming a question
+        # for the user instead of going back to the team (here the team proposes nothing, so the
+        # plan stalls, which the host continues by itself).
         original = self.handler
         for cause in ("user_decision", "permission_required", "external_dependency", None):
             with self.subTest(cause=cause):
@@ -158,7 +170,12 @@ class TechnicalBlockNativeTests(unittest.IsolatedAsyncioTestCase):
                 created = await self.create()
                 await self.settle()
                 final = await self.service.read_room(created["room"]["id"])
-                self.assertEqual(final["objective"]["status"], "needs_user")
+                if cause in ("user_decision", "permission_required"):
+                    self.assertEqual((final["objective"]["status"], final["stop_kind"]), ("needs_user", None))
+                else:
+                    self.assertEqual((final["objective"]["status"], final["objective"]["stop_reason"], final["stop_kind"]),
+                                     ("stopped", "team_plan_stalled", "auto"))
+                    self.assertFalse(any(event["kind"] == "objective_decision_required" for event in final["events"]))
                 self.assertEqual(final["team"]["tasks"][0]["block_cause"], cause or "unclassified")
                 self.assertEqual(final["team"]["tasks"][0]["status"], "blocked")
                 self.assertEqual(final["room"]["runtime_settings"]["permission"], "full_access")

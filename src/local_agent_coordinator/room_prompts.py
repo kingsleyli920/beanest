@@ -32,16 +32,31 @@ IMPLEMENTER_RULE = (
 _BLOCK_PROTOCOL = (
     IMPLEMENTER_RULE +
     "A block requires reason and cause: technical, coordination_required, user_decision, permission_required or external_dependency. "
+    "Only two causes go to the user, and the task waits for the answer while the rest of the board keeps moving: "
+    "user_decision for a specific unresolved choice that is the user's to make, and permission_required for a new "
+    "permission only the user can grant; state the exact question. Every other block comes back to the team, never "
+    "to the user: you and your peers judge it, replan, hand the work to someone else or try another way. "
     "Use technical for an implementation, test or environment failure that can be investigated within the current "
     "goal and permissions; the host will seek peer help or resume the owner for diagnosis, not ask the user to "
-    "choose routine engineering steps. Use coordination_required only to request internal replanning within the "
+    "choose routine engineering steps. Use coordination_required to request internal replanning within the "
     "existing goal and permissions: the work needs a file another unfinished task holds, or must be split differently; "
-    "it grants no file access. A file no unfinished task holds needs no replanning: extend your own task with it. The plan author must propose concrete work, "
-    "members confirm the exact revised plan, and the new tasks then go to the shared pool. Use the other causes only for a specific unresolved business choice, "
-    "new permission, or a concrete missing external condition, with the relevant evidence. A cause label never "
+    "it grants no file access. A file no unfinished task holds needs no replanning: extend your own task with it. "
+    "Use external_dependency for a concrete missing external condition, with the relevant evidence; it is replanned "
+    "the same way, so the team can work around it, reorder the work or substitute for it. In a replan the plan author must propose concrete work, "
+    "members confirm the exact revised plan, and the new tasks then go to the shared pool. A cause label never "
     "overrides a user prohibition, withdrawn work, ownership or frozen permissions. Do not relabel a host safety "
-    "failure as technical to bypass it. Repeated blockers with unchanged file/result evidence stop as no progress. "
+    "failure as technical to bypass it. The host does not decide for you that work is stuck: when the same blocker, "
+    "help request or review verdict returns with unchanged file/result evidence, it says so in "
+    "context.objective.repeated_results and then hands the task back to the team for replanning. "
 )
+
+REPEATED_RESULTS_INSTRUCTION = (
+    " The same outcome has come back more than once with nothing new to show for it. "
+    "context.objective.repeated_results lists each case in this run and "
+    "context.objective.continuation.repeated_results those of the run before it, with the task and how many times. "
+    "These are facts, not a verdict; the user is not asked. Do not send the same thing again: change the approach, "
+    "replan so another partner takes the step, accept what is already good enough, or block with user_decision "
+    "only when a real choice belongs to the user. ")
 
 
 MID_RUN_ADJUSTMENT_INSTRUCTION = (
@@ -645,6 +660,12 @@ class RoomPromptMixin:
                 protocol += (" Before the previous run stopped, the user added the request in "
                              "context.objective.continuation.carried_user_request to this goal. "
                              "It is still part of the acceptance scope. ")
+            if carried.get("user_messages_while_stopped"):
+                protocol += (" context.objective.continuation.user_messages_while_stopped are messages the user sent "
+                             "while this room could not continue. They are the user's current instructions for this "
+                             "goal: act on them, and answer what they ask. ")
+            if snapshot["objective"].get("repeated_results") or carried.get("repeated_results"):
+                protocol += REPEATED_RESULTS_INSTRUCTION
             if carried.get("previous_stop"):
                 protocol += (" The previous run ended before its calls reported a result; "
                              "context.objective.continuation.previous_stop says which calls ended and why. "
@@ -652,6 +673,10 @@ class RoomPromptMixin:
                              "done: inspect the current files and state, keep what is good, and redo or reassign the rest. "
                              "A call marked may_have_acted_outside_private_tree may have changed things outside its "
                              "private project (commits, pushes, external files): check before repeating such a step. "
+                             "A call marked process_may_still_be_running was not confirmed to have exited: its partner "
+                             "looks for that process and ends it before touching the same files. "
+                             "shared_commit_unconfirmed means the last publish to the shared files may or may not have "
+                             "landed: read the current files instead of assuming either. "
                              "unowned_private_changes lists files a partner changed in its private project that no "
                              "task owns; that partner decides: add the file to its task with extend to publish it, "
                              "or restore it. ")
