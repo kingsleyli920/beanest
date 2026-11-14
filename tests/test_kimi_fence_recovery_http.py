@@ -276,8 +276,17 @@ class KimiFenceRecoveryHTTPTests(unittest.TestCase):
                     count = len(fixture.native_calls)
                     code, changed = fixture.request('GET', f'/api/rooms/{fixture.room_id}')
                     self.assertEqual(code, 200)
-                    self.assertFalse(changed['current_run']['can_recover_native'])
-                    self.assertNotEqual(fixture.recover(changed)[0], 200)
+                    if mutation == 'cleanup_confirmed':
+                        # A process that may still be running keeps the room waiting.
+                        self.assertFalse(changed['current_run']['can_recover_native'])
+                        self.assertNotEqual(fixture.recover(changed)[0], 200)
+                    else:
+                        # Evidence that no longer proves the old call never selects the
+                        # recovery that would trust it; the room may still abandon that
+                        # call and start fresh, accepting nothing from it.
+                        self.assertIsNone(fixture.service.store.native_recovery_requirements(fixture.room_id)['fenced'])
+                        self.assertEqual((changed['current_run']['native_recovery_kind'], changed['current_run']['can_recover_native']),
+                                         ('unconfirmed_restart', True))
                     self.assertEqual(len(fixture.native_calls), count)
                 finally:
                     with fixture.service.store._connection(write=True) as db:
@@ -307,10 +316,11 @@ class KimiFenceRecoveryHTTPTests(unittest.TestCase):
             with fixture.service.store._connection(write=True) as db:
                 db.execute('UPDATE events SET value_json=? WHERE room_id=? AND seq=?', (json.dumps(changed_event), fixture.room_id, event_seq))
             _, changed = fixture.request('GET', f'/api/rooms/{fixture.room_id}')
-            self.assertFalse(changed['current_run']['can_recover_native'])
-            count = len(fixture.native_calls)
-            self.assertNotEqual(fixture.recover(changed)[0], 200)
-            self.assertEqual(len(fixture.native_calls), count)
+            # The receipt no longer names this call: the recovery that trusted it
+            # is gone, and only abandoning the call for a fresh start remains.
+            self.assertIsNone(fixture.service.store.native_recovery_requirements(fixture.room_id)['fenced'])
+            self.assertEqual((changed['current_run']['native_recovery_kind'], changed['current_run']['can_recover_native']),
+                             ('unconfirmed_restart', True))
         finally:
             with fixture.service.store._connection(write=True) as db:
                 db.execute('UPDATE events SET value_json=? WHERE room_id=? AND seq=?', (original_event, fixture.room_id, event_seq))

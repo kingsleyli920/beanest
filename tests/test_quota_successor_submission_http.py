@@ -245,17 +245,25 @@ class QuotaSuccessorSubmissionHTTPTests(unittest.TestCase):
         self.assertTrue(any(job['error'] == 'team_assignment_changed' for job in final['jobs']))
         self.assertNotEqual(final['objective']['status'], 'complete')
 
-    def test_peer_review_cannot_publish_outside_owner_scope(self):
+    def test_a_peer_review_that_also_wrote_a_free_file_publishes_nothing_and_is_not_failed(self):
+        # Catches a review publishing a file, and catches the review (and the
+        # team with it) being failed because the reviewer wrote a file nobody
+        # holds in its own private project.
         fixture = self.fixture(review_outside=True)
         fixture.create()
         fixture.wait(lambda value: fixture.review_started.is_set())
         final = fixture.settled()
-        self.assertNotEqual(final['objective']['status'], 'complete')
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
         project = fixture.service._project(fixture.room_id).snapshot()
-        self.assertEqual({item['path']: (item['sha256'], item['owner']) for item in project['files']},
-                         fixture.review_canonical_files)
+        published = {item['path']: (item['sha256'], item['owner']) for item in project['files']}
+        # The reviewer later did its own task; the file it wrote while
+        # reviewing must not ride along with that task either.
+        self.assertEqual(sorted(published), ['final.md', 'first.md', 'second.md'])
+        self.assertEqual({name: published[name] for name in fixture.review_canonical_files}, fixture.review_canonical_files)
         self.assertEqual((fixture.source / 'README.md').read_bytes(), fixture.original_readme)
-        self.assertNotEqual(next(item for item in final['team']['tasks'] if item['id'] == 'T2')['status'], 'accepted')
+        tasks = {item['id']: item for item in final['team']['tasks']}
+        self.assertEqual(tasks['T2']['status'], 'accepted')
+        self.assertEqual(tasks['T3']['write_paths'], ['final.md'])
 
 
     def legacy_stopped(self, **options):

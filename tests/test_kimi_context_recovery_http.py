@@ -353,7 +353,16 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
                         else:
                             db.execute("UPDATE team_jobs SET phase='work' WHERE job_id=?", (fixture.failed_plan['job_id'],))
                 code, value = fixture.continue_http(stopped)
-                self.assertEqual(code, 409, value)
-                self.assertEqual(len(fixture.calls), calls)
-                self.assertEqual(fixture.read()['current_run']['id'], stopped['current_run']['id'])
+                if fault in {'effects', 'phase'}:
+                    # The record no longer proves a context-limit failure, so that
+                    # attestation is not used. The call is abandoned instead and a
+                    # fresh run starts, accepting nothing from it.
+                    self.assertEqual(code, 200, value)
+                    kinds = [event['kind'] for event in fixture.settled()['events']]
+                    self.assertNotIn('native_context_limit_handoff', kinds)
+                    self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+                else:
+                    self.assertEqual(code, 409, value)
+                    self.assertEqual(len(fixture.calls), calls)
+                    self.assertEqual(fixture.read()['current_run']['id'], stopped['current_run']['id'])
                 fixture.close()

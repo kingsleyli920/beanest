@@ -365,9 +365,22 @@ class NativeNonworkHintsHTTPTests(unittest.TestCase):
                 for file in self.service._project(self.room_id).files_for_paths(list(DOCS)):
                     self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
 
+    def test_a_call_that_publishes_nothing_is_not_failed_for_a_free_file_it_left_changed(self):
+        # Catches a coordinate call, and with it the team, failing because the
+        # partner edited a file nobody holds in its private project. Nothing
+        # from that edit may reach the shared files.
+        self.hold_claude = False
+        self.violation, self.hinted_jobs = "private_D", []
+        self.create()
+        final = self.wait(lambda value: value["objective"]["status"] == "complete")
+        self.assertEqual(len(self.hinted_jobs), 1)
+        self.assertFalse(any(job["error"] for job in final["jobs"]))
+        for file in self.service._project(self.room_id).files_for_paths(list(DOCS)):
+            self.assertEqual(file["content"], "Existing canonical " + file["path"] + ".\n")
+
     def test_nonwork_hints_cannot_hide_disk_json_or_resolution_changes(self):
         self.hold_claude = False
-        expected = {"private_D": "native_changes_not_imported", "json_files": "native_json_files_forbidden",
+        expected = {"json_files": "native_json_files_forbidden",
                     "json_edits": "native_json_files_forbidden", "resolved": "team_scope_conflict"}
         for violation, code in expected.items():
             with self.subTest(violation=violation):

@@ -1,4 +1,5 @@
 """Last-resort recovery: a proven-dead unconfirmed call never leaves a dead end."""
+import asyncio
 import json
 from pathlib import Path
 import unittest
@@ -89,22 +90,72 @@ class UnconfirmedRestartTests(unittest.IsolatedAsyncioTestCase):
                     # The interrupted owner's partial bytes stayed for it to finish.
                     self.assertEqual(seen[-1][1], "VALUE = 2\n")
 
-    async def test_unpublished_change_outside_every_unfinished_owner_path_still_refuses(self):
-        # Catches: the fallback quietly carrying or discarding an unrelated
-        # private edit that no resumed task authorizes.
-        self.fail_once("work", "native_no_progress", "failed")
+    async def test_a_private_change_no_task_owns_is_reported_to_the_partners_not_held_against_the_room(self):
+        # Catches the dead end this fallback used to keep: one stray file in a
+        # private project refused every way to continue, with nothing in the
+        # app to resolve it. The next run is told about the file instead, and
+        # nothing is published by the restart itself.
+        self.fail_once("work", "unknown_provider_error", "failed")
         self.record_work()
         created = await self.create()
         await self.settle()
         room_id = created["room"]["id"]
         snapshot = await self.service.read_room(room_id)
-        self.assertTrue(snapshot["current_run"]["can_recover_native"])
         worker = next(job["provider"] for job in snapshot["jobs"] if job["status"] in {"unknown", "failed"})
         state = self.service.store.native_workspace(room_id, worker)
         (Path(state["project"]) / "unowned.txt").write_text("Fictional edit outside every task.\n")
         run = (await self.service.read_room(room_id))["current_run"]
-        self.assertFalse(run["can_recover_native"])
-        self.assertEqual(run["native_recovery_reason"], "native_recovery_unpublished_changes")
+        self.assertTrue(run["can_recover_native"], run["native_recovery_reason"])
+        before = len(self.fake.calls)
+        await self.service.recover_native(room_id, "abandon-with-stray-file",
+                                          run_id=run["id"], revision=run["revision"], digest=run["digest"])
+        started = self.service.store.snapshot(room_id)
+        abandoned = [event for event in started["events"] if event["kind"] == "native_unconfirmed_calls_abandoned"]
+        self.assertEqual([event["unowned_private_changes"] for event in abandoned],
+                         [[{"provider": worker, "paths": ["unowned.txt"]}]])
+        self.assertEqual(self.service._project(room_id).snapshot()["revision"], 1, "the restart itself published nothing")
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        told = self.fake.calls[before]["context"]["objective"]["continuation"]["previous_stop"]
+        self.assertEqual(told["unowned_private_changes"], [{"provider": worker, "paths": ["unowned.txt"]}])
+        self.assertEqual([(call["provider"], call["phase"], call["error"]) for call in told["ended_calls"]],
+                         [(worker, "work", "unknown_provider_error")])
+        self.assertIn("context.objective.continuation.previous_stop", self.fake.calls[before]["prompt"])
+
+    async def test_a_stop_the_user_pressed_mid_call_can_be_continued_by_their_next_message(self):
+        # Guards a path that already worked before the fallback was widened:
+        # a room the user stopped in the middle of a tool, under Full Access,
+        # must still take their next message and finish.
+        working, base = asyncio.Event(), type(self.fake).__call__
+        async def transport(adapter, prompt, cwd, session_id=None, timeout=None, **options):
+            context = json.loads(prompt.split("CONTEXT DATA:\n", 1)[1])
+            if context["job"]["job_phase"] == "work" and not working.is_set():
+                working.set()
+                (Path(cwd) / "main.py").write_text("VALUE = 2\n")
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError as error:
+                    # Stopped in the middle of a tool, under Full Access.
+                    error.native_execution = {"permission": options["permission"], "tool_calls": 2, "tool_results": 1,
+                                              "cleanup_confirmed": True, "side_effects_possible": True}
+                    raise
+            return await base(self.fake, adapter, prompt, cwd, session_id=session_id, timeout=timeout, **options)
+        self.service.native_invoke = transport
+        created = await self.create()
+        room_id = created["room"]["id"]
+        await asyncio.wait_for(working.wait(), 5)
+        await self.service.cancel_room(room_id)
+        await self.settle()
+        stopped = await self.service.read_room(room_id)
+        self.assertEqual(stopped["team"]["phase"], "cancelled", stopped["team"])
+        self.assertTrue(stopped["continuation"]["can_send"], stopped["continuation"])
+        self.record_work()
+        await self.service.send_message(room_id, "Carry on with the same goal.", "all", "after-stop",
+                                        intent="continue", binding=stopped["continuation"]["binding"])
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
 
     async def test_unknown_canonical_commit_is_never_abandoned(self):
         # Catches: restarting over a call whose commit outcome is unknown,

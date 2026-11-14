@@ -101,15 +101,16 @@ class OptionalNativeHintsTests(unittest.IsolatedAsyncioTestCase):
         self.assert_not_published(result)
         self.assertTrue(any(j['error'] == 'invalid_agent_response' for j in result['jobs']))
 
-    async def test_actual_unowned_change_stays_private(self):
-        # Catches an ownership breach being imported now that deletions and binaries are.
+    async def test_a_new_file_nobody_holds_is_published_with_the_task(self):
+        # Catches a finished work reply being voided for a file its task had not listed.
         def mutate(cwd, reply):
             (cwd / 'main.py').write_text('VALUE = 2\n')
-            (cwd / 'outside.txt').write_text('unauthorized')
+            (cwd / 'outside.txt').write_text('also needed')
         result = await self.run_work(mutate)
-        self.assert_not_published(result)
-        reasons = {b['reason'] for state in result['native_workspaces'] for b in state['blocked']}
-        self.assertIn('native_path_not_owned', reasons)
+        self.assertEqual(result['objective']['status'], 'complete', result['team'])
+        project = self.service._project(result['room']['id'])
+        self.assertEqual(project.files_for_paths(['outside.txt'])[0]['content'], 'also needed')
+        self.assertEqual([b for state in result['native_workspaces'] for b in state['blocked']], [])
 
     async def test_owned_deletion_and_binary_changes_are_imported(self):
         # Catches an owned file's deletion or binary rewrite still stopping the room.

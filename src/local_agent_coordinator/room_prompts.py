@@ -640,6 +640,21 @@ class RoomPromptMixin:
                          "host_authorized_transfer_paths are exact host grants allowing this task to change those retired-owner files; "
                          "they do not authorize other paths. A task marked review_kind=self_check requires an honest self review, "
                          "never claiming an independent reviewer. ")
+            carried = snapshot["objective"].get("continuation") or {}
+            if carried.get("carried_user_request"):
+                protocol += (" Before the previous run stopped, the user added the request in "
+                             "context.objective.continuation.carried_user_request to this goal. "
+                             "It is still part of the acceptance scope. ")
+            if carried.get("previous_stop"):
+                protocol += (" The previous run ended before its calls reported a result; "
+                             "context.objective.continuation.previous_stop says which calls ended and why. "
+                             "Nothing from them was accepted or will be replayed. Judge for yourselves what is already "
+                             "done: inspect the current files and state, keep what is good, and redo or reassign the rest. "
+                             "A call marked may_have_acted_outside_private_tree may have changed things outside its "
+                             "private project (commits, pushes, external files): check before repeating such a step. "
+                             "unowned_private_changes lists files a partner changed in its private project that no "
+                             "task owns; that partner decides: add the file to its task with extend to publish it, "
+                             "or restore it. ")
             if (snapshot["objective"].get("continuation") or {}).get("kind") == "user_followup":
                 protocol += (" This linked follow-up preserves the earlier original goal and deliveries, and the user has "
                              "directly requested additional work in context.objective.continuation.user_request. "

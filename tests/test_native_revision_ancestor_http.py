@@ -83,9 +83,12 @@ class NativeRevisionAncestorHTTPTests(unittest.TestCase):
             return native.native_reply(context, [{'type':'plan_ready'}])
 
         self.native.handler = empty_planners
-        code, empty = self.request('POST', f'/api/rooms/{room}/messages', self.continue_body(carried))
-        self.assertEqual(code, 200, empty)
-        empty = self.settled(room)
+        # That legacy host also failed a plan call for any change left in its
+        # private project; a room it stopped that way must still recover.
+        with patch.object(native.RoomService, '_tolerated_free_paths', staticmethod(lambda job, free, leftover: set())):
+            code, empty = self.request('POST', f'/api/rooms/{room}/messages', self.continue_body(carried))
+            self.assertEqual(code, 200, empty)
+            empty = self.settled(room)
         self.native.handler = self.handler
         self.assertEqual(empty['team']['stop_reason'], 'native_changes_not_imported', empty['team'])
         self.assertEqual(empty['team']['tasks'], [])

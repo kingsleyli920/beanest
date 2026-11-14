@@ -85,6 +85,17 @@ class KimiQuotaFooterHTTPTests(unittest.TestCase):
                     calls = len(fixture.calls)
                     code, rejected = fixture.request('POST', f'/api/rooms/{fixture.room_id}/recover-native',
                         {'request_id': str(uuid4()), **blocked['continuation']['binding']})
+                    if fault == 'new_prompt':
+                        # A later prompt in the session means this footer proves nothing
+                        # about the failed call: no quota handoff happens. The call is
+                        # abandoned and its owner keeps what it left in its own project.
+                        self.assertEqual(code, 200, rejected)
+                        final = fixture.settled()
+                        kinds = [event['kind'] for event in final['events']]
+                        self.assertNotIn('native_partial_workspace_transferred', kinds)
+                        self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+                        self.assertEqual(fixture.inspections, [])
+                        continue
                     self.assertEqual(code, 409, rejected)
                     final = fixture.read()
                     self.assertEqual(final['current_run']['id'], stopped['current_run']['id'])

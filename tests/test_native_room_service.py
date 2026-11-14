@@ -1162,23 +1162,32 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.service, "partner_manager", cached_partners(self.service, lambda identifier: {"state": "available"})):
             self.assertTrue(self.service._snapshot(room_id)["current_run"]["can_recover_native"])
 
-    async def test_partial_recovery_rejects_incomplete_tools_cleanup_and_missing_identity(self):
+    async def test_unproven_partial_work_is_never_transferred_but_the_room_can_still_continue(self):
+        # Catches two things. Evidence that no longer proves the old call
+        # (tools that never returned, a changed assignment, a lost session)
+        # authorizing a transfer of its partial work to a peer; and the room
+        # being left with every action refused because of it. The fresh run
+        # accepts nothing from the old call. A process that may still be
+        # running is the one thing that keeps the room waiting.
         before, binding = await self.partial_work_failure()
         room_id, count = before["room"]["id"], len(self.fake.calls)
         failed = before["jobs"][-1]["id"]
+        def offered():
+            run = self.service._snapshot(room_id)["current_run"]
+            return run["native_recovery_kind"], run["can_recover_native"]
+        self.assertEqual(offered(), ("partial_work", True))
         with self.service.store._connection() as db:
             original = db.execute("SELECT metadata_json FROM native_executions WHERE job_id=?", (failed,)).fetchone()[0]
         incomplete = json.loads(original)
         incomplete["tool_results"] = 0
         with self.service.store._connection(write=True) as db:
             db.execute("UPDATE native_executions SET metadata_json=? WHERE job_id=?", (json.dumps(incomplete), failed))
-        self.assertFalse(self.service._snapshot(room_id)["current_run"]["can_recover_native"])
-        with self.assertRaises(RoomError):
-            await self.service.recover_native(room_id, "partial-tool-gap", **binding)
+        self.assertEqual(offered(), ("unconfirmed_restart", True))
+        self.assertEqual(self.service.store.native_recovery_requirements(room_id)["unconfirmed_restart"]["unverified_job_ids"], [failed])
         with self.service.store._connection(write=True) as db:
             db.execute("UPDATE native_executions SET metadata_json=? WHERE job_id=?", (original, failed))
             db.execute("UPDATE shared_tasks SET assignment_epoch=1 WHERE run_id=? AND id='T1'", (binding["run_id"],))
-        self.assertFalse(self.service._snapshot(room_id)["current_run"]["can_recover_native"])
+        self.assertEqual(offered(), ("unconfirmed_restart", True))
         with self.service.store._connection(write=True) as db:
             db.execute("UPDATE shared_tasks SET assignment_epoch=0 WHERE run_id=? AND id='T1'", (binding["run_id"],))
         self.service.store.record_job_cleanup(failed, confirmed=False)
@@ -1189,8 +1198,24 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.store.record_job_cleanup(failed, confirmed=True)
         with self.service.store._connection(write=True) as db:
             db.execute("UPDATE members SET session_id=NULL WHERE room_id=? AND provider='claude'", (room_id,))
-        self.assertFalse(self.service._snapshot(room_id)["current_run"]["can_recover_native"])
+        self.assertEqual(offered(), ("unconfirmed_restart", True))
         self.assertEqual(len(self.fake.calls), count)
+        seen, default = [], self.handler
+        def finishing(agent, context, cwd):
+            if context["job"]["job_phase"] == "work":
+                seen.append((cwd / "main.py").read_text())
+                return native_reply(context, [{"type": "complete", "task_id": context["task"]["id"], "result": "Finished main."}],
+                    unchanged=[{"path": "notes.md", "reason": "Existing notes remain correct."}])
+            return default(agent, context, cwd)
+        self.fake.handler = finishing
+        await self.service.recover_native(room_id, "abandon-unproven", **binding)
+        await self.settle()
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertFalse(any(event["kind"] == "native_partial_workspace_transferred" for event in final["events"]))
+        self.assertEqual(sum(event["kind"] == "native_unconfirmed_calls_abandoned" for event in final["events"]), 1)
+        # The owner found its own partial edit still in its private project and finished from it.
+        self.assertEqual(seen, ["VALUE = 2\n"])
 
     async def test_partial_inspection_quota_does_not_transfer_preexisting_unpublished_d(self):
         before, binding = await self.partial_work_failure()
@@ -1814,23 +1839,58 @@ class NativeRoomServiceTests(unittest.IsolatedAsyncioTestCase):
         project = self.service._project(created["room"]["id"]).snapshot()
         self.assertNotIn("outside.txt", [file["path"] for file in project["files"]])
 
-    async def test_unowned_file_change_stays_private_and_is_not_imported(self):
+    async def test_a_free_file_a_work_call_also_changed_is_published_with_its_task(self):
+        # Catches the host voiding a finished work reply, and stopping the
+        # team, because the call also wrote a file its task had not listed
+        # and nobody else holds. A native tool lets the model touch it.
         original = self.handler
         def handler(agent, context, cwd):
             value = original(agent, context, cwd)
             if context["job"]["job_phase"] == "work":
-                (cwd / "unauthorized.txt").write_text("must stay private")
+                (cwd / "helper.txt").write_text("needed by main")
             return value
         self.fake.handler = handler
         created = await self.create()
         await self.settle()
         result = await self.service.read_room(created["room"]["id"])
-        self.assertNotEqual(result["objective"]["status"], "complete")
-        blocked = [item for state in result["native_workspaces"] for item in state["blocked"]]
-        self.assertIn({"path": "unauthorized.txt", "reason": "native_path_not_owned"}, blocked)
-        self.assertEqual(self.service._project(created["room"]["id"]).snapshot()["revision"], 1)
-        work = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "work")
-        self.assertTrue((work["cwd"] / "unauthorized.txt").is_file())
+        self.assertEqual(result["objective"]["status"], "complete", result["team"])
+        self.assertIsNone(result["team"]["stop_reason"])
+        self.assertEqual(result["team"]["tasks"][0]["write_paths"], ["main.py", "notes.md", "helper.txt"])
+        project = self.service._project(created["room"]["id"])
+        self.assertEqual(project.files_for_paths(["helper.txt"])[0]["content"], "needed by main")
+        self.assertEqual([item for state in result["native_workspaces"] for item in state["blocked"]], [])
+
+    async def test_a_file_another_unfinished_task_holds_is_never_taken_by_the_host(self):
+        # Catches the host grant above handing one partner a file a peer is
+        # still working on: that stays a coordination matter between them.
+        release, original = asyncio.Event(), self.handler
+        def handler(agent, context, cwd):
+            phase, board, task = context["job"]["job_phase"], context["team"], context["task"]
+            if phase in {"plan", "coordinate"}:
+                commands = []
+                if not board["tasks"] and agent == board["plan_author"]:
+                    commands += [proposal("T1", paths=["main.py"], capability="python"), {"type": "claim", "task_id": "T1"},
+                                 proposal("T2", paths=["notes.md"], capability="text")]
+                elif agent != board["plan_author"] and any(item["id"] == "T2" and not item["owner"] for item in board["tasks"]):
+                    commands.append({"type": "claim", "task_id": "T2"})
+                if board["tasks"] or commands:
+                    commands.append({"type": "plan_ready"})
+                return native_reply(context, commands)
+            if phase == "work" and task["id"] == "T1":
+                (cwd / "main.py").write_text("VALUE = 2\n")
+                (cwd / "notes.md").write_text("T1 rewrote the peer's notes\n")
+                return native_reply(context, [{"type": "complete", "task_id": "T1", "result": "Updated main."}])
+            if phase == "work":
+                return native_reply(context, [{"type": "block", "task_id": "T2", "reason": "Waiting.", "cause": "technical"}])
+            return original(agent, context, cwd)
+        self.fake.handler = handler
+        created = await self.create()
+        await self.settle()
+        result = await self.service.read_room(created["room"]["id"])
+        tasks = {task["id"]: task for task in result["team"]["tasks"]}
+        self.assertEqual(tasks["T1"]["write_paths"], ["main.py"])
+        self.assertEqual(self.service._project(created["room"]["id"]).files_for_paths(["notes.md"])[0]["content"], "Original notes.\n")
+        self.assertTrue(any(job["error"] == "native_changes_not_imported" for job in result["jobs"]))
 
     async def test_single_member_is_self_check_and_plan_permission_is_effectively_read_only(self):
         created = await self.create(participants=["claude"])

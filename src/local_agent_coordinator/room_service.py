@@ -19,7 +19,7 @@ from . import job_progress, native_adapters, native_workspace
 from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
-from .execution_policy import seconds_available, deadline_reached
+from .execution_policy import seconds_available, deadline_reached, task_settled
 from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
 from .room_contract import MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_ROOM_MEMBERS, MAX_TASK_PATHS
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
@@ -434,6 +434,7 @@ class RoomService(RoomPromptMixin):
         self._recovery_displays = {}
         self._signature_paths = {}
         self._late_cleanup_checks = {}
+        self._task_leftovers = {}
         self._lifecycle_tasks: dict[str, asyncio.Task] = {}
         self._lifecycle_waiting: set[str] = set()
         self._lifecycle_retry_after: dict[str, float] = {}
@@ -2601,6 +2602,10 @@ class RoomService(RoomPromptMixin):
         board = ((requirements.get("context_limit") or {}).get("decision_board")
                  or requirements.get("unconfirmed_restart") or {})
         board_retained = []
+        # Abandoning ended calls never waits on a private tree: what a partner
+        # left outside every task's paths is reported to the next run, where
+        # its owner keeps or restores it. Nothing is published by this audit.
+        abandoning, unowned = bool(requirements.get("unconfirmed_restart")), []
         for member in snapshot["members"]:
             state = self.store.native_workspace(snapshot["room"]["id"], member["id"])
             retained = retained_by_provider.get(member["id"])
@@ -2614,15 +2619,22 @@ class RoomService(RoomPromptMixin):
                            else archive["paths"] if archive else board.get("paths", {}).get(member["id"], []))
                 changes = native_workspace.collect_changes(state["project"], state, allowed, resolved_conflicts=[])
             except (native_workspace.NativeWorkspaceError, OSError, ValueError):
-                raise RoomError("native_recovery_unpublished_changes") from None
+                if not abandoning:
+                    raise RoomError("native_recovery_unpublished_changes") from None
+                unowned.append({"provider": member["id"], "unreadable": True})
+                continue
             if changes["blocked"] or changes["files"] and not allowed:
-                raise RoomError("native_recovery_unpublished_changes")
+                if not abandoning:
+                    raise RoomError("native_recovery_unpublished_changes")
+                unowned.append({"provider": member["id"], "paths": sorted(item["path"] for item in changes["blocked"])})
             if member["id"] in (receivers or {}).values() and retained is None and state.get("conflicts"):
                 raise RoomError("native_recovery_unpublished_changes")
             if archive:
                 actual = self._native_metadata_observation(state, changes, archive["paths"], [])
                 if actual["files"] != archive["observation"]["files"]:
-                    raise RoomError("native_recovery_unpublished_changes")
+                    if not abandoning:
+                        raise RoomError("native_recovery_unpublished_changes")
+                    unowned.append({"provider": member["id"], "paths": sorted(archive["paths"])})
                 if member["id"] in fenced_retained:
                     fenced_observations.append({"candidate": retained,
                         "observation": self._audit_native_metadata_candidate(snapshot, retained, state, changes)})
@@ -2684,7 +2696,7 @@ class RoomService(RoomPromptMixin):
             # The loop above refused every unpublished change outside the
             # owners' own unfinished task paths; those stay for the owner.
             attestation = {"recovery_kind": "native_unconfirmed_restart", "candidate": requirements["unconfirmed_restart"],
-                           "retained_owner_work": board_retained,
+                           "retained_owner_work": board_retained, "unowned_private_changes": unowned,
                            "current_binding": {"run_id": snapshot["current_run"]["id"], "revision": snapshot["current_run"]["revision"],
                                                "digest": snapshot["current_run"]["digest"]},
                            "old_commands_accepted": False}
@@ -5668,6 +5680,59 @@ class RoomService(RoomPromptMixin):
                     paths.append(path)
         return list(dict.fromkeys(paths))
 
+    def _free_changed_paths(self, job, task, collected):
+        """Changed files outside this call's paths that no other unfinished task holds."""
+        held = {path.casefold() for other in self.store.snapshot(job["room_id"])["team"]["tasks"]
+                if (task is None or other["id"] != task["id"]) and not task_settled(other) for path in other["write_paths"]}
+        return [item["path"] for item in collected["blocked"]
+                if item["reason"] == "native_path_not_owned" and item["path"].casefold() not in held]
+
+    @staticmethod
+    def _private_digest(state, name):
+        try:
+            path = Path(state["project"]) / name
+            return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() and not path.is_symlink() else None
+        except OSError:
+            return None
+
+    def _native_leftover(self, state):
+        """Every file already changed in a private tree as a call begins, with its bytes' digest."""
+        try:
+            changes = native_workspace.collect_changes(state["project"], state, [], resolved_conflicts=[])
+        except (native_workspace.NativeWorkspaceError, OSError, ValueError):
+            return {}
+        return {item["path"]: self._private_digest(state, item["path"]) for item in changes["blocked"]
+                if item["reason"] == "native_path_not_owned"}
+
+    @staticmethod
+    def _tolerated_free_paths(job, free, leftover):
+        """Free files that stay changed in the private tree without failing
+        the call. A call that publishes nothing (a plan, a review, a
+        checkpoint) is never failed for one. A work or help call is not failed
+        for one an earlier call left there; what it changed itself is its
+        task's (granted above) or its proposal (a helper keeps its own path)."""
+        return set(free) & leftover if job["team"]["job_phase"] in {"work", "help"} else set(free)
+
+    def _grant_free_paths(self, job, parsed, task, allowed, free):
+        """A work call's free files join its task, as the call's own extend
+        would add them. A native tool lets a model touch the file it needs."""
+        if (task is None or job["team"]["job_phase"] != "work" or task.get("repair_execution_id")
+                or read_only(job.get("work_mode"), job.get("runtime_settings"))):
+            return []
+        free = free[:max(0, MAX_TASK_PATHS - len(allowed))]
+        if not free:
+            return []
+        extend = next((command for command in parsed["commands"] if isinstance(command, dict)
+                       and command.get("type") == "extend" and command.get("task_id") == task["id"]
+                       and isinstance(command.get("write_paths"), list)), None)
+        if extend is None:
+            if len(parsed["commands"]) >= MAX_RESPONSE_COMMANDS:
+                return []
+            extend = {"type": "extend", "task_id": task["id"], "write_paths": []}
+            parsed["commands"].insert(0, extend)
+        extend["write_paths"] = _with_extension(extend["write_paths"], free)
+        return free
+
     def _collect_native_changes(self, job, parsed):
         if parsed["files"] or parsed.get("edits"):
             raise RoomError("native_json_files_forbidden")
@@ -5682,11 +5747,24 @@ class RoomService(RoomPromptMixin):
         if set(parsed["resolved_conflicts"]) - set(allowed):
             raise RoomError("team_scope_conflict")
         state = self.store.native_workspace(job["room_id"], job["provider"])
+        # What was already changed in this tree before the call began is not
+        # this call's work: it is neither published with it nor held against it.
+        leftover = {name for name, digest in (job.get("native_leftover") or {}).items()
+                    if self._private_digest(state, name) == digest}
         collected = self._audited_native_changes(job, state, allowed, parsed["resolved_conflicts"])
+        free = self._free_changed_paths(job, task, collected) if collected["blocked"] else []
+        granted = self._grant_free_paths(job, parsed, task, allowed, [path for path in free if path not in leftover])
+        if granted:
+            allowed = _with_extension(allowed, granted)
+            collected = self._audited_native_changes(job, state, allowed, parsed["resolved_conflicts"])
+            free = self._free_changed_paths(job, task, collected) if collected["blocked"] else []
         state["blocked"] = collected["blocked"]
         state["generated"] = collected.get("generated", [])
         self.store.save_native_workspace(job["room_id"], job["provider"], state)
-        if collected["blocked"]:
+        # What is left otherwise is another unfinished task's file, or one
+        # that cannot be published: that needs the owners' coordination.
+        tolerated = self._tolerated_free_paths(job, free, leftover)
+        if any(item["path"] not in tolerated for item in collected["blocked"]):
             raise RoomError("native_changes_not_imported")
         correction = self._native_submission_correction(job)
         if correction is not None and correction.get("purpose", "metadata_only") != "response_format":
@@ -5916,6 +5994,17 @@ class RoomService(RoomPromptMixin):
                         and event.get("job_id") == job["id"]), None)
                     job["native_base_revision"] = job["artifact_base_revision"]
                     workspace = await self._native_workspace_for_job(job)
+                    # One task's work may take several calls in a run (a corrected
+                    # reply, a resume after help): what the first of them found
+                    # already changed is what none of them made.
+                    key = (room_id, job["provider"], job["team"]["run_id"], job["team"]["task_id"])
+                    if job["team"]["job_phase"] != "work" or key not in self._task_leftovers:
+                        leftover = await asyncio.to_thread(self._native_leftover, workspace)
+                        if job["team"]["job_phase"] == "work":
+                            if len(self._task_leftovers) > 2000:
+                                self._task_leftovers.clear()
+                            self._task_leftovers[key] = leftover
+                    job["native_leftover"] = self._task_leftovers[key] if job["team"]["job_phase"] == "work" else leftover
                     cwd = Path(workspace["project"])
                     prompt = self._prompt(job)
                     task = next((item for item in self.store.snapshot(room_id)["team"]["tasks"] if item["id"] == job["team"]["task_id"]), None)

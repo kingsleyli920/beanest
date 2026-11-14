@@ -528,6 +528,14 @@ class TeamStore:
                 db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (previous[0], objective["id"]))
         continuation = {"source_run_id": source_run_id, "preserved_task_ids": [task["id"] for task in tasks],
                         "scope": "unfinished_work_only", "old_calls_replayed": False}
+        # What the user added to this goal after it was first written lives
+        # only in the stopped objective; the carried one must still hold it.
+        prior = db.execute("SELECT o.continuation_json FROM objectives o JOIN team_runs r ON r.objective_id=o.id "
+                           "WHERE r.id=?", (source_run_id,)).fetchone()
+        prior = json.loads(prior[0] or "{}") if prior else {}
+        added = prior.get("user_request") if prior.get("kind") == "user_followup" else prior.get("carried_user_request")
+        if isinstance(added, str) and added:
+            continuation["carried_user_request"] = added
         db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(continuation), objective["id"]))
         self.store._event(db, room_id, "objective_work_carried", sender="user", objective_id=objective["id"],
                           source_run_id=source_run_id, run_id=target_run_id, task_ids=continuation["preserved_task_ids"])

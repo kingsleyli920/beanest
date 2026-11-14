@@ -112,7 +112,10 @@ class EmptyNativePlanRecoveryHTTPTests(unittest.TestCase):
         self.native.handler = legacy_empty_planners
         # Without the newly added per-plan freeze, the ordinary collector
         # rejects exactly the previous unpublished report; no new D is written.
-        with patch.object(self.service.store, "native_preexisting_work_candidate", return_value=None):
+        # That legacy host also failed a plan call for any change left in its
+        # private project; a room it stopped that way must still recover.
+        with (patch.object(self.service.store, "native_preexisting_work_candidate", return_value=None),
+              patch.object(native.RoomService, "_tolerated_free_paths", staticmethod(lambda job, free, leftover: set()))):
             code, empty = self.request("POST", f"/api/rooms/{room}/messages", self.continue_body(carried))
             self.assertEqual(code, 200, empty)
             empty = self.settled(room)

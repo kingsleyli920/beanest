@@ -259,15 +259,20 @@ class InternalReplanHTTPTests(unittest.TestCase):
                 self.assertEqual(len(fixture.t3_calls), 1)
                 self.assertFalse(fixture.replan_prompts)
 
-    def test_coordination_label_never_authorizes_current_out_of_scope_disk_edit(self):
+    def test_a_free_file_edited_while_asking_for_a_replan_joins_the_task_and_nothing_stops(self):
+        # Catches the team stopping because the call that asked for a new task
+        # had also edited a file nobody held yet.
         fixture = self.fixture(escape=True)
         fixture.create()
         final = fixture.settled()
-        self.assertEqual(final['team']['phase'], 'stopped')
-        self.assertEqual(next(job['error'] for job in final['jobs'] if job['id'] == fixture.t3_calls[0]['job_id']),
-                         'native_changes_not_imported')
-        self.assertFalse(any(task['id'] == 'T4' for task in final['team']['tasks']))
-        self.assertEqual(len(fixture.t3_calls), 1)
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertFalse(any(job['error'] for job in final['jobs']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual(tasks['T3']['write_paths'], ['final.md', 'README.md'])
+        self.assertEqual(tasks['T4']['write_paths'], ['README.md'])
+        self.assertTrue(all(task['status'] == 'accepted' for task in tasks.values()))
+        self.assertEqual(fixture.service._project(fixture.room_id).files_for_paths(['README.md'])[0]['content'],
+                         'Fictional newly authorized regression evidence.\n')
 
     def test_same_coordination_request_cannot_cycle_without_new_progress(self):
         fixture = self.fixture(repeat=True)

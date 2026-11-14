@@ -256,25 +256,32 @@ class NativeHelpScopeHTTPTests(unittest.TestCase):
         self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
         self.assertFalse(any(job['error'] == 'invalid_team_commands' for job in final['jobs']))
 
-    def test_actual_private_escape_and_incomplete_native_proof_do_not_become_format_corrections(self):
-        for case in ('disk_escape', 'missing_wire'):
-            with self.subTest(case=case):
-                fixture = self.fixture(case)
-                fixture.create()
-                final = fixture.settled()
-                rejected_id = fixture.t3_calls[0]['job_id']
-                self.assertNotEqual(final['objective']['status'], 'complete')
-                self.assertFalse(any(event['kind'] == 'format_correction_queued' and event.get('job_id') == rejected_id
-                                     for event in final['events']))
-                self.assertEqual(len(fixture.t3_calls), 1)
-                self.assertFalse(any(event['kind'] == 'native_repairs_scheduled' for event in final['events']))
-                if case == 'disk_escape':
-                    self.assertEqual(next(job['error'] for job in final['jobs'] if job['id'] == rejected_id),
-                                     'native_changes_not_imported')
-                else:
-                    result = next(item['result'] for item in fixture.results if item['job_id'] == rejected_id)
-                    self.assertEqual(result['status'], 'failed')
-                fixture.close()
+    def test_incomplete_native_proof_does_not_become_a_format_correction(self):
+        fixture = self.fixture('missing_wire')
+        fixture.create()
+        final = fixture.settled()
+        rejected_id = fixture.t3_calls[0]['job_id']
+        self.assertNotEqual(final['objective']['status'], 'complete')
+        self.assertFalse(any(event['kind'] == 'format_correction_queued' and event.get('job_id') == rejected_id
+                             for event in final['events']))
+        self.assertEqual(len(fixture.t3_calls), 1)
+        self.assertFalse(any(event['kind'] == 'native_repairs_scheduled' for event in final['events']))
+        result = next(item['result'] for item in fixture.results if item['job_id'] == rejected_id)
+        self.assertEqual(result['status'], 'failed')
+
+    def test_a_free_file_edited_while_asking_for_help_joins_the_task_instead_of_stopping_the_team(self):
+        # Catches the team stopping because the call that asked for help had
+        # also edited a file its task had not listed and nobody else holds.
+        fixture = self.fixture('disk_escape')
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertFalse(any(job['error'] == 'native_changes_not_imported' for job in final['jobs']))
+        tasks = {task['id']: task for task in final['team']['tasks']}
+        self.assertEqual(tasks['T3']['write_paths'], ['final.md', 'README.md'])
+        self.assertTrue(all(task['status'] == 'accepted' for task in tasks.values()))
+        self.assertEqual(fixture.service._project(fixture.room_id).files_for_paths(['README.md'])[0]['content'],
+                         'Unauthorized private edit must stay rejected.\n')
 
 
 if __name__ == '__main__':
