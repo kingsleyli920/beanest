@@ -773,7 +773,7 @@ class TurnUpdates:
 
 async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permission="plan",
                         response_schema=None, runtime_settings=None, on_activity=None,
-                        receipt_dir=None, progress_file=None, sandbox=False):
+                        receipt_dir=None, progress_file=None, sandbox=False, on_process=None):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     from .message_capacity import MAX_PROMPT_BYTES
     if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
@@ -817,6 +817,8 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         nonlocal process, connection, session_id, proof, path, before, prompt_sent
         process, connection = await start(cwd, on_update=updates, permission=permission,
                                           progress_file=progress_file, sandbox=sandbox)
+        if on_process is not None:
+            on_process(process.pid)
         _remember(process.pid, owned, await asyncio.to_thread(_processes))
         initialized = await initialize(connection)
         resumed = session_id is not None

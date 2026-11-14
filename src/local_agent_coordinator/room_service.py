@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import threading
 import time
 from uuid import uuid4
@@ -5022,6 +5023,33 @@ class RoomService(RoomPromptMixin):
         except (PartnerError, OSError, ValueError):
             pass  # The next recheck tries again.
 
+    def _end_cut_off_calls(self, snapshot):
+        """A host that was killed mid-call wrote no cleanup for the call it cut
+        off, and the process that call launched may have outlived it. The new
+        host ends that process by its recorded ID and confirms the cleanup
+        itself, so the room can continue instead of waiting for ever. A call
+        claimed before processes were recorded proves nothing and is left."""
+        events = snapshot["events"]
+        settled = {event["job_id"] for event in events if event["kind"] == "job_cleanup"}
+        claims = {event["job_id"]: event for event in events if event["kind"] == "job_claimed"}
+        launched = {event["job_id"]: event for event in events if event["kind"] == "native_process_started"}
+        for job in snapshot["jobs"]:
+            if (job["status"] != "interrupted" or job["error"] != "service_restarted" or job["id"] in settled
+                    or (claims.get(job["id"]) or {}).get("process_tracked") is not True):
+                continue
+            process = launched.get(job["id"])
+            if process is not None:
+                last = self._late_cleanup_checks.get(("cut_off", job["id"]))
+                if last is not None and self.clock() - last < 2:
+                    continue
+                self._late_cleanup_checks[("cut_off", job["id"])] = self.clock()
+                try:
+                    if native_adapters.end_orphaned(process["pid"], process["created_at"]):
+                        continue  # Still ending: look again on the next pass.
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                    continue
+            self.store.record_job_cleanup(job["id"], confirmed=True)
+
     def _confirm_late_cleanup(self, room_id, snapshot):
         """A call cancelled while the service shut down can record cleanup as
         unconfirmed before its own receipt is written. That receipt, bound to
@@ -5030,6 +5058,7 @@ class RoomService(RoomPromptMixin):
         if snapshot["room"]["mode"] != "native_project":
             return
         events = snapshot["events"]
+        self._end_cut_off_calls(snapshot)
         confirmed = {event["job_id"] for event in events if event["kind"] == "job_cleanup" and event.get("cleanup_confirmed") is True}
         unconfirmed = {event["job_id"] for event in events if event["kind"] == "job_cleanup" and event.get("cleanup_confirmed") is False}
         claims = {event["job_id"]: event for event in events if event["kind"] == "job_claimed"}
@@ -6059,6 +6088,7 @@ class RoomService(RoomPromptMixin):
                             spec.adapter, prompt, cwd, session_id=job["session_id"], timeout=timeout,
                             permission=permission, response_schema=schema,
                             on_activity=lambda event, bound_job=job: self._record_native_event(bound_job, event),
+                            on_process=lambda pid, bound_job=job: self.store.record_native_process(bound_job["id"], pid),
                             receipt_dir=receipt_dir,
                             **progress_kwargs, **runtime_kwargs))
                     elif self.invoke is not None:

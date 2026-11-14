@@ -1825,6 +1825,16 @@ class RoomStore:
             previous = self._request(db, request_id, parameters)[2]
             return previous["room_id"] if previous else None
 
+    def record_native_process(self, job_id, pid):
+        """The process a native call launched, for a host that is killed mid-call."""
+        if type(pid) is not int or pid <= 1:
+            return
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT room_id,provider FROM jobs WHERE id=? AND status='working'", (job_id,)).fetchone()
+            if job is not None:
+                self._event(db, job["room_id"], "native_process_started", sender="system", job_id=job_id,
+                            provider=job["provider"], pid=pid)
+
     def record_job_cleanup(self, job_id, *, confirmed):
         with self._connection(write=True) as db:
             job = db.execute("SELECT room_id,provider FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -3432,8 +3442,7 @@ class RoomStore:
         """
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         objective = self._team.objectives.current(db, room_id)
-        if (room["mode"] != "native_project" or room["lifecycle_state"] != "active"
-                or room["stop_requested"] and not room["stop_confirmed"]
+        if (room["mode"] != "native_project" or room["lifecycle_state"] != "active" or room["stop_confirmed"] == 0
                 or team is None or objective is None or team["phase"] not in {"unknown", "stopped", "interrupted", "cancelled"}
                 or team["stop_reason"] in NATIVE_RECOVERY_ERRORS | _NEVER_ABANDONED
                 or not self._native_continuation_requires_recovery(db, room_id)
@@ -5297,9 +5306,13 @@ class RoomStore:
                 self._team.objectives.record_claim(db, room_id)
             db.execute("UPDATE members SET status='working',current_task=? WHERE room_id=? AND provider=?",
                        (job["text"][:300], room_id, provider))
+            # process_tracked: this host records the process a native call
+            # launches (native_process_started), so a call with no such record
+            # launched none.
             self._event(db, room_id, "job_claimed", sender=provider, recipient=provider,
                         job_id=job["id"], work_mode=room["work_mode"], session_id=member["session_id"],
-                        runtime_settings=json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None)
+                        runtime_settings=json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None,
+                        **({"process_tracked": True} if room["mode"] == "native_project" else {}))
             team_context = self._team.claim(db, job)
             handoff = (self._pending_round_handoff(db, room_id, provider)
                        if member["session_id"] is None and team_context and room["mode"] == "native_project" else None)

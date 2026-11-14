@@ -774,6 +774,32 @@ def _processes():
     return result
 
 
+def end_orphaned(pid, launched_at):
+    """End what a launch this host no longer runs left behind; True while any of it is alive.
+
+    A launch starts its own process group, so the group's ID is its PID. The
+    leader is this launch only if it started when the launch was recorded: a
+    PID the system has since given to another program is left alone, and
+    means the launch itself is gone.
+    """
+    table = _processes()
+    leader = table.get(pid)
+    if leader is not None and 'Z' not in leader[3]:
+        try:
+            started = time.mktime(time.strptime(leader[2], '%a %b %d %H:%M:%S %Y'))
+        except (ValueError, OverflowError):
+            return False
+        if not launched_at - 5 <= started <= launched_at + 2:
+            return False
+    if not any(row[1] == pid and 'Z' not in row[3] for row in table.values()):
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _remember(pid, owned, table):
     changed = True
     while changed:
@@ -1202,7 +1228,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                         timeout: float | None = None, *, permission='read_only',
                         response_schema: dict | None = None, runtime_settings: dict | None = None,
                         on_activity=None, receipt_dir: Path | None = None,
-                        progress_file: Path | None = None) -> dict:
+                        progress_file: Path | None = None, on_process=None) -> dict:
     """Run one cancellable native turn; no implicit time or turn-count budget.
 
     Cancellation raises CancelledError *after* owned cleanup. Other failures
@@ -1212,13 +1238,16 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
 
     A tool that fails is the model's to handle, however often it repeats:
     the host never ends a turn for that, as the native tool itself would not.
+
+    on_process receives the launched process ID at once, so a host that is
+    killed during the turn can find and end that process when it starts again.
     """
     if agent == 'kimi':
         from .kimi_acp import invoke_native as invoke_kimi
         return await invoke_kimi(prompt, cwd, session_id, timeout, permission=permission,
                                  response_schema=response_schema, runtime_settings=runtime_settings,
                                  on_activity=on_activity, receipt_dir=receipt_dir,
-                                 progress_file=progress_file,
+                                 progress_file=progress_file, on_process=on_process,
                                  sandbox=True)
 
     def not_started(error, cleanup_confirmed):
@@ -1298,6 +1327,8 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=_MAX_LINE + 1)
+        if on_process is not None:
+            on_process(process.pid)
 
         receipt_diagnostics = _ClaudeReceiptDiagnostics(response_schema) if agent == 'claude' else None
 
