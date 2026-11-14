@@ -142,7 +142,10 @@ const errorLabels = localizedLabels({
   native_recovery_unavailable: '这次恢复请求未完成，已有记录与成果保留。',
   native_recovery_cleanup_unconfirmed: '上次本机执行的清理尚未确认，暂时不能继续。',
   native_recovery_workspace_unavailable: '开发副本暂时无法安全核对，没有重新派发。',
-  native_recovery_unpublished_changes: '上次留下的改动已保留，本次尚未启动续作。',
+  native_recovery_unpublished_changes: '上一步留下的现场暂时核对不上，这一步还没接着做；豆窝会自己再试。',
+  native_recovery_required: '上一步的结果还没核对完，要先接着原来的工作恢复。',
+  no_available_partner: '现在没有能接活的伙伴，可能都在等额度或已停用。',
+  room_not_active: '这个任务现在不在进行中，还不能直接发消息。',
   native_recovery_binding_changed: '当前文件版本已变化，请重新核对现场后再试。',
   native_recovery_diagnostic_unconfirmed: '现场记录暂时对不上，已保留文件和记录；核对后再继续。',
   objective_calls_exhausted: '本目标的调用上限已到，成果和记录保留。',
@@ -358,12 +361,13 @@ const replyCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked',
 // objective, so the page words it the same way.
 const selfCorrectedCodes = new Set([...replyCorrectedCodes, 'team_scope_conflict']);
 // Mirrors stop_policy.py: only these stops wait for the user (USER_STOPS),
-// keep the scene for inspection (KEEP_SCENE) or have their own quota wait.
-// The host continues every other stop of an autonomous objective once per
-// board state; a stop that comes back without progress is the user's.
-const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt', 'budget_exhausted', 'deadline_exceeded',
-  'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit', 'objective_no_progress',
-  'objective_decision_required', 'objective_scope_confirmation', 'objective_checkpoint_disagreed',
+// keep the scene (KEEP_SCENE, continued only by the native restart the
+// service reports as stop_kind) or have their own quota wait. The host
+// continues every other stop of an autonomous objective, again and again
+// with a growing pause; it never gives one up to the user.
+const userStopCodes = new Set(['cancel_requested', 'lifecycle_requested', 'explicit_new_attempt',
+  'objective_calls_exhausted', 'objective_deadline_exceeded', 'objective_stage_limit',
+  'objective_decision_required', 'objective_checkpoint_disagreed',
   'partner_account_home_changed']);
 const keepSceneCodes = new Set(['project_commit_unconfirmed', 'native_cleanup_unconfirmed', 'team_cleanup_unconfirmed',
   'native_recovery_cleanup_unconfirmed', 'session_identity_changed', 'session_identity_unknown',
@@ -551,15 +555,24 @@ function nowSummary(snapshot) {
       title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。")].join(' ') };
     if (kind === 'auto' || kind === 'repeated') {
       const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
+      const repeats = Number(snapshot.auto_continue?.repeats) || 0;
+      const nextAt = Number(snapshot.auto_continue?.next_at);
+      if (kind === 'auto' && repeats > 0) return { tone: 'go', autoContinue: true, label: label(t("稍后自动再试"), room.updated_at),
+        title: t("又停在同一处，豆窝稍后自动再试"),
+        text: [nextAt > 0 ? t("已经自动继续过 {p0} 次，下次大约在 {p1}。不用你操作；想换个做法可以直接在下面说。", { p0: repeats, p1: timeLabel(nextAt) })
+          : t("已经自动继续过 {p0} 次，稍后会再试。不用你操作；想换个做法可以直接在下面说。", { p0: repeats }), doneNote].join(' ') };
       return kind === 'repeated'
-        ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过一次，又停在同一处"),
-          text: [t("没有新进展，所以不再自动继续。点“继续推进”再试，或在下面补充要求。"), doneNote].join(' ') }
+        ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过，又停在同一处"),
+          text: [t("现在还不能接着做，能继续时豆窝会自己再试。也可以在下面补充要求。"), doneNote].join(' ') }
         : { tone: 'go', autoContinue: true, label: label(t("马上自动继续"), room.updated_at),
           title: restartedStop ? t("豆窝服务重启过，马上自动接着做") : t("推进停了一下，马上自动接着做"),
           text: [t("几秒后自动继续，不用你操作。"), doneNote].join(' ') };
     }
   }
-  if (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown') return { tone: 'bad', label: label(t("结果待确认")),
+  // A stop with a known reason says that reason; only a result nobody can
+  // name yet reads as "unconfirmed".
+  const namedStop = ['stopped', 'interrupted'].includes(status) && (Object.hasOwn(executionLabels, stopReason) || Object.hasOwn(errorLabels, stopReason));
+  if (!namedStop && (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown')) return { tone: 'bad', label: label(t("结果待确认")),
     title: t("上一步的结果还没确认"), text: t("执行结果还没核对清楚，豆窝不会自动重跑。可以先看看讨论里的记录。") };
   const stopped = ['stopped', 'interrupted'].includes(status) || outcome === 'stopped' || closedStatuses.has(room.status);
   if (stopped) {
@@ -3180,7 +3193,7 @@ function projectLimitMessage(folder) {
 
 function executionMessage(code) {
   if (code === 'project_limit_exceeded' && state.snapshot?.room.mode === 'project_folder') return projectLimitMessage(true);
-  return Object.hasOwn(executionLabels, code) ? executionLabels[code] : t("本轮结果需要核对。");
+  return Object.hasOwn(executionLabels, code) ? executionLabels[code] : Object.hasOwn(errorLabels, code) ? errorLabels[code] : t("本轮结果需要核对。");
 }
 
 function timeLabel(seconds, full = false) {
@@ -4214,7 +4227,10 @@ function naturalContinuation(snapshot = state.snapshot, target = state.target) {
     && JSON.stringify(binding) === JSON.stringify(current);
   const recipient = target !== 'all' && target !== 'both' ? value?.recipients?.[target] : null;
   const eligibility = typeof recipient?.can_send === 'boolean' ? recipient : value;
-  return { canSend: eligibility?.can_send === true && !!valid, reason: valid ? eligibility?.reason : 'native_recovery_binding_changed', binding: valid ? binding : null };
+  // canHold: the room cannot continue right now, but the service keeps the
+  // user's words and hands them to the next run. Only an archived room has nowhere to put them.
+  return { canSend: eligibility?.can_send === true && !!valid, reason: valid ? eligibility?.reason : 'native_recovery_binding_changed', binding: valid ? binding : null,
+    canHold: !!valid && eligibility?.can_send === false && eligibility?.reason !== 'room_archived' };
 }
 function capturePendingIntent(request, snapshot = state.snapshot) {
   const source = request.roomId && snapshot?.room?.id === request.roomId && pagedRoom(snapshot) ? snapshot.through_seq : null;
@@ -4226,7 +4242,8 @@ async function submitNaturalContinuation(text, snapshot = state.snapshot) {
       || !text.trim() || !checkUserText(text)) return;
   const current = naturalContinuation(state.snapshot); const captured = naturalContinuation(snapshot);
   if (recipientProblem()) { showActionError(recipientProblem()); return; }
-  if (!current?.canSend || !captured?.canSend || JSON.stringify(current.binding) !== JSON.stringify(captured.binding)) return;
+  if (!(current?.canSend || current?.canHold) || !(captured?.canSend || captured?.canHold)
+      || JSON.stringify(current.binding) !== JSON.stringify(captured.binding)) return;
   const changes = pendingRuntimeChanges();
   if (Object.keys(changes).length && (naturalRuntimeConfiguration()?.can_edit !== true || runtimeSubmissionError())) {
     showActionError(runtimeSubmissionError() || t("当前不能修改设置，草稿已保留。"), state.selected, 'message'); return;
@@ -6124,15 +6141,16 @@ function renderControls() {
       : `${t("这轮只讨论方案，不创建或修改文件，也不运行代码。")}${interfaceWordSpace()}${planNextStepText()}`;
   }
   $('message').disabled = !canCompose;
-  $('message').placeholder = natural ? !natural.canSend ? t("当前无法发送，原因见下方") : objective?.status === 'complete' ? t("哪里还要调整？直接告诉伙伴") : t("补充要求，或说继续") : continuation === 'native_recovery' ? t("继续，或补充要求后接着做") : continuation ? t("说“继续”，接着完成原任务") : room ? t("补充要求，或告诉伙伴要调整什么") : t("说说这次想做什么");
+  $('message').placeholder = natural ? !natural.canSend ? natural.canHold ? t("可以先留言，能继续时会带给伙伴") : t("当前无法发送，原因见下方") : objective?.status === 'complete' ? t("哪里还要调整？直接告诉伙伴") : t("补充要求，或说继续") : continuation === 'native_recovery' ? t("继续，或补充要求后接着做") : continuation ? t("说“继续”，接着完成原任务") : room ? t("补充要求，或告诉伙伴要调整什么") : t("说说这次想做什么");
   const policyInputError = policySubmissionError() || runtimeSubmissionError();
-  $('send').disabled = !!recipientProblem() || !canCompose || (natural && !natural.canSend) || (!natural && !continuation && (!!policyInputError || (preparingFork ? blockedParticipants().length > 0 : submissionAvailabilityBlocked()))) || !$('message').value.trim()
+  $('send').disabled = !!recipientProblem() || !canCompose || (natural && !natural.canSend && !natural.canHold) || (!natural && !continuation && (!!policyInputError || (preparingFork ? blockedParticipants().length > 0 : submissionAvailabilityBlocked()))) || !$('message').value.trim()
     || (!room && ((!state.taskModes.includes(state.mode) && !(projectMode && state.projects.some((project) => project.id === state.selectedProject))) || (artifactMode && state.target === 'all')));
   renderRecipientControl();
   $('send-label').textContent = state.busy ? t("发送中") : natural ? t("发送") : continuation ? continuation === 'native_recovery' && $('message').value.trim() ? t("发送并继续") : t("发送") : canAnswer ? t("回答并继续") : preparingFork ? t("开始新任务") : canContinue ? t("开始下一轮") : room ? t("发送补充") : t("开始任务");
   $('character-count').hidden = true;
   const availabilityBlock = preparingFork ? availabilityBlockMessage() : submissionAvailabilityMessage();
-  $('composer-note').textContent = natural ? !state.connected ? t("本地服务未连接，草稿已保留。") : !natural.canSend ? errorLabels[natural.reason] || executionMessage(natural.reason) : state.pending ? t("结果待确认，原请求已保留。") : '' : continuation ? t("说“继续”，或点上方“继续”。已有目标和权限保持。") : policyInputError || availabilityBlock || (inactive ? t("先恢复任务，再继续聊天或开始下一轮。") : state.pending ? t("先确认上一条，避免重复发送") : (!state.connected ? t("本地服务未连接。请先刷新；如果刚重启过豆窝，请从桌面版重新打开。")
+  $('composer-note').textContent = natural ? !state.connected ? t("本地服务未连接，草稿已保留。") : !natural.canSend ? natural.canHold ? t("{p0} 可以先留言，能继续时会带给伙伴。", { p0: errorLabels[natural.reason] || executionMessage(natural.reason) })
+      : errorLabels[natural.reason] || executionMessage(natural.reason) : state.pending ? t("结果待确认，原请求已保留。") : '' : continuation ? t("说“继续”，或点上方“继续”。已有目标和权限保持。") : policyInputError || availabilityBlock || (inactive ? t("先恢复任务，再继续聊天或开始下一轮。") : state.pending ? t("先确认上一条，避免重复发送") : (!state.connected ? t("本地服务未连接。请先刷新；如果刚重启过豆窝，请从桌面版重新打开。")
     : preparingFork ? t("复用已保存文件，以新会话开始；原任务和未完成项保留，未被验收。确认目标后点“开始新任务”。")
     : canAnswer ? t("回答当前问题，沿同一目标继续。")
       : canContinue ? t("写下新的要求，在同一聊天继续下一轮；已有交付与记录保留")

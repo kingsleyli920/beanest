@@ -1213,26 +1213,29 @@ class RoomStore:
             return resumed
 
     def auto_continue_state(self, room_id):
-        """The board's progress fingerprint, and whether the host already
-        continued this exact state since the user last spoke."""
+        """The board's progress fingerprint, and how many times the host has
+        already continued this exact state since the user last spoke."""
         with self._connection() as db:
-            team = self._team.team(db, room_id)
-            objective = self._team.objectives.current(db, room_id)
-            tasks = db.execute("SELECT id,status,owner,result_digest,result_version,blocked_reason,block_cause "
-                               "FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY id",
-                               (room_id, team["current_run_id"])).fetchall()
-            reason = team["stop_reason"] or (objective["stop_reason"] if objective else None)
-            board = [reason, [list(task) for task in tasks]]
-            if reason in {"service_restarted", "service_shutdown"}:
-                # Quitting the app is not a stop the work caused; quitting again
-                # before a task finished must still resume.
-                board.append(team["current_run_id"])
-            fingerprint = hashlib.sha256(json.dumps(board, sort_keys=True).encode()).hexdigest()
-            repeated = db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? "
-                                  "AND json_extract(value_json,'$.kind')='objective_auto_continued' "
-                                  "AND json_extract(value_json,'$.fingerprint')=? LIMIT 1",
-                                  (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()
-            return fingerprint, repeated is not None
+            return self._auto_continue_state(db, room_id)
+
+    def _auto_continue_state(self, db, room_id):
+        team = self._team.team(db, room_id)
+        objective = self._team.objectives.current(db, room_id)
+        tasks = db.execute("SELECT id,status,owner,result_digest,result_version,blocked_reason,block_cause "
+                           "FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY id",
+                           (room_id, team["current_run_id"])).fetchall()
+        reason = team["stop_reason"] or (objective["stop_reason"] if objective else None)
+        board = [reason, [list(task) for task in tasks]]
+        if reason in {"service_restarted", "service_shutdown"}:
+            # Quitting the app is not a stop the work caused; quitting again
+            # before a task finished must still resume.
+            board.append(team["current_run_id"])
+        fingerprint = hashlib.sha256(json.dumps(board, sort_keys=True).encode()).hexdigest()
+        repeats = db.execute("SELECT count(*) FROM events WHERE room_id=? AND seq>? "
+                             "AND json_extract(value_json,'$.kind')='objective_auto_continued' "
+                             "AND json_extract(value_json,'$.fingerprint')=?",
+                             (room_id, self._latest_direct_user_seq(db, room_id), fingerprint)).fetchone()[0]
+        return fingerprint, repeats
 
     def host_continued_from(self, room_id, binding):
         """Whether only the host's own automatic continues, since the user last
@@ -1824,6 +1827,16 @@ class RoomStore:
         with self._connection() as db:
             previous = self._request(db, request_id, parameters)[2]
             return previous["room_id"] if previous else None
+
+    def record_native_process(self, job_id, pid):
+        """The process a native call launched, for a host that is killed mid-call."""
+        if type(pid) is not int or pid <= 1:
+            return
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT room_id,provider FROM jobs WHERE id=? AND status='working'", (job_id,)).fetchone()
+            if job is not None:
+                self._event(db, job["room_id"], "native_process_started", sender="system", job_id=job_id,
+                            provider=job["provider"], pid=pid)
 
     def record_job_cleanup(self, job_id, *, confirmed):
         with self._connection(write=True) as db:
@@ -3421,86 +3434,80 @@ class RoomStore:
         return {"run_id": board["id"], "task_errors": {task["id"]: "invalid_target" for task in resumed},
                 "paths": {owner: sorted(values) for owner, values in paths.items()}}
 
-    def _native_unconfirmed_restart_candidate(self, db, room_id):
-        """Last resort when no specific recovery applies: abandon proven-dead calls.
+    def _native_unconfirmed_restart_candidate(self, db, room_id, *, generic=False):
+        """Last resort when no specific recovery applies: abandon the ended calls.
 
-        Every claimed call must have confirmed cleanup, and the service still
-        refuses unless every private tree is free of unpublished changes. The
-        old calls are never replayed or accepted; a fresh-session run carries
-        the unfinished board. A commit or cleanup outcome that is itself
-        unknown is never abandoned this way.
+        The old calls are never replayed or accepted; a new run carries the
+        unfinished board and its partners are told what ended and what it may
+        have left behind. As the ordinary fallback this waits for confirmed
+        cleanup and a known shared-copy commit.
+
+        generic=True is the way out when every other continuation is refused:
+        it needs only an idle room. A process that may still be running and a
+        commit whose outcome is unknown are then facts for the partners too,
+        because a stopped room nothing can restart helps nobody.
         """
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         objective = self._team.objectives.current(db, room_id)
-        if (room["mode"] != "native_project" or room["stop_requested"] or room["lifecycle_state"] != "active"
-                or team is None or objective is None or team["phase"] not in {"unknown", "stopped", "interrupted"}
-                or team["stop_reason"] in NATIVE_RECOVERY_ERRORS | _NEVER_ABANDONED
-                or not self._native_continuation_requires_recovery(db, room_id)
-                or self._team.pending(db, room_id) or not self._stage_cleanup_confirmed(db, room_id)):
+        if (room["mode"] != "native_project" or room["lifecycle_state"] != "active"
+                or team is None or objective is None or team["phase"] not in {"unknown", "stopped", "interrupted", "cancelled"}
+                or self._team.pending(db, room_id)):
+            return None
+        if not generic and (room["stop_confirmed"] == 0 or team["stop_reason"] in NATIVE_RECOVERY_ERRORS | _NEVER_ABANDONED
+                            or not self._native_continuation_requires_recovery(db, room_id)
+                            or not self._stage_cleanup_confirmed(db, room_id)):
             return None
         jobs = db.execute("SELECT j.* FROM jobs j JOIN team_jobs t ON t.job_id=j.id "
                           "WHERE t.run_id=? ORDER BY j.rowid", (team["current_run_id"],)).fetchall()
-        if any(job["error"] in _NEVER_ABANDONED for job in jobs):
+        if not generic and any(job["error"] in _NEVER_ABANDONED for job in jobs):
             return None
-        unsettled = [job for job in jobs if job["status"] in {"unknown", "failed", "interrupted"}]
-        # An interrupted owner may keep partial work for its own unfinished
-        # task only when that exact call was the task's last work call, its
-        # assignment is unchanged, every tool returned and its session is the
-        # owner's. Anything else is refused by the private-tree audit.
-        paths, retained = {}, set()
+        unsettled = [job for job in jobs if job["status"] in {"unknown", "failed", "interrupted", "cancelled"}]
+        # Whatever an owner left in its own unfinished task's paths stays for
+        # that task: the owner resumes it and publishes through it as usual.
+        paths = {}
         for task in db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, team["current_run_id"])):
-            if not task["owner"] or task_settled(task):
-                continue
-            job = db.execute("SELECT j.*,t.assignment_epoch,t.result_version,n.metadata_json FROM jobs j "
-                "JOIN team_jobs t ON t.job_id=j.id JOIN native_executions n ON n.job_id=j.id "
-                "WHERE t.run_id=? AND t.task_id=? AND t.phase='work' ORDER BY j.rowid DESC LIMIT 1",
-                (team["current_run_id"], task["id"])).fetchone()
-            member = db.execute("SELECT session_id,adapter FROM members WHERE room_id=? AND provider=?", (room_id, task["owner"])).fetchone()
-            native = json.loads(job["metadata_json"]) if job else {}
-            # Kimi work failures are proven against the owned wire tail by
-            # their dedicated candidates; this fallback never replaces that.
-            if (job is None or job["status"] not in {"unknown", "failed", "interrupted"} or job["provider"] != task["owner"]
-                    or member is not None and member["adapter"] == "kimi"
-                    or job["assignment_epoch"] != task["assignment_epoch"] or job["result_version"] != task["result_version"]
-                    or type(native.get("tool_calls")) is not int or native.get("tool_calls") != native.get("tool_results")
-                    or member is None or not member["session_id"] or not self.native_job_identity_confirmed(db, job, member["session_id"])):
-                continue
-            retained.add(job["id"])
-            paths.setdefault(task["owner"], set()).update(json.loads(task["write_paths_json"]))
-        # Each abandoned call meets an existing recovery standard: a work call
-        # qualifies for owner retention above. Any other call (a reply to the
-        # user, a plan, a review, a check) owns no task paths. Under a
-        # permission that keeps writes inside its private tree, whatever it
-        # changed there is refused by the service's tree audit and its
-        # processes are confirmed gone, so a process killed mid-tool, or one
-        # that merely read files, is no reason to keep the room stopped with
-        # every action refused. With Full Access it could have acted outside
-        # that tree: it must have returned every tool and recorded no
-        # possible side effect.
+            if task["owner"] and not task_settled(task):
+                paths.setdefault(task["owner"], set()).update(json.loads(task["write_paths_json"]))
+        claimed, clean = set(), {}
+        for row in db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind') "
+                              "IN ('job_claimed','job_cleanup') ORDER BY seq", (room_id,)):
+            event = json.loads(row[0])
+            if event["kind"] == "job_claimed":
+                claimed.add(event["job_id"])
+            else:
+                clean[event["job_id"]] = event.get("cleanup_confirmed") is True
+        # A call that ended mid-tool, or ran with Full Access, may have acted
+        # outside its private tree. That is told to the next partners as a
+        # fact to check, not held against the room.
+        unverified, running = [], []
         for job in unsettled:
-            phase = db.execute("SELECT phase FROM team_jobs WHERE job_id=?", (job["id"],)).fetchone()
             native = db.execute("SELECT metadata_json FROM native_executions WHERE job_id=?", (job["id"],)).fetchone()
             native = json.loads(native[0]) if native else None
-            if phase is None or native is None or native.get("cleanup_confirmed") is not True:
-                return None
-            confined = native.get("permission") in {"plan", "read_only", "workspace_write"}
-            if phase[0] == "work":
-                if job["id"] not in retained:
+            if (native.get("cleanup_confirmed") is False if native else False) or job["id"] in claimed and not clean.get(job["id"]):
+                if not generic:
                     return None
-            elif (type(native.get("tool_calls")) is not int
-                    or not confined and (native.get("side_effects_possible") is not False
-                                         or native["tool_calls"] != native.get("tool_results"))
-                    or native["tool_calls"] and not self.native_job_identity_confirmed(db, job)):
-                # A peer cancelled before its first tool did nothing to bind;
-                # any call that ran tools must prove its own session.
-                return None
+                running.append(job["id"])
+            if native is None:
+                continue  # Never reported from its native tool.
+            confined = native.get("permission") in {"plan", "read_only", "workspace_write"}
+            if (type(native.get("tool_calls")) is not int or native["tool_calls"] != native.get("tool_results")
+                    or not confined and native.get("side_effects_possible") is not False):
+                unverified.append(job["id"])
+        codes = {job["error"] for job in unsettled if job["error"]} | ({team["stop_reason"]} if team["stop_reason"] else set())
         return {"run_id": team["current_run_id"], "stop_reason": team["stop_reason"],
                 "paths": {owner: sorted(values) for owner, values in paths.items()},
-                "job_ids": [job["id"] for job in unsettled],
-                "errors": sorted({job["error"] for job in unsettled if job["error"]} | ({team["stop_reason"]} if team["stop_reason"] else set()))}
+                "job_ids": [job["id"] for job in unsettled], "unverified_job_ids": unverified,
+                "errors": sorted(codes),
+                **({"generic": True, "possibly_running_job_ids": running,
+                    "shared_commit_unconfirmed": "project_commit_unconfirmed" in codes} if generic else {})}
 
-    def _native_recovery_requirements(self, db, room_id):
+    def _native_recovery_requirements(self, db, room_id, *, generic=False):
         """One candidate projection for admission and the service's full audit."""
+        if generic:
+            restart = self._native_unconfirmed_restart_candidate(db, room_id, generic=True)
+            return {"quota_checkpoint": None, "context_limit": None, "legacy": None, "review": None, "fenced": None,
+                    "nonwork": None, "permission_restore": None, "metadata": None, "help_repair": None, "partials": [],
+                    "unconfirmed_restart": restart, "eligible": restart is not None}
         candidates = {
             "quota_checkpoint": self._native_quota_checkpoint_candidate(db, room_id),
             "context_limit": self._native_context_limit_candidate(db, room_id),
@@ -3521,14 +3528,14 @@ class RoomStore:
         candidates["eligible"] = bool(team and (specific or candidates["unconfirmed_restart"]))
         return candidates
 
-    def native_recovery_requirements(self, room_id):
+    def native_recovery_requirements(self, room_id, *, generic=False):
         with self._connection() as db:
-            return self._native_recovery_requirements(db, room_id)
+            return self._native_recovery_requirements(db, room_id, generic=generic)
 
     def _native_recovery_reason(self, db, room_id):
         room, team = self._room(db, room_id), self._team.team(db, room_id)
         if (room["mode"] != "native_project" or room["lifecycle_state"] != "active" or team is None
-                or team["phase"] not in {"unknown", "interrupted", "stopped"}
+                or team["phase"] not in {"unknown", "interrupted", "stopped", "cancelled"}
                    and not self._native_revision_hint_ancestor(db, room_id)
                    and not self._native_nonwork_permission_candidate(db, room_id)
                 or self._team.objectives.current(db, room_id) is None):
@@ -3650,7 +3657,7 @@ class RoomStore:
                        metadata_correction=None, partial_works=(), receiver_workspaces=None,
                        quota_blocked=(), ownership_files=(), user_message=None, request_identity=None, runtime_change=None,
                        help_repair=None, message_target="all", directed_followup=False, recovery_source="user",
-                       quota_returned=()):
+                       quota_returned=(), generic=False):
         if recovery_source not in {"user", "system"}:
             raise RoomError("invalid_request")
         with self._connection(write=True) as db:
@@ -3662,7 +3669,9 @@ class RoomStore:
                 return False
             recipients = checked_target(message_target, self.member_ids_in_transaction(db, room_id))
             self._stage_runtime(db, room_id, runtime_change)
-            reason = self._native_recovery_reason(db, room_id)
+            requirements = self._native_recovery_requirements(db, room_id, generic=True) if generic else None
+            reason = ((None if requirements["unconfirmed_restart"] else "native_recovery_unavailable") if generic
+                      else self._native_recovery_reason(db, room_id))
             if reason:
                 raise RoomError(reason)
             team = self._team.team(db, room_id)
@@ -3672,7 +3681,7 @@ class RoomStore:
                     or team["phase"] not in {"stopped", "unknown", "interrupted"}
                     or self._partner_dispatch_reason(db, message_target) or message_target in quota_blocked):
                 raise RoomError("objective_restart_unsafe")
-            permission_restore = self._native_nonwork_permission_candidate(db, room_id)
+            permission_restore = None if generic else self._native_nonwork_permission_candidate(db, room_id)
             if permission_restore:
                 receipt = (legacy_attestation or {}).get("receipt", {})
                 if (not isinstance(legacy_attestation, dict)
@@ -3701,15 +3710,20 @@ class RoomStore:
                 self._remember_request(db, key, fingerprint, room_id)
                 self._settle(db, room_id)
                 return True
-            context_limit = self._native_context_limit_candidate(db, room_id)
-            unconfirmed_restart = self._native_recovery_requirements(db, room_id)["unconfirmed_restart"]
+            if generic:
+                # Nothing from the old calls is trusted, so no specific recovery is consulted.
+                context_limit = legacy = review = fenced = nonwork = candidate = None
+                unconfirmed_restart, partials = requirements["unconfirmed_restart"], []
+            else:
+                context_limit = self._native_context_limit_candidate(db, room_id)
+                unconfirmed_restart = self._native_recovery_requirements(db, room_id)["unconfirmed_restart"]
+                legacy = self._legacy_native_recovery_candidate(db, room_id)
+                review = self._native_review_recovery_candidate(db, room_id)
+                fenced = self._native_fenced_recovery_candidate(db, room_id)
+                nonwork = self._native_nonwork_recovery_candidate(db, room_id)
+                candidate = self._native_metadata_recovery_candidate(db, room_id)
+                partials = self._native_partial_recovery_candidates(db, room_id)
             compaction_quota = False
-            legacy = self._legacy_native_recovery_candidate(db, room_id)
-            review = self._native_review_recovery_candidate(db, room_id)
-            fenced = self._native_fenced_recovery_candidate(db, room_id)
-            nonwork = self._native_nonwork_recovery_candidate(db, room_id)
-            candidate = self._native_metadata_recovery_candidate(db, room_id)
-            partials = self._native_partial_recovery_candidates(db, room_id)
             receiver_workspaces = receiver_workspaces or {}
             if recovery_source == "system" and (not partial_works or help_repair or metadata_correction):
                 raise RoomError("native_recovery_unavailable")
@@ -3774,7 +3788,7 @@ class RoomStore:
                                 quota_failure_receipt=retained.get("quota_failure_receipt"),
                                 recovery_ancestry=partial.get("recovery_ancestry"),
                                 external_effects_unconfirmed=True, historical_immutability_unconfirmed=True)
-            elif team["stop_reason"] == NATIVE_METADATA_ERROR:
+            elif team["stop_reason"] == NATIVE_METADATA_ERROR and not generic:
                 if (candidate is None or not isinstance(metadata_correction, dict)
                         or metadata_correction.get("candidate") != candidate):
                     raise RoomError("native_recovery_binding_changed")
@@ -3844,6 +3858,10 @@ class RoomStore:
                     raise RoomError("native_recovery_binding_changed")
                 self._event(db, room_id, "native_unconfirmed_calls_abandoned", sender=recovery_source,
                             job_ids=unconfirmed_restart["job_ids"], errors=unconfirmed_restart["errors"],
+                            unverified_job_ids=unconfirmed_restart["unverified_job_ids"],
+                            possibly_running_job_ids=unconfirmed_restart.get("possibly_running_job_ids", []),
+                            shared_commit_unconfirmed=unconfirmed_restart.get("shared_commit_unconfirmed", False),
+                            unowned_private_changes=legacy_attestation.get("unowned_private_changes") or [],
                             audit_digest=audit_digest, old_calls_replayed=False, old_commands_accepted=False)
             elif team["stop_reason"] not in NATIVE_RECOVERY_ERRORS:
                 if (legacy is None or not isinstance(legacy_attestation, dict)
@@ -3897,9 +3915,25 @@ class RoomStore:
                 self._remember_request(db, key, fingerprint, room_id)
                 self._settle(db, room_id)
                 return True
+            # A partner keeps its session, and with it what it knows of the work,
+            # when every call it made in the ended run proved that session and
+            # its process is gone. The first time, that is: if this same stop
+            # was already continued once, the session itself may be what keeps
+            # failing, so everybody starts fresh.
+            fresh = None
+            if unconfirmed_restart and not self._auto_continue_state(db, room_id)[1]:
+                running = set(unconfirmed_restart.get("possibly_running_job_ids", []))
+                fresh = []
+                for member in db.execute("SELECT provider,session_id,identity_uncertain FROM members WHERE room_id=?", (room_id,)).fetchall():
+                    ended = [job for job in db.execute("SELECT * FROM jobs WHERE room_id=? AND provider=?", (room_id, member["provider"]))
+                             if job["id"] in unconfirmed_restart["job_ids"]]
+                    if (member["identity_uncertain"] or not member["session_id"]
+                            or any(job["id"] in running or not self.native_job_identity_confirmed(db, job, member["session_id"])
+                                   for job in ended)):
+                        fresh.append(member["provider"])
             new_id = self._team.start_next(db, room_id, previous["original_goal"], team["plan_author"], **binding,
                 retry=True, source=recovery_source, execution_policy=json.loads(previous["policy_json"]), assessment=True,
-                verified_restart=True, fresh_native_recovery=True)
+                verified_restart=True, fresh_native_recovery=fresh is None, fresh_providers=fresh)
             errors = (NATIVE_RECOVERY_ERRORS | ({context_limit["source_error"]} if context_limit else set()) | ({"provider_failed"} if legacy else set())
                       | set(unconfirmed_restart["errors"] if unconfirmed_restart else ())
                       | ({NATIVE_METADATA_ERROR} if metadata_correction else set())
@@ -3931,6 +3965,23 @@ class RoomStore:
                 task_errors.update(self._revision_hint_recovery_tasks(db, room_id, source_run, error=error))
             self._team.carry_unfinished(db, room_id, board_run, new_id, recovery_errors=errors,
                                         recovery_task_errors=task_errors)
+            if unconfirmed_restart:
+                # The facts the next partners judge for themselves.
+                objective = self._team.objectives.current(db, room_id)
+                continuation = json.loads(objective["continuation_json"] or "{}")
+                unverified = set(unconfirmed_restart["unverified_job_ids"])
+                running = set(unconfirmed_restart.get("possibly_running_job_ids", []))
+                ended = [{"provider": row["provider"], "phase": row["phase"], "task_id": row["task_id"], "error": row["error"],
+                          "may_have_acted_outside_private_tree": row["id"] in unverified,
+                          "process_may_still_be_running": row["id"] in running}
+                         for row in db.execute(
+                    "SELECT j.id,j.provider,t.phase,t.task_id,j.error FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.id IN ("
+                    + ",".join("?" for _ in unconfirmed_restart["job_ids"]) + ") ORDER BY j.rowid", unconfirmed_restart["job_ids"])]
+                continuation["previous_stop"] = {
+                    "reason": unconfirmed_restart["stop_reason"], "ended_calls": ended,
+                    "shared_commit_unconfirmed": unconfirmed_restart.get("shared_commit_unconfirmed", False),
+                    "unowned_private_changes": legacy_attestation.get("unowned_private_changes") or []}
+                db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(continuation), objective["id"]))
             if context_limit:
                 objective = self._team.objectives.current(db, room_id)
                 continuation = json.loads(objective["continuation_json"] or "{}")
@@ -4062,7 +4113,8 @@ class RoomStore:
             db.execute("UPDATE objectives SET baseline_json=? WHERE id=?", (json.dumps(baseline), objective["id"]))
             self._remember_request(db, key, fingerprint, room_id)
             self._event(db, room_id, "native_recovery_started", sender=recovery_source, source_run_id=binding["run_id"],
-                        run_id=new_id, new_sessions=True, audit_digest=audit_digest, old_calls_replayed=False)
+                        run_id=new_id, new_sessions=fresh is None, audit_digest=audit_digest, old_calls_replayed=False,
+                        **({"fresh_providers": fresh} if fresh is not None else {}))
             self._settle(db, room_id)
 
     def save_native_workspace(self, room_id, provider, state):
@@ -4682,6 +4734,42 @@ class RoomStore:
         with self._connection() as db:
             self._room(db, room_id)
             return self._request(db, request_id, [action, room_id, *parameters])[2] is not None
+
+    def hold_user_message(self, room_id, text, target, request_id, reason, *, request_identity=None):
+        """Keep what the user said while the room cannot continue. It shows in
+        the conversation at once and reaches the partners with the next run."""
+        with self._connection(write=True) as db:
+            text = checked_message(text)
+            key, fingerprint, prior = self._request(db, request_id, request_identity or ["held-message", room_id, text, target])
+            if prior:
+                return False
+            checked_target(target, self.member_ids_in_transaction(db, room_id))
+            self._event(db, room_id, "message", sender="user", recipient=target, text=text, job_id=None,
+                        held=True, held_reason=reason)
+            self._remember_request(db, key, fingerprint, room_id)
+            return True
+
+    def deliver_held_messages(self, room_id):
+        """Hand every message kept while the room was stopped to the run that is
+        now going: its partners read them in the objective's continuation."""
+        with self._connection(write=True) as db:
+            objective = self._team.objectives.current(db, room_id)
+            if objective is None or objective["status"] not in {"running", "checkpoint"}:
+                return []
+            marker = db.execute("SELECT max(seq) FROM events WHERE room_id=? "
+                                "AND json_extract(value_json,'$.kind')='held_messages_delivered'", (room_id,)).fetchone()[0] or 0
+            held = [(row["seq"], json.loads(row["value_json"])) for row in db.execute(
+                "SELECT seq,value_json FROM events WHERE room_id=? AND seq>? AND json_extract(value_json,'$.kind')='message' "
+                "AND json_extract(value_json,'$.held')=1 ORDER BY seq", (room_id, marker))]
+            if not held:
+                return []
+            continuation = json.loads(objective["continuation_json"] or "{}")
+            continuation["user_messages_while_stopped"] = (continuation.get("user_messages_while_stopped") or []) + [
+                {"text": event["text"], "to": event.get("recipient")} for _, event in held]
+            db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(continuation), objective["id"]))
+            self._event(db, room_id, "held_messages_delivered", sender="system", message_seqs=[seq for seq, _ in held],
+                        objective_id=objective["id"])
+            return [seq for seq, _ in held]
 
     def natural_message_seen(self, room_id, request_id, identity):
         with self._connection() as db:
@@ -5310,9 +5398,13 @@ class RoomStore:
                 self._team.objectives.record_claim(db, room_id)
             db.execute("UPDATE members SET status='working',current_task=? WHERE room_id=? AND provider=?",
                        (job["text"][:300], room_id, provider))
+            # process_tracked: this host records the process a native call
+            # launches (native_process_started), so a call with no such record
+            # launched none.
             self._event(db, room_id, "job_claimed", sender=provider, recipient=provider,
                         job_id=job["id"], work_mode=room["work_mode"], session_id=member["session_id"],
-                        runtime_settings=json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None)
+                        runtime_settings=json.loads(room["runtime_settings_json"]) if room["runtime_settings_json"] else None,
+                        **({"process_tracked": True} if room["mode"] == "native_project" else {}))
             team_context = self._team.claim(db, job)
             handoff = (self._pending_round_handoff(db, room_id, provider)
                        if member["session_id"] is None and team_context and room["mode"] == "native_project" else None)

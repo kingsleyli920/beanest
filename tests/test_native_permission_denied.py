@@ -51,24 +51,33 @@ class PermissionDeniedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result['status'], result['failure_code']), ('failed', 'native_tool_result_missing'))
         self.assertEqual((result['native_execution']['tool_calls'], result['native_execution']['tool_results']), (1, 0))
 
-    async def test_closed_shape_session_and_observed_tool_binding_remain_required(self):
-        cases = [({'session_id': '44444444-4444-4444-8444-444444444444'}, 'native_session_identity_mismatch'),
-                 ({'tool_use_id': 'unobserved'}, 'native_protocol_invalid'),
-                 ({'tool_name': 'Read'}, 'native_protocol_invalid'),
-                 ({'tool_name': 'UnapprovedTool'}, 'native_protocol_invalid'),
-                 ({'tool_name': {}}, 'native_protocol_invalid'),
-                 ({'uuid': 'invalid'}, 'native_protocol_invalid'),
-                 ({'agent_id': 'subagent'}, 'native_protocol_invalid'),
-                 ({'extra': 'DO_NOT_STORE'}, 'native_protocol_invalid'),
-                 ({'message': None}, 'native_protocol_invalid'),
-                 ({'decision_reason_code': 'unknown'}, 'native_protocol_invalid')]
-        for update, expected in cases:
+    async def test_an_advisory_in_another_shape_is_skipped_and_another_session_still_fails(self):
+        # Catches three defects: a denial advisory whose shape or tool binding
+        # the parser cannot read ending the call (a CLI release adding a field
+        # or reason code did that); such an advisory closing the tool; and an
+        # advisory from another session no longer failing the call.
+        cases = [({'session_id': '44444444-4444-4444-8444-444444444444'}, 'native_session_identity_mismatch', []),
+                 ({'tool_use_id': 'unobserved'}, None, ['native_protocol_invalid']),
+                 ({'tool_name': 'Read'}, None, ['native_protocol_invalid']),
+                 ({'tool_name': 'UnapprovedTool'}, None, ['native_protocol_invalid']),
+                 ({'tool_name': {}}, None, ['native_protocol_invalid']),
+                 ({'uuid': 'invalid'}, None, ['native_protocol_invalid']),
+                 ({'agent_id': 'subagent'}, None, ['native_protocol_invalid']),
+                 ({'extra': 'DO_NOT_STORE'}, None, ['native_protocol_invalid']),
+                 ({'message': None}, None, ['native_protocol_invalid']),
+                 ({'decision_reason_code': 'unknown'}, None, ['native_protocol_invalid'])]
+        for update, failure, ignored in cases:
             with self.subTest(update=update):
                 stream = native._Stream('claude', True, None)
                 for row in (INIT, CALL, {**DENIAL, **update}):
                     await stream.consume(json.dumps(row).encode())
-                self.assertEqual(stream.failure, expected)
+                self.assertEqual((stream.failure, stream.ignored), (failure, ignored))
                 self.assertEqual((stream.calls, stream.results), (1, 0))
+        # End to end: the unreadable advisory changes nothing about the turn.
+        result = await self.invoke([INIT, CALL, {**DENIAL, 'decision_reason_code': 'unknown'}, RESULT, FINAL])
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual((result['native_execution']['tool_calls'], result['native_execution']['tool_results']), (1, 1))
+        self.assertNotIn('DO_NOT_STORE', Path(result['native_execution']['receipt_path']).read_text())
         missing = {key: value for key, value in DENIAL.items() if key != 'message'}
         self.assertFalse(native._claude_permission_denied_valid(missing))
         diagnostic = native._protocol_diagnostic(json.dumps({**DENIAL, 'agent_id': 'DO_NOT_STORE'}).encode())

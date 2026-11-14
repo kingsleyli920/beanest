@@ -310,7 +310,10 @@ class ProjectedLineageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScopeReferenceTests(unittest.TestCase):
-    def test_exact_current_objective_anchor_is_not_a_cross_goal_or_substring_approval(self):
+    def test_a_checkpoint_that_continues_stays_in_the_current_goal_whatever_its_scope_reference(self):
+        # Catches the host overruling the partners' own judgement that work
+        # remains: a continue whose reference it could not match used to be
+        # relabelled a new goal and held for the user's confirmation.
         with tempfile.TemporaryDirectory() as root:
             store = RoomStore(Path(root) / "rooms.sqlite3")
             try:
@@ -327,6 +330,6 @@ class ScopeReferenceTests(unittest.TestCase):
                         store._team.objectives.propose(db, room, "claude", {"decision": "continue", "summary": "Remaining original work.",
                             "next_goal": "Continue the authorized work.", "scope_reference": reference, "question": None})
                     proposal = store.snapshot(room)["objective"]["checkpoint_proposal"]
-                    self.assertEqual(proposal["scope"], "current_goal" if case in {"valid", "legacy"} else "new_goal", case)
+                    self.assertEqual(proposal["scope"], "current_goal", case)
             finally:
                 store.close()

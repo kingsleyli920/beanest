@@ -73,6 +73,11 @@ class KimiQuotaFooterHTTPTests(unittest.TestCase):
         self.assertEqual(rows[-1]['info']['status'], 'killed')
 
     def test_unknown_new_prompt_mismatched_or_drifted_footer_cannot_authorize_handoff(self):
+        # Catches a footer that is unknown, belongs to another task or process,
+        # or is followed by a new prompt being read as this call's clean end
+        # and so authorizing the quota handoff; and recover-native being
+        # refused because it does not. The call is abandoned instead and its
+        # owner keeps what it left in its own project.
         for fault in ('unknown', 'new_prompt', 'wrong_task', 'drift'):
             with self.subTest(fault=fault):
                 fixture = self.fixture(legacy=False, footer_fault=fault)
@@ -82,18 +87,28 @@ class KimiQuotaFooterHTTPTests(unittest.TestCase):
                     # neither absent projection nor a blocked handoff grants recovery.
                     blocked = fixture.read()
                     self.assertEqual(fixture.inspections, [])
-                    calls = len(fixture.calls)
-                    code, rejected = fixture.request('POST', f'/api/rooms/{fixture.room_id}/recover-native',
+                    run = blocked['current_run']
+                    # A later prompt leaves no quota candidate at all, only the
+                    # ordinary abandon-and-restart; the other tails keep the
+                    # candidate and refuse its audit.
+                    self.assertEqual((run['native_recovery_kind'], run['can_recover_native'], run['native_recovery_reason']),
+                                     ('unconfirmed_restart', True, None) if fault == 'new_prompt'
+                                     else ('partial_work', False, 'native_recovery_diagnostic_unconfirmed'))
+                    code, started = fixture.request('POST', f'/api/rooms/{fixture.room_id}/recover-native',
                         {'request_id': str(uuid4()), **blocked['continuation']['binding']})
-                    self.assertEqual(code, 409, rejected)
-                    final = fixture.read()
-                    self.assertEqual(final['current_run']['id'], stopped['current_run']['id'])
-                    self.assertEqual(len(fixture.calls), calls)
+                    self.assertEqual(code, 200, started)
+                    final = fixture.settled()
+                    kinds = [event['kind'] for event in final['events']]
+                    self.assertNotIn('native_partial_workspace_transferred', kinds)
+                    self.assertNotIn('native_partial_recovery_attestation', kinds)
+                    self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+                    self.assertEqual(fixture.inspections, [])
+                    self.assertEqual(final['objective']['retired_partners'], {})
+                    self.assertNotEqual(final['current_run']['id'], stopped['current_run']['id'])
                     self.assertEqual((Path(fixture.failed_work['cwd']) / 'second.md').read_bytes(), fixture.retained)
-                    self.assertFalse(any(event['kind'] == 'native_recovery_started' for event in final['events']))
+                    self.assertEqual(next(task for task in final['team']['tasks'] if task['id'] == 'T2')['owner'], 'kimi')
                 finally:
                     fixture.close()
-
 
 if __name__ == '__main__':
     unittest.main()

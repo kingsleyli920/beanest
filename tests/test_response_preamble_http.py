@@ -116,15 +116,19 @@ class ResponsePreambleHTTPTests(unittest.TestCase):
         self.assertEqual(final['objective']['status'], 'complete', final['team'])
         self.assertTrue(all(job['error'] is None for job in final['jobs']))
 
-    def test_unregistered_peer_d_and_unconfirmed_cleanup_still_block_recovery(self):
+    def test_unregistered_peer_d_and_unconfirmed_cleanup_refuse_the_format_recovery_but_the_room_restarts(self):
+        # Catches the old-format recovery (which keeps the peer's private work
+        # as audited evidence) running over peer work nobody registered or a
+        # call whose exit was never confirmed, and the room refusing every
+        # continue because that recovery is unavailable.
         for archived in (False, True):
             with self.subTest(archived=archived):
                 fixture = self.fixture(PreambleRecoveryFixture, archived=archived)
                 try:
                     failed = fixture.bootstrap_failed()
+                    job = next(job for job in failed['jobs'] if job['error'] == 'invalid_response_json')
                     if archived:
                         self.assertTrue(failed['current_run']['can_recover_native'], failed['current_run'])
-                        job = next(job for job in failed['jobs'] if job['error'] == 'invalid_response_json')
                         with fixture.service.store._connection(write=True) as db:
                             row = db.execute('SELECT metadata_json FROM native_executions WHERE job_id=?', (job['id'],)).fetchone()
                             metadata = json.loads(row[0])
@@ -132,9 +136,35 @@ class ResponsePreambleHTTPTests(unittest.TestCase):
                             db.execute('UPDATE native_executions SET metadata_json=? WHERE job_id=?', (json.dumps(metadata), job['id']))
                         _, failed = fixture.request('GET', f'/api/rooms/{fixture.room_id}')
                     self.assertFalse(failed['current_run']['can_recover_native'], failed['current_run'])
-                    count = len(fixture.native_calls)
-                    self.assertNotEqual(fixture.recover(failed)[0], 200)
-                    self.assertEqual(len(fixture.native_calls), count)
+                    self.assertEqual(failed['current_run']['native_recovery_reason'],
+                                     'native_recovery_cleanup_unconfirmed' if archived else 'native_recovery_unpublished_changes')
+                    self.assertTrue(failed['continuation']['can_send'], failed['continuation'])
+                    old_ids = [item['id'] for item in failed['jobs']]
+                    rows, count = fixture.old_rows(old_ids), len(fixture.native_calls)
+                    code, response = fixture.recover(failed)
+                    self.assertEqual(code, 200, response.get('error'))
+                    final = fixture.settled()
+                    kinds = [event['kind'] for event in final['events']]
+                    self.assertEqual(kinds.count('native_fenced_recovery_attestation'), 0)
+                    abandoned = [event for event in final['events'] if event['kind'] == 'native_unconfirmed_calls_abandoned']
+                    self.assertEqual(len(abandoned), 1)
+                    self.assertEqual((abandoned[0]['errors'], abandoned[0]['old_commands_accepted']),
+                                     (['invalid_response_json', 'invoke_interrupted'], False))
+                    # A call whose exit was never confirmed is told to the next run
+                    # as possibly still running, and its session is not continued.
+                    self.assertEqual(abandoned[0]['possibly_running_job_ids'], [job['id']] if archived else [])
+                    fresh = next(call for call in fixture.native_calls[count:] if call['agent'] == 'kimi')
+                    if archived:
+                        self.assertIsNone(fresh['input_session_id'])
+                    # The rejected result stays rejected and nothing is inspected as retained work.
+                    self.assertEqual(fixture.old_rows(old_ids), rows)
+                    self.assertFalse(any(call['retained_inspection'] for call in fixture.permissions))
+                    self.assertEqual(final['objective']['status'], 'complete', final['team'])
+                    # The peer's file reached the shared copy only through its owner's new work call.
+                    files = fixture.service._project(fixture.room_id).files_for_paths(['notes.md'])
+                    self.assertEqual([(file['owner'], file['content']) for file in files],
+                                     [('claude', 'Retained fictional Claude work.\n')])
+                    self.assertEqual(sorted(call['agent'] for call in fixture.native_calls[count:] if call.get('phase') == 'work'), ['claude', 'kimi'])
                 finally:
                     fixture.close()
 

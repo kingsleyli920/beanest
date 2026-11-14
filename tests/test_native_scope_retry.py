@@ -104,12 +104,17 @@ class NativeScopeRetryTests(unittest.TestCase):
             with store._connection(write=True) as db:
                 db.execute('INSERT INTO native_workspaces VALUES (?,?,?)', (room, peer, previous))
 
-    def test_specialized_help_audit_keeps_called_peer_missing_workspace_gate(self):
+    def test_missing_peer_workspace_blocks_the_help_repair_audit_and_the_room_restarts_without_it(self):
+        # Catches the audited help repair running although a called peer's
+        # private project is not registered (the helper's proposed bytes would
+        # be retained or published unaudited), and the room refusing every
+        # continue because that audit cannot be made.
         snapshot = self.create(legacy=True)
         room, store = snapshot['room']['id'], self.service.store
         self.assertTrue(snapshot['current_run']['can_recover_native'])
         candidate = store.native_help_repair_candidate(room)
         peer = next(member['id'] for member in snapshot['members'] if member['id'] != candidate['provider'])
+        self.assertEqual((candidate['provider'], peer), ('claude', 'codex'))
         calls = len(self.native.calls)
         with store._connection(write=True) as db:
             previous = db.execute('SELECT state_json FROM native_workspaces WHERE room_id=? AND provider=?', (room, peer)).fetchone()[0]
@@ -117,13 +122,30 @@ class NativeScopeRetryTests(unittest.TestCase):
         try:
             code, current = self.request('GET', f'/api/rooms/{room}')
             self.assertEqual(code, 200)
+            # The audited help repair is still refused for the missing tree.
             self.assertFalse(current['current_run']['can_recover_native'])
             self.assertEqual(current['current_run']['native_recovery_reason'], 'native_recovery_workspace_unavailable')
+            self.assertTrue(current['continuation']['can_send'], current['continuation'])
             run = current['current_run']
             code, result = self.request('POST', f'/api/rooms/{room}/recover-native', {
                 'request_id':str(uuid4()), 'run_id':run['id'], 'revision':run['revision'], 'digest':run['digest']})
-            self.assertEqual((code, result.get('error')), (409, 'native_recovery_workspace_unavailable'))
-            self.assertEqual(len(self.native.calls), calls)
+            self.assertEqual((code, result.get('error')), (200, None))
+            # Only the start of the generic restart is asserted here: with the
+            # registration removed by hand, what the new run then does is not
+            # this test's subject.
+            final = self.settled(room)
+            kinds = [event['kind'] for event in final['events']]
+            self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+            self.assertEqual(kinds.count('native_help_repair_retained'), 0)
+            self.assertEqual(kinds.count('native_help_repair_workspace'), 0)
+            abandoned = next(event for event in final['events'] if event['kind'] == 'native_unconfirmed_calls_abandoned')
+            self.assertEqual((abandoned['job_ids'], abandoned['old_commands_accepted']), ([candidate['job_id']], False))
+            self.assertNotEqual(final['current_run']['id'], run['id'])
+            self.assertNotIn(candidate['job_id'], [call['context']['job']['id'] for call in self.native.calls[calls:]])
+            # The helper's proposed repairs were never published by the restart.
+            files = self.service._project(room).files_for_paths(['src/a.txt', 'src/b.txt'])
+            self.assertEqual([file['content'] for file in files], ['original src/a.txt\n', 'original src/b.txt\n'])
         finally:
             with store._connection(write=True) as db:
+                db.execute('DELETE FROM native_workspaces WHERE room_id=? AND provider=?', (room, peer))
                 db.execute('INSERT INTO native_workspaces VALUES (?,?,?)', (room, peer, previous))

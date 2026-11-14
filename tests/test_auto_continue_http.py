@@ -71,8 +71,20 @@ class AutoContinueHTTPTests(unittest.TestCase):
         self.assertEqual(sum(event['kind'] == 'objective_auto_continued' for event in final['events']), 1)
         self.assertTrue(all(task['status'] in {'accepted', 'self_checked'} for task in final['team']['tasks']))
 
-    def test_a_crash_that_repeats_without_progress_is_continued_once_then_left_for_the_user(self):
-        # Catches: the automatic continue looping on the same failure forever.
+    def test_a_crash_that_keeps_repeating_is_continued_again_and_again_with_a_growing_pause(self):
+        # Catches: the host giving a repeated stop up to the user after one
+        # try, so a failure that would have passed left the room stopped.
+        fixture = self.keep(OutcomeFixture({'native_case': 'nonzero'}, bad_phase='work', repeated=True))
+        fixture.release_peer.set()
+        with patch.object(room_service, '_AUTO_CONTINUE_BACKOFF_SECONDS', (0.2, 0.4)):
+            fixture.create()
+            value = self.settled_after_auto(fixture, 2)
+        self.assertNotEqual(value['objective']['status'], 'complete')
+        self.assertEqual(value['stop_kind'], 'auto')
+        self.assertGreaterEqual(value['auto_continue']['repeats'], 1)
+
+    def test_a_crash_that_repeats_without_progress_is_not_continued_again_at_once(self):
+        # Catches: the automatic continue hammering the same failure with no pause.
         fixture = self.keep(OutcomeFixture({'native_case': 'nonzero'}, bad_phase='work', repeated=True))
         fixture.release_peer.set()
         fixture.create()
@@ -101,7 +113,7 @@ class AutoContinueHTTPTests(unittest.TestCase):
         self.assertTrue(any(event['kind'] == 'task_blocks_resumed' for event in final['events']))
         self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
 
-    def test_a_reply_that_stays_bad_is_reopened_once_then_left_for_the_user(self):
+    def test_a_reply_that_stays_bad_is_not_reopened_again_at_once(self):
         case = next(c for c in CORPUS['cases'] if c['id'] == 'illegal_json')
         fixture = self.keep(DependencyFixture(case, repeated=True))
         fixture.create()

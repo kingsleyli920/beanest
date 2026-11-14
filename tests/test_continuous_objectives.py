@@ -54,13 +54,19 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['objective']['stop_reason'], 'objective_calls_exhausted')
         self.assertEqual(result['objective']['deadline'], 8200)
 
-    async def test_exact_repeated_help_stops_but_new_help_does_not_spend_a_total_cap(self):
+    async def test_exact_repeated_help_goes_back_to_the_team_and_new_help_does_not_spend_a_total_cap(self):
+        # Catches: three identical help requests stopped the objective as objective_no_progress and
+        # left it for the user. Now the partners are told it is the same request again, and the third
+        # one hands the task to the team to replan (nobody proposes here, so the plan stalls and the
+        # host continues it by itself).
         original = self.handler
         work_calls = 0
+        contexts = []
         def handler(agent, context):
             nonlocal work_calls
             if context['job']['job_phase'] == 'work':
                 work_calls += 1
+                contexts.append(context)
                 return reply(context, commands=[{'type':'request_help','task_id':context['task']['id'],
                     'to':'codex' if agent == 'claude' else 'claude','capability':'text',
                     'text':'Confirm the same unchanged edge case.'}])
@@ -72,8 +78,16 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
             mode='python_artifacts', work_mode='build', execution_policy={'mode':'autonomous'})
         await self.settle()
         result = await self.service.read_room(created['room']['id'])
-        self.assertEqual(result['objective']['stop_reason'], 'objective_no_progress')
         self.assertEqual(work_calls, 3)
+        self.assertEqual((result['objective']['status'], result['objective']['stop_reason'], result['stop_kind']),
+                         ('stopped', 'team_plan_stalled', 'auto'))
+        self.assertEqual([event['reason'] for event in result['events'] if event['kind'] == 'internal_replan_requested'],
+                         ['repeated_result'])
+        self.assertFalse(any(event.get('code') == 'objective_no_progress' for event in result['events']))
+        self.assertNotIn('repeated_results', contexts[1]['objective'])
+        self.assertEqual(contexts[2]['objective'].get('repeated_results'),
+                         [{'what': 'the same help request was sent again with nothing on the board changed',
+                           'task_id': 'main', 'times': 2}])
         self.assertFalse((await self.service.status())['autonomous_work_active'])
 
     async def test_restart_carries_exact_unfinished_board_without_replanning_or_replaying_accepted_work(self):
@@ -173,13 +187,18 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(work, 4)
         self.assertEqual(result['team']['tasks'][0]['revision_attempts'], 3)
 
-    async def test_unchanged_revision_stops_even_when_review_chat_wording_changes(self):
+    async def test_unchanged_revision_goes_back_to_the_team_even_when_review_chat_wording_changes(self):
+        # Catches: three change requests against unchanged bytes stopped the objective as
+        # objective_no_progress and left it for the user. Now the owner and the reviewer are told
+        # it is the same result again, and the third rejection hands the task to the team to replan.
         original = self.handler
         reviews = 0
+        contexts = []
         def handler(agent, context):
             nonlocal reviews
             if context['job']['job_phase'] == 'review':
                 reviews += 1
+                contexts.append(context)
                 return reply(context,commands=[{'type':'review','task_id':context['task']['id'],
                     'verdict':'changes_requested','reason':f'The same bytes still miss the acceptance item; review {reviews}.'}])
             return original(agent,context)
@@ -188,14 +207,29 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
             mode='python_artifacts',work_mode='build',execution_policy={'mode':'autonomous'})
         await self.settle()
         result = await self.service.read_room(created['room']['id'])
-        self.assertEqual(result['objective']['stop_reason'],'objective_no_progress')
         self.assertEqual(reviews,3)
+        self.assertEqual((result['objective']['status'], result['objective']['stop_reason'], result['stop_kind']),
+                         ('stopped', 'team_plan_stalled', 'auto'))
+        self.assertFalse(any(event.get('code') == 'objective_no_progress' for event in result['events']))
+        task = result['team']['tasks'][0]
+        self.assertEqual((task['status'], task['block_cause'], task['blocked_reason']),
+                         ('blocked', 'coordination_required', 'Review asked for changes again and the delivered result is '
+                          'unchanged: The same bytes still miss the acceptance item; review 3.'))
+        self.assertEqual(contexts[2]['objective'].get('repeated_results'),
+                         [{'what': 'review asked for changes and the delivered result came back unchanged',
+                           'task_id': 'main', 'times': 2}])
 
     async def test_identical_checkpoint_deliveries_cannot_loop_using_new_task_ids(self):
+        # Catches: stages that deliver nothing new looping for ever under fresh task ids; the third
+        # stage's assessment not being told that the same continue already came back twice; and
+        # the stop being left for the user instead of continued by the host.
         self.rounds = 100
         original = self.handler
+        checkpoints = []
         def handler(agent, context):
             phase = context['job']['job_phase']
+            if phase == 'checkpoint':
+                checkpoints.append(context)
             if phase in {'plan','coordinate'}:
                 commands=[]
                 if not context['team']['tasks']:
@@ -212,6 +246,12 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         result=await self.service.read_room(created['room']['id'])
         self.assertEqual(result['objective']['stop_reason'],'objective_no_progress')
         self.assertEqual(result['objective']['stage'],3)
+        self.assertEqual(result['stop_kind'],'auto')
+        self.assertEqual(len(checkpoints),3)
+        self.assertIsNone(checkpoints[1]['objective'].get('repeated_results'))
+        self.assertEqual(checkpoints[2]['objective'].get('repeated_results'),
+                         [{'what': 'the checkpoint asked to continue with the same next goal and no new results',
+                           'task_id': None, 'times': 2}])
 
     async def test_same_file_bytes_cannot_loop_checkpoint_by_incrementing_revision(self):
         self.rounds=100
@@ -238,6 +278,8 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         result=await self.service.read_room(created['room']['id'])
         self.assertEqual(result['objective']['status'],'stopped')
         self.assertEqual(result['objective']['stop_reason'],'objective_no_progress')
+        # A stop the host continues by itself after a pause, no longer one that waits for the user.
+        self.assertEqual(result['stop_kind'],'auto')
         self.assertEqual(result['objective']['stage'],3)
         self.assertGreater(result['project']['revision'],1)
 

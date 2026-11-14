@@ -231,18 +231,24 @@ class InterruptedUserMessages(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.answered_by("codex", QUESTION)), 2)
         self.assertTrue(all(call["session_id"] is None for call in self.answered_by("codex", QUESTION)[1:]))
 
-    async def test_an_unknown_session_that_ran_tools_stays_for_the_user(self):
-        # Catches: the host continuing an unknown session past the audit, when a
-        # call that may have acted cannot prove whose session it was.
+    async def test_an_unknown_session_that_ran_tools_is_abandoned_and_the_partners_are_told(self):
+        # Catches two things: the room staying stopped, with every action
+        # refused, because a killed call that had run a tool could not prove
+        # its session; and the host resuming that unknown session. The fresh
+        # run is told the call may have acted, to check before repeating it.
         self.kill_tools, self.kill_before_session = 1, True
         room_id, stopped = await self.kill_reply_during_check()
         self.assertEqual(stopped["team"]["stop_reason"], "session_identity_unknown")
-        self.assertFalse(stopped["current_run"]["can_recover_native"])
-        self.assertIsNone(stopped["stop_kind"])
-        calls = len(self.fake.calls)
+        self.assertTrue(stopped["current_run"]["can_recover_native"], stopped["current_run"]["native_recovery_reason"])
+        self.assertEqual(stopped["stop_kind"], "auto")
         await self.watchdog(room_id)
-        self.assertEqual(len(self.fake.calls), calls)
-        self.assertEqual((await self.service.read_room(room_id))["current_run"]["id"], stopped["current_run"]["id"])
+        final = await self.service.read_room(room_id)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertNotEqual(final["current_run"]["id"], stopped["current_run"]["id"])
+        self.assertTrue(all(call["session_id"] is None for call in self.answered_by("codex", QUESTION)[1:]))
+        abandoned = [event for event in final["events"] if event["kind"] == "native_unconfirmed_calls_abandoned"]
+        self.assertEqual(len(abandoned), 1)
+        self.assertEqual(len(abandoned[0]["unverified_job_ids"]), 1)
 
     async def _first_reply_killed(self):
         while not any(call["context"]["job"]["job_phase"] == "user" for call in self.fake.calls):

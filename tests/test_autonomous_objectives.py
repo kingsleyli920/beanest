@@ -182,21 +182,30 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["objective_status"], "complete")
         self.assertEqual(summary["objective_goal"], result["objective"]["original_goal"])
 
-    async def test_out_of_scope_suggestion_never_auto_starts(self):
+    async def test_a_continue_is_not_held_for_scope_confirmation_and_a_suggestion_never_auto_starts(self):
+        # Catches: the host comparing scope_reference with the goal's wording and stopping a
+        # checkpoint's continue for the user to confirm; and the protection that must stay, a new
+        # goal merely suggested with a completed objective starting by itself.
         original = self.handler
         def handler(agent, context):
             result = original(agent, context)
-            if context["job"]["job_phase"] == "checkpoint":
-                result["commands"][0].update(decision="continue", next_goal="Build an unrelated product.", scope_reference="unrelated")
+            if context["job"]["job_phase"] == "checkpoint" and context["objective"]["stage"] == 1:
+                result["commands"][0].update(decision="continue", next_goal="Finish the remaining part of the item.",
+                                              scope_reference="unrelated")
+            elif context["job"]["job_phase"] == "checkpoint":
+                result["commands"][0].update(decision="complete", next_goal="Build an unrelated product.", scope_reference="unrelated")
             return result
         self.fake.handler = handler
         created = await self.service.create_room("Build a bounded original item.", "claude", "scope", mode="python_artifacts", execution_policy=POLICY)
         await self.settle()
         result = await self.service.read_room(created["room"]["id"])
-        self.assertEqual(result["objective"]["status"], "needs_user")
+        self.assertEqual((result["objective"]["status"], result["objective"]["stage"]), ("complete", 2))
+        self.assertEqual([event.get("code") for event in result["events"] if event["kind"] == "objective_checkpoint_finished"],
+                         [None, None])
         self.assertFalse(result["objective"]["next_step"]["can_start"])
-        self.assertEqual(result["objective"]["stage"], 1)
+        self.assertEqual(result["objective"]["next_step"]["scope"], "new_goal")
         self.assertTrue(result["current_run"]["can_start_suggested_goal"])
+        self.assertEqual(len(result["runs"]), 2)
 
     async def test_user_decision_continues_same_objective_and_total_budget(self):
         original = self.handler
@@ -256,10 +265,13 @@ class ObjectiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(final["objective"]["budget"]["used"], before["objective"]["budget"]["used"])
 
     async def test_task_block_stops_autonomy_and_quota_does_not_erase_question(self):
+        # A block that asks the user (cause user_decision) still waits; one without a cause now
+        # goes back to the team (test_partner_resolved_blocks).
         original = self.handler
         def handler(agent, context):
             if context["job"]["job_phase"] == "work" and context["objective"]["stage"] == 1:
-                return reply(context, commands=[{"type": "block", "task_id": "main", "reason": "Choose the required output value."}])
+                return reply(context, commands=[{"type": "block", "task_id": "main", "cause": "user_decision",
+                                                 "reason": "Choose the required output value."}])
             return original(agent, context)
         self.fake.handler = handler
         created = await self.service.create_room("Build the agreed bounded item.", "claude", "blocked-decision",

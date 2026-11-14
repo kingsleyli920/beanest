@@ -157,6 +157,11 @@ class CollaborationViewTests(unittest.TestCase):
         self.assertEqual(outcome["state"], "in_progress")
         self.assertEqual(outcome["reason"], "Fix the wait budget：需要调整文件分工。手头的工作做完后，伙伴会重新分配，不用你操作。")
         self.assertIn("Fix the wait budget：等伙伴重新分配文件后继续", outcome["remaining"])
+        # Every block the partners resolve themselves reads the same way once a replan is requested.
+        for cause in ("technical", "external_dependency", "unclassified"):
+            with self.subTest(cause=cause):
+                value["team"]["tasks"][1].update(block_cause=cause, internal_replan_revision=-1)
+                self.assertEqual(collaboration_view(value)["outcome"]["state"], "in_progress")
         # A block for the user, or a coordination block nobody has asked to replan, still asks the user.
         for cause, replan in (("user_decision", -1), ("coordination_required", None)):
             with self.subTest(cause=cause, replan=replan):

@@ -129,15 +129,36 @@ class InternalReplanStoreTests(unittest.TestCase):
         self.assertEqual(self.store.snapshot(room)['team']['phase'], 'planning')
         self.assertEqual(self.store.snapshot(room)['team']['revision'], before + 1)
 
-    def test_real_decision_prevents_internal_replanning_from_swallowing_it(self):
+    def test_a_task_waiting_for_the_user_does_not_hold_back_the_teams_replan_and_is_asked_alone(self):
+        # Catches: one task waiting for the user's permission froze the whole board, so the replan
+        # another task had asked for never started; and the opposite, the replan swallowing the
+        # permission question so the user was never asked.
         room = self.plan()
         peer = self.store.claim(room, 'codex')
         self.request(room)
         self.finish(peer, [{'type':'block','task_id':'tests','cause':'permission_required','reason':'User authorization is missing.'}])
         snap = self.store.snapshot(room)
+        self.assertEqual(snap['team']['phase'], 'planning')
+        self.assertEqual([e['task_ids'] for e in snap['events'] if e['kind']=='internal_replan_started'], [['main']])
+        self.assertEqual((self.task(room, 'tests')['status'], self.task(room, 'tests')['block_cause']),
+                         ('blocked', 'permission_required'))
+        self.finish(self.store.claim(room, 'claude'), [proposal('fix'), {'type':'plan_ready'}])
+        for _ in range(30):
+            jobs = [job for job in (self.store.claim(room, member) for member in ('codex', 'claude')) if job]
+            if not jobs: break
+            for job in jobs:
+                task_id = job['team']['task_id']
+                self.finish(job, [{'type':'plan_ready'}] if job['kind'] == 'team_coordinate' else
+                            [{'type':'review','task_id':task_id,'verdict':'accept','reason':'Exact result checked.'}]
+                            if job['kind'] == 'team_review' else
+                            [{'type':'complete','task_id':task_id,'result':'Concrete independently checked result.'}])
+        snap = self.store.snapshot(room)
+        # The permission block did not keep the confirmed plan in planning, and the rest was delivered.
         self.assertEqual(snap['team']['phase'], 'working')
-        self.assertEqual(self.task(room, 'tests')['block_cause'], 'permission_required')
-        self.assertFalse(any(e['kind']=='internal_replan_started' for e in snap['events']))
+        self.assertEqual({task['id']: task['status'] for task in snap['team']['tasks']},
+                         {'main': 'accepted', 'tests': 'blocked', 'fix': 'accepted'})
         binding = {'run_id':snap['current_run']['id'], 'revision':0, 'digest':'fixture'}
         self.assertTrue(self.store.require_task_decision(room, binding))
-        self.assertEqual(self.store.snapshot(room)['objective']['next_step']['origin'], 'task_block')
+        objective = self.store.snapshot(room)['objective']
+        self.assertEqual((objective['status'], objective['next_step']['origin'], objective['next_step']['question']),
+                         ('needs_user', 'task_block', 'Deliver tests：User authorization is missing.'))

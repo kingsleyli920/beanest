@@ -646,15 +646,15 @@ class TeamStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["room"]["status"], "needs_user")
 
     def test_unavailable_task_capability_never_starts_work(self):
+        # Catches: a task needing a capability no partner has being recorded (it was stored blocked
+        # from birth and held the plan in planning for good) or, worse, dispatched as work.
         room_id = self.room()
-        author, peer = self.store.claim(room_id, "claude"), self.store.claim(room_id, "codex")
-        self.finish(author, [proposal("art", capability="image"), {"type": "plan_ready"}])
-        self.finish(peer, [])
-        self.finish(self.store.claim(room_id, "codex"), [{"type": "plan_ready"}])
+        author = self.store.claim(room_id, "claude")
+        self.assertCode("team_capability_unavailable", lambda: self.store.prevalidate_team_result(
+            author["id"], [proposal("art", capability="image"), {"type": "plan_ready"}]))
         snapshot = self.store.snapshot(room_id)
-        self.assertEqual(self.task(room_id, "art")["blocked_reason"], "capability_unavailable")
+        self.assertEqual(snapshot["team"]["tasks"], [])
         self.assertFalse(any(job["kind"] == "team_work" for job in snapshot["jobs"]))
-        self.assertEqual(snapshot["room"]["status"], "needs_user")
 
 
 if __name__ == "__main__":
