@@ -142,7 +142,10 @@ const errorLabels = localizedLabels({
   native_recovery_unavailable: '这次恢复请求未完成，已有记录与成果保留。',
   native_recovery_cleanup_unconfirmed: '上次本机执行的清理尚未确认，暂时不能继续。',
   native_recovery_workspace_unavailable: '开发副本暂时无法安全核对，没有重新派发。',
-  native_recovery_unpublished_changes: '上次留下的改动已保留，本次尚未启动续作。',
+  native_recovery_unpublished_changes: '上一步留下的现场暂时核对不上，这一步还没接着做；豆窝会自己再试。',
+  native_recovery_required: '上一步的结果还没核对完，要先接着原来的工作恢复。',
+  no_available_partner: '现在没有能接活的伙伴，可能都在等额度或已停用。',
+  room_not_active: '这个任务现在不在进行中，还不能直接发消息。',
   native_recovery_binding_changed: '当前文件版本已变化，请重新核对现场后再试。',
   native_recovery_diagnostic_unconfirmed: '现场记录暂时对不上，已保留文件和记录；核对后再继续。',
   objective_calls_exhausted: '本目标的调用上限已到，成果和记录保留。',
@@ -551,15 +554,24 @@ function nowSummary(snapshot) {
       title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。")].join(' ') };
     if (kind === 'auto' || kind === 'repeated') {
       const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
+      const repeats = Number(snapshot.auto_continue?.repeats) || 0;
+      const nextAt = Number(snapshot.auto_continue?.next_at);
+      if (kind === 'auto' && repeats > 0) return { tone: 'go', autoContinue: true, label: label(t("稍后自动再试"), room.updated_at),
+        title: t("又停在同一处，豆窝稍后自动再试"),
+        text: [nextAt > 0 ? t("已经自动继续过 {p0} 次，下次大约在 {p1}。不用你操作；想换个做法可以直接在下面说。", { p0: repeats, p1: timeLabel(nextAt) })
+          : t("已经自动继续过 {p0} 次，稍后会再试。不用你操作；想换个做法可以直接在下面说。", { p0: repeats }), doneNote].join(' ') };
       return kind === 'repeated'
-        ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过一次，又停在同一处"),
-          text: [t("没有新进展，所以不再自动继续。点“继续推进”再试，或在下面补充要求。"), doneNote].join(' ') }
+        ? { tone: 'stop', label: stoppedLabel, title: t("自动继续过，又停在同一处"),
+          text: [t("现在还不能接着做，能继续时豆窝会自己再试。也可以在下面补充要求。"), doneNote].join(' ') }
         : { tone: 'go', autoContinue: true, label: label(t("马上自动继续"), room.updated_at),
           title: restartedStop ? t("豆窝服务重启过，马上自动接着做") : t("推进停了一下，马上自动接着做"),
           text: [t("几秒后自动继续，不用你操作。"), doneNote].join(' ') };
     }
   }
-  if (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown') return { tone: 'bad', label: label(t("结果待确认")),
+  // A stop with a known reason says that reason; only a result nobody can
+  // name yet reads as "unconfirmed".
+  const namedStop = ['stopped', 'interrupted'].includes(status) && (Object.hasOwn(executionLabels, stopReason) || Object.hasOwn(errorLabels, stopReason));
+  if (!namedStop && (outcome === 'unknown' || status === 'unknown' || room.status === 'unknown')) return { tone: 'bad', label: label(t("结果待确认")),
     title: t("上一步的结果还没确认"), text: t("执行结果还没核对清楚，豆窝不会自动重跑。可以先看看讨论里的记录。") };
   const stopped = ['stopped', 'interrupted'].includes(status) || outcome === 'stopped' || closedStatuses.has(room.status);
   if (stopped) {
@@ -3180,7 +3192,7 @@ function projectLimitMessage(folder) {
 
 function executionMessage(code) {
   if (code === 'project_limit_exceeded' && state.snapshot?.room.mode === 'project_folder') return projectLimitMessage(true);
-  return Object.hasOwn(executionLabels, code) ? executionLabels[code] : t("本轮结果需要核对。");
+  return Object.hasOwn(executionLabels, code) ? executionLabels[code] : Object.hasOwn(errorLabels, code) ? errorLabels[code] : t("本轮结果需要核对。");
 }
 
 function timeLabel(seconds, full = false) {

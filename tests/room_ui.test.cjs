@@ -6296,10 +6296,10 @@ test('a definitive native continuation rejection stays beside the composer acros
   } });
   ui.type('保留未发送的下一项要求'); await ui.click('recover-native');
   assert.equal(ui.get('pending-request').hidden, true); assert.equal(ui.get('action-error').hidden, false);
-  assert.equal(ui.get('action-error').textContent, '上次留下的改动已保留，本次尚未启动续作。');
+  assert.equal(ui.get('action-error').textContent, '上一步留下的现场暂时核对不上，这一步还没接着做；豆窝会自己再试。');
   assert.doesNotMatch(ui.get('action-error').textContent, /请先处理|副本|内部|审批/); assert.equal(ui.get('message').value, '保留未发送的下一项要求');
   await ui.poll(); await ui.poll();
-  assert.equal(ui.get('action-error').hidden, false); assert.match(ui.get('action-error').textContent, /尚未启动续作/); assert.equal(ui.posts().length, 1);
+  assert.equal(ui.get('action-error').hidden, false); assert.match(ui.get('action-error').textContent, /这一步还没接着做/); assert.equal(ui.posts().length, 1);
   assert.equal(ui.get('recover-native').disabled, false);
   accepted = true; await ui.click('recover-native'); assert.equal(ui.get('action-error').hidden, true); assert.equal(ui.get('action-error').textContent, '');
   const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8'); assert.match(css, /\.notice, \.pending-request\s*\{[^}]*font-size: 12px/s);
@@ -10251,13 +10251,40 @@ test('stops the host continues by itself never read as a decision, and only user
     assert.equal(/马上自动继续/.test(naturalUi.get('now-label').textContent), canSend, `natural continuation can_send=${canSend}`);
     assert.doesNotMatch(naturalUi.get('now-card').textContent, /等你决定/);
   }
-  // The same automatic stop coming back after one automatic continue waits for the user.
+  // An older service without stop_kind: the same stop coming back is never called final.
   const repeated = restartSnapshot(); repeated.objective.stop_reason = 'service_restarted';
   repeated.objective.execution_policy = { ...repeated.current_run.execution_policy };
   repeated.events.push({ seq: 90, kind: 'objective_auto_continued', sender: 'system', code: 'service_restarted', run_id: repeated.current_run.id, created_at: 1090 });
   const repeatedUi = await browser({ rooms: [repeated.room], saved: repeated, executionPolicySupport: true, continuousObjectiveSupport: true });
-  assert.match(repeatedUi.get('now-title').textContent, /自动继续过一次，又停在同一处/);
+  assert.equal(repeatedUi.get('now-title').textContent, '自动继续过，又停在同一处');
+  assert.doesNotMatch(repeatedUi.get('now-text').textContent, /不再自动继续/);
   assert.ok(descendants(repeatedUi.get('now-card')).find((node) => node.dataset.mirror === 'restart-objective').classList.contains('pri'));
+});
+test('a stop that keeps coming back shows that the host is still retrying, how often and when next', async () => {
+  // Catches the card promising "a few seconds" for a retry that is minutes away, or calling a stop the host still retries final.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'cli_nonzero_exit';
+  saved.objective.execution_policy = { ...saved.current_run.execution_policy };
+  saved.stop_kind = 'auto'; saved.auto_continue = { repeats: 2, next_at: 1794650000 };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(ui.get('now-title').textContent, '又停在同一处，豆窝稍后自动再试');
+  assert.match(ui.get('now-label').textContent, /稍后自动再试/);
+  assert.match(ui.get('now-text').textContent, /已经自动继续过 2 次，下次大约在 /);
+  assert.doesNotMatch(ui.get('now-text').textContent, /几秒后|不再自动继续/);
+  const first = restartSnapshot(); first.objective.stop_reason = 'cli_nonzero_exit';
+  first.objective.execution_policy = { ...first.current_run.execution_policy };
+  first.stop_kind = 'auto'; first.auto_continue = { repeats: 0, next_at: 1794650000 };
+  const firstUi = await browser({ rooms: [first.room], saved: first, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(firstUi.get('now-title').textContent, '推进停了一下，马上自动接着做');
+});
+test('a stop whose reason is known says that reason even while the room status is unknown', async () => {
+  // Catches the generic "上一步的结果还没确认…不会自动重跑" card hiding why a native room stopped.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'native_recovery_cleanup_unconfirmed';
+  saved.objective.execution_policy = { ...saved.current_run.execution_policy };
+  saved.room.status = 'unknown'; saved.stop_kind = null;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(ui.get('now-title').textContent, '推进已停止');
+  assert.match(ui.get('now-text').textContent, /上次本机执行的清理尚未确认，暂时不能继续。/);
+  assert.doesNotMatch(ui.get('now-title').textContent, /上一步的结果还没确认/);
 });
 test('the service stop_kind keeps the card, the room list and the task board telling the same story', async () => {
   // Catches a list saying 已停止, unfinished tasks saying 已取消, or a note asking for a click while the card promises to resume.
