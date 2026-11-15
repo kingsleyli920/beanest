@@ -75,7 +75,11 @@ MID_RUN_ADJUSTMENT_INSTRUCTION = (
     "continues untouched and nobody re-confirms the plan. "
     "New tasks go to the shared pool and the next free partner takes them. If any command breaks a "
     "rule, the whole response is rejected and nothing changes. context.plan_adjustments lists such changes made in this "
-    "round; the current board is what counts. ")
+    "round; the current board is what counts. When context.answering_now is present, those partners are answering user "
+    "messages at the same time as you. Only the first plan change lands: one sent from a board another partner has "
+    "changed since is returned and that whole call is repeated. So the first partner listed drafts any propose or adjust; "
+    "the others answer the user and put what they would change in their message, and send plan commands themselves only "
+    "for something the first partner's change cannot cover. ")
 
 
 EXTEND_INSTRUCTION = (
@@ -453,6 +457,15 @@ class RoomPromptMixin:
                        if event["kind"] == "plan_adjusted" and event.get("run_id") == job["team"]["run_id"]][-6:]
         if adjustments:
             context["plan_adjustments"] = adjustments
+        if job["team"].get("job_phase") == "user":
+            # Everyone answering now, in board order, so they can agree who drafts plan changes.
+            # A partner in the middle of other work answers later, so it is not listed.
+            busy = {item["provider"] for item in snapshot["jobs"]
+                    if item["status"] == "working" and item["kind"] != "team_user"}
+            answering = ({item["provider"] for item in snapshot["jobs"]
+                          if item["kind"] == "team_user" and item["status"] in {"queued", "working"}} - busy) | {job["provider"]}
+            if len(answering) > 1:
+                context["answering_now"] = [member["id"] for member in snapshot["members"] if member["id"] in answering]
         if snapshot.get("objective"):
             context["current_stage_goal"] = job["goal"]
             if job["team"]["job_phase"] in {"checkpoint", "checkpoint_review"}:

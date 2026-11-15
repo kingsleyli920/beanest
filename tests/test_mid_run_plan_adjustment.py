@@ -254,6 +254,10 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         if context["job"]["job_phase"] != "user":
             return await pool.PoolService.handler(self, agent, context, cwd)
         self.user_replies.append(context["self"])
+        if getattr(self, "answers_only", False):
+            self.answering[context["self"]] = context.get("answering_now")
+            await asyncio.sleep(0.05)  # both replies overlap
+            return native_reply(context, [])
         self.plan.append(pool.plan("L2a", paths=["l2_side.py"]))
         return native_reply(context, [
             native.proposal("L2a", paths=["l2_side.py"], capability="python", dependencies=[]),
@@ -317,6 +321,38 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         # The answering partner's reply was told it may do this.
         reply = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "user")
         self.assertIn("adjust{type,task_id,dependencies,write_paths}", reply["prompt"])
+        self.assertNotIn("answering_now", reply["context"], "one partner answering alone has nobody to agree with")
+
+    async def test_partners_answering_the_same_message_are_told_who_else_is_and_in_what_order(self):
+        # Catches two free partners each drafting a plan change for one user message without knowing
+        # of each other: the later draft is returned and that whole call repeated. A partner busy
+        # with other work answers later and must not be named as the one to draft.
+        self.plan = [pool.plan("L1"), pool.plan("L2", dependencies=["L1"]), pool.plan("D1", dependencies=["L1"])]
+        self.user_replies, self.answering, self.answers_only = [], {}, True
+        released = asyncio.Event()
+
+        async def until():
+            return released.is_set()
+        self.holds["L1"] = until
+        await self.create(["claude", "codex", "ember"])
+        for _ in range(300):
+            state = await self.state()
+            if ("claude", "L1") in self.works and not any(
+                    job["provider"] in {"codex", "ember"} and job["status"] in {"queued", "working"} for job in state["jobs"]):
+                break
+            await asyncio.sleep(0.01)
+        await self.service.send_message(self.room_id, "Can any of this start earlier?", "all", str(uuid4()), source="user")
+        for _ in range(300):
+            if {"codex", "ember"} <= set(self.answering):
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual({key: self.answering.get(key) for key in ("codex", "ember")},
+                         {"codex": ["codex", "ember"], "ember": ["codex", "ember"]})
+        released.set()
+        await self.settle()
+        state = await self.state()
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        self.assertNotIn("native_response_rejected", {event["kind"] for event in state["events"]})
 
 
 if __name__ == "__main__":
