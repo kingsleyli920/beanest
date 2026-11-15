@@ -32,7 +32,10 @@ NEW_TEXT_FORMAT = "beanest-text-artifacts-v1"
 MAX_FILES = 16
 MAX_BYTES = 64 * 1024
 MAX_METADATA = 1024 * 1024
-LOCK_SECONDS = 5
+# How long one call waits for another to finish with the shared project. Two partners starting
+# in the same second each copy a large project under this lock; five seconds made the second one
+# fail, which stopped the whole team. Only a holder that never lets go should end the wait.
+LOCK_SECONDS = 300
 _PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.py\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")

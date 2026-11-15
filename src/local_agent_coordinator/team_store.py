@@ -478,7 +478,9 @@ class TeamStore:
                      # Running out of quota pauses a task; it is not a question for the user.
                      "all_partners_quota_exhausted", "agent_quota_exhausted", "subscription_limit_reached",
                      # The call never reached a model; the task simply was not started.
-                     NATIVE_PREFLIGHT_FAILED}
+                     NATIVE_PREFLIGHT_FAILED,
+                     # Another call held the shared project too long; nothing about the task itself.
+                     "project_busy"}
         # A reply mistake applied nothing; the carried task is redone, not a
         # question for the user.
         resumable.update(REPLY_MISTAKES)
