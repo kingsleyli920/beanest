@@ -466,6 +466,53 @@ class ProtocolTests(unittest.TestCase):
             child = adapters._environment()
         self.assertFalse(any(k in child for k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_PROFILE')))
 
+    def test_full_access_environment_keeps_the_toolchain_and_drops_only_account_selectors(self):
+        # Catches three defects: a full access call losing ordinary variables
+        # the user's build reads (they were all stripped, so builds failed);
+        # the fix passing a variable that selects a key, endpoint or login
+        # home; and the host's own probes (ps, status, account checks, which
+        # call this without ``inherit``) starting to inherit anything more.
+        host = {'HOME': '/home/user', 'PATH': '/usr/bin:/bin', 'JAVA_HOME': '/opt/jdk-21',
+                'ANDROID_HOME': '/opt/android-sdk', 'GODOT': '/opt/godot', 'GRADLE_OPTS': '-Xmx2g',
+                'NODE_AUTH_TOKEN': 'registry-token', 'VITE_API_BASE_URL': 'https://project.invalid',
+                'AWS_PROFILE': 'project-deploy', 'HTTPS_PROXY': 'http://127.0.0.1:7890',
+                'ANTHROPIC_API_KEY': 'PRIVATE', 'ANTHROPIC_AUTH_TOKEN': 'PRIVATE',
+                'ANTHROPIC_BASE_URL': 'https://router.invalid', 'CLAUDE_CODE_USE_BEDROCK': '1',
+                'CLAUDE_CODE_USE_VERTEX': '1', 'CLAUDE_CODE_OAUTH_TOKEN': 'PRIVATE',
+                'CLAUDE_CONFIG_DIR': '/user/shell/claude', 'CLAUDECODE': '1',
+                'OPENAI_API_KEY': 'PRIVATE', 'OPENAI_BASE_URL': 'https://router.invalid',
+                'CODEX_API_KEY': 'PRIVATE', 'CODEX_HOME': '/user/shell/codex',
+                'KIMI_API_KEY': 'PRIVATE', 'KIMI_BASE_URL': 'https://router.invalid',
+                'KIMI_CODE_HOME': '/user/shell/kimi', 'MOONSHOT_API_KEY': 'PRIVATE',
+                'BEANEST_PROGRESS_FILE': '/another/call/progress'}
+        with patch.dict(os.environ, host, clear=True):
+            inherited = adapters._environment(inherit=True)
+            minimal = adapters._environment()
+            with adapters.account_home('codex', '/beanest/homes/profile'):
+                bound = adapters._environment(inherit=True)
+        self.assertEqual(inherited, {
+            'HOME': '/home/user', 'PATH': '/usr/bin:/bin', 'JAVA_HOME': '/opt/jdk-21',
+            'ANDROID_HOME': '/opt/android-sdk', 'GODOT': '/opt/godot', 'GRADLE_OPTS': '-Xmx2g',
+            'NODE_AUTH_TOKEN': 'registry-token', 'VITE_API_BASE_URL': 'https://project.invalid',
+            'AWS_PROFILE': 'project-deploy', 'HTTPS_PROXY': 'http://127.0.0.1:7890'})
+        self.assertEqual(minimal, {'HOME': '/home/user', 'PATH': '/usr/bin:/bin',
+                                   'HTTPS_PROXY': 'http://127.0.0.1:7890'})
+        # Only the profile this call is bound to names a login home.
+        self.assertEqual(bound, {**inherited, 'CODEX_HOME': '/beanest/homes/profile'})
+
+    def test_full_access_environment_drops_only_the_hosts_own_python_path(self):
+        # Catches: a host run from a source checkout handing its own src to
+        # the user's Python (which would then import the host's code), or the
+        # fix touching a PYTHONPATH the user set themselves.
+        own = str(Path(adapters.__file__).resolve().parents[1])
+        for value, expected in [(own + os.pathsep + '/user/lib', '/user/lib'),
+                                ('/user/lib' + os.pathsep + own, '/user/lib'),
+                                (own, None),
+                                ('/user/a' + os.pathsep + '/user/b', '/user/a' + os.pathsep + '/user/b')]:
+            with self.subTest(value=value), patch.dict(os.environ, {'PYTHONPATH': value}):
+                self.assertEqual(adapters._environment(inherit=True).get('PYTHONPATH'), expected)
+                self.assertNotIn('PYTHONPATH', adapters._environment())
+
     def test_network_proxy_and_ca_reach_the_child_but_provider_routing_does_not(self):
         # Catches: users behind an HTTPS proxy or corporate CA could not reach
         # the provider from Beanest although their own terminal could.

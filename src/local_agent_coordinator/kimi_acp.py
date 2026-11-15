@@ -252,8 +252,12 @@ def write_sandbox(environment, cwd, progress_file=None):
 
 
 async def start(cwd, *, on_update=None, permission="plan", progress_file=None, sandbox=False):
-    """sandbox: run read-only calls under the write-denying sandbox so their tools may run."""
-    environment = adapters._environment()
+    """sandbox: run read-only calls under the write-denying sandbox so their tools may run.
+
+    A full access call inherits the host's environment as a terminal would,
+    minus what selects another account; every other start keeps the essentials.
+    """
+    environment = adapters._environment(inherit=permission == "full_access")
     if progress_file is not None:
         environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
     sandboxed = sandbox and permission in READ_ONLY_PERMISSIONS and SANDBOX_EXEC.is_file()
@@ -330,13 +334,17 @@ def wire_offset(path):
 
 
 def completed_turn(path, initial):
-    """Read only newly appended typed records of this exact owned session."""
+    """Read only newly appended typed records of this exact owned session.
+
+    How much a turn wrote is not evidence against it: a long turn is read to
+    its end, one record at a time, however far the wire grew.
+    """
     identity, offset = initial
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         if (not stat.S_ISREG(info.st_mode) or identity is not None and identity != (info.st_dev, info.st_ino)
-                or info.st_size < offset or info.st_size - offset > 64 * 1024 * 1024):
+                or info.st_size < offset):
             raise ACPError("native_turn_unconfirmed")
         stream.seek(offset)
         started, ended, prompts = [], [], 0
@@ -379,7 +387,7 @@ def failed_turn_diagnostic(path, initial):
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or identity is not None and identity != (info.st_dev, info.st_ino)
-                    or info.st_size < offset or info.st_size - offset > 64 * 1024 * 1024):
+                    or info.st_size < offset):
                 return None
             stream.seek(offset)
             prompts, ends, compacting = 0, [], False
@@ -443,7 +451,7 @@ def turn_usage(path, initial):
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or identity is not None and identity != (info.st_dev, info.st_ino)
-                    or info.st_size < offset or info.st_size - offset > 64 * 1024 * 1024):
+                    or info.st_size < offset):
                 return None
             stream.seek(offset)
             sources = ([], {}, {})
@@ -703,7 +711,7 @@ async def set_session_mode(connection, session_id, mode, resumed):
 
 
 class TurnUpdates:
-    def __init__(self, callback, progress_fingerprint=None):
+    def __init__(self, callback):
         from .native_adapters import _Stream
         self.callback = callback
         self.active = False
@@ -713,7 +721,8 @@ class TurnUpdates:
         self.permission_required = False
         self.question = None
         self.possible_effects = False
-        self.progress = _Stream("kimi", True, None, progress_fingerprint)
+        self.unreadable_tools = set()
+        self.progress = _Stream("kimi", True, None)
 
     async def __call__(self, params):
         if params.get("permission_required"):
@@ -728,36 +737,44 @@ class TurnUpdates:
             return  # session/load's replay is not a new tool invocation.
         if not isinstance(params, dict) or params.get("sessionId") != self.session_id:
             raise ACPError("native_session_identity_mismatch")
+        # An update this host cannot read is skipped, never a reason to end the
+        # turn: Kimi Code adds update kinds, tool kinds and states between
+        # releases. What may have been a tool still counts as a possible effect.
         update = params.get("update")
         if not isinstance(update, dict):
-            raise ACPError("native_protocol_invalid")
+            self.possible_effects = True
+            return
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
             content = update.get("content", {})
-            if content.get("type") == "text" and isinstance(content.get("text"), str):
+            if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
+                # The final answer is kept whole, whatever its length.
                 self.text += content["text"]
-                if len(self.text.encode("utf-8")) > adapters.MAX_TEXT:
-                    raise ACPError("output_limit")
         elif kind in {"tool_call", "tool_call_update"}:
             identifier = update.get("toolCallId")
             if not isinstance(identifier, str) or not 1 <= len(identifier) <= 256:
-                raise ACPError("native_protocol_invalid")
+                self.possible_effects = True
+                return
+            native_state = update.get("status", self.tools.get(identifier, {}).get("state", "pending"))
+            if not isinstance(native_state, str) or native_state not in {"pending", "in_progress", "completed", "failed"}:
+                # A state a newer Kimi Code added. Whether this tool finished is
+                # no longer known, so it stays out of the counts and never
+                # leaves the turn looking unpaired.
+                if identifier not in self.tools and identifier not in self.unreadable_tools:
+                    self.text = ""  # Still a tool: what was said before it is not the final answer.
+                self.tools.pop(identifier, None)
+                self.unreadable_tools.add(identifier)
+                self.possible_effects = True
+                return
+            if identifier in self.unreadable_tools:
+                return
             if identifier not in self.tools:
-                self.tools[identifier] = {"kind": update.get("kind", "other"), "state": "pending"}
+                self.tools[identifier] = {"kind": "other", "state": "pending"}
                 self.text = ""
             tool = self.tools[identifier]
-            tool["kind"] = update.get("kind", tool["kind"])
-            if "rawInput" in update:
-                self.progress.remember_input(identifier, tool["kind"], update["rawInput"])
-            native_state = update.get("status", tool["state"])
-            if native_state not in {"pending", "in_progress", "completed", "failed"}:
-                raise ACPError("native_protocol_invalid")
+            native_kind = update.get("kind", tool["kind"])
+            tool["kind"] = native_kind if isinstance(native_kind, str) else "other"
             tool["state"] = native_state
-            if native_state == "failed" and not tool.get("failure_observed", False):
-                tool["failure_observed"] = True
-                await self.progress.failed_tool(identifier, update.get("rawOutput", update.get("content")))
-                if self.progress.failure is not None:
-                    raise ACPError(self.progress.failure)
             tool_kind = {"read": "file_read", "edit": "file_write", "delete": "file_write",
                          "execute": "shell", "search": "file_search", "fetch": "network"}.get(tool["kind"], "tool")
             self.possible_effects |= tool["kind"] not in {"read", "search"}
@@ -780,7 +797,7 @@ class TurnUpdates:
 
 async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permission="plan",
                         response_schema=None, runtime_settings=None, on_activity=None,
-                        receipt_dir=None, progress_fingerprint=None, progress_file=None, sandbox=False):
+                        receipt_dir=None, progress_file=None, sandbox=False, on_process=None):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     from .message_capacity import MAX_PROMPT_BYTES
     if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
@@ -814,7 +831,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise ValueError("invalid_prompt")
     process, connection, owned = None, None, {}
-    updates = TurnUpdates(on_activity, progress_fingerprint)
+    updates = TurnUpdates(on_activity)
     result = {"session_id": session_id, "text": "", "status": "failed", "usage": None, "events": []}
     started = time.monotonic()
     proof, receipt_path, cancelled = None, None, None
@@ -824,6 +841,8 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         nonlocal process, connection, session_id, proof, path, before, prompt_sent
         process, connection = await start(cwd, on_update=updates, permission=permission,
                                           progress_file=progress_file, sandbox=sandbox)
+        if on_process is not None:
+            on_process(process.pid)
         _remember(process.pid, owned, await asyncio.to_thread(_processes))
         initialized = await initialize(connection)
         resumed = session_id is not None

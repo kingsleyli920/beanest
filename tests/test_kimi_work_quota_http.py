@@ -481,29 +481,72 @@ class KimiWorkQuotaHTTPTests(unittest.TestCase):
         self.assertNotEqual(final['objective']['status'], 'complete')
         self.assertEqual((Path(fixture.failed_work['cwd']) / 'second.md').read_bytes(), fixture.retained)
 
-    def test_generic_429_is_not_quota_retirement_or_recovery_authority(self):
-        fixture = self.fixture(quota=False)
-        stopped = fixture.stopped()
+    def restarted_without_quota_handoff(self, fixture, stopped):
+        """recover-native starts the generic restart: the failed call is abandoned
+        and none of the quota handoff happens (no retirement, no transfer, no
+        read-only inspection of the retained work by a peer)."""
         calls = len(fixture.calls)
-        code, value = fixture.continue_http(stopped)
-        self.assertIn(code, (200, 409), value.get('error'))
-        code, refused = fixture.request('POST', f'/api/rooms/{fixture.room_id}/recover-native',
+        code, started = fixture.request('POST', f'/api/rooms/{fixture.room_id}/recover-native',
                                         {'request_id': str(uuid4()), **stopped['continuation']['binding']})
-        self.assertEqual(code, 409, refused.get('error'))
-        self.assertEqual(len(fixture.calls), calls)
-        self.assertEqual(fixture.read()['current_run']['id'], stopped['current_run']['id'])
+        self.assertEqual((code, started.get('error')), (200, None))
+        final = fixture.settled()
+        later = [event for event in final['events'] if event['seq'] > stopped['events'][-1]['seq']]
+        kinds = [event['kind'] for event in later]
+        self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+        for kind in ('native_partial_recovery_attestation', 'native_partial_workspace_transferred', 'native_partial_inspection_group',
+                     'native_quota_checkpoint_handoff'):
+            self.assertEqual(kinds.count(kind), 0, kind)
+        self.assertEqual(final['objective']['retired_partners'], {})
+        self.assertEqual(fixture.inspections, [])
+        self.assertNotEqual(final['current_run']['id'], stopped['current_run']['id'])
+        abandoned = next(event for event in later if event['kind'] == 'native_unconfirmed_calls_abandoned')
+        self.assertEqual((abandoned['job_ids'], abandoned['old_commands_accepted']), ([fixture.failed_work['job_id']], False))
+        # The source keeps its own task and what it left for it; no peer took it over.
+        second = next(task for task in final['team']['tasks'] if task['id'] == 'T2')
+        self.assertEqual(second['owner'], 'kimi')
+        self.assertEqual((Path(fixture.failed_work['cwd']) / 'second.md').read_bytes(), fixture.retained)
+        self.assertEqual([call['agent'] for call in fixture.calls[calls:] if call['phase'] == 'work'][:1], ['kimi'])
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        return final, abandoned, fixture.calls[calls:]
 
-    def test_outside_d_cleanup_unknown_and_wrong_prompt_reject_without_new_calls(self):
-        for fault in ('outside_d', 'cleanup', 'prompt'):
+    def test_generic_429_is_not_quota_retirement_or_recovery_authority(self):
+        # Catches an ordinary rate-limit 429 being taken as proof of exhausted
+        # quota (Kimi retired, its retained work handed to a peer), and
+        # recover-native being refused for good because it is not that proof.
+        fixture = self.fixture(quota=False)
+        fixture.stopped()
+        stopped = fixture.wait(lambda value: (value['current_run'].get('native_quota_handoff') or {}).get('state') == 'blocked')
+        self.assertEqual(stopped['current_run']['native_quota_handoff']['reason'], 'native_recovery_diagnostic_unconfirmed')
+        self.assertEqual((stopped['current_run']['can_recover_native'], stopped['current_run']['native_recovery_reason']),
+                         (False, 'native_recovery_diagnostic_unconfirmed'))
+        self.assertIsNone(stopped['current_run']['native_quota_failure'])
+        self.restarted_without_quota_handoff(fixture, stopped)
+
+    def test_outside_d_cleanup_unknown_and_wrong_prompt_refuse_the_quota_handoff_but_the_room_restarts(self):
+        # Catches a quota handoff over evidence that does not hold: a private
+        # change outside the task, a call whose exit was never confirmed, a
+        # prompt that is not this call's. And the room being refused
+        # recover-native because of it. Each fact reaches the fresh run instead.
+        for fault, reason in (('outside_d', 'native_recovery_unpublished_changes'), ('cleanup', 'native_recovery_unavailable'),
+                              ('prompt', 'native_recovery_diagnostic_unconfirmed')):
             with self.subTest(fault=fault):
                 fixture = self.fixture(fault=fault)
                 stopped = fixture.stopped()
-                calls = len(fixture.calls)
-                code, value = fixture.continue_http(stopped)
-                self.assertIn(code, (200, 409), value.get('error'))
-                code, refused = fixture.request('POST', f'/api/rooms/{fixture.room_id}/recover-native',
-                                                {'request_id': str(uuid4()), **stopped['continuation']['binding']})
-                self.assertEqual(code, 409, refused.get('error'))
-                self.assertEqual(len(fixture.calls), calls)
-                self.assertEqual(fixture.read()['current_run']['id'], stopped['current_run']['id'])
+                if fault != 'cleanup':  # An unconfirmed exit is not a quota candidate at all.
+                    stopped = fixture.wait(lambda value: (value['current_run'].get('native_quota_handoff') or {}).get('state') == 'blocked')
+                    self.assertEqual(stopped['current_run']['native_quota_handoff']['reason'], reason)
+                self.assertEqual((stopped['current_run']['can_recover_native'], stopped['current_run']['native_recovery_reason']),
+                                 (False, reason))
+                final, abandoned, later = self.restarted_without_quota_handoff(fixture, stopped)
+                self.assertEqual(abandoned['unowned_private_changes'],
+                                 [{'provider': 'kimi', 'paths': ['README.md']}] if fault == 'outside_d' else [])
+                self.assertEqual(abandoned['possibly_running_job_ids'], [fixture.failed_work['job_id']] if fault == 'cleanup' else [])
+                # The stray README stays private and unpublished.
+                self.assertEqual(sorted(file['path'] for file in fixture.service._project(fixture.room_id).snapshot()['files']),
+                                 ['final.md', 'first.md', 'second.md'])
+                if fault == 'outside_d':
+                    self.assertEqual((Path(fixture.failed_work['cwd']) / 'README.md').read_text(), 'Unauthorized drift.\n')
+                if fault == 'cleanup':
+                    # A call that may still be running does not have its session continued.
+                    self.assertIsNone(next(call for call in later if call['agent'] == 'kimi')['input_sid'])
                 fixture.close()

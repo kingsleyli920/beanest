@@ -435,6 +435,10 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
         path = _file(root, name, checked)
         before = entries.get(name)
         exists = path.exists()
+        if exists and before is None and name in allowed and path.is_dir():
+            # A task may name a folder as a write path. The folder is not a
+            # file to import; each file inside is judged under its own name.
+            continue
         if exists and not path.is_file():
             raise NativeWorkspaceError("invalid_native_file")
         if _excluded(name) and (before is None or name in allowed):
@@ -569,6 +573,8 @@ def discard_paths(workspace, previous_manifest, paths):
             if before is None:
                 continue
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        elif before is None and path.is_dir():
+            continue  # A folder named as a write path was never collected.
         elif not path.is_file():
             raise NativeWorkspaceError("invalid_native_file")
         elif before is None:

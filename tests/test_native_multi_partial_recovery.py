@@ -4,7 +4,6 @@ import json
 import unittest
 from uuid import uuid4
 
-from local_agent_coordinator.room_store import RoomError
 import test_native_room_service as native_tests
 from test_native_room_service import native_reply
 from test_team_store import proposal
@@ -66,6 +65,44 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
         binding["run_id"] = before["current_run"]["id"]
         return before, binding
 
+    def refused(self, reason):
+        """The retained-work recovery is refused for `reason`, by a fresh audit
+        rather than the cached display one; the room itself can still continue."""
+        snapshot = self.service._snapshot(self.room_id)
+        run = snapshot["current_run"]
+        self.assertEqual((run["can_recover_native"], run["native_recovery_reason"]), (False, reason))
+        self.assertTrue(snapshot["continuation"]["can_send"], snapshot["continuation"])
+
+    def finish(self, agent, context, cwd):
+        task, phase = context["task"], context["job"]["job_phase"]
+        if phase == "work":
+            return native_reply(context, [{"type": "complete", "task_id": task["id"], "result": "Finished from the current private files."}])
+        if phase == "review":
+            return native_reply(context, [{"type": "review", "task_id": task["id"], "verdict": "accept", "reason": "Read the published bytes."}])
+        return self.handler(agent, context, cwd)
+
+    async def restarted(self, request_id, binding):
+        """Continue for real. What starts is the generic restart: the ended calls
+        are abandoned, nothing is re-inspected read-only and nothing is published
+        by the restart itself."""
+        since = self.service.store.snapshot(self.room_id)["events"][-1]["seq"]
+        count = len(self.fake.calls)
+        self.fake.handler = self.finish
+        await self.service.recover_native(self.room_id, request_id, **binding)
+        self.assertEqual(self.service._project(self.room_id).snapshot()["revision"], 1)
+        await self.settle()
+        final = await self.service.read_room(self.room_id)
+        kinds = [event["kind"] for event in final["events"] if event["seq"] > since]
+        self.assertEqual(kinds.count("native_unconfirmed_calls_abandoned"), 1)
+        for kind in ("native_partial_recovery_attestation", "native_partial_inspection_group", "native_partial_inspected",
+                     "native_partial_work_queued", "native_partial_workspace_transferred"):
+            self.assertEqual(kinds.count(kind), 0, kind)
+        later = self.fake.calls[count:]
+        self.assertTrue(later)
+        self.assertFalse(any(call["context"].get("native_partial_inspection") or call["permission"] == "read_only" for call in later))
+        self.assertNotEqual(final["current_run"]["id"], binding["run_id"])
+        return final, later
+
     async def test_all_retained_owners_are_inspected_before_work_or_import(self):
         before, binding = await self.interrupted_pair()
         old_jobs = {job["id"]: (job["status"], job["error"]) for job in before["jobs"]}
@@ -126,7 +163,10 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.source / "main.py").read_text(), "VALUE = 1\n")
         self.assertEqual((self.source / "notes.md").read_text(), "Original notes.\n")
 
-    async def test_second_owner_outside_scope_or_unknown_cleanup_does_not_recover(self):
+    async def test_second_owner_outside_scope_or_unknown_cleanup_cannot_join_the_group_but_the_room_restarts(self):
+        # Catches a second owner's file outside its task, or a call whose exit
+        # was never confirmed, being inspected and published as retained work;
+        # and the room refusing to continue because of either.
         before, binding = await self.interrupted_pair()
         peer = next(job for job in before["jobs"] if job["error"] == "invoke_interrupted")
         state = self.service.store.native_workspace(self.room_id, "codex")
@@ -134,18 +174,29 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
         unexpected = Path(state["project"]) / "outside.py"
         unexpected.write_text("Unauthorized.\n")
         count = len(self.fake.calls)
-        with self.assertRaises(RoomError) as denied:
-            await self.service.recover_native(self.room_id, "recover-outside", **binding)
-        self.assertEqual(denied.exception.code, "native_recovery_unpublished_changes")
+        self.refused("native_recovery_unpublished_changes")
         unexpected.unlink()
         self.service.store.record_job_cleanup(peer["id"], confirmed=False)
-        with self.assertRaises(RoomError) as denied:
-            await self.service.recover_native(self.room_id, "recover-unclean", **binding)
-        self.assertEqual(denied.exception.code, "native_recovery_cleanup_unconfirmed")
+        self.refused("native_recovery_cleanup_unconfirmed")
         self.assertEqual(len(self.fake.calls), count)
-        self.assertEqual(self.service._project(self.room_id).snapshot()["revision"], 1)
+        # Continue with both facts present: they are reported to the next run.
+        unexpected.write_text("Unauthorized.\n")
+        final, later = await self.restarted("recover-unclean-outside", binding)
+        abandoned = next(event for event in final["events"] if event["kind"] == "native_unconfirmed_calls_abandoned")
+        self.assertEqual(abandoned["unowned_private_changes"], [{"provider": "codex", "paths": ["outside.py"]}])
+        self.assertEqual(abandoned["possibly_running_job_ids"], [peer["id"]])
+        told = later[0]["context"]["objective"]["continuation"]["previous_stop"]
+        self.assertEqual(sorted((call["provider"], call["process_may_still_be_running"]) for call in told["ended_calls"]),
+                         [("claude", False), ("codex", True)])
+        # The stray file stays private; a possibly running call's session is not continued.
+        self.assertEqual(unexpected.read_text(), "Unauthorized.\n")
+        self.assertNotIn("outside.py", [file["path"] for file in final["project"]["files"]])
+        self.assertIsNone(next(call for call in later if call["agent"] == "codex")["session_id"])
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
 
     async def test_unrelated_interruption_cannot_borrow_a_protocol_fault(self):
+        # Catches an interruption that cannot be shown to have been running
+        # when the protocol fault happened joining the retained group anyway.
         _, binding = await self.interrupted_pair()
         candidates = self.service.store.native_partial_recovery_candidates(self.room_id)
         self.assertEqual(len(candidates), 2)
@@ -158,10 +209,13 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
             db.execute("DELETE FROM events WHERE seq=?", (row["seq"],))
             self.service.store._event(db, self.room_id, "job_claimed", sender="codex", job_id=peer["job_id"])
         count = len(self.fake.calls)
-        with self.assertRaises(RoomError) as denied:
-            await self.service.recover_native(self.room_id, "recover-unrelated-cancel", **binding)
-        self.assertEqual(denied.exception.code, "native_recovery_unpublished_changes")
+        self.refused("native_recovery_unpublished_changes")
         self.assertEqual(len(self.fake.calls), count)
+        final, later = await self.restarted("recover-unrelated-cancel", binding)
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        # Each owner's file reached the shared copy through its own new work call.
+        self.assertEqual(sorted((call["agent"], call["context"]["task"]["id"]) for call in later
+                                if call["context"]["job"]["job_phase"] == "work"), [("claude", "T1"), ("codex", "T2")])
 
     async def test_group_pause_keeps_both_inspection_notes_and_retained_bytes(self):
         _, binding = await self.interrupted_pair()
@@ -226,6 +280,8 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(task["result_version"] == 0 for task in final["team"]["tasks"]))
 
     async def test_peer_epoch_or_tool_gap_cannot_join_retained_group(self):
+        # Catches a peer whose task was reassigned since, or whose call ended
+        # mid-tool, being inspected and published with the retained group.
         _, binding = await self.interrupted_pair()
         candidate = next(item for item in self.service.store.native_partial_recovery_candidates(self.room_id)
                          if item["provider"] == "codex")
@@ -233,9 +289,7 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with self.service.store._connection(write=True) as db:
             db.execute("UPDATE shared_tasks SET assignment_epoch=assignment_epoch+1 WHERE room_id=? AND run_id=? AND id=?",
                        (self.room_id, binding["run_id"], candidate["task_id"]))
-        with self.assertRaises(RoomError) as denied:
-            await self.service.recover_native(self.room_id, "recover-stale-peer", **binding)
-        self.assertEqual(denied.exception.code, "native_recovery_unpublished_changes")
+        self.refused("native_recovery_unpublished_changes")
         with self.service.store._connection(write=True) as db:
             db.execute("UPDATE shared_tasks SET assignment_epoch=assignment_epoch-1 WHERE room_id=? AND run_id=? AND id=?",
                        (self.room_id, binding["run_id"], candidate["task_id"]))
@@ -243,10 +297,13 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
             metadata = json.loads(row[0])
             metadata["tool_results"] = 0
             db.execute("UPDATE native_executions SET metadata_json=? WHERE job_id=?", (json.dumps(metadata), candidate["job_id"]))
-        with self.assertRaises(RoomError) as denied:
-            await self.service.recover_native(self.room_id, "recover-unpaired-peer", **binding)
-        self.assertEqual(denied.exception.code, "native_recovery_unpublished_changes")
+        self.refused("native_recovery_unpublished_changes")
         self.assertEqual(len(self.fake.calls), count)
+        final, later = await self.restarted("recover-unpaired-peer", binding)
+        abandoned = next(event for event in final["events"] if event["kind"] == "native_unconfirmed_calls_abandoned")
+        # The call that ended mid-tool is reported as unverified, not trusted.
+        self.assertIn(candidate["job_id"], abandoned["unverified_job_ids"])
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
 
     async def test_protocol_interruption_during_group_inspection_reaudits_successful_unpublished_owner(self):
         _, binding = await self.interrupted_pair()
@@ -286,10 +343,12 @@ class NativeMultiPartialRecoveryTests(unittest.IsolatedAsyncioTestCase):
         path = Path(state["project"]) / "main.py"
         content = path.read_bytes()
         path.write_text("Not the inspected version.\n")
-        with self.assertRaises(RoomError) as denied:
-            await self.service.recover_native(self.room_id, "recover-drift-after-inspection", **binding)
-        self.assertEqual(denied.exception.code, "native_recovery_unpublished_changes")
+        # The inspected owner is re-audited: changed bytes no longer pass as
+        # the inspected ones. (Continuing now would abandon the calls instead;
+        # here the bytes are put back and the audited recovery goes on.)
+        self.refused("native_recovery_unpublished_changes")
         path.write_bytes(content)
+        self.assertTrue(self.service._snapshot(self.room_id)["current_run"]["can_recover_native"])
         inspected = set()
         def finish(agent, context, cwd):
             task, phase = context["task"], context["job"]["job_phase"]

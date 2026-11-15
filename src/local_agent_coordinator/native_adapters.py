@@ -37,6 +37,10 @@ def _claude_tool_name_valid(name):
 _MAX_LINE = 32 * 1024 * 1024
 _CLEANUP_SETTLE_SECONDS = 10
 _MAX_RECEIPT = 64 * 1024 * 1024
+# Written once when a receipt reaches _MAX_RECEIPT. The receipt is evidence for
+# a later audit, not a budget on the work: recording stops, the call does not.
+_RECEIPT_TRUNCATED = json.dumps({'channel': 'diagnostic',
+                                 'data': {'type': 'native_receipt_truncated'}}).encode() + b'\n'
 _PUBLIC_PROGRESS_CACHE_SIZE = 256
 _MAX_PUBLIC_PROGRESS_BYTES = 16 * 1024
 ACTIVITY_OPERATIONS = frozenset({
@@ -258,9 +262,15 @@ def _claude_permission_denied_valid(event):
         return False
 
 
-def _protocol_diagnostic(raw):
-    """Record bounded protocol shape when rejected, never payload values."""
+def _protocol_diagnostic(raw, ignored=()):
+    """Record bounded protocol shape when rejected or skipped, never payload values.
+
+    ``ignored`` names why the stream parser skipped this event while the call
+    carried on; without it the event ended the call.
+    """
     value = {'type': 'native_protocol_diagnostic'}
+    if ignored:
+        value['ignored'] = list(ignored)
     try:
         event = adapters._strict_json(raw)
     except (ValueError, UnicodeError, RecursionError):
@@ -270,6 +280,22 @@ def _protocol_diagnostic(raw):
             label = event.get(source)
             if isinstance(label, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', label):
                 value[target] = label
+        item = event.get('item')
+        if (isinstance(item, dict) and isinstance(item.get('type'), str)
+                and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', item['type'])):
+            # A Codex item's kind is a protocol label like the event's own.
+            value['item_type'] = item['type']
+        if event.get('type') == 'assistant':
+            message = event.get('message')
+            content = message.get('content') if isinstance(message, dict) else None
+            if isinstance(content, list):
+                # Closed vocabulary: a block's own type string may be anything.
+                value['block_count'] = len(content)
+                value['block_types'] = [
+                    'invalid' if not isinstance(block, dict) else block['type']
+                    if isinstance(block.get('type'), str) and block['type'] in {
+                        'text', 'thinking', 'redacted_thinking', 'tool_use'} else 'unknown'
+                    for block in content[:8]]
         if event.get('type') == 'system' and event.get('subtype') == 'permission_denied':
             fields = {'type', 'subtype', 'tool_name', 'tool_use_id', 'message', 'uuid', 'session_id',
                       'agent_id', 'decision_reason_type', 'decision_reason_code', 'decision_reason'}
@@ -774,6 +800,32 @@ def _processes():
     return result
 
 
+def end_orphaned(pid, launched_at):
+    """End what a launch this host no longer runs left behind; True while any of it is alive.
+
+    A launch starts its own process group, so the group's ID is its PID. The
+    leader is this launch only if it started when the launch was recorded: a
+    PID the system has since given to another program is left alone, and
+    means the launch itself is gone.
+    """
+    table = _processes()
+    leader = table.get(pid)
+    if leader is not None and 'Z' not in leader[3]:
+        try:
+            started = time.mktime(time.strptime(leader[2], '%a %b %d %H:%M:%S %Y'))
+        except (ValueError, OverflowError):
+            return False
+        if not launched_at - 5 <= started <= launched_at + 2:
+            return False
+    if not any(row[1] == pid and 'Z' not in row[3] for row in table.values()):
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _remember(pid, owned, table):
     changed = True
     while changed:
@@ -850,7 +902,7 @@ async def _settle_cleanup(operation):
 
 
 class _Stream:
-    def __init__(self, agent, structured, callback, progress_fingerprint=None, *, expected_session=None):
+    def __init__(self, agent, structured, callback, *, expected_session=None):
         self.agent, self.structured, self.callback = agent, structured, callback
         self.expected_session = expected_session
         self.public_progress_ids = OrderedDict()
@@ -866,39 +918,27 @@ class _Stream:
         self.finished_format_tools = set()
         self.terminal_count = 0
         self.codex_closed_tools_at_terminal = None
-        self.progress_fingerprint = progress_fingerprint
-        self.tool_inputs = {}
         self.tool_summaries = {}
-        self.failed_evidence = {}
+        # Started tools this parser cannot name. One becomes a call only when
+        # its result arrives, so calls and results stay paired either way.
+        self.loose_tools = {}
+        # Why the event just consumed was skipped; empty when it was understood.
+        self.ignored = []
 
-    def remember_input(self, identifier, tool, value):
-        # Only hashes survive the event; native arguments never enter public
-        # progress callbacks or the repeated-failure state.
-        self.tool_inputs[identifier] = hashlib.sha256(json.dumps(
-            [tool, value], sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    def ignore(self, code, *, effects=False):
+        """Skip content this parser does not recognize; the call carries on.
 
-    async def failed_tool(self, identifier, result):
-        input_digest = self.tool_inputs.get(identifier)
-        if self.progress_fingerprint is None or input_digest is None:
-            return
-        signature = hashlib.sha256(json.dumps(
-            [input_digest, result], sort_keys=True, ensure_ascii=True).encode()).hexdigest()
-        try:
-            fingerprint = self.progress_fingerprint()
-            if inspect.isawaitable(fingerprint):
-                fingerprint = await fingerprint
-            if not isinstance(fingerprint, str) or re.fullmatch(r'[0-9a-f]{64}', fingerprint) is None:
-                raise ValueError('unconfirmed progress fingerprint')
-        except Exception:
-            # Unknown file state cannot prove stagnation, nor justify silently
-            # continuing an unmonitored failure loop.
-            self.failure = 'native_progress_unconfirmed'
-            return
-        previous, count = self.failed_evidence.get(signature, (None, 0))
-        count = count + 1 if previous == fingerprint else 1
-        self.failed_evidence[signature] = (fingerprint, count)
-        if count >= 3:
-            self.failure = 'native_no_progress'
+        A newer CLI adds events, blocks and tools between releases, and the
+        native tool lets all of them run. Not understanding one is no reason
+        to end the call: it is noted for the receipt and left out of the tool
+        counts. What may have been a tool is still reported as a possible side
+        effect. Only a wrong session identity, a missing terminal, a nonzero
+        exit or an unusable final answer fail a call: then there is no answer.
+        """
+        if code not in self.ignored:
+            self.ignored.append(code)
+        if effects:
+            self.possible_effects = True
 
     def identity(self, value):
         try:
@@ -980,18 +1020,17 @@ class _Stream:
                 await returned
 
     async def consume(self, raw):
+        self.ignored = []
         try:
             event = adapters._strict_json(raw)
             if not isinstance(event, dict):
                 raise ValueError
         except (ValueError, UnicodeError, RecursionError):
-            self.failure = 'native_protocol_invalid'
-            self.possible_effects = True
+            self.ignore('native_protocol_invalid', effects=True)
             return
         kind = event.get('type')
         if not isinstance(kind, str):
-            self.failure = 'native_protocol_invalid'
-            self.possible_effects = True
+            self.ignore('native_protocol_invalid', effects=True)
             return
         if self.agent == 'codex':
             if kind in {'thread.started', 'turn.started', 'turn.completed', 'turn.failed', 'error'}:
@@ -1004,15 +1043,14 @@ class _Stream:
                         self.codex_closed_tools_at_terminal = frozenset(self.tools)
                 return
             if kind not in {'item.started', 'item.updated', 'item.completed'}:
-                self.failure = 'native_protocol_unknown'
-                self.possible_effects = True
+                self.ignore('native_protocol_unknown', effects=True)
                 return
             item = event.get('item')
             if not isinstance(item, dict):
-                self.failure = 'native_protocol_invalid'
+                self.ignore('native_protocol_invalid', effects=True)
                 return
             tool = item.get('type')
-            if tool in {'agent_message', 'reasoning', 'error'}:
+            if isinstance(tool, str) and tool in {'agent_message', 'reasoning', 'error'}:
                 self.final_lines.append(raw)
                 if (kind == 'item.completed' and tool == 'agent_message'
                         # exec's AgentMessageItem has text but no phase;
@@ -1022,42 +1060,45 @@ class _Stream:
                         and item.get('role', 'assistant') == 'assistant'):
                     await self.public_progress(item.get('id'), item.get('text'), event, item)
                 return
-            if tool not in _CODEX_TOOLS:
-                self.failure = 'native_tool_unknown'
-                self.possible_effects = True
-                return
             self.possible_effects = True
+            known = isinstance(tool, str) and tool in _CODEX_TOOLS
+            if not known:
+                # An item kind a newer Codex added. It may be a tool, so it is
+                # counted like one once it completes; its name and arguments
+                # never leave this parser.
+                self.ignore('native_tool_unknown')
+                tool = 'unknown'
             identifier = item.get('id')
             if not isinstance(identifier, str):
-                self.failure = 'native_protocol_invalid'
+                self.ignore('native_protocol_invalid')
                 return
-            inputs = {key: item[key] for key in ('command', 'changes', 'server', 'tool', 'arguments') if key in item}
-            if inputs:
-                self.remember_input(identifier, tool, inputs)
+            inputs = ({key: item[key] for key in ('command', 'changes', 'server', 'tool', 'arguments') if key in item}
+                      if known else None)
             if kind == 'item.started':
-                if identifier not in self.tools:
-                    self.tools[identifier] = tool
+                if identifier not in self.tools and identifier not in self.loose_tools:
                     self.tool_summaries[identifier] = _activity_summary(tool, inputs)
-                    self.calls += 1
+                    if known:
+                        self.tools[identifier] = tool
+                        self.calls += 1
+                    else:
+                        self.loose_tools[identifier] = tool
                     await self.activity(tool, 'started', identifier=identifier)
             elif kind == 'item.completed':
                 if identifier in self.finished_tools:
-                    self.failure = 'native_protocol_invalid'
+                    self.ignore('native_protocol_invalid')
                     return
                 self.finished_tools.add(identifier)
                 if identifier not in self.tools:
-                    self.tools[identifier] = tool
-                    self.tool_summaries[identifier] = _activity_summary(tool, inputs)
+                    self.tools[identifier] = self.loose_tools.pop(identifier, tool)
+                    self.tool_summaries.setdefault(identifier, _activity_summary(tool, inputs))
                     self.calls += 1
                 self.results += 1
-                failed = (item.get('status') in {'failed', 'declined'}
+                tool = self.tools[identifier]
+                failed = (item.get('status') in ('failed', 'declined')
                           or tool == 'command_execution' and type(item.get('exit_code')) is int
                           and item['exit_code'] != 0)
                 await self.activity(tool, 'failed' if failed else 'completed',
                                     identifier=identifier, exit_code=item.get('exit_code'), is_error=failed)
-                if failed:
-                    await self.failed_tool(identifier, {key: item[key] for key in
-                        ('status', 'exit_code', 'aggregated_output', 'result', 'error') if key in item})
         elif kind == 'tool_progress':
             identifier = event.get('tool_use_id')
             tool = self.tools.get(identifier) if isinstance(identifier, str) else None
@@ -1072,8 +1113,9 @@ class _Stream:
             if (tool is None or event.get('tool_name') != tool
                     or not _nonnegative_number(event.get('elapsed_time_seconds'))
                     or 'heartbeat' in event and type(event['heartbeat']) is not bool):
-                self.failure = 'native_protocol_invalid'
-                self.possible_effects = True
+                # Liveness of a tool this parser did not see start, or in a
+                # shape it cannot read: it shows nothing and counts nothing.
+                self.ignore('native_protocol_invalid', effects=True)
                 return
             if 'session_id' in event:
                 self.identity(event['session_id'])
@@ -1087,25 +1129,27 @@ class _Stream:
                 self.final_lines.append(raw)
             elif event.get('subtype') == 'permission_denied':
                 if not _claude_permission_denied_valid(event):
-                    self.failure = 'native_protocol_invalid'
+                    self.ignore('native_protocol_invalid')
                 elif self.session_id is None or event['session_id'] != self.session_id:
                     self.failure = 'native_session_identity_mismatch'
                 elif self.tools.get(event['tool_use_id']) != event['tool_name']:
-                    self.failure = 'native_protocol_invalid'
+                    self.ignore('native_protocol_invalid')
                 # Advisory denial is not a tool_result, completion or authority.
                 # Keep waiting for the actual result; readonly argv is unchanged.
-            elif event.get('subtype') not in {'compact_boundary', 'status', 'task_started',
-                                               'task_progress', 'task_notification'}:
+            elif event.get('subtype') not in ('compact_boundary', 'status', 'task_started',
+                                              'task_progress', 'task_notification'):
                 valid = _claude_metadata_valid(event)
                 if valid is None and not _claude_future_system_notice(event):
-                    self.failure = 'native_protocol_unknown'
+                    self.ignore('native_protocol_unknown')
                 elif valid is None:
                     # Recorded as a label-only notice in the receipt. A
                     # session_id still has to match this owned session.
                     if 'session_id' in event:
                         self.identity(event['session_id'])
                 elif not valid:
-                    self.failure = 'native_protocol_invalid'
+                    # A known notice in a shape a newer CLI changed. Nothing in
+                    # it is trusted, its session field included.
+                    self.ignore('native_protocol_invalid')
                 elif 'session_id' in event:
                     self.identity(event['session_id'])
         elif kind == 'assistant':
@@ -1116,7 +1160,7 @@ class _Stream:
             self.final_lines.append(raw)
             message = event.get('message')
             if not isinstance(message, dict) or not isinstance(message.get('content'), list):
-                self.failure = 'native_protocol_invalid'
+                self.ignore('native_protocol_invalid', effects=True)
                 return
             public_message = (event.get('isApiErrorMessage') is not True
                               and event.get('session_id') == self.session_id
@@ -1132,39 +1176,45 @@ class _Stream:
                         await self.public_progress(public_id + ':' + str(index), block.get('text'), event, message)
             for block in message['content']:
                 if not isinstance(block, dict):
-                    self.failure = 'native_protocol_invalid'
+                    self.ignore('native_protocol_invalid', effects=True)
                 elif block.get('type') == 'tool_use':
                     tool = block.get('name')
                     if tool != 'StructuredOutput':
                         self.possible_effects = True
-                    if not _claude_tool_name_valid(tool):
-                        self.failure = 'native_tool_unknown'
-                        continue
                     identifier = block.get('id')
                     if not isinstance(identifier, str):
-                        self.failure = 'native_protocol_invalid'
+                        self.ignore('native_protocol_invalid')
+                        continue
+                    # An ID names one tool for the whole call. A block that
+                    # reuses it under another name is skipped; the first stands.
+                    taken = (identifier in self.tools or identifier in self.loose_tools
+                             or identifier in self.format_tools)
+                    if not _claude_tool_name_valid(tool):
+                        # A tool whose name this parser cannot read. Its result
+                        # still pairs with it by ID; the name stays private.
+                        self.ignore('native_tool_unknown')
+                        if not taken:
+                            self.loose_tools[identifier] = 'unknown'
+                            self.tool_summaries[identifier] = _activity_summary('unknown', None)
+                            await self.activity('unknown', 'started', identifier=identifier)
                         continue
                     if tool == 'StructuredOutput':
-                        if identifier in self.tools:
-                            self.failure = 'native_protocol_invalid'
+                        if identifier in self.tools or identifier in self.loose_tools:
+                            self.ignore('native_protocol_invalid')
                         else:
                             self.format_tools.add(identifier)
                         continue
-                    if identifier in self.format_tools:
-                        self.failure = 'native_protocol_invalid'
+                    if taken and self.tools.get(identifier) != tool:
+                        self.ignore('native_protocol_invalid')
                         continue
-                    if identifier in self.tools and self.tools[identifier] != tool:
-                        self.failure = 'native_protocol_invalid'
-                        continue
-                    if identifier not in self.tools:
+                    if not taken:
                         self.tools[identifier] = tool
                         self.tool_summaries[identifier] = _activity_summary(tool, block.get('input'))
-                        if 'input' in block:
-                            self.remember_input(identifier, tool, block['input'])
                         self.calls += 1
                         await self.activity(tool, 'started', identifier=identifier)
-                elif block.get('type') not in {'text', 'thinking', 'redacted_thinking'}:
-                    self.failure = 'native_protocol_unknown'
+                elif block.get('type') not in ('text', 'thinking', 'redacted_thinking'):
+                    # A block kind a newer CLI added; it may be a tool.
+                    self.ignore('native_protocol_unknown', effects=True)
         elif kind == 'user':
             if _claude_synthetic_user_text(event):
                 if self.session_id is None or event['session_id'] != self.session_id:
@@ -1175,42 +1225,45 @@ class _Stream:
             message = event.get('message', {})
             content = message.get('content', []) if isinstance(message, dict) else []
             if not isinstance(content, list) or not content:
-                self.failure = 'native_protocol_invalid'
-                return
-            if any(not isinstance(block, dict) or block.get('type') != 'tool_result' for block in content):
-                self.failure = 'native_protocol_unknown'
+                self.ignore('native_protocol_invalid')
                 return
             for block in content:
+                if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                    # Not a tool result: it completes nothing and is not read.
+                    self.ignore('native_protocol_unknown')
+                    continue
                 identifier = block.get('tool_use_id')
                 if not isinstance(identifier, str):
-                    self.failure = 'native_protocol_invalid'
+                    self.ignore('native_protocol_invalid', effects=True)
                     continue
                 if identifier in self.format_tools:
                     if identifier in self.finished_format_tools:
-                        self.failure = 'native_protocol_invalid'
+                        self.ignore('native_protocol_invalid')
                     else:
                         self.finished_format_tools.add(identifier)
                     continue
+                if identifier in self.loose_tools:
+                    self.tools[identifier] = self.loose_tools.pop(identifier)
+                    self.calls += 1
                 tool = self.tools.get(identifier)
                 if tool is None:
-                    self.failure = 'native_protocol_invalid'
+                    # The result of a tool this parser never saw start. It
+                    # completes none of the tools it did see.
+                    self.ignore('native_protocol_invalid', effects=True)
                     continue
-                if block['tool_use_id'] in self.finished_tools:
-                    self.failure = 'native_protocol_invalid'
+                if identifier in self.finished_tools:
+                    self.ignore('native_protocol_invalid')
                     continue
-                self.finished_tools.add(block['tool_use_id'])
+                self.finished_tools.add(identifier)
                 self.results += 1
                 failed = block.get('is_error') is True
                 await self.activity(tool, 'failed' if failed else 'completed', identifier=identifier, is_error=failed)
-                if failed:
-                    await self.failed_tool(identifier, {key: block[key] for key in ('is_error', 'content') if key in block})
         elif kind == 'result':
             self.terminal_count += 1
             self.identity(event.get('session_id'))
             self.final_lines.append(raw)
         elif kind not in {'rate_limit_event'}:
-            self.failure = 'native_protocol_unknown'
-            self.possible_effects = True
+            self.ignore('native_protocol_unknown', effects=True)
 
     def result(self, exit_code, expected_session, *, allow_codex_nonterminal_diagnostics=False):
         allow_diagnostics = (allow_codex_nonterminal_diagnostics and self.agent == 'codex' and self.structured
@@ -1243,7 +1296,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                         timeout: float | None = None, *, permission='read_only',
                         response_schema: dict | None = None, runtime_settings: dict | None = None,
                         on_activity=None, receipt_dir: Path | None = None,
-                        progress_fingerprint=None, progress_file: Path | None = None) -> dict:
+                        progress_file: Path | None = None, on_process=None) -> dict:
     """Run one cancellable native turn; no implicit time or turn-count budget.
 
     Cancellation raises CancelledError *after* owned cleanup. Other failures
@@ -1251,17 +1304,22 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
     if a quota failure or invalid final response follows. Callers must never
     blindly replay such a failed turn.
 
-    An optional sync/async progress_fingerprint returns a SHA256 of only the
-    task's authorized working files. Three identical failed tools with an
-    unchanged fingerprint stop the turn; successful tools and heartbeats do
-    not consume a count. This is not a general semantic stall detector.
+    A tool that fails is the model's to handle, however often it repeats:
+    the host never ends a turn for that, as the native tool itself would not.
+    Nor does it end one for an event, block or tool it does not recognize, or
+    for a receipt that has grown past its cap: those are skipped and noted.
+    Under full access the CLI gets the host's environment, as in a terminal,
+    minus what would select another account (see adapters._environment).
+
+    on_process receives the launched process ID at once, so a host that is
+    killed during the turn can find and end that process when it starts again.
     """
     if agent == 'kimi':
         from .kimi_acp import invoke_native as invoke_kimi
         return await invoke_kimi(prompt, cwd, session_id, timeout, permission=permission,
                                  response_schema=response_schema, runtime_settings=runtime_settings,
                                  on_activity=on_activity, receipt_dir=receipt_dir,
-                                 progress_fingerprint=progress_fingerprint, progress_file=progress_file,
+                                 progress_file=progress_file, on_process=on_process,
                                  sandbox=True)
 
     def not_started(error, cleanup_confirmed):
@@ -1302,8 +1360,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                      or isinstance(cause, asyncio.CancelledError) and getattr(cause, 'cleanup_confirmed', False) is True)
         not_started(error, confirmed)
         raise
-    stream = _Stream(agent, response_schema is not None, on_activity, progress_fingerprint,
-                     expected_session=session_id)
+    stream = _Stream(agent, response_schema is not None, on_activity, expected_session=session_id)
     process = None
     owned = {}
     cleanup_confirmed = False
@@ -1311,6 +1368,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
     receipt = None
     schema_directory = None
     receipt_bytes = 0
+    receipt_full = False
     tasks = []
     exit_code = None
     cancelled_error = None
@@ -1334,7 +1392,7 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             receipt = os.fdopen(descriptor, 'wb')
             receipt_path = str(path)
-        environment = adapters._environment()
+        environment = adapters._environment(inherit=permission == 'full_access')
         if agent == 'claude':
             environment.update(_CLAUDE_BASH_ENV)
         if progress_file is not None:
@@ -1342,13 +1400,15 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=_MAX_LINE + 1)
+        if on_process is not None:
+            on_process(process.pid)
 
         receipt_diagnostics = _ClaudeReceiptDiagnostics(response_schema) if agent == 'claude' else None
 
         async def record(channel, raw, *, rejected=False):
-            nonlocal receipt_bytes
-            if receipt:
-                evidence = (_protocol_diagnostic(raw) if rejected else
+            nonlocal receipt_bytes, receipt_full
+            if receipt and not receipt_full:
+                evidence = (_protocol_diagnostic(raw, stream.ignored) if rejected else
                             _receipt_event(agent, raw, format_tool_ids=stream.format_tools))
                 diagnostics = (receipt_diagnostics.observe(raw, stream)
                                if receipt_diagnostics is not None and not rejected else [])
@@ -1362,9 +1422,13 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                     rows.append({'channel': 'diagnostic', 'data': diagnostics})
                 for row in rows:
                     value = json.dumps(row, ensure_ascii=False).encode() + b'\n'
+                    if receipt_bytes + len(value) + len(_RECEIPT_TRUNCATED) > _MAX_RECEIPT:
+                        # Long work outgrows the receipt, never the reverse:
+                        # mark where recording stopped and let the call run on.
+                        receipt.write(_RECEIPT_TRUNCATED)
+                        receipt_full = True
+                        break
                     receipt_bytes += len(value)
-                    if receipt_bytes > _MAX_RECEIPT:
-                        raise RuntimeError('native_receipt_size_limit')
                     receipt.write(value)
                 receipt.flush()
 
@@ -1374,8 +1438,9 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                     raise RuntimeError('native_protocol_line_limit')
                 await record('stdout', raw)
                 await stream.consume(raw)
-                if stream.failure:
+                if stream.ignored or stream.failure:
                     await record('stdout', raw, rejected=True)
+                if stream.failure:
                     raise RuntimeError(stream.failure)
 
         async def stderr():

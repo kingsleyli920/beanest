@@ -9,7 +9,8 @@ import hashlib
 import json
 from uuid import uuid4
 
-from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached
+from .block_contract import USER_BLOCK_CAUSES
+from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached, task_settled
 from .room_contract import MAX_PARTNER_TEXT, RoomError, checked_text
 from .stop_policy import continues_automatically, OWN_RECOVERY
 
@@ -49,6 +50,8 @@ class ObjectiveStore:
             scope TEXT NOT NULL, signature TEXT NOT NULL, repeats INTEGER NOT NULL,
             PRIMARY KEY(objective_id,scope,signature)
         )""")
+        if "subject_json" not in {row[1] for row in db.execute("PRAGMA table_info(objective_progress)")}:
+            db.execute("ALTER TABLE objective_progress ADD COLUMN subject_json TEXT")
 
     @staticmethod
     def current(db, room_id):
@@ -125,12 +128,21 @@ class ObjectiveStore:
         if objective is not None and objective["status"] not in {"complete", "stopped", "interrupted"}:
             db.execute("UPDATE objectives SET used=used+1 WHERE id=?", (objective["id"],))
 
-    def repeated_without_progress(self, db, room_id, scope, evidence, *, include_tasks=True, stop_on_repeat=True):
-        """Bound repeated identical evidence, never a count of useful calls.
+    def repeated_without_progress(self, db, room_id, scope, evidence, *, include_tasks=True, stop_on_repeat=True,
+                                  subject=None):
+        """Notice repeated identical evidence, never a count of useful calls.
 
         New read ranges, hashes, completed results, ownership epochs or plan
         decisions have different signatures. Chat wording, timestamps and
-        working/waiting transitions cannot reset this persisted protection.
+        working/waiting transitions cannot reset this persisted record.
+
+        The host does not decide for the partners that they are stuck, and
+        never hands this to the user. From the second identical result the
+        fact is in every partner's context (repeated_results, described by
+        subject). From the third the caller hands the task back to the team
+        or, where there is no task to hand back, the objective stops with
+        objective_no_progress, a stop the host continues by itself after a
+        growing pause.
         """
         objective = self.current(db, room_id)
         if objective is None or json.loads(objective["policy_json"])["mode"] != "autonomous":
@@ -147,8 +159,9 @@ class ObjectiveStore:
             # masquerade as a fresh observation on every turn.
             db.execute("UPDATE objective_progress SET repeats=0 WHERE objective_id=? AND scope=?",
                        (objective["id"], scope))
-        db.execute("INSERT INTO objective_progress VALUES (?,?,?,1) ON CONFLICT(objective_id,scope,signature) "
-                   "DO UPDATE SET repeats=repeats+1", (objective["id"], scope, signature))
+        db.execute("INSERT INTO objective_progress(objective_id,scope,signature,repeats,subject_json) VALUES (?,?,?,1,?) "
+                   "ON CONFLICT(objective_id,scope,signature) DO UPDATE SET repeats=repeats+1,subject_json=excluded.subject_json",
+                   (objective["id"], scope, signature, json.dumps(subject) if subject else None))
         repeats = db.execute("SELECT repeats FROM objective_progress WHERE objective_id=? AND scope=? AND signature=?",
                              (objective["id"], scope, signature)).fetchone()[0]
         if repeats == 2:
@@ -159,6 +172,29 @@ class ObjectiveStore:
                 self.store._team.stop(db, room_id, "objective_no_progress")
             return True
         return False
+
+    def repeated_results(self, db, room_id, objective_id, run_id):
+        """The identical results the partners should know about, as plain facts.
+
+        Each entry names what came back the same, for which task, and how many
+        times in a row. A result that has since changed, a finished task and an
+        earlier run are left out: they are no longer what is happening.
+        """
+        facts = []
+        for row in db.execute("SELECT subject_json,repeats FROM objective_progress WHERE objective_id=? AND repeats>=2 "
+                              "AND subject_json IS NOT NULL ORDER BY rowid", (objective_id,)):
+            subject = json.loads(row["subject_json"])
+            # A subject without a run belongs to the whole objective (a checkpoint
+            # that keeps asking to continue spans its stages).
+            if subject.get("run_id") not in (None, run_id):
+                continue
+            if subject.get("task_id") is not None:
+                task = db.execute("SELECT status FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?",
+                                  (room_id, run_id, subject["task_id"])).fetchone()
+                if task is None or task_settled(task):
+                    continue
+            facts.append({"what": subject["what"], "task_id": subject.get("task_id"), "times": row["repeats"]})
+        return facts
 
     @staticmethod
     def inspection_evidence(observation):
@@ -225,8 +261,12 @@ class ObjectiveStore:
                       and reference.startswith("beanest-objective:") else
                       isinstance(reference, str) and len(reference.strip()) >= min(8, len(original.strip()))
                       and reference in original)
+        # Whether the next stage still belongs to the goal is the partners' own
+        # judgement, checked by the reviewing partner; the host does not compare
+        # scope_reference with the goal's wording to overrule a continue.
         proposal["scope"] = ("new_goal" if decision == "complete" and proposal["next_goal"] else
-                             "current_goal" if same_scope else "new_goal" if proposal["next_goal"] else None)
+                             "current_goal" if same_scope or decision == "continue" else
+                             "new_goal" if proposal["next_goal"] else None)
         checkpoint["proposal"] = proposal
         checkpoint["proposal_digest"] = hashlib.sha256(json.dumps(proposal, sort_keys=True).encode()).hexdigest()
         db.execute("UPDATE objectives SET checkpoint_json=? WHERE id=?", (json.dumps(checkpoint), objective["id"]))
@@ -260,7 +300,9 @@ class ObjectiveStore:
                 scope = json.dumps(["checkpoint_revision", checkpoint.get("input_user_seq")])
                 paused = objective["status"] == "paused"
                 if self.repeated_without_progress(db, room_id, scope, [checkpoint["proposal_digest"], results],
-                        include_tasks=False, stop_on_repeat=not paused):
+                        include_tasks=False, stop_on_repeat=not paused,
+                        subject={"what": "the reviewer returned the same checkpoint assessment and it came back unchanged",
+                                 "task_id": None, "run_id": checkpoint["binding"]["run_id"]}):
                     if paused:
                         checkpoint.update(resume_status="stopped", resume_stop_reason="objective_no_progress",
                                           revision_feedback=feedback)
@@ -276,13 +318,13 @@ class ObjectiveStore:
                 db.execute("UPDATE teams SET phase='checkpoint' WHERE room_id=?", (room_id,))
                 return
             if decision == "continue" and self.repeated_without_progress(db, room_id, "checkpoint_continuation",
-                    [proposal["next_goal"], proposal["scope_reference"], results], include_tasks=False):
+                    [proposal["next_goal"], proposal["scope_reference"], results], include_tasks=False,
+                    subject={"what": "the checkpoint asked to continue with the same next goal and no new results",
+                             "task_id": None, "run_id": None}):
                 return
         if verdict != "accept":
             status, stop = "needs_user", "objective_checkpoint_disagreed"
             proposal["question"] = reason
-        elif decision == "continue" and proposal["scope"] != "current_goal":
-            status, stop = "needs_user", "objective_scope_confirmation"
         elif decision == "continue":
             status, stop = "awaiting_continue", None
         elif decision == "needs_user":
@@ -312,6 +354,10 @@ class ObjectiveStore:
         objective = self.current(db, room_id)
         if objective is None or objective["status"] != "running" or not tasks and native_question is None:
             return False
+        # Only a block that asks for the user's decision or permission is put
+        # to the user. The other blocked tasks are not part of the question:
+        # the host hands them back (resume_recoverable_block) while this waits.
+        tasks = [task for task in tasks if task["block_cause"] in USER_BLOCK_CAUSES] or tasks
         question = native_question if native_question is not None else "；".join(task["title"] + "：" + (task["blocked_reason"] or "需要补充决定") for task in tasks)
         proposal = {"decision": "needs_user", "summary": "有任务明确提出阻塞，未继续派发。",
                     "next_goal": None, "scope_reference": objective["original_goal"], "scope": "current_goal",
@@ -340,9 +386,12 @@ class ObjectiveStore:
                     "scope": proposal["scope"], "question": proposal["question"],
                     "binding": checkpoint["binding"], "review_kind": checkpoint["review_kind"],
                     "can_start": (row["status"] == "awaiting_continue" and checkpoint["reviewed"]
-                                  and proposal["scope"] == "current_goal" and calls_available(budget["remaining"])
+                                  and calls_available(budget["remaining"])
                                   and not deadline_reached(row["deadline"], self.store.clock()) and stage_available(policy, stage))}
+        run = db.execute("SELECT current_run_id FROM teams WHERE room_id=?", (room_id,)).fetchone()
+        repeated = self.repeated_results(db, room_id, row["id"], run[0]) if run else []
         return {"id": row["id"], "mode": policy["mode"], "execution_policy": policy,
+                **({"repeated_results": repeated} if repeated else {}),
                 "original_goal": row["original_goal"], "scope_reference": objective_scope_reference(row),
                 "created_at": row["created_at"], "deadline": public_deadline(row["deadline"]),
                 "status": row["status"], "stop_reason": row["stop_reason"], "budget": budget, "stage": stage,
@@ -397,7 +446,9 @@ class ObjectiveStore:
         state = checkpoint.pop("resume_status", "running")
         deferred_stop = checkpoint.pop("resume_stop_reason", None)
         if state == "stopped" and deferred_stop:
-            db.execute("UPDATE objectives SET checkpoint_json=? WHERE id=?", (json.dumps(checkpoint), objective_id))
+            # The pause is over: leave it first, or a stop the host continues
+            # by itself would be held as if the user were still pausing.
+            db.execute("UPDATE objectives SET status='running',checkpoint_json=? WHERE id=?", (json.dumps(checkpoint), objective_id))
             self.store._team.stop(db, room_id, deferred_stop)
         else:
             db.execute("UPDATE objectives SET status=?,checkpoint_json=? WHERE id=?",

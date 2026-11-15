@@ -184,9 +184,18 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
         self.assertEqual((file["owner"], file["content"]), ("claude", "repaired " + self.long_path + "\n"))
 
     def test_new_repair_ids_and_reason_wording_do_not_reset_same_file_evidence_protection(self):
+        # Catches: new repair task ids or reworded requests resetting the record of unchanged file
+        # evidence; and the old outcome, the objective stopping as objective_no_progress for the
+        # user. The third identical request now hands the task to the team to replan.
         self.repeat_requests, self.repeated_requests = True, 0
         final = self.create()
-        self.assertEqual(final["objective"]["stop_reason"], "objective_no_progress", final["objective"])
+        self.assertEqual(final["objective"]["stop_reason"], "team_plan_stalled", final["objective"])
+        self.assertEqual(final["objective"].get("repeated_results"),
+                         [{"what": "the same repair request was sent again and the named files are unchanged",
+                           "task_id": "M3", "times": 3}])
+        self.assertEqual([event["reason"] for event in final["events"] if event["kind"] == "internal_replan_requested"],
+                         ["repeated_result"])
+        self.assertFalse(any(event.get("code") == "objective_no_progress" for event in final["events"]))
         self.assertGreaterEqual(len(final["team"]["tasks"]), 9)
         self.assertGreater(self.repeated_requests, 2)
         self.assertEqual(self.resumed, 0)

@@ -124,19 +124,19 @@ for event in {events!r}:
                           result['native_execution']['tool_results']), (2, 2))
         self.assertTrue(result['cleanup_confirmed'])
 
-    async def test_three_identical_failed_tools_with_unchanged_files_stop_and_clean_up(self):
-        owned = self.root / 'owned.txt'
-        owned.write_text('unchanged')
+    async def test_a_command_that_keeps_failing_the_same_way_never_ends_the_call(self):
+        # Catches the host ending a turn the native tool itself would let run:
+        # waiting on a check that fails until something finishes, or retrying
+        # a failing test, is the model's own business.
         for agent in ('codex', 'claude'):
             events = ([codex_events()[0], {'type': 'turn.started'}] if agent == 'codex' else
                       [{'type': 'system', 'subtype': 'init', 'session_id': SESSION}])
-            for index in range(3):
-                identifier = 'retry-' + str(index)
+            for index in range(6):
+                identifier = 'same-' + str(index)
                 if agent == 'codex':
                     events += [
-                        {'type': 'item.started', 'item': {'id': identifier,
-                            'type': 'command_execution', 'command': 'same failing command',
-                            'status': 'in_progress'}},
+                        {'type': 'item.started', 'item': {'id': identifier, 'type': 'command_execution',
+                            'command': 'same failing command', 'status': 'in_progress'}},
                         {'type': 'item.completed', 'item': {'id': identifier,
                             'type': 'command_execution', 'status': 'completed',
                             'exit_code': 1, 'aggregated_output': 'same actual failure'}},
@@ -150,81 +150,19 @@ for event in {events!r}:
                             'tool_use_id': identifier, 'is_error': True,
                             'content': 'same actual failure'}]}},
                     ]
-            fingerprints = []
-
-            def fingerprint():
-                value = hashlib.sha256(owned.read_bytes()).hexdigest()
-                fingerprints.append(value)
-                return value
-
-            with self.subTest(agent=agent), self.make_stub(events, agent=agent, after='time.sleep(60)'):
+            events += (codex_events()[-2:] if agent == 'codex' else [
+                {'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': SESSION,
+                 'result': json.dumps(FINAL), 'structured_output': FINAL,
+                 'usage': {'input_tokens': 1, 'output_tokens': 1}}])
+            with self.subTest(agent=agent), self.make_stub(events, agent=agent):
                 result = await asyncio.wait_for(native.invoke_native(agent, 'hello', self.root,
-                    permission='full_access', progress_fingerprint=fingerprint), 5)
-            self.assertEqual(result['failure_code'], 'native_no_progress')
-            self.assertEqual(result['status'], 'failed')
-            self.assertEqual((result['native_execution']['tool_calls'],
-                              result['native_execution']['tool_results']), (3, 3))
-            self.assertEqual(len(fingerprints), 3)
-            self.assertEqual(len(set(fingerprints)), 1)
-            self.assertTrue(result['native_execution']['side_effects_possible'])
-            self.assertTrue(result['cleanup_confirmed'])
-
-    async def test_actual_file_changes_allow_identical_failed_command_retries(self):
-        owned, acknowledgement = self.root / 'owned.txt', self.root / 'acknowledgement'
-        owned.write_text('version 0')
-        # The stub waits for each fingerprint before modifying the real file;
-        # otherwise pipe buffering could make every callback see the last one.
-        before = f'''
-print(json.dumps({codex_events()[0]!r}), flush=True)
-print(json.dumps({{'type': 'turn.started'}}), flush=True)
-for index in range(3):
-    identifier = 'retry-' + str(index)
-    print(json.dumps({{'type':'item.started','item':{{'id':identifier,
-        'type':'command_execution','command':'same failing command','status':'in_progress'}}}}), flush=True)
-    print(json.dumps({{'type':'item.completed','item':{{'id':identifier,
-        'type':'command_execution','status':'completed','exit_code':1,
-        'aggregated_output':'same actual failure'}}}}), flush=True)
-    deadline = time.monotonic() + 3
-    while not os.path.exists({str(acknowledgement)!r}) or open({str(acknowledgement)!r}).read() != str(index + 1):
-        if time.monotonic() >= deadline:
-            sys.exit(9)
-        time.sleep(0.01)
-    open({str(owned)!r}, 'w').write('version ' + str(index + 1))
-'''
-        fingerprints = []
-
-        async def fingerprint():
-            value = hashlib.sha256(owned.read_bytes()).hexdigest()
-            fingerprints.append(value)
-            acknowledgement.write_text(str(len(fingerprints)))
-            return value
-
-        with self.make_stub(codex_events()[-2:], before=before):
-            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root,
-                response_schema=SCHEMA, progress_fingerprint=fingerprint), 5)
-        self.assertEqual(result['status'], 'completed')
-        self.assertEqual(json.loads(result['text']), FINAL)
-        self.assertEqual((result['native_execution']['tool_calls'],
-                          result['native_execution']['tool_results']), (3, 3))
-        self.assertEqual(len(set(fingerprints)), 3)
-        self.assertEqual(owned.read_text(), 'version 3')
-        self.assertTrue(all(event['is_error'] for event in result['events']
-                            if event.get('state') == 'failed'))
-        self.assertTrue(result['cleanup_confirmed'])
-
-    async def test_fingerprint_is_only_required_on_actual_failure(self):
-        with self.make_stub(codex_events()):
-            result = await native.invoke_native('codex', 'hello', self.root,
-                progress_fingerprint=lambda: self.fail('successful tool must not query files'))
-        self.assertEqual(result['status'], 'completed')
-        events = codex_events()
-        events[3]['item']['exit_code'] = 1
-        with self.make_stub(events, after='time.sleep(60)'):
-            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root,
-                progress_fingerprint=lambda: 'unknown'), 5)
-        self.assertEqual(result['failure_code'], 'native_progress_unconfirmed')
-        self.assertNotEqual(result['failure_code'], 'native_no_progress')
-        self.assertTrue(result['cleanup_confirmed'])
+                    permission='full_access', response_schema=SCHEMA), 5)
+                self.assertEqual(result['status'], 'completed', result.get('failure_code'))
+                self.assertEqual((result['native_execution']['tool_calls'],
+                                  result['native_execution']['tool_results']), (6, 6))
+        # The switch that used to end such a turn is gone, not merely unused.
+        with self.assertRaises(TypeError):
+            await native.invoke_native('codex', 'hello', self.root, progress_fingerprint=lambda: '0' * 64)
 
     async def test_structured_format_result_is_not_an_execution_or_final_source(self):
         events = [
@@ -250,7 +188,10 @@ for index in range(3):
         self.assertNotIn('DO_NOT_STORE', Path(evidence['receipt_path']).read_text())
         self.assertFalse(any(event['type'] == 'native_tool' for event in result['events']))
 
-    async def test_unmatched_format_result_remains_invalid(self):
+    async def test_a_result_for_a_tool_never_seen_is_skipped_and_counts_nothing(self):
+        # Catches two defects: a tool result this parser cannot match ending a
+        # call that then finished normally, and such a result being counted as
+        # a completed tool or treated as proof that nothing ran.
         events = [
             {'type': 'system', 'subtype': 'init', 'session_id': SESSION},
             {'type': 'user', 'message': {'content': [{'type': 'tool_result',
@@ -260,8 +201,12 @@ for index in range(3):
         ]
         with self.make_stub(events, agent='claude'):
             result = await native.invoke_native('claude', 'hello', self.root, response_schema=SCHEMA)
-        self.assertEqual(result['status'], 'failed')
-        self.assertEqual(result['failure_code'], 'native_protocol_invalid')
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+        evidence = result['native_execution']
+        self.assertEqual((evidence['tool_calls'], evidence['tool_results']), (0, 0))
+        self.assertTrue(evidence['side_effects_possible'])
+        self.assertEqual([event for event in result['events'] if event['type'] == 'native_tool'], [])
         self.assertTrue(result['cleanup_confirmed'])
 
     async def test_official_synthetic_user_context_is_neither_execution_nor_final_output(self):
@@ -272,13 +217,15 @@ for index in range(3):
         contexts = [context('DO_NOT_STORE_SYNTHETIC_SUMMARY', isReplay=False),
                     context([{'type': 'text', 'text': 'DO_NOT_STORE_SYNTHETIC_CONTEXT'}]),
                     context([{'type': 'text', 'text': 'DO_NOT_STORE_SYNTHETIC_REPLAY'}], isReplay=True)]
-        # Reproduce the previous tool-result-only branch without claiming that
-        # the real rejected stdout frame's unrecorded body was recovered.
+        # Without the synthetic-context rule this frame is plain user text the
+        # parser does not read: skipped and noted, never a tool result.
         old = native._Stream('claude', True, None)
         old.identity(SESSION)
         with patch.object(native, '_claude_synthetic_user_text', return_value=False):
             await old.consume(json.dumps(contexts[1]).encode())
-        self.assertEqual(old.failure, 'native_protocol_unknown')
+        self.assertIsNone(old.failure)
+        self.assertEqual(old.ignored, ['native_protocol_unknown'])
+        self.assertEqual((old.calls, old.results), (0, 0))
         events = [
             {'type': 'system', 'subtype': 'init', 'session_id': SESSION},
             {'type': 'system', 'subtype': 'compact_boundary', 'session_id': SESSION,
@@ -304,10 +251,13 @@ for index in range(3):
         self.assertNotIn('DO_NOT_STORE', json.dumps(result))
         self.assertIn('ACTUAL_TOOL_RESULT', receipt)
 
-    async def test_synthetic_user_context_does_not_relax_unknown_blocks_or_tool_identity(self):
+    async def test_unrecognized_user_context_is_skipped_and_only_a_real_tool_result_completes_a_tool(self):
+        # Catches two defects: user-role content the parser does not recognize
+        # ending the call (a CLI release changing this furniture stopped rooms),
+        # and such content completing a tool it does not carry a result for.
         base = {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'text', 'text': 'context'}]},
                 'session_id': SESSION, 'parent_tool_use_id': None, 'uuid': str(uuid.uuid4()), 'isSynthetic': True}
-        cases = [
+        skipped = [
             {**base, 'isSynthetic': False}, {**base, 'isSynthetic': 1}, {**base, 'isReplay': 'false'},
             {**base, 'parent_tool_use_id': 'unknown-parent'}, {**base, 'uuid': 'invalid'},
             {**base, 'timestamp': []}, {**base, 'future_authority': True},
@@ -316,19 +266,23 @@ for index in range(3):
             {**base, 'message': {'role': 'user', 'content': [{'type': 'image', 'source': {}}]}},
             {**base, 'message': {'role': 'user', 'content': []}},
             {**base, 'message': {'role': 'user', 'content': [
-                {'type': 'text', 'text': 'context'}, {'type': 'tool_result', 'tool_use_id': 'real-tool', 'content': 'mixed'}]}},
-            {**base, 'message': {'role': 'user', 'content': [
                 {'type': 'tool_result', 'tool_use_id': 'unknown-tool', 'content': 'forged'}]}},
         ]
-        for event in cases:
+        # The one frame that does carry the started tool's result, beside text.
+        mixed = {**base, 'message': {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'context'}, {'type': 'tool_result', 'tool_use_id': 'real-tool', 'content': 'mixed'}]}}
+        for event, counts in [*((event, (1, 0)) for event in skipped), (mixed, (1, 1))]:
             with self.subTest(fields=sorted(event), message=sorted(event['message'])):
                 stream = native._Stream('claude', True, None)
                 stream.identity(SESSION)
                 await stream.consume(json.dumps({'type': 'assistant', 'message': {'content': [
                     {'type': 'tool_use', 'id': 'real-tool', 'name': 'Read', 'input': {'file_path': 'synthetic'}}]}}).encode())
                 await stream.consume(json.dumps(event).encode())
-                self.assertIsNotNone(stream.failure)
-                self.assertEqual((stream.calls, stream.results), (1, 0))
+                self.assertIsNone(stream.failure)
+                self.assertNotEqual(stream.ignored, [])
+                self.assertEqual((stream.calls, stream.results), counts)
+                # Only the assistant frame is a source of the final answer.
+                self.assertEqual(len(stream.final_lines), 1)
         for known in (None, str(uuid.uuid4())):
             stream = native._Stream('claude', True, None)
             if known:
@@ -337,7 +291,9 @@ for index in range(3):
             self.assertEqual(stream.failure, 'native_session_identity_mismatch')
             self.assertEqual((stream.calls, stream.results), (0, 0))
 
-    async def test_rejected_user_diagnostic_is_bounded_schema_only(self):
+    async def test_skipped_user_frame_leaves_a_bounded_schema_only_diagnostic_and_the_call_completes(self):
+        # Catches two defects: an unreadable user frame ending the call, and
+        # the note kept about it carrying any of the frame's keys or values.
         event = {'type': 'user', 'isSynthetic': True, 'isReplay': 'DO_NOT_STORE_REPLAY',
                  'DO_NOT_STORE_KEY': 'DO_NOT_STORE_AUTH', 'message': {'role': 'user',
                     'DO_NOT_STORE_MESSAGE_KEY': 'DO_NOT_STORE_MESSAGE_VALUE', 'content': [
@@ -356,15 +312,20 @@ for index in range(3):
         self.assertNotIn('isReplay', diagnostic)
         self.assertNotIn('DO_NOT_STORE', json.dumps(diagnostic))
         self.assertNotIn('future_secret_type', json.dumps(diagnostic))
-        with self.make_stub([{'type': 'system', 'subtype': 'init', 'session_id': SESSION}, event],
-                            agent='claude', after='time.sleep(60)'):
+        with self.make_stub([{'type': 'system', 'subtype': 'init', 'session_id': SESSION}, event,
+                             {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'result': 'done'}],
+                            agent='claude'):
             result = await asyncio.wait_for(native.invoke_native('claude', 'hello', self.root,
                 receipt_dir=self.root / 'private'), 5)
-        self.assertEqual(result['failure_code'], 'native_protocol_unknown')
+        self.assertEqual((result['status'], result.get('failure_code'), result['text']), ('completed', None, 'done'))
+        self.assertEqual((result['native_execution']['tool_calls'], result['native_execution']['tool_results']), (0, 0))
         self.assertTrue(result['cleanup_confirmed'])
         receipt = Path(result['native_execution']['receipt_path']).read_text()
         self.assertNotIn('DO_NOT_STORE', receipt)
-        self.assertEqual(json.loads(receipt.splitlines()[-1])['data'], diagnostic)
+        self.assertNotIn('DO_NOT_STORE', json.dumps(result))
+        rows = [json.loads(line)['data'] for line in receipt.splitlines()]
+        self.assertEqual([row['type'] for row in rows], ['system', 'native_protocol_diagnostic', 'result'])
+        self.assertEqual(rows[1], {**diagnostic, 'ignored': ['native_protocol_unknown']})
 
     async def test_claude_long_tool_heartbeat_and_known_notices_do_not_end_the_turn(self):
         events = [
@@ -408,7 +369,9 @@ for index in range(3):
         self.assertEqual(progress, [{'type': 'tool_progress', 'tool_use_id': 'bash-1',
             'tool_name': 'Bash', 'elapsed_time_seconds': 30, 'heartbeat': True}])
 
-    async def test_progress_receipt_keeps_only_safe_diagnostics_when_stream_rejects_it(self):
+    async def test_progress_receipt_keeps_only_safe_diagnostics_when_stream_skips_it(self):
+        # Catches: progress for a tool the parser never saw start ending the
+        # call, being shown as a running tool, or leaking its extra fields.
         event = {'type': 'tool_progress', 'tool_use_id': 'unmatched-tool', 'tool_name': 'Bash',
                  'elapsed_time_seconds': 30, 'heartbeat': True,
                  'session_id': SESSION, 'prompt': 'DO_NOT_STORE_PROMPT',
@@ -416,9 +379,13 @@ for index in range(3):
         receipt = native._receipt_event('claude', json.dumps(event).encode())
         self.assertEqual(set(receipt), {'type', 'tool_use_id', 'tool_name', 'elapsed_time_seconds', 'heartbeat'})
         self.assertNotIn('DO_NOT_STORE', json.dumps(receipt))
-        stream = native._Stream('claude', False, None)
+        observed = []
+        stream = native._Stream('claude', False, observed.append)
         await stream.consume(json.dumps(event).encode())
-        self.assertEqual(stream.failure, 'native_protocol_invalid')
+        self.assertIsNone(stream.failure)
+        self.assertEqual(stream.ignored, ['native_protocol_invalid'])
+        self.assertEqual((stream.calls, stream.results, observed), (0, 0, []))
+        self.assertTrue(stream.possible_effects)
         event.update(tool_name={'thinking': 'DO_NOT_STORE'}, elapsed_time_seconds='DO_NOT_STORE', heartbeat=1)
         receipt = native._receipt_event('claude', json.dumps(event).encode())
         self.assertEqual(receipt['invalid_fields'], ['tool_name', 'elapsed_time_seconds', 'heartbeat'])
@@ -456,6 +423,9 @@ for index in range(3):
         self.assertIn('toolu_synthetic-heartbeat-1', receipt)
 
     async def test_heartbeat_alias_does_not_authorize_unknown_ids_names_or_tool_results(self):
+        # Catches two defects: a heartbeat or result under an ID or name that
+        # matches no started tool ending the call, and it being accepted as
+        # that tool's progress or completion.
         for identifier, heartbeat, name in [
             ('unknown-heartbeat-0', True, 'Bash'),
             ('a-heartbeat-0', False, 'Bash'),
@@ -468,15 +438,19 @@ for index in range(3):
                     {'type': 'tool_use', 'id': 'a', 'name': 'Bash', 'input': {'command': 'synthetic'}}]}}).encode())
                 await stream.consume(json.dumps({'type': 'tool_progress', 'tool_use_id': identifier,
                     'tool_name': name, 'elapsed_time_seconds': 30, 'heartbeat': heartbeat}).encode())
-                self.assertEqual(stream.failure, 'native_protocol_invalid')
+                self.assertIsNone(stream.failure)
+                self.assertEqual(stream.ignored, ['native_protocol_invalid'])
                 self.assertEqual((stream.calls, stream.results), (1, 0))
+                self.assertEqual([event['state'] for event in stream.events], ['started'])
         stream = native._Stream('claude', False, None)
         await stream.consume(json.dumps({'type': 'assistant', 'message': {'content': [
             {'type': 'tool_use', 'id': 'a', 'name': 'Bash', 'input': {'command': 'synthetic'}}]}}).encode())
         await stream.consume(json.dumps({'type': 'user', 'message': {'content': [
             {'type': 'tool_result', 'tool_use_id': 'a-heartbeat-0', 'is_error': False, 'content': 'forged'}]}}).encode())
-        self.assertEqual(stream.failure, 'native_protocol_invalid')
+        self.assertIsNone(stream.failure)
+        self.assertEqual(stream.ignored, ['native_protocol_invalid'])
         self.assertEqual((stream.calls, stream.results), (1, 0))
+        self.assertEqual([event['state'] for event in stream.events], ['started'])
 
     async def test_installed_ui_invalidation_before_init_is_metadata_not_execution(self):
         notice = {'type': 'system', 'subtype': 'ui_invalidate', 'event': 'ui.render',
@@ -501,7 +475,10 @@ for index in range(3):
         self.assertNotIn('DO_NOT_STORE', receipt)
         self.assertNotIn('prompts_screened', receipt)
 
-    async def test_ui_invalidation_is_narrow_and_keeps_session_identity_checks(self):
+    async def test_ui_invalidation_in_another_shape_is_skipped_and_identity_checks_stay(self):
+        # Catches three defects: a known notice whose shape a CLI release
+        # changed ending the call; such a notice being trusted (its session
+        # adopted, a tool counted); and a wrong session no longer failing.
         notice = {'type': 'system', 'subtype': 'ui_invalidate', 'event': 'ui.render',
                   'uuid': str(uuid.uuid4()), 'session_id': SESSION}
         for changes in ({'event': 'Bash'}, {'prompts_screened': False},
@@ -510,7 +487,9 @@ for index in range(3):
             with self.subTest(fields=sorted(changes)):
                 stream = native._Stream('claude', False, None)
                 await stream.consume(json.dumps({**notice, **changes}).encode())
-                self.assertEqual(stream.failure, 'native_protocol_invalid')
+                self.assertIsNone(stream.failure)
+                self.assertEqual(stream.ignored, ['native_protocol_invalid'])
+                self.assertIsNone(stream.session_id)
                 self.assertEqual((stream.calls, stream.results), (0, 0))
         stream = native._Stream('claude', False, None)
         stream.identity(SESSION)
@@ -546,25 +525,29 @@ for index in range(3):
         self.assertIn({'type': 'native_protocol_notice', 'event_type': 'system', 'event_subtype': 'notification'},
                       [json.loads(line)['data'] for line in receipt.splitlines()])
 
-    async def test_future_system_notice_is_narrow(self):
-        # Catches: tolerating notices so broadly that a forged identity, an
-        # unsafe label, a malformed KNOWN subtype or a new top-level type passes.
+    async def test_unreadable_notices_are_skipped_but_a_forged_identity_still_fails(self):
+        # Catches two defects: a notice with an unsafe label, a missing
+        # subtype, a changed known shape or a new top-level type ending the
+        # call; and a notice from another session no longer failing it.
         stream = native._Stream('claude', False, None)
         stream.identity(SESSION)
         await stream.consume(json.dumps({'type': 'system', 'subtype': 'notification',
                                          'session_id': str(uuid.uuid4())}).encode())
         self.assertEqual(stream.failure, 'native_session_identity_mismatch')
-        for event, failure in [
-                ({'type': 'system', 'subtype': 'bad label', 'session_id': SESSION}, 'native_protocol_unknown'),
-                ({'type': 'system', 'session_id': SESSION}, 'native_protocol_unknown'),
+        for event, ignored, effects in [
+                ({'type': 'system', 'subtype': 'bad label', 'session_id': SESSION}, ['native_protocol_unknown'], False),
+                ({'type': 'system', 'session_id': SESSION}, ['native_protocol_unknown'], False),
                 ({'type': 'system', 'subtype': 'ui_invalidate', 'event': 'Bash', 'uuid': str(uuid.uuid4()),
-                  'session_id': SESSION}, 'native_protocol_invalid'),
-                ({'type': 'future_metadata', 'subtype': 'notification'}, 'native_protocol_unknown')]:
+                  'session_id': SESSION}, ['native_protocol_invalid'], False),
+                # A top-level type nobody has seen may be anything, a tool included.
+                ({'type': 'future_metadata', 'subtype': 'notification'}, ['native_protocol_unknown'], True)]:
             with self.subTest(event=event):
                 stream = native._Stream('claude', False, None)
                 stream.identity(SESSION)
                 await stream.consume(json.dumps(event).encode())
-                self.assertEqual(stream.failure, failure)
+                self.assertIsNone(stream.failure)
+                self.assertEqual(stream.ignored, ignored)
+                self.assertEqual(stream.possible_effects, effects)
                 self.assertEqual((stream.calls, stream.results), (0, 0))
 
     async def test_background_membership_is_metadata_and_does_not_invent_tool_results(self):
@@ -596,7 +579,9 @@ for index in range(3):
         self.assertNotIn('DO_NOT_STORE', receipt)
         self.assertNotIn('background_tasks_changed', receipt)
 
-    async def test_background_membership_shape_and_session_remain_strict(self):
+    async def test_background_membership_in_another_shape_is_skipped_and_session_stays_strict(self):
+        # Catches two defects: a task inventory whose shape a CLI release
+        # changed ending the call, and it inventing a tool call or result.
         task = {'task_id': 'background-1', 'task_type': 'local_bash', 'description': 'synthetic'}
         event = {'type': 'system', 'subtype': 'background_tasks_changed', 'tasks': [task],
                  'uuid': str(uuid.uuid4()), 'session_id': SESSION}
@@ -608,14 +593,17 @@ for index in range(3):
             with self.subTest(fields=sorted(changes)):
                 stream = native._Stream('claude', False, None)
                 await stream.consume(json.dumps({**event, **changes}).encode())
-                self.assertEqual(stream.failure, 'native_protocol_invalid')
+                self.assertIsNone(stream.failure)
+                self.assertEqual(stream.ignored, ['native_protocol_invalid'])
                 self.assertEqual((stream.calls, stream.results), (0, 0))
         stream = native._Stream('claude', False, None)
         stream.identity(SESSION)
         await stream.consume(json.dumps({**event, 'session_id': str(uuid.uuid4())}).encode())
         self.assertEqual(stream.failure, 'native_session_identity_mismatch')
 
-    async def test_claude_progress_must_match_an_established_tool(self):
+    async def test_claude_progress_that_matches_no_started_tool_is_skipped_not_shown(self):
+        # Catches two defects: progress that matches no started tool ending
+        # the call, and it being shown as that tool still running.
         for identifier, name, elapsed in [('unknown', 'Bash', 30), ('a', 'Read', 30), ('a', 'Bash', -1)]:
             with self.subTest(identifier=identifier, name=name, elapsed=elapsed):
                 stream = native._Stream('claude', False, None)
@@ -623,8 +611,10 @@ for index in range(3):
                     {'type': 'tool_use', 'id': 'a', 'name': 'Bash', 'input': {'command': 'synthetic'}}]}}).encode())
                 await stream.consume(json.dumps({'type': 'tool_progress', 'tool_use_id': identifier,
                     'tool_name': name, 'elapsed_time_seconds': elapsed}).encode())
-                self.assertEqual(stream.failure, 'native_protocol_invalid')
+                self.assertIsNone(stream.failure)
+                self.assertEqual(stream.ignored, ['native_protocol_invalid'])
                 self.assertEqual((stream.calls, stream.results), (1, 0))
+                self.assertEqual([event['state'] for event in stream.events], ['started'])
 
     async def test_private_receipt_excludes_thinking_chat_and_stderr_but_keeps_tools(self):
         codex = codex_events()
@@ -680,6 +670,67 @@ for index in range(3):
                 result = await native.invoke_native('codex', 'hello', self.root)
         self.assertEqual(result['status'], 'completed')
 
+    async def test_full_access_call_runs_with_the_users_toolchain_environment_but_no_account_selectors(self):
+        # Catches two defects: a full access call losing the variables the
+        # user's build needs (JAVA_HOME, ANDROID_HOME, GODOT were stripped, so
+        # project builds failed inside a call but not in a terminal), and the
+        # fix letting a key, token, endpoint or login home reach the CLI.
+        host = {'JAVA_HOME': '/opt/jdk-21', 'ANDROID_HOME': '/opt/android-sdk', 'GODOT': '/opt/godot',
+                'NODE_AUTH_TOKEN': 'registry-token', 'OPENAI_API_KEY': 'forbidden', 'CODEX_API_KEY': 'forbidden',
+                'ANTHROPIC_API_KEY': 'forbidden', 'ANTHROPIC_AUTH_TOKEN': 'forbidden',
+                'ANTHROPIC_BASE_URL': 'https://bad.invalid', 'CLAUDE_CODE_USE_BEDROCK': '1',
+                'CLAUDE_CONFIG_DIR': '/other/claude', 'CODEX_HOME': '/other/codex',
+                'KIMI_API_KEY': 'forbidden', 'MOONSHOT_API_KEY': 'forbidden'}
+        seen = self.root / 'environment.json'
+        keys = sorted(host) + ['HOME']
+        before = f"open({str(seen)!r}, 'w').write(json.dumps({{k: os.environ.get(k) for k in {keys!r}}}))"
+        claude = [{'type': 'system', 'subtype': 'init', 'session_id': SESSION},
+                  {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'structured_output': FINAL}]
+        for agent, events, permission, expected in [
+                ('codex', codex_events(), 'full_access', {'JAVA_HOME': '/opt/jdk-21', 'ANDROID_HOME': '/opt/android-sdk',
+                    'GODOT': '/opt/godot', 'NODE_AUTH_TOKEN': 'registry-token'}),
+                ('claude', claude, 'full_access', {'JAVA_HOME': '/opt/jdk-21', 'ANDROID_HOME': '/opt/android-sdk',
+                    'GODOT': '/opt/godot', 'NODE_AUTH_TOKEN': 'registry-token'}),
+                # A restricted call keeps its original, minimal environment.
+                ('codex', codex_events(), 'workspace_write', {'JAVA_HOME': None, 'ANDROID_HOME': None,
+                    'GODOT': None, 'NODE_AUTH_TOKEN': None})]:
+            with self.subTest(agent=agent, permission=permission), patch.dict(os.environ, host), \
+                    self.make_stub(events, agent=agent, before=before):
+                result = await native.invoke_native(agent, 'hello', self.root, permission=permission,
+                                                    response_schema=SCHEMA)
+                self.assertEqual(result['status'], 'completed', result.get('failure_code'))
+                child = json.loads(seen.read_text())
+                self.assertEqual(child.pop('HOME'), os.environ['HOME'])
+                self.assertEqual(child, {'OPENAI_API_KEY': None, 'CODEX_API_KEY': None, 'ANTHROPIC_API_KEY': None,
+                    'ANTHROPIC_AUTH_TOKEN': None, 'ANTHROPIC_BASE_URL': None, 'CLAUDE_CODE_USE_BEDROCK': None,
+                    'CLAUDE_CONFIG_DIR': None, 'CODEX_HOME': None, 'KIMI_API_KEY': None, 'MOONSHOT_API_KEY': None,
+                    **expected})
+
+    async def test_receipt_past_its_cap_stops_recording_and_the_call_still_completes(self):
+        # Catches: a long call being killed and failed because its private
+        # receipt grew past the cap. Recording stops there, once, with a
+        # marker; the turn, its answer and its tool counts are unaffected.
+        marker = '{"channel": "diagnostic", "data": {"type": "native_receipt_truncated"}}'
+        with patch.object(native, '_MAX_RECEIPT', 400), self.make_stub(codex_events()):
+            result = await native.invoke_native('codex', 'hello', self.root, permission='full_access',
+                response_schema=SCHEMA, receipt_dir=self.root / 'private')
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+        evidence = result['native_execution']
+        self.assertEqual((evidence['tool_calls'], evidence['tool_results'], evidence['exit_code']), (1, 1, 0))
+        path = Path(evidence['receipt_path'])
+        lines = path.read_text().splitlines()
+        self.assertEqual(json.loads(lines[0])['data'], {'type': 'thread.started', 'thread_id': SESSION})
+        self.assertEqual((lines[-1], lines.count(marker)), (marker, 1))
+        self.assertLessEqual(path.stat().st_size, 400)
+        self.assertNotIn('turn.completed', path.read_text())
+        # Under the cap nothing is cut and no marker is written.
+        with self.make_stub(codex_events()):
+            whole = await native.invoke_native('codex', 'hello', self.root, permission='full_access',
+                response_schema=SCHEMA, receipt_dir=self.root / 'whole')
+        text = Path(whole['native_execution']['receipt_path']).read_text()
+        self.assertEqual((text.count('native_receipt_truncated'), text.count('turn.completed')), (0, 1))
+
     async def test_claude_command_timers_are_process_local_and_settings_cannot_lower_them(self):
         expected = {'BASH_DEFAULT_TIMEOUT_MS': '2147483647', 'BASH_MAX_TIMEOUT_MS': '2147483647',
                     'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '1'}
@@ -726,40 +777,121 @@ for index in range(3):
                 await native.invoke_native('codex', 'hello', self.root)
         self.assertFalse(marker.exists())
 
-    async def test_unknown_tool_fails_even_with_valid_final(self):
+    async def test_unknown_codex_item_counts_as_a_paired_tool_and_keeps_the_valid_final(self):
+        # Catches three defects: an item kind a newer Codex added ending a call
+        # that finished normally; that item being left out of the paired tool
+        # counts or reported as effect-free; and its name or arguments leaving
+        # the parser.
         events = codex_events()
-        events.insert(2, {'type': 'item.completed', 'item': {'id': 'x', 'type': 'future_tool'}})
+        events.insert(2, {'type': 'item.started', 'item': {'id': 'x', 'type': 'future_tool',
+            'arguments': 'DO_NOT_PUBLISH_ARGUMENT'}})
+        events.insert(3, {'type': 'item.completed', 'item': {'id': 'x', 'type': 'future_tool',
+            'result': 'DO_NOT_PUBLISH_RESULT', 'status': 'completed'}})
+        observed = []
         with self.make_stub(events):
-            result = await native.invoke_native('codex', 'hello', self.root)
-        self.assertEqual(result['failure_code'], 'native_tool_unknown')
-        self.assertEqual(result['status'], 'failed')
+            result = await native.invoke_native('codex', 'hello', self.root, on_activity=observed.append,
+                response_schema=SCHEMA, receipt_dir=self.root / 'private')
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+        evidence = result['native_execution']
+        self.assertEqual((evidence['tool_calls'], evidence['tool_results']), (2, 2))
+        self.assertTrue(evidence['side_effects_possible'])
+        self.assertEqual([(event['kind'], event['state'], event['operation']) for event in observed],
+                         [('unknown', 'started', 'use_tool'), ('unknown', 'completed', 'use_tool'),
+                          ('command_execution', 'started', 'run_command'),
+                          ('command_execution', 'completed', 'run_command')])
+        receipt = Path(evidence['receipt_path']).read_text()
+        for text in (json.dumps(result), json.dumps(observed), receipt):
+            self.assertNotIn('DO_NOT_PUBLISH', text)
+        self.assertNotIn('future_tool', json.dumps(result) + json.dumps(observed))
+        self.assertEqual([json.loads(line)['data'] for line in receipt.splitlines()
+                          if json.loads(line)['data']['type'] == 'native_protocol_diagnostic'],
+                         [{'type': 'native_protocol_diagnostic', 'ignored': ['native_tool_unknown'],
+                           'event_type': 'item.started', 'item_type': 'future_tool'},
+                          {'type': 'native_protocol_diagnostic', 'ignored': ['native_tool_unknown'],
+                           'event_type': 'item.completed', 'item_type': 'future_tool'}])
+
+    async def test_unknown_top_level_event_is_skipped_and_noted(self):
+        # Catches: an event type a newer CLI added ending the call, before or
+        # after the turn's own terminal, or being taken as proof nothing ran.
+        events = codex_events()
+        events.insert(2, {'type': 'mystery', 'body': 'DO_NOT_STORE_BODY'})
+        with self.make_stub(events + [{'type': 'mystery'}]):
+            result = await native.invoke_native('codex', 'hello', self.root, response_schema=SCHEMA,
+                receipt_dir=self.root / 'private')
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+        self.assertEqual((result['native_execution']['tool_calls'], result['native_execution']['tool_results']), (1, 1))
         self.assertTrue(result['native_execution']['side_effects_possible'])
+        receipt = Path(result['native_execution']['receipt_path']).read_text()
+        self.assertNotIn('DO_NOT_STORE', receipt)
+        self.assertEqual([json.loads(line)['data'] for line in receipt.splitlines()].count(
+            {'type': 'native_protocol_diagnostic', 'ignored': ['native_protocol_unknown'], 'event_type': 'mystery'}), 2)
 
-    async def test_unknown_protocol_fails(self):
-        with self.make_stub(codex_events() + [{'type': 'mystery'}]):
-            result = await native.invoke_native('codex', 'hello', self.root)
-        self.assertEqual(result['failure_code'], 'native_protocol_unknown')
-
-    async def test_rejected_protocol_receipt_records_labels_without_private_values(self):
-        for event in [
-            {'type': 'future_metadata', 'subtype': 'future_startup_notice',
-             'output': ['DO_NOT_STORE_AUTH'], 'prompt': 'DO_NOT_STORE_PROMPT',
-             'thinking': 'DO_NOT_STORE_THINKING'},
-            # A future system subtype is a tolerated notice; an unsafe label is not.
-            {'type': 'system', 'subtype': 'future subtype', 'content': 'DO_NOT_STORE_BODY'},
+    async def test_skipped_protocol_receipt_records_labels_without_private_values(self):
+        # Catches: an unreadable event ending the call, or the note kept about
+        # it holding anything but protocol labels.
+        for event, diagnostic in [
+            ({'type': 'future_metadata', 'subtype': 'future_startup_notice',
+              'output': ['DO_NOT_STORE_AUTH'], 'prompt': 'DO_NOT_STORE_PROMPT',
+              'thinking': 'DO_NOT_STORE_THINKING'},
+             {'type': 'native_protocol_diagnostic', 'ignored': ['native_protocol_unknown'],
+              'event_type': 'future_metadata', 'event_subtype': 'future_startup_notice'}),
+            # A future system subtype is a labelled notice; an unsafe label is only skipped.
+            ({'type': 'system', 'subtype': 'future subtype', 'content': 'DO_NOT_STORE_BODY'},
+             {'type': 'native_protocol_diagnostic', 'ignored': ['native_protocol_unknown'], 'event_type': 'system'}),
         ]:
-            with self.subTest(event_type=event['type']), self.make_stub([event], agent='claude', after='time.sleep(60)'):
+            events = [event, {'type': 'system', 'subtype': 'init', 'session_id': SESSION},
+                      {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'result': 'done'}]
+            with self.subTest(event_type=event['type']), self.make_stub(events, agent='claude'):
                 result = await asyncio.wait_for(native.invoke_native('claude', 'hello', self.root,
                     receipt_dir=self.root / 'private'), 5)
-            self.assertEqual(result['failure_code'], 'native_protocol_unknown')
+            self.assertEqual((result['status'], result.get('failure_code'), result['text']), ('completed', None, 'done'))
             self.assertTrue(result['cleanup_confirmed'])
             text = Path(result['native_execution']['receipt_path']).read_text()
             self.assertNotIn('DO_NOT_STORE', text)
-            self.assertEqual([json.loads(line)['data'] for line in text.splitlines()],
-                [{'type': 'native_protocol_diagnostic', 'event_type': event['type'],
-                  **({'event_subtype': event['subtype']} if ' ' not in event['subtype'] else {})}])
+            self.assertEqual(json.loads(text.splitlines()[0])['data'], diagnostic)
         self.assertEqual(native._protocol_diagnostic(json.dumps({'type': {'auth': 'secret'},
             'subtype': 'DO NOT STORE CONTENT'}).encode()), {'type': 'native_protocol_diagnostic'})
+
+    async def test_unreadable_claude_blocks_and_tool_names_are_skipped_and_named_tools_still_pair(self):
+        # Catches four defects: a block kind or tool name the parser cannot
+        # read ending the call; the unnamed tool's result breaking the pairing
+        # of calls and results; an unnamed tool without a result failing the
+        # call as a missing result; and any of their content being published.
+        def events(*, unnamed_result):
+            results = [{'type': 'tool_result', 'tool_use_id': 'named', 'content': 'DO_NOT_PUBLISH_OUTPUT'},
+                       {'type': 'text', 'text': 'DO_NOT_PUBLISH_USER_TEXT'}]
+            if unnamed_result:
+                results.insert(0, {'type': 'tool_result', 'tool_use_id': 'unnamed', 'is_error': True,
+                                   'content': 'DO_NOT_PUBLISH_UNNAMED_OUTPUT'})
+            return [
+                {'type': 'system', 'subtype': 'init', 'session_id': SESSION},
+                {'type': 'assistant', 'message': {'content': [
+                    {'type': 'thinking', 'thinking': 'DO_NOT_PUBLISH_THINKING'},
+                    {'type': 'server_tool_use', 'id': 'server', 'name': 'web_search',
+                     'input': {'query': 'DO_NOT_PUBLISH_QUERY'}},
+                    {'type': 'tool_use', 'id': 'unnamed', 'name': 'DO_NOT_PUBLISH name with spaces',
+                     'input': {'argument': 'DO_NOT_PUBLISH_ARGUMENT'}},
+                    {'type': 'tool_use', 'id': 'named', 'name': 'Bash',
+                     'input': {'command': 'echo DO_NOT_PUBLISH_COMMAND'}}]}},
+                {'type': 'user', 'message': {'content': results}},
+                {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'structured_output': FINAL}]
+        for unnamed_result, counts, activity in [
+                (True, (2, 2), [('unknown', 'started'), ('Bash', 'started'), ('unknown', 'failed'), ('Bash', 'completed')]),
+                (False, (1, 1), [('unknown', 'started'), ('Bash', 'started'), ('Bash', 'completed')])]:
+            observed = []
+            with self.subTest(unnamed_result=unnamed_result), \
+                    self.make_stub(events(unnamed_result=unnamed_result), agent='claude'):
+                result = await native.invoke_native('claude', 'hello', self.root, permission='full_access',
+                    response_schema=SCHEMA, on_activity=observed.append)
+                self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+                self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+                evidence = result['native_execution']
+                self.assertEqual((evidence['tool_calls'], evidence['tool_results']), counts)
+                self.assertTrue(evidence['side_effects_possible'])
+                self.assertEqual([(event['kind'], event['state']) for event in observed], activity)
+                self.assertNotIn('DO_NOT_PUBLISH', json.dumps(result) + json.dumps(observed))
 
     async def test_nonzero_exit_fails_despite_final(self):
         with self.make_stub(codex_events(), after='sys.exit(7)'):
@@ -1009,9 +1141,15 @@ time.sleep(60)
                 permission='plan', response_schema=SCHEMA)
         self.assertNotEqual(mismatch['status'], 'completed')
 
-    async def test_claude_repeated_tool_identity_cannot_change_its_name(self):
-        for first, second in (('Read', 'Read'), ('Read', 'EndConversation'),
-                              ('Read', 'StructuredOutput'), ('StructuredOutput', 'Read')):
+    async def test_claude_repeated_tool_identity_keeps_its_first_name_and_never_ends_the_call(self):
+        # Catches two defects: a tool ID repeated under another name ending the
+        # call, and the repeat renaming the tool, counting it twice or turning
+        # a format call into an executed tool (or the reverse).
+        for first, second, counts, started in (
+                ('Read', 'Read', (1, 1), ['Read']),
+                ('Read', 'EndConversation', (1, 1), ['Read']),
+                ('Read', 'StructuredOutput', (1, 1), ['Read']),
+                ('StructuredOutput', 'Read', (0, 0), [])):
             with self.subTest(first=first, second=second):
                 events = [{'type': 'system', 'subtype': 'init', 'session_id': SESSION}]
                 for name in (first, second):
@@ -1021,14 +1159,16 @@ time.sleep(60)
                     {'type': 'user', 'message': {'content': [
                         {'type': 'tool_result', 'tool_use_id': 'same-id', 'content': 'done'}]}},
                     {'type': 'result', 'subtype': 'success', 'session_id': SESSION, 'structured_output': FINAL}])
+                observed = []
                 with self.make_stub(events, agent='claude'):
                     result = await native.invoke_native('claude', 'fixture', self.root,
-                        permission='full_access', response_schema=SCHEMA)
-                if first == second:
-                    self.assertEqual(result['status'], 'completed')
-                    self.assertEqual(result['native_execution']['tool_calls'], 1)
-                else:
-                    self.assertEqual(result['failure_code'], 'native_protocol_invalid')
+                        permission='full_access', response_schema=SCHEMA, on_activity=observed.append)
+                self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+                evidence = result['native_execution']
+                self.assertEqual((evidence['tool_calls'], evidence['tool_results']), counts)
+                self.assertEqual([event['kind'] for event in observed if event['state'] == 'started'], started)
+                # A Read was announced in every case, whatever it was later called.
+                self.assertTrue(evidence['side_effects_possible'])
 
     async def test_exact_legacy_config_warning_keeps_receipt_and_real_final(self):
         notice = ('Codex is ignoring 1 unrecognized configuration setting. '
@@ -1051,12 +1191,28 @@ time.sleep(60)
         self.assertEqual(absent['status'], 'failed')
         self.assertEqual(absent['failure_code'], 'protocol_turn_incomplete')
 
-    async def test_unknown_tool_alone_cannot_be_replayed_as_effect_free(self):
-        events = [codex_events()[0], {'type': 'item.started',
-            'item': {'id': 'x', 'type': 'new_unknown_tool'}}]
-        with self.make_stub(events, after='time.sleep(60)'):
-            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root), 5)
-        self.assertEqual(result['failure_code'], 'native_tool_unknown')
+    async def test_unknown_tool_started_and_never_finished_neither_fails_nor_looks_effect_free(self):
+        # Catches three defects: an unknown item that only ever starts ending
+        # the call; it failing the finished call as a missing tool result or
+        # leaving calls and results unequal; and the call then being reported
+        # as effect-free, which would let it be replayed blindly.
+        events = codex_events()
+        events.insert(2, {'type': 'item.started', 'item': {'id': 'x', 'type': 'new_unknown_tool'}})
+        with self.make_stub(events):
+            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root,
+                response_schema=SCHEMA), 5)
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+        evidence = result['native_execution']
+        self.assertEqual((evidence['tool_calls'], evidence['tool_results']), (1, 1))
+        self.assertTrue(evidence['side_effects_possible'])
+        # With nothing else in the turn, the unknown item alone still marks it.
+        alone = [codex_events()[0], events[2], *codex_events()[-2:]]
+        with self.make_stub(alone):
+            result = await asyncio.wait_for(native.invoke_native('codex', 'hello', self.root,
+                response_schema=SCHEMA), 5)
+        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+        self.assertEqual((result['native_execution']['tool_calls'], result['native_execution']['tool_results']), (0, 0))
         self.assertTrue(result['native_execution']['side_effects_possible'])
 
     async def test_duplicate_terminal_is_not_success(self):
@@ -1383,7 +1539,9 @@ class PublicProgressTests(unittest.IsolatedAsyncioTestCase):
         for candidate in (json.dumps(envelope), '```json\n' + json.dumps(envelope) + '\n```'):
             self.assertTrue(native._structured_final_text(candidate))
 
-    async def test_public_commentary_does_not_replace_canonical_final_or_protocol_failure(self):
+    async def test_public_commentary_does_not_replace_canonical_final_or_a_missing_terminal(self):
+        # Catches: commentary standing in for the final answer; an unknown
+        # event discarding a finished turn; a second terminal still passing.
         events = codex_events()
         events.insert(2, self.codex_message())
         stream, observed = await self.consume('codex', events, expected_session=SESSION)
@@ -1393,6 +1551,9 @@ class PublicProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([event for event in observed if event['type'] == 'native_progress']), 1)
         self.assertEqual((stream.calls, stream.results), (1, 1))
         await stream.consume(json.dumps({'type': 'unknown_protocol'}))
+        kept = stream.result(0, SESSION)
+        self.assertEqual((kept['status'], kept.get('failure_code')), ('completed', None))
+        self.assertEqual(json.loads(kept['text']), {'message': 'done', 'action': 'finish'})
+        await stream.consume(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}}))
         failed = stream.result(0, SESSION)
-        self.assertEqual(failed['status'], 'failed')
-        self.assertEqual(failed['failure_code'], 'native_protocol_unknown')
+        self.assertEqual((failed['status'], failed['failure_code'], failed['text']), ('failed', 'protocol_turn_incomplete', ''))

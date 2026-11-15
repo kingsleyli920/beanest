@@ -251,7 +251,7 @@ class NativeReviewSubmissionHTTPTests(unittest.TestCase):
         self.assertTrue(all(task["status"] == "accepted" for task in final["team"]["tasks"]))
         self.assertEqual(self.job_rows(old_ids), old_rows)
 
-    def test_changed_binding_and_real_null_cause_model_block_do_not_recover(self):
+    def test_changed_binding_and_a_model_block_never_use_the_review_recovery(self):
         failed, carried = self.legacy_failed_and_carried()
         self.assert_mixed_rejection_is_not_a_collateral_stop(failed)
         room_id = carried["room"]["id"]
@@ -262,6 +262,7 @@ class NativeReviewSubmissionHTTPTests(unittest.TestCase):
         code, current = self.request("GET", f"/api/rooms/{room_id}")
         self.assertEqual(code, 200, {"error": current.get("error")})
         calls = len(self.native.calls)
+        self.assertFalse(current["current_run"]["can_recover_native"])
         code, response = self.request("POST", f"/api/rooms/{room_id}/messages", self.continue_body(current))
         self.assertEqual(code, 409, {"error": response.get("error")})
         self.assertEqual(len(self.native.calls), calls)
@@ -285,8 +286,13 @@ class NativeReviewSubmissionHTTPTests(unittest.TestCase):
         current = blocked["current_run"]
         code, response = self.request("POST", f"/api/rooms/{blocked_room}/recover-native", {
             "request_id": str(uuid4()), "run_id": current["id"], "revision": current["revision"], "digest": current["digest"]})
-        self.assertEqual(code, 409, {"error": response.get("error")})
-        self.assertEqual(len(self.native.calls), calls)
+        # The review recovery does not apply to a block the model raised. The
+        # room is still not locked: recover-native abandons the ended calls
+        # and restarts, without retrying or accepting the old review.
+        self.assertEqual(code, 200, {"error": response.get("error")})
+        kinds = [event["kind"] for event in self.settled(blocked_room)["events"]]
+        self.assertEqual(kinds.count("native_unconfirmed_calls_abandoned"), 1)
+        self.assertEqual(kinds.count("native_review_retry_queued"), 0)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from local_agent_coordinator import folder_workspace
+from local_agent_coordinator import folder_workspace, room_service
 from test_native_outcome_http import OutcomeFixture
 from test_native_room_service import native_reply
 from test_team_store import proposal
@@ -120,7 +120,10 @@ class GeneratedCacheImportHTTPTests(unittest.TestCase):
         fixture = self.fixture()
         # Replay only the former excluded-directory policy, using the real
         # collector and normal host failure path, not forged ledger rows.
-        with patch.object(folder_workspace, '_EXCLUDED_DIRS', folder_workspace._EXCLUDED_DIRS - {'.godot'}):
+        # A room stopped this way by an earlier version must still recover:
+        # that version also never added a free file to the task by itself.
+        with (patch.object(folder_workspace, '_EXCLUDED_DIRS', folder_workspace._EXCLUDED_DIRS - {'.godot'}),
+              patch.object(room_service.RoomService, '_grant_free_paths', lambda *args: [])):
             fixture.create()
             stopped = fixture.settled()
         self.assertEqual(stopped['team']['stop_reason'], 'native_changes_not_imported')
@@ -162,32 +165,42 @@ class GeneratedCacheImportHTTPTests(unittest.TestCase):
                       [(entry['path'], entry.get('reason')) for entry in state.get('generated', [])])
         self.assertTrue(Path(fixture.work[0]['path']).exists())
 
-    def test_symlink_captured_and_ordinary_unowned_files_remain_rejected(self):
-        # Catches a symlink, a changed captured input or an unowned source edit being imported.
-        for fault in ('symlink', 'captured', 'ordinary'):
-            with self.subTest(fault=fault):
-                fixture = self.fixture(fault=fault)
-                try:
-                    fixture.create()
-                    final = fixture.settled()
-                    self.assertNotEqual(final['objective']['status'], 'complete')
-                    self.assertFalse(any(task['status'] == 'accepted' for task in final['team']['tasks']))
-                    self.assertFalse(any(entry['path'] == 'result.md'
-                                         for entry in fixture.service._project(fixture.room_id).snapshot()['files']))
-                    self.assertEqual(len(fixture.work), 1)
-                    failed = next(job for job in final['jobs'] if job['id'] == fixture.work[0]['job_id'])
-                    self.assertEqual(failed['error'], 'native_symlink_refused' if fault == 'symlink'
-                                     else 'native_changes_not_imported')
-                    result = next(item['result'] for item in fixture.results if item['job_id'] == failed['id'])
-                    self.assertEqual(result['status'], 'completed')
-                    self.assertTrue(result['native_execution']['cleanup_confirmed'])
-                    if fault == 'captured':
-                        self.assertEqual((fixture.source / fixture.cache_path).read_bytes(),
-                                         b'Previously captured project input.\n')
-                    self.assertTrue(Path(fixture.work[0]['path']).is_symlink() if fault == 'symlink'
-                                    else Path(fixture.work[0]['path']).exists())
-                finally:
-                    fixture.close()
+    def test_a_symlink_left_in_the_private_tree_is_still_refused(self):
+        # Catches a symlink being followed or imported.
+        fixture = self.fixture(fault='symlink')
+        fixture.create()
+        final = fixture.settled()
+        self.assertNotEqual(final['objective']['status'], 'complete')
+        self.assertFalse(any(task['status'] == 'accepted' for task in final['team']['tasks']))
+        self.assertFalse(any(entry['path'] == 'result.md'
+                             for entry in fixture.service._project(fixture.room_id).snapshot()['files']))
+        failed = next(job for job in final['jobs'] if job['id'] == fixture.work[0]['job_id'])
+        self.assertEqual(failed['error'], 'native_symlink_refused')
+        self.assertTrue(Path(fixture.work[0]['path']).is_symlink())
+
+    def test_a_free_source_file_the_call_also_wrote_is_published_with_its_task(self):
+        # Catches a finished report being voided, and the team stopped, for a
+        # file the task had not listed and no other task holds.
+        fixture = self.fixture(fault='ordinary')
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertTrue(all(job['error'] is None for job in final['jobs']))
+        project = fixture.service._project(fixture.room_id)
+        self.assertEqual(sorted(entry['path'] for entry in project.snapshot()['files']), ['code/unowned.md', 'result.md'])
+        self.assertEqual(final['team']['tasks'][0]['write_paths'], ['result.md', 'code/unowned.md'])
+
+    def test_a_previously_captured_cache_file_stays_private_and_no_longer_fails_the_task(self):
+        # Catches an engine cache captured under an older policy either failing
+        # the task that regenerated it or being copied back into the project.
+        fixture = self.fixture(fault='captured')
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+        self.assertEqual((fixture.source / fixture.cache_path).read_bytes(), b'Previously captured project input.\n')
+        project = fixture.service._project(fixture.room_id)
+        self.assertEqual(project.files_for_paths([fixture.cache_path])[0]['content'], 'Previously captured project input.\n')
+        self.assertTrue(any(entry['path'] == 'result.md' for entry in project.snapshot()['files']))
 
 
 if __name__ == '__main__':

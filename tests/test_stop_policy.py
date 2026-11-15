@@ -10,12 +10,16 @@ SOURCE = Path(__file__).resolve().parent.parent / "src" / "local_agent_coordinat
 # Hand-written expectations. A new stop code fails the test until it is added
 # here, so nobody adds a way to stop without deciding whether the user must act.
 EXPECTED = {
-    "user": {"budget_exhausted", "cancel_requested", "deadline_exceeded", "explicit_new_attempt", "lifecycle_requested",
-             "objective_calls_exhausted", "objective_deadline_exceeded", "objective_no_progress"},
+    "user": {"cancel_requested", "explicit_new_attempt", "lifecycle_requested",
+             "objective_calls_exhausted", "objective_deadline_exceeded"},
     "keep": {"execution_unknown", "native_cleanup_unconfirmed", "native_recovery_unpublished_changes",
              "native_side_effects_unconfirmed", "team_cleanup_unconfirmed"},
     "own": {"all_partners_quota_exhausted"},
-    "auto": {"cli_nonzero_exit", "empty_response", "execution_failed", "execution_repair_no_change",
+    # budget_exhausted and deadline_exceeded are not limits the user set: the room-level cap and
+    # deadline are always zero, so they only come from one call running out of time.
+    # objective_no_progress is the partners' to sort out; the host continues it after a pause.
+    "auto": {"budget_exhausted", "deadline_exceeded", "objective_no_progress",
+             "cli_nonzero_exit", "empty_response", "execution_failed", "execution_repair_no_change",
              "execution_version_stale", "invalid_agent_response", "invalid_project_files", "invalid_response_json",
              "invalid_target", "invalid_team_commands", "invalid_team_dependencies", "invalid_team_task", "invalid_text",
              "message_too_large", "native_auth_unconfirmed", "native_json_files_forbidden", "native_no_progress", "native_preflight_failed",
@@ -54,24 +58,48 @@ class StopPolicyTests(unittest.TestCase):
         self.assertEqual(unlisted, [], "Add these codes to EXPECTED with the class you intend.")
         self.assertEqual({code: classify(code) for code in expected}, expected)
 
-    def test_a_model_question_is_never_reopened_as_a_host_block(self):
-        # Catches: treating the model's own block (with a cause) as recoverable host noise.
-        for cause in ("user_decision", "permission_required", "external_dependency", "technical", "unclassified"):
-            self.assertFalse(stop_policy.host_block_recoverable({"block_cause": cause, "blocked_reason": "cli_nonzero_exit"}))
+    def test_only_a_user_decision_or_permission_block_waits_for_the_user(self):
+        # Catches: a block the partners can sort out themselves (technical, external,
+        # coordination, no cause given) being turned into a question for the user, and
+        # the opposite, a real question to the user being reopened as host noise.
+        for cause in ("user_decision", "permission_required"):
+            task = {"block_cause": cause, "blocked_reason": "cli_nonzero_exit"}
+            self.assertTrue(stop_policy.block_waits_for_user(task), cause)
+            self.assertFalse(stop_policy.host_block_recoverable(task), cause)
+        for cause in ("technical", "external_dependency", "coordination_required", "unclassified"):
+            task = {"block_cause": cause, "blocked_reason": "The service this needs is not reachable."}
+            self.assertFalse(stop_policy.block_waits_for_user(task), cause)
+            self.assertTrue(stop_policy.host_block_recoverable(task), cause)
+        # The host's own block (no cause) follows the stop policy of its failure code.
         self.assertTrue(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": "invalid_team_commands"}))
         self.assertFalse(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": "native_cleanup_unconfirmed"}))
+        self.assertTrue(stop_policy.block_waits_for_user({"block_cause": None, "blocked_reason": "native_cleanup_unconfirmed"}))
 
-    def test_an_audited_kept_scene_never_reopens_a_board_in_place(self):
-        # Catches: a session of unknown identity resumed by the generic continue or
-        # an in-place block reopen, instead of only the audited fresh-session recovery.
-        self.assertEqual(stop_policy.AUDITED_RECOVERY, {"session_identity_unknown"})
-        for code in stop_policy.AUDITED_RECOVERY:
-            self.assertIn(code, stop_policy.KEEP_SCENE)
+    def test_the_host_never_hands_its_own_judgement_of_the_partners_to_the_user(self):
+        # Catches: "no progress", "may be out of scope" or one timed-out call coming back as a
+        # stop the user must resolve, while the limits the user set stop being honoured.
+        for code in ("objective_no_progress", "objective_scope_confirmation", "deadline_exceeded", "budget_exhausted"):
+            self.assertNotIn(code, stop_policy.USER_STOPS)
+            self.assertTrue(stop_policy.continues_automatically(code), code)
+        for code in ("objective_calls_exhausted", "objective_deadline_exceeded", "cancel_requested",
+                     "objective_decision_required"):
+            self.assertIn(code, stop_policy.USER_STOPS)
+            self.assertFalse(stop_policy.continues_automatically(code), code)
+
+    def test_a_kept_scene_is_continued_only_by_the_restart_that_abandons_its_calls(self):
+        # Catches two things: a kept scene (unknown session, unconfirmed
+        # cleanup or commit, unpublished edits) left for the user for good,
+        # and one reopened in place or by the plain continue, which would
+        # reuse what is unknown.
+        self.assertEqual(stop_policy.AUDITED_RECOVERY, stop_policy.KEEP_SCENE)
+        self.assertIn("native_cleanup_unconfirmed", stop_policy.KEEP_SCENE)
+        self.assertIn("session_identity_unknown", stop_policy.KEEP_SCENE)
+        for code in stop_policy.KEEP_SCENE:
             self.assertFalse(stop_policy.continues_automatically(code))
             self.assertTrue(stop_policy.continues_after_recovery_audit(code))
             self.assertFalse(stop_policy.host_block_recoverable({"block_cause": None, "blocked_reason": code}))
             self.assertEqual(room_service.RoomService._auto_continue_actions(code), {"recover-native"})
-        self.assertFalse(stop_policy.continues_after_recovery_audit("native_side_effects_unconfirmed"))
+        self.assertFalse(stop_policy.continues_after_recovery_audit("cancel_requested"))
 
 
 class AutoContinueGateTests(unittest.IsolatedAsyncioTestCase):

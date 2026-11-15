@@ -112,7 +112,10 @@ class EmptyNativePlanRecoveryHTTPTests(unittest.TestCase):
         self.native.handler = legacy_empty_planners
         # Without the newly added per-plan freeze, the ordinary collector
         # rejects exactly the previous unpublished report; no new D is written.
-        with patch.object(self.service.store, "native_preexisting_work_candidate", return_value=None):
+        # That legacy host also failed a plan call for any change left in its
+        # private project; a room it stopped that way must still recover.
+        with (patch.object(self.service.store, "native_preexisting_work_candidate", return_value=None),
+              patch.object(native.RoomService, "_tolerated_free_paths", staticmethod(lambda job, free, leftover: set()))):
             code, empty = self.request("POST", f"/api/rooms/{room}/messages", self.continue_body(carried))
             self.assertEqual(code, 200, empty)
             empty = self.settled(room)
@@ -217,6 +220,10 @@ class EmptyNativePlanRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual((self.source / "notes.md").read_text(), "Unchanged source.\n")
 
     def test_later_canonical_commit_cannot_be_authorized_by_the_empty_restart_chain(self):
+        # Catches the empty-restart chain's old evidence authorizing the
+        # retained-work recovery after the shared files moved on, and the
+        # user's message being refused (and so lost) while this room cannot
+        # act on it: it is kept instead, and nothing is dispatched.
         _, _, _, restarted = self.legacy_empty_plan_and_restart()
         room = restarted["room"]["id"]
         self.service._project(room).apply("codex", "later-independent-result", 2, [
@@ -226,10 +233,21 @@ class EmptyNativePlanRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual(code, 200, current)
         self.assertFalse(current["current_run"]["can_recover_native"])
         self.assertEqual(current["current_run"]["native_recovery_reason"], "native_recovery_binding_changed")
-        code, rejected = self.request("POST", f"/api/rooms/{room}/messages", self.continue_body(current))
-        self.assertEqual(code, 409, {"error": rejected.get("error"),
-                                     "continuation": rejected.get("continuation")})
+        self.assertEqual((current["continuation"]["can_send"], current["continuation"]["reason"]),
+                         (False, "native_recovery_binding_changed"))
+        code, kept = self.request("POST", f"/api/rooms/{room}/messages", self.continue_body(current))
+        self.assertEqual(code, 200, {"error": kept.get("error"), "continuation": kept.get("continuation")})
+        later = [event for event in kept["events"] if event["seq"] > current["events"][-1]["seq"]]
+        self.assertEqual([(event["sender"], event["text"], event["held"], event["held_reason"])
+                          for event in later if event["kind"] == "message"],
+                         [("user", "继续", True, "native_recovery_binding_changed")])
+        # Kept is all that happened: no recovery of any kind started.
+        kinds = [event["kind"] for event in later]
+        for kind in ("native_partial_recovery_attestation", "native_recovery_started", "native_unconfirmed_calls_abandoned"):
+            self.assertEqual(kinds.count(kind), 0, kind)
+        self.assertEqual(kept["current_run"]["id"], current["current_run"]["id"])
         self.assertEqual(len(self.native.calls), calls)
+        self.assert_report_unpublished(room)
 
     def test_normal_empty_plan_preserves_frozen_owner_D_without_importing_or_rejecting_it(self):
         _, carried = self.legacy_failed_and_carried()
