@@ -552,8 +552,15 @@ function nowSummary(snapshot) {
   if (['stopped', 'interrupted'].includes(status) && !hostResultInterruption(objective)) {
     const stoppedLabel = label(t("已停止"), room.updated_at);
     const kind = stopKind(snapshot, stopReason);
-    if (kind === 'quota_wait') return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
-      title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。")].join(' ') };
+    if (kind === 'quota_wait') {
+      // A refused key or an empty balance never comes back by itself: say whose turn it is.
+      const hands = membersWaitingOnUser(snapshot);
+      if (hands.all) return { tone: 'stop', label: label(t("等你处理"), room.updated_at), title: t("伙伴的密钥或余额要你处理"),
+        text: [doneNote, t("换好密钥或充值后，在“伙伴与额度”里点“检查连接”，豆窝会接着做。")].join(' ') };
+      return { tone: 'stop', autoContinue: true, label: label(t("等额度恢复"), room.updated_at),
+        title: t("伙伴额度都用完了，恢复后自动继续"), text: [doneNote, t("有伙伴额度恢复后豆窝会自己接着做，不用你操作。"),
+          ...(hands.names.length ? [t("{p0}的密钥或余额要你处理，换好后点“检查连接”。", { p0: hands.names.join(t("、")) })] : [])].join(' ') };
+    }
     if (kind === 'auto' || kind === 'repeated') {
       const restartedStop = ['service_restarted', 'service_restarted_no_retry', 'service_shutdown'].includes(stopReason);
       const repeats = Number(snapshot.auto_continue?.repeats) || 0;
@@ -2057,6 +2064,18 @@ function availabilityInfo(id) {
   return { value, blocked, stale, summary, detail };
 }
 // The partner card carries one plain line; the full record lives under 账号与额度.
+// Reasons a pay-per-use partner is held that only the user can clear.
+const userClearedAvailability = ['api_key_unavailable', 'api_key_rejected', 'api_balance_exhausted'];
+function waitsOnUser(id) {
+  const info = availabilityInfo(id);
+  return !!info.blocked && userClearedAvailability.includes(info.value?.reason);
+}
+// Which of a room's partners wait on the user, and whether that is every one of them.
+function membersWaitingOnUser(snapshot) {
+  const members = (snapshot?.members || []).filter((member) => typeof member?.id === 'string');
+  const waiting = members.filter((member) => waitsOnUser(member.id));
+  return { names: waiting.map((member) => member.name || member.id), all: members.length > 0 && waiting.length === members.length };
+}
 // A quota wait is an ordinary state, so only a login or status in doubt asks for attention.
 function memberAvailabilityLine(info) {
   if (!info.value || !info.blocked) return null;
@@ -5546,7 +5565,7 @@ function renderMembers(snapshot) {
     // Out of quota while the room waits for it: say so once; the line below already gives the return time.
     const quotaWaiting = snapshot && roomStopKind(snapshot.room) === 'quota_wait' && member && !member.identity_uncertain
       && ['agent_quota_exhausted', 'subscription_limit_reached'].includes(retirement?.reason);
-    $(`status-${provider}`).textContent = quotaWaiting ? t("等额度恢复") : resumes ? t("待继续") : preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
+    $(`status-${provider}`).textContent = quotaWaiting ? waitsOnUser(provider) ? t("等你处理") : t("等额度恢复") : resumes ? t("待继续") : preferredActivity ? preferredActivity.label : paused || taskActivity?.label || (member?.identity_uncertain ? uncertainty.label : (loading ? t("正在读取") : (notStarted ? t("未启动") : statusLabels[statusClass(displayStatus)])));
     $(`status-${provider}`).className = `member-status ${preferredActivity ? statusClass(preferredActivity.status) : paused ? paused === t("正在暂停") ? 'working' : 'idle' : notStarted || loading ? '' : statusClass(preferredActivity?.status || taskActivity?.status || displayStatus)}`;
     $(`task-${provider}`).textContent = quotaWaiting ? teamMemberTask(snapshot, member) || t("额度恢复后接着做。") : preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
       : teamMemberTask(snapshot, member) || (typeof member?.current_task === 'string' && member.current_task ? member.current_task

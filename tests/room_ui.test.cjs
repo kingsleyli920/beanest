@@ -11760,6 +11760,30 @@ test('an empty balance or a refused key says what to do, not that the quota ran 
   }
 });
 
+test('a room held only by a refused key or an empty balance asks the user, and never promises to resume by itself', async () => {
+  // Catches the top card saying "额度都用完了，恢复后自动继续" while every partner waits on a key or a top-up only the user can fix.
+  const held = (member, reason) => apiPartnerFixture({ id: member.id, name: member.name,
+    availability: { state: 'blocked', selectable: false, reason, source: 'api_spend_ledger', observed_at: 1000, stale: false, scope: 'api_endpoint' } });
+  const stopped = () => { const saved = restartSnapshot(); saved.objective.stop_reason = 'all_partners_quota_exhausted';
+    saved.objective.execution_policy = { ...saved.current_run.execution_policy }; return saved; };
+  const all = stopped();
+  assert.ok(all.members.length >= 2, 'the fixture room has several partners');
+  const allUi = await browser({ rooms: [all.room], saved: all, executionPolicySupport: true, continuousObjectiveSupport: true,
+    partners: all.members.map((member, index) => held(member, index ? 'api_balance_exhausted' : 'api_key_rejected')) });
+  await settle();
+  assert.equal(allUi.get('now-title').textContent, '伙伴的密钥或余额要你处理');
+  assert.match(allUi.get('now-label').textContent, /等你处理/);
+  assert.match(allUi.get('now-text').textContent, /换好密钥或充值后，在“伙伴与额度”里点“检查连接”，豆窝会接着做。/);
+  assert.doesNotMatch(allUi.get('now-card').textContent, /恢复后自动继续|不用你操作/);
+  // One partner waits on the user while another's quota returns by itself: the promise stays, and the key is named.
+  const mixed = stopped();
+  const mixedUi = await browser({ rooms: [mixed.room], saved: mixed, executionPolicySupport: true, continuousObjectiveSupport: true,
+    partners: [held(mixed.members[0], 'api_key_rejected')] });
+  await settle();
+  assert.equal(mixedUi.get('now-title').textContent, '伙伴额度都用完了，恢复后自动继续');
+  assert.ok(mixedUi.get('now-text').textContent.includes(`${mixed.members[0].name}的密钥或余额要你处理，换好后点“检查连接”。`), mixedUi.get('now-text').textContent);
+});
+
 test('adding DeepSeek Harness sends dsh, the editable prices and only the key location', async () => {
   // Catches the preset sending its own name as the adapter, dsh offered as a plain sign-in tool, or saving without a key location.
   let partners = catalog.slice(0, 2).map((agent) => ({ ...agent, adapter: agent.id, enabled: true }));
