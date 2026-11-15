@@ -85,8 +85,8 @@ class RecoveryDisplayCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path.parent.stat().st_mtime_ns, folder, "a same-size in-place edit leaves the folder alone")
         run = (await self.service.read_room(room_id))["current_run"]
         self.assertEqual(len(self.audits), 2)
-        self.assertIs(run["can_recover_native"], False)
-        self.assertEqual(run["native_recovery_reason"], "native_recovery_unpublished_changes")
+        # The edit is a fact for the next run, never a reason to refuse it.
+        self.assertIs(run["can_recover_native"], True)
 
     async def test_cached_audit_expires(self):
         # Catches: a cache that never expires, so changes the key cannot see
@@ -115,30 +115,36 @@ class RecoveryDisplayCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.audits), 1)
         return room_id, run
 
+    def reported_changes(self, room_id):
+        return [event["unowned_private_changes"] for event in self.service.store.snapshot(room_id)["events"]
+                if event["kind"] == "native_unconfirmed_calls_abandoned"]
+
     async def test_recover_native_audits_afresh_despite_a_stale_cache(self):
-        # Catches: recover-native acting on the cached poll verdict, which
-        # would start a new run over an unpublished private edit.
+        # Catches: recover-native acting on the cached poll verdict. What the
+        # new run is told must come from the private trees as they are now,
+        # including an edit made after the poll cached its audit.
         room_id, run = await self.stale_cache()
-        calls = len(self.fake.calls)
-        with self.assertRaises(RoomError) as raised:
-            await self.service.recover_native(room_id, str(uuid4()),
-                                              run_id=run["id"], revision=run["revision"], digest=run["digest"])
-        self.assertEqual(raised.exception.code, "native_recovery_unpublished_changes")
-        await self.settle()
+        bystander = self.bystander_file(room_id).parents[1].name
+        await self.service.recover_native(room_id, str(uuid4()),
+                                          run_id=run["id"], revision=run["revision"], digest=run["digest"])
         self.assertGreater(len(self.audits), 1)
-        self.assertEqual(len(self.fake.calls), calls, "no partner was called")
-        after = self.service.store.snapshot(room_id)
-        self.assertEqual(after["current_run"]["id"], run["id"], "no new run was started")
+        self.assertEqual(self.reported_changes(room_id), [[{"provider": bystander, "paths": ["main.py"]}]])
+        await self.settle()
 
     async def test_recover_native_is_not_refused_by_a_stale_cached_refusal(self):
-        # Catches: recover-native gating on the cached poll verdict, so a user
-        # who already undid a stray private edit is still refused until expiry.
+        # Catches: recover-native gating on the cached poll verdict, so a
+        # refusal that no longer holds keeps refusing until the cache expires.
         room_id = await self.stopped_room()
         self.service._recovery_display_key = lambda *args: "frozen"
-        path = self.bystander_file(room_id)
-        path.write_text("VALUE = 3\n")
+        counted, refuse = self.service._audit_native_recovery, [True]
+        def audit(*args, **kwargs):
+            if refuse[0]:
+                self.audits.append(kwargs)
+                raise RoomError("native_recovery_workspace_unavailable")
+            return counted(*args, **kwargs)
+        self.service._audit_native_recovery = audit
         self.assertIs((await self.service.read_room(room_id))["current_run"]["can_recover_native"], False)
-        path.write_text("VALUE = 1\n")
+        refuse[0] = False
         run = (await self.service.read_room(room_id))["current_run"]
         self.assertIs(run["can_recover_native"], False, "the frozen key makes the poll reuse the old verdict")
         self.assertEqual(len(self.audits), 1)
@@ -153,13 +159,12 @@ class RecoveryDisplayCacheTests(unittest.IsolatedAsyncioTestCase):
         # Catches: the host pressing 继续 for the user on the cached poll
         # verdict instead of a fresh audit of the private trees.
         room_id, run = await self.stale_cache()
-        calls = len(self.fake.calls)
+        bystander = self.bystander_file(room_id).parents[1].name
         stop_reason = self.service.store.snapshot(room_id)["team"]["stop_reason"]
         await self.service._auto_continue(room_id, run["id"], stop_reason)
-        await self.settle()
         self.assertGreater(len(self.audits), 1)
-        self.assertEqual(len(self.fake.calls), calls, "no partner was called")
-        self.assertEqual(self.service.store.snapshot(room_id)["current_run"]["id"], run["id"], "no new run was started")
+        self.assertEqual(self.reported_changes(room_id), [[{"provider": bystander, "paths": ["main.py"]}]])
+        await self.settle()
 
 
 class ListSnapshotTests(unittest.TestCase):

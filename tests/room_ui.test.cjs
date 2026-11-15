@@ -5340,19 +5340,29 @@ test('completed and paused tasks accept a bound natural follow-up in the same ch
   }
 });
 
-test('natural continuation preserves blocked drafts and follows the host gate instead of inferring permission from old run flags', async () => {
+test('a room that cannot continue yet still takes the message, and only a stale page or an archived room holds it back', async () => {
+  // Catches the composer refusing the user's words while the room waits (quota, a stop still being checked).
   const saved = withNaturalContinuation(restartSnapshot(), false, 'agent_quota_exhausted');
   saved.current_run.can_recover_native = true; saved.room.mode = 'native_project';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true, naturalContinuationSupport: true, route(request) {
     if (request.path.endsWith('/messages')) return saved;
   } });
   assert.equal(ui.get('composer').hidden, false); assert.equal(ui.get('message').disabled, false);
-  ui.type('额度恢复后接着做。'); assert.equal(ui.get('send').disabled, true); await ui.submit();
-  assert.equal(ui.posts().length, 0); assert.equal(ui.document.getElementById('recover-native'), null);
-  saved.continuation.can_send = true; saved.continuation.reason = null; await ui.poll();
-  assert.equal(ui.get('send').disabled, false); assert.equal(ui.get('message').value, '额度恢复后接着做。');
+  ui.type('额度恢复后接着做。'); assert.equal(ui.get('send').disabled, false);
+  assert.match(ui.get('composer-note').textContent, /可以先留言，能继续时会带给伙伴。$/);
+  assert.equal(ui.get('message').placeholder, '可以先留言，能继续时会带给伙伴');
+  assert.equal(ui.get('continue-current').disabled, true, 'continuing without a message is still not possible');
+  // A page showing an older run than the service has is refreshed first, never sent blind.
   saved.continuation.binding.digest = 'a'.repeat(64); await ui.poll(); await ui.submit(); assert.equal(ui.posts().length, 0);
-  saved.continuation.binding.digest = saved.current_run.digest; await ui.poll(); await ui.submit(); assert.equal(ui.posts().length, 1);
+  saved.continuation.binding.digest = saved.current_run.digest; await ui.poll();
+  assert.equal(ui.get('message').value, '额度恢复后接着做。'); await ui.submit();
+  assert.equal(ui.posts().length, 1); assert.match(ui.posts()[0].path, /\/messages/);
+  assert.equal(ui.document.getElementById('recover-native'), null);
+  saved.continuation.reason = 'room_archived'; await ui.poll();
+  ui.type('还在吗'); assert.equal(ui.get('send').disabled, true);
+  assert.doesNotMatch(ui.get('composer-note').textContent, /可以先留言/);
+  saved.continuation.can_send = true; saved.continuation.reason = null; await ui.poll();
+  assert.equal(ui.get('send').disabled, false);
 });
 
 test('a failed recovery request reports that attempt without denying a fresh host continuation capability', async () => {
@@ -6296,10 +6306,10 @@ test('a definitive native continuation rejection stays beside the composer acros
   } });
   ui.type('保留未发送的下一项要求'); await ui.click('recover-native');
   assert.equal(ui.get('pending-request').hidden, true); assert.equal(ui.get('action-error').hidden, false);
-  assert.equal(ui.get('action-error').textContent, '上次留下的改动已保留，本次尚未启动续作。');
+  assert.equal(ui.get('action-error').textContent, '上一步留下的现场暂时核对不上，这一步还没接着做；豆窝会自己再试。');
   assert.doesNotMatch(ui.get('action-error').textContent, /请先处理|副本|内部|审批/); assert.equal(ui.get('message').value, '保留未发送的下一项要求');
   await ui.poll(); await ui.poll();
-  assert.equal(ui.get('action-error').hidden, false); assert.match(ui.get('action-error').textContent, /尚未启动续作/); assert.equal(ui.posts().length, 1);
+  assert.equal(ui.get('action-error').hidden, false); assert.match(ui.get('action-error').textContent, /这一步还没接着做/); assert.equal(ui.posts().length, 1);
   assert.equal(ui.get('recover-native').disabled, false);
   accepted = true; await ui.click('recover-native'); assert.equal(ui.get('action-error').hidden, true); assert.equal(ui.get('action-error').textContent, '');
   const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8'); assert.match(css, /\.notice, \.pending-request\s*\{[^}]*font-size: 12px/s);
@@ -7662,7 +7672,9 @@ test('plain composer replies retain the bound legacy answer route and the natura
   assert.equal(post.body.objective_id, saved.objective.id); assert.equal(post.body.run_id, saved.current_run.id);
   saved.continuation.can_send = false; saved.continuation.reason = 'agent_quota_exhausted';
   const blocked = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
-  blocked.type('保留未发出的回答'); assert.equal(blocked.get('send').disabled, true); assert.equal(blocked.posts().length, 0);
+  // The room cannot act on it yet, but the user's words are still taken (and kept by the service).
+  blocked.type('保留未发出的回答'); assert.equal(blocked.get('send').disabled, false); assert.equal(blocked.posts().length, 0);
+  assert.match(blocked.get('composer-note').textContent, /可以先留言，能继续时会带给伙伴。$/);
 });
 test('switching from expanded completed results to a question closes old results without hiding the original question', async () => {
   const saved = completedSuggestionFixture();
@@ -9029,10 +9041,14 @@ test('recipient continuation follows the host projection while preserving blocke
   saved.members[1].identity_uncertain = true;
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true,
     route(request) { if (request.path.endsWith('/messages')) return saved; } });
-  ui.type('只给健康伙伴的新要求'); assert.equal(ui.get('send').disabled, true);
+  // Sending is never refused; the note says whether the message goes out now or is kept for later.
+  ui.type('只给健康伙伴的新要求'); assert.equal(ui.get('send').disabled, false);
+  assert.match(ui.get('composer-note').textContent, /可以先留言/);
   await ui.choose('claude'); assert.equal(ui.get('send').disabled, false);
-  await ui.choose('codex'); assert.equal(ui.get('send').disabled, true);
-  await ui.choose('all'); assert.equal(ui.get('send').disabled, true);
+  assert.doesNotMatch(ui.get('composer-note').textContent, /可以先留言/);
+  await ui.choose('codex'); assert.equal(ui.get('send').disabled, false);
+  assert.match(ui.get('composer-note').textContent, /可以先留言/);
+  await ui.choose('all'); assert.equal(ui.get('send').disabled, false);
   await ui.choose('claude'); await ui.submit();
   const sent = ui.posts().filter((request) => request.path.endsWith('/messages'));
   assert.equal(sent.length, 1); assert.equal(sent[0].body.target, 'claude'); assert.equal(sent[0].body.text, '只给健康伙伴的新要求');
@@ -9049,8 +9065,14 @@ test('recipient projections never bypass a stale run binding and old hosts keep 
     }
     const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
     await ui.choose('claude'); ui.type('不能由前端猜测放行'); await ui.submit();
-    assert.equal(ui.get('send').disabled, true); assert.equal(ui.posts().length, 0);
-    assert.equal(ui.get('message').value, '不能由前端猜测放行');
+    if (stale) {
+      // A page behind the service's run sends nothing, whatever a recipient entry claims.
+      assert.equal(ui.get('send').disabled, true); assert.equal(ui.posts().length, 0);
+      assert.equal(ui.get('message').value, '不能由前端猜测放行');
+    } else {
+      // The host says it cannot continue yet: the message still goes to the host, which keeps it.
+      assert.equal(ui.posts().length, 1); assert.match(ui.posts()[0].path, /\/messages$/);
+    }
   }
 });
 
@@ -10251,13 +10273,40 @@ test('stops the host continues by itself never read as a decision, and only user
     assert.equal(/马上自动继续/.test(naturalUi.get('now-label').textContent), canSend, `natural continuation can_send=${canSend}`);
     assert.doesNotMatch(naturalUi.get('now-card').textContent, /等你决定/);
   }
-  // The same automatic stop coming back after one automatic continue waits for the user.
+  // An older service without stop_kind: the same stop coming back is never called final.
   const repeated = restartSnapshot(); repeated.objective.stop_reason = 'service_restarted';
   repeated.objective.execution_policy = { ...repeated.current_run.execution_policy };
   repeated.events.push({ seq: 90, kind: 'objective_auto_continued', sender: 'system', code: 'service_restarted', run_id: repeated.current_run.id, created_at: 1090 });
   const repeatedUi = await browser({ rooms: [repeated.room], saved: repeated, executionPolicySupport: true, continuousObjectiveSupport: true });
-  assert.match(repeatedUi.get('now-title').textContent, /自动继续过一次，又停在同一处/);
+  assert.equal(repeatedUi.get('now-title').textContent, '自动继续过，又停在同一处');
+  assert.doesNotMatch(repeatedUi.get('now-text').textContent, /不再自动继续/);
   assert.ok(descendants(repeatedUi.get('now-card')).find((node) => node.dataset.mirror === 'restart-objective').classList.contains('pri'));
+});
+test('a stop that keeps coming back shows that the host is still retrying, how often and when next', async () => {
+  // Catches the card promising "a few seconds" for a retry that is minutes away, or calling a stop the host still retries final.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'cli_nonzero_exit';
+  saved.objective.execution_policy = { ...saved.current_run.execution_policy };
+  saved.stop_kind = 'auto'; saved.auto_continue = { repeats: 2, next_at: 1794650000 };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(ui.get('now-title').textContent, '又停在同一处，豆窝稍后自动再试');
+  assert.match(ui.get('now-label').textContent, /稍后自动再试/);
+  assert.match(ui.get('now-text').textContent, /已经自动继续过 2 次，下次大约在 /);
+  assert.doesNotMatch(ui.get('now-text').textContent, /几秒后|不再自动继续/);
+  const first = restartSnapshot(); first.objective.stop_reason = 'cli_nonzero_exit';
+  first.objective.execution_policy = { ...first.current_run.execution_policy };
+  first.stop_kind = 'auto'; first.auto_continue = { repeats: 0, next_at: 1794650000 };
+  const firstUi = await browser({ rooms: [first.room], saved: first, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(firstUi.get('now-title').textContent, '推进停了一下，马上自动接着做');
+});
+test('a stop whose reason is known says that reason even while the room status is unknown', async () => {
+  // Catches the generic "上一步的结果还没确认…不会自动重跑" card hiding why a native room stopped.
+  const saved = restartSnapshot(); saved.objective.stop_reason = 'native_recovery_cleanup_unconfirmed';
+  saved.objective.execution_policy = { ...saved.current_run.execution_policy };
+  saved.room.status = 'unknown'; saved.stop_kind = null;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, continuousObjectiveSupport: true });
+  assert.equal(ui.get('now-title').textContent, '推进已停止');
+  assert.match(ui.get('now-text').textContent, /上次本机执行的清理尚未确认，暂时不能继续。/);
+  assert.doesNotMatch(ui.get('now-title').textContent, /上一步的结果还没确认/);
 });
 test('the service stop_kind keeps the card, the room list and the task board telling the same story', async () => {
   // Catches a list saying 已停止, unfinished tasks saying 已取消, or a note asking for a click while the card promises to resume.
@@ -10474,7 +10523,8 @@ test('automatic quota handoff stays visible without a confirmation button and ac
   saved.continuation.can_send = false; saved.continuation.reason = 'team_cleanup_unconfirmed'; await ui.poll();
   ui.type('这条先留作草稿'); assert.match(ui.get('collaboration-outcome').textContent, /自动接手暂未完成.*执行或清理尚未确认/);
   assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /点击“继续”/);
-  assert.equal(ui.get('send').disabled, true); await ui.submit(); assert.equal(ui.posts().length, initialPosts + 2);
+  assert.equal(ui.get('send').disabled, false); assert.match(ui.get('composer-note').textContent, /可以先留言/);
+  assert.equal(ui.posts().length, initialPosts + 2);
   assert.equal(ui.get('message').value, '这条先留作草稿');
   saved.current_run.native_quota_handoff.source_job_id = 'old-unrelated-job'; await ui.poll();
   assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /自动接手暂未完成|正在自动核对/);

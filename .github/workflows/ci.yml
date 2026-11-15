@@ -8,7 +8,8 @@ jobs:
   python:
     name: Python integration (${{ matrix.python }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The suite takes 16 to 36 minutes depending on the runner it lands on.
+    timeout-minutes: 50
     env:
       LAC_TEST_WAIT_SCALE: '3'
     strategy:

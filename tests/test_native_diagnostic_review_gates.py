@@ -104,41 +104,93 @@ class NativeDiagnosticReviewGateTests(unittest.TestCase):
             os.utime(receipt, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
         self.assertEqual(self.service._native_review_receipt_attestation(self.room_id, candidate)["sha256"], self.failed_receipt_sha256)
 
-    def test_unpublished_private_changes_refuse_public_continue_without_new_calls(self):
+    def restarted(self, snapshot, candidate):
+        """Continue through HTTP and return the settled room after the generic restart."""
+        old_rows, calls = self.job_rows([candidate["job_id"]]), len(self.native.calls)
+        self.review_release.set()  # The fresh run's T2 review must not wait for this fixture.
+        code, accepted = self.request("POST", f"/api/rooms/{self.room_id}/messages", self.continuation(snapshot))
+        self.assertEqual(code, 200, {"error": accepted.get("error")})
+        final = self.settled(self.room_id)
+        kinds = [event["kind"] for event in final["events"]]
+        self.assertEqual(kinds.count("native_unconfirmed_calls_abandoned"), 1)
+        # The audited review recovery never ran: its evidence did not hold.
+        self.assertEqual(kinds.count("native_review_recovery_attestation"), 0)
+        self.assertEqual(kinds.count("native_review_retry_queued"), 0)
+        self.assertNotEqual(final["current_run"]["id"], snapshot["current_run"]["id"])
+        # The failed review is abandoned, never replayed or rewritten.
+        self.assertEqual(self.job_rows([candidate["job_id"]]), old_rows)
+        later = self.native.calls[calls:]
+        self.assertTrue(later)
+        self.assertNotIn(candidate["job_id"], [call["context"]["job"]["id"] for call in later])
+        return final, later
+
+    def test_unpublished_private_changes_block_the_review_recovery_and_are_reported_not_published(self):
+        # Catches two defects: a stray private file being imported (or thrown
+        # away) by a recovery it was never part of, and the room refusing every
+        # way to continue because of that file.
         snapshot, candidate = self.failed()
         state = self.service.store.native_workspace(self.room_id, candidate["provider"])
         retained = Path(state["project"]) / "unauthorized.txt"
         retained.write_text("Retain this evidence; recovery must not import or discard it.\n")
-        calls = len(self.native.calls)
         code, changed = self.request("GET", f"/api/rooms/{self.room_id}")
         self.assertEqual(code, 200)
         self.assertFalse(changed["current_run"]["can_recover_native"])
-        code, failure = self.request("POST", f"/api/rooms/{self.room_id}/messages", self.continuation(snapshot))
-        self.assertEqual(code, 409, {"error": failure.get("error")})
-        self.assertEqual(len(self.native.calls), calls)
-        self.assertTrue(retained.is_file())
-        self.assertEqual(self.work_counts, {"T1": 1, "T2": 1, "T3": 0})
+        self.assertEqual(changed["current_run"]["native_recovery_reason"], "native_recovery_unpublished_changes")
+        self.assertTrue(changed["continuation"]["can_send"], changed["continuation"])
+        final, later = self.restarted(snapshot, candidate)
+        abandoned = next(event for event in final["events"] if event["kind"] == "native_unconfirmed_calls_abandoned")
+        self.assertEqual(abandoned["job_ids"], [candidate["job_id"]])
+        self.assertEqual(abandoned["unowned_private_changes"], [{"provider": "codex", "paths": ["unauthorized.txt"]}])
+        self.assertEqual(later[0]["context"]["objective"]["continuation"]["previous_stop"]["unowned_private_changes"],
+                         [{"provider": "codex", "paths": ["unauthorized.txt"]}])
+        # The stray file stays where it was and never reaches the shared files.
+        self.assertEqual(retained.read_text(), "Retain this evidence; recovery must not import or discard it.\n")
+        self.assertNotIn("unauthorized.txt", [file["path"] for file in final["project"]["files"]])
+        # Delivered work is not redone: only the unfinished summary is written.
+        self.assertEqual(self.work_counts, {"T1": 1, "T2": 1, "T3": 1})
 
-    def test_same_path_changes_and_ABA_refuse_a_fresh_review(self):
-        snapshot, candidate = self.failed()
+    def changed_reviewed_file(self, contents):
+        """The reviewed path changes after the failed review; the review recovery must refuse each time."""
+        _, candidate = self.failed()
         project, path = self.service._project(self.room_id), "results/second.md"
-        old = project.files_for_paths([path])[0]
         calls = len(self.native.calls)
-        for label, content in (("changed", "A new unreviewed version.\n"), ("ABA", old["content"])):
-            with self.subTest(label=label):
-                current = project.files_for_paths([path])[0]
-                project.apply("claude", "path-CAS-negative-" + label, project.snapshot()["revision"], [{
-                    "path": path, "previous_sha256": current["sha256"], "content": content}])
-                code, changed = self.request("GET", f"/api/rooms/{self.room_id}")
-                self.assertEqual(code, 200)
-                self.assertFalse(changed["current_run"]["can_recover_native"])
-                with self.assertRaises(RoomError) as failure:
-                    self.service._audit_native_review_recovery(changed, candidate)
-                self.assertEqual(failure.exception.code, "native_recovery_binding_changed")
-                code, response = self.request("POST", f"/api/rooms/{self.room_id}/messages", self.continuation(changed))
-                self.assertEqual(code, 409, {"error": response.get("error")})
-                self.assertEqual(len(self.native.calls), calls)
+        for index, content in enumerate(contents):
+            current = project.files_for_paths([path])[0]
+            project.apply("claude", f"path-CAS-negative-{index}", project.snapshot()["revision"], [{
+                "path": path, "previous_sha256": current["sha256"], "content": content}])
+            code, changed = self.request("GET", f"/api/rooms/{self.room_id}")
+            self.assertEqual(code, 200)
+            self.assertFalse(changed["current_run"]["can_recover_native"])
+            with self.assertRaises(RoomError) as failure:
+                self.service._audit_native_review_recovery(changed, candidate)
+            self.assertEqual(failure.exception.code, "native_recovery_binding_changed")
+            self.assertTrue(changed["continuation"]["can_send"], changed["continuation"])
+        self.assertEqual(len(self.native.calls), calls, "reading the room dispatched nothing")
+        final, later = self.restarted(changed, candidate)
+        return final, later, project.files_for_paths([path])[0]["content"]
 
+    def test_a_changed_reviewed_path_cannot_authorize_the_review_recovery_but_the_room_restarts(self):
+        # Catches a review recovery being authorized for bytes that are no
+        # longer the reviewed ones, and the room locking because of it.
+        final, later, content = self.changed_reviewed_file(["A new unreviewed version.\n"])
+        self.assert_fresh_review(final, later)
+        self.assertEqual(content, "A new unreviewed version.\n", "the restart did not put the old bytes back")
+
+    def test_a_reverted_reviewed_path_cannot_authorize_the_review_recovery_but_the_room_restarts(self):
+        # Catches ABA: the path changed and went back to the same bytes, which
+        # a hash comparison alone would accept as "unchanged since the review".
+        final, later, content = self.changed_reviewed_file(
+            ["A new unreviewed version.\n", "Synthetic independently owned T2 delivery.\n"])
+        self.assert_fresh_review(final, later)
+        self.assertEqual(content, "Synthetic independently owned T2 delivery.\n")
+
+    def assert_fresh_review(self, final, later):
+        # The delivered T2 is judged again by a new review call; nothing is
+        # redone and the old review's verdict is not what accepted it.
+        self.assertEqual([(call["agent"], call["context"]["job"]["job_phase"], (call["context"].get("task") or {}).get("id"))
+                          for call in later[:2]], [("codex", "review", "T2"), ("codex", "work", "T3")])
+        self.assertEqual(final["objective"]["status"], "complete", final["team"])
+        self.assertEqual(self.work_counts, {"T1": 1, "T2": 1, "T3": 1})
 
 if __name__ == "__main__":
     unittest.main()

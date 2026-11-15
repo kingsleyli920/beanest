@@ -146,6 +146,8 @@ class CheckpointRevisionTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         final = await self.service.read_room(created["room"]["id"])
         self.assertEqual(final["objective"]["stop_reason"], "objective_no_progress")
+        # The partners' own disagreement: the host continues it after a pause and asks the user nothing.
+        self.assertEqual((final["objective"]["status"], final["stop_kind"]), ("stopped", "auto"))
         self.assertEqual(len(proposals), 3)
         self.assertEqual(len(reviews), 3)
         self.assertEqual(len({context["objective"]["checkpoint_proposal"]["proposal_digest"] for context in reviews}), 1)
@@ -226,36 +228,64 @@ class CheckpointRevisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["objective"]["stop_reason"], "objective_no_progress")
         self.assertEqual(len(self.fake.calls), count)
 
-    async def test_human_decision_and_scope_expansion_remain_human_gates_without_historical_rewrite(self):
+    async def test_a_decision_asked_of_the_user_remains_a_human_gate_without_historical_rewrite(self):
+        # Catches: a checkpoint in which the partner itself asks the user a question being
+        # continued or revised by the host instead of waiting for the answer.
         original = self.handler
-        for decision in ("needs_user", "new_goal"):
-            with self.subTest(decision=decision):
-                def handler(agent, context, cwd):
-                    phase = context["job"]["job_phase"]
-                    if phase == "checkpoint":
-                        return fixtures.native_reply(context, [{"type": "checkpoint", "decision": "needs_user" if decision == "needs_user" else "continue",
-                            "summary": "A concrete human decision remains.", "next_goal": None if decision == "needs_user" else "Start an unrelated new goal.",
-                            "scope_reference": context["objective"]["original_goal"] if decision == "needs_user" else "Unrelated scope",
-                            "question": "Which business requirement should apply?" if decision == "needs_user" else None}])
-                    if phase == "checkpoint_review":
-                        return fixtures.native_reply(context, [{"type": "checkpoint_review", "verdict": "accept",
-                            "reason": "The user must supply this choice or new scope.",
-                            "proposal_digest": context["objective"]["checkpoint_proposal"]["proposal_digest"]}])
-                    return original(agent, context, cwd)
-                self.fake.handler = handler
-                created = await self.create()
-                await self.settle()
-                room = created["room"]["id"]
-                before = await self.service.read_room(room)
-                self.assertEqual(before["objective"]["status"], "needs_user")
-                self.assertEqual(before["objective"]["stop_reason"], "objective_decision_required" if decision == "needs_user" else "objective_scope_confirmation")
-                count = len(self.fake.calls)
-                self.service._wake(room)
-                await self.settle()
-                after = await self.service.read_room(room)
-                self.assertEqual(len(self.fake.calls), count)
-                self.assertEqual(after["objective"], before["objective"])
-                self.assertFalse(any(event["kind"] == "objective_checkpoint_revision_requested" for event in after["events"]))
+        def handler(agent, context, cwd):
+            phase = context["job"]["job_phase"]
+            if phase == "checkpoint":
+                return fixtures.native_reply(context, [{"type": "checkpoint", "decision": "needs_user",
+                    "summary": "A concrete human decision remains.", "next_goal": None,
+                    "scope_reference": context["objective"]["original_goal"],
+                    "question": "Which business requirement should apply?"}])
+            if phase == "checkpoint_review":
+                return fixtures.native_reply(context, [{"type": "checkpoint_review", "verdict": "accept",
+                    "reason": "The user must supply this choice.",
+                    "proposal_digest": context["objective"]["checkpoint_proposal"]["proposal_digest"]}])
+            return original(agent, context, cwd)
+        self.fake.handler = handler
+        created = await self.create()
+        await self.settle()
+        room = created["room"]["id"]
+        before = await self.service.read_room(room)
+        self.assertEqual(before["objective"]["status"], "needs_user")
+        self.assertEqual(before["objective"]["stop_reason"], "objective_decision_required")
+        self.assertIsNone(before["stop_kind"])
+        count = len(self.fake.calls)
+        self.service._wake(room)
+        await self.settle()
+        after = await self.service.read_room(room)
+        self.assertEqual(len(self.fake.calls), count)
+        self.assertEqual(after["objective"], before["objective"])
+        self.assertFalse(any(event["kind"] == "objective_checkpoint_revision_requested" for event in after["events"]))
+
+    async def test_a_checkpoint_that_continues_is_not_held_for_scope_confirmation(self):
+        # Catches: the host judging the next stage "possibly outside the original goal" because
+        # scope_reference was not a quotation of it, and stopping to ask the user. Whether the work
+        # still belongs to the goal is for the partner and its reviewer to judge.
+        base, observed = self.revision_scenario()
+        def handler(agent, context, cwd):
+            phase, stage = context["job"]["job_phase"], context["objective"]["stage"]
+            if phase == "checkpoint":
+                return fixtures.native_reply(context, [{"type": "checkpoint", "decision": "continue" if stage == 1 else "complete",
+                    "summary": "The value is two; three is still required." if stage == 1 else "The requested value is three.",
+                    "next_goal": "Raise the value once more." if stage == 1 else None,
+                    "scope_reference": "Not a quotation of the goal.", "question": None}])
+            if phase == "checkpoint_review":
+                return fixtures.native_reply(context, [{"type": "checkpoint_review", "verdict": "accept",
+                    "reason": "The remaining step is part of the requested change.",
+                    "proposal_digest": context["objective"]["checkpoint_proposal"]["proposal_digest"]}])
+            return base(agent, context, cwd)
+        self.fake.handler = handler
+        created = await self.create()
+        await self.settle()
+        final = await self.service.read_room(created["room"]["id"])
+        self.assertEqual((final["objective"]["status"], final["objective"]["stage"]), ("complete", 2), final["team"])
+        self.assertEqual([event.get("code") for event in final["events"] if event["kind"] == "objective_checkpoint_finished"],
+                         [None, None])
+        self.assertEqual(len(observed["work"]), 2)
+        self.assertEqual((self.source / "main.py").read_text(), "VALUE = 1\n")
 
     async def test_new_user_update_during_revised_review_invalidates_proposal_and_old_feedback(self):
         base, observed = self.revision_scenario()

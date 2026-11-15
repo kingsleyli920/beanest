@@ -248,9 +248,12 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
 
     def test_resumed_board_never_retains_private_work_outside_the_owner_task_paths(self):
         # Catches: retaining a resumed owner's private work must not become a
-        # way to carry arbitrary unpublished files into the next run.
+        # way to carry arbitrary unpublished files into the next run; and a
+        # stray file must not leave the room with continue refused. With the
+        # stray file there, the quota handoff is not used at all: the call is
+        # abandoned and the file is reported, never published.
         fixture = self.fixture('compaction_quota')
-        fixture.stopped_context_run()
+        stopped = fixture.stopped_context_run()
         with fixture.service.store._connection(write=True) as db:
             db.execute("UPDATE shared_tasks SET owner='claude',status='blocked',blocked_reason='invalid_target',block_cause=NULL "
                        "WHERE run_id=? AND id='T3'", (fixture.original['current_run']['id'],))
@@ -260,10 +263,28 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         snapshot = fixture.read()
         self.assertFalse(snapshot['current_run']['can_recover_native'])
         self.assertEqual(snapshot['current_run']['native_recovery_reason'], 'native_recovery_unpublished_changes')
-        calls = len(fixture.calls)
+        self.assertTrue(snapshot['continuation']['can_send'], snapshot['continuation'])
+        published = fixture.service._project(fixture.room_id).files_for_paths(['final.md'])[0]['sha256']
         code, value = fixture.continue_http(snapshot)
-        self.assertEqual(code, 409, value)
-        self.assertEqual(len(fixture.calls), calls)
+        self.assertEqual(code, 200, value)
+        # Only the start of the restart is this test's subject, not how the
+        # fixture's scripted partners then deal with the reported files.
+        final = fixture.settled()
+        later = [event for event in final['events'] if event['seq'] > stopped['events'][-1]['seq']]
+        kinds = [event['kind'] for event in later]
+        self.assertEqual(kinds.count('native_context_limit_handoff'), 0)
+        abandoned = [event for event in later if event['kind'] == 'native_unconfirmed_calls_abandoned']
+        self.assertEqual([(event['errors'], event['unowned_private_changes'], event['old_commands_accepted']) for event in abandoned],
+                         [(['native_turn_unconfirmed'], [{'provider': 'claude', 'paths': ['final.md', 'unowned-notes.md']}], False)])
+        # Without the audited quota evidence nobody is retired and no board is resumed.
+        self.assertEqual(final['objective']['retired_partners'], {})
+        self.assertNotIn('native_context_handoff', final['objective']['continuation'])
+        self.assertEqual(final['objective']['continuation']['preserved_task_ids'], [])
+        # Neither private file reached the shared copy.
+        files = {file['path']: file['sha256'] for file in fixture.service._project(fixture.room_id).snapshot()['files']}
+        self.assertNotIn('unowned-notes.md', files)
+        self.assertEqual(files['final.md'], published)
+        self.assertEqual((Path(state['project']) / 'unowned-notes.md').read_text(), 'Fictional file outside every resumed task.\n')
 
     def test_room_list_poll_skips_private_tree_audit_and_keeps_the_outcome(self):
         # Catches: the 3-second room-list poll ran each room's full recovery
@@ -312,15 +333,32 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual(final['objective']['status'], 'complete', final['team'])
 
     def test_other_auth403_is_not_a_context_recovery_authority(self):
+        # Catches any other 403 being attested as a context-limit failure (a
+        # handoff that tells the partners why the old session ended), and the
+        # room being refused every continue because it is not one.
         fixture = self.fixture('other_auth403')
         stopped = fixture.stopped_context_run()
-        calls = len(fixture.calls)
+        self.assertFalse(stopped['current_run']['can_recover_native'])
+        self.assertEqual(stopped['current_run']['native_recovery_reason'], 'native_recovery_diagnostic_unconfirmed')
+        old_jobs = {job['id']: (job['status'], job['error']) for job in stopped['jobs']}
         code, value = fixture.continue_http(stopped)
-        self.assertEqual(code, 409, value)
-        self.assertEqual(len(fixture.calls), calls)
-        self.assertEqual(fixture.read()['current_run']['id'], stopped['current_run']['id'])
+        self.assertEqual(code, 200, value)
+        final = fixture.settled()
+        kinds = [event['kind'] for event in final['events']]
+        self.assertEqual(kinds.count('native_context_limit_handoff'), 0)
+        self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+        self.assertNotIn('native_context_handoff', final['objective']['continuation'])
+        self.assertEqual(final['objective']['retired_partners'], {})
+        self.assertNotEqual(final['current_run']['id'], stopped['current_run']['id'])
+        self.assertEqual({job['id']: (job['status'], job['error']) for job in final['jobs'] if job['id'] in old_jobs}, old_jobs)
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
 
     def test_changed_binding_private_drift_or_side_effects_cannot_reuse_context_attestation(self):
+        # Catches a context-limit attestation being reused for a record that no
+        # longer proves it (another job's prompt, an unbound tail, private
+        # drift, possible side effects, another phase); and the room being
+        # refused every continue once it is not. The call is abandoned and a
+        # fresh run starts, accepting nothing from it.
         for fault in ('binding', 'drift', 'effects', 'phase', 'wire_tail'):
             with self.subTest(fault=fault):
                 fixture = self.fixture()
@@ -329,7 +367,7 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
                 # watchdog would otherwise race the explicit continue below.
                 fixture.service._settle_clean_stop = lambda room_id: None
                 stopped = fixture.stopped_context_run()
-                calls = len(fixture.calls)
+                old_jobs = {job['id']: (job['status'], job['error']) for job in stopped['jobs']}
                 if fault == 'binding':
                     rows = [json.loads(line) for line in fixture.failed_wire.read_text().splitlines()]
                     for row in reversed(rows):
@@ -353,7 +391,19 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
                         else:
                             db.execute("UPDATE team_jobs SET phase='work' WHERE job_id=?", (fixture.failed_plan['job_id'],))
                 code, value = fixture.continue_http(stopped)
-                self.assertEqual(code, 409, value)
-                self.assertEqual(len(fixture.calls), calls)
-                self.assertEqual(fixture.read()['current_run']['id'], stopped['current_run']['id'])
+                self.assertEqual(code, 200, value)
+                final = fixture.settled()
+                later = [event for event in final['events'] if event['seq'] > stopped['events'][-1]['seq']]
+                kinds = [event['kind'] for event in later]
+                self.assertNotIn('native_context_limit_handoff', kinds)
+                self.assertEqual(kinds.count('native_unconfirmed_calls_abandoned'), 1)
+                self.assertNotIn('native_context_handoff', final['objective']['continuation'])
+                abandoned = next(event for event in later if event['kind'] == 'native_unconfirmed_calls_abandoned')
+                self.assertEqual((abandoned['job_ids'], abandoned['old_commands_accepted']), ([fixture.failed_plan['job_id']], False))
+                self.assertEqual(abandoned['unowned_private_changes'],
+                                 [{'provider': 'kimi', 'paths': ['README.md']}] if fault == 'drift' else [])
+                self.assertEqual({job['id']: (job['status'], job['error']) for job in final['jobs'] if job['id'] in old_jobs}, old_jobs)
+                # The drifted private bytes are reported, never published.
+                self.assertNotIn('Unauthorized drift after the failed call.\n',
+                                 [file['content'] for file in fixture.service._project(fixture.room_id).files_for_paths(['README.md'])])
                 fixture.close()

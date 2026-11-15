@@ -86,14 +86,7 @@ FAKE_ACP = textwrap.dedent(r'''
             stream.write(json.dumps(record) + "\n")
 
     def finish_prompt(identifier):
-        if case == "no_progress":
-            for index in range(3):
-                identifier = "23:failed-read-" + str(index)
-                update({"sessionUpdate": "tool_call", "toolCallId": identifier,
-                        "kind": "read", "status": "in_progress", "rawInput": {"path": "fictional-missing.txt"}})
-                update({"sessionUpdate": "tool_call_update", "toolCallId": identifier,
-                        "kind": "read", "status": "failed", "rawOutput": {"error": "fictional unchanged error"}})
-        elif case == "streamed_activity":
+        if case == "streamed_activity":
             for status in ("pending", "in_progress", "completed"):
                 for index in range(40):
                     update({"sessionUpdate": "tool_call" if status == "pending" and index == 0 else "tool_call_update",
@@ -269,12 +262,12 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
     def trace(self):
         return [json.loads(line) for line in (self.root / "trace.jsonl").read_text().splitlines()]
 
-    async def invoke(self, *, session_id=None, permission="plan", progress_fingerprint=None, sandbox=False):
+    async def invoke(self, *, session_id=None, permission="plan", sandbox=False):
         return await kimi_acp.invoke_native("Return the fictional answer.", self.cwd,
             session_id=session_id, permission=permission, timeout=8, response_schema=SCHEMA,
             runtime_settings={"model": MODEL, "effort": "high"},
             on_activity=self.activities.append, receipt_dir=self.receipts,
-            progress_fingerprint=progress_fingerprint, sandbox=sandbox)
+            sandbox=sandbox)
 
     def receipt(self, result):
         path = Path(result["native_execution"]["receipt_path"])
@@ -353,37 +346,46 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
             if raw_input is not None:
                 value["rawInput"] = raw_input
             await updates({"sessionId": SID, "update": value})
-        with patch.object(updates.progress, "remember_input", wraps=updates.progress.remember_input) as remembered:
-            await send("a", "pending", "read")
-            for index in range(10):
-                await send("a", "pending", raw_input={"path": str(index)})
-            await send("a", "in_progress")
-            await send("a", "in_progress", "execute")
-            await send("a", "completed")
-            await send("a", "completed")
-            await send("b", "pending", "read")
-            await send("b", "completed")
-        self.assertEqual(remembered.call_count, 10)
+        await send("a", "pending", "read")
+        for index in range(10):
+            await send("a", "pending", raw_input={"path": str(index)})
+        await send("a", "in_progress")
+        await send("a", "in_progress", "execute")
+        await send("a", "completed")
+        await send("a", "completed")
+        await send("b", "pending", "read")
+        await send("b", "completed")
         self.assertEqual([(event["kind"], event["state"]) for event in events],
                          [("file_read", "started"), ("file_read", "running"), ("shell", "running"),
                           ("shell", "completed"), ("file_read", "started"), ("file_read", "completed")])
         self.assertTrue(updates.possible_effects)
 
-    async def test_failed_activity_fingerprint_is_observed_once_per_tool(self):
+    async def test_tools_failing_the_same_way_again_and_again_do_not_end_the_turn(self):
+        # Catches the host ending a Kimi turn because one read failed the same way three times.
         events = []
-        updates = kimi_acp.TurnUpdates(events.append, lambda: "0" * 64)
+        updates = kimi_acp.TurnUpdates(events.append)
+        updates.session_id, updates.active = SID, True
+        for index in range(6):
+            for status in ("in_progress", "failed"):
+                await updates({"sessionId": SID, "update": {"sessionUpdate": "tool_call_update",
+                    "toolCallId": "same-" + str(index), "kind": "read", "status": status,
+                    "rawInput": {"path": "missing.txt"}, "rawOutput": {"error": "fictional unchanged error"}}})
+        self.assertEqual([event["state"] for event in events], ["running", "failed"] * 6)
+        self.assertIsNone(updates.progress.failure)
+
+    async def test_a_tool_reported_failed_twice_is_shown_failed_once(self):
+        events = []
+        updates = kimi_acp.TurnUpdates(events.append)
         updates.session_id, updates.active = SID, True
         async def send(status):
             await updates({"sessionId": SID, "update": {"sessionUpdate": "tool_call_update",
                 "toolCallId": "a", "kind": "read", "status": status, "rawInput": {"path": "missing.txt"},
                 "rawOutput": {"error": "fictional unchanged error"}}})
-        with patch.object(updates.progress, "failed_tool", wraps=updates.progress.failed_tool) as failed:
-            await send("pending")
-            await send("failed")
-            await send("failed")
-            await send("in_progress")
-            await send("failed")
-        self.assertEqual(failed.call_count, 1)
+        await send("pending")
+        await send("failed")
+        await send("failed")
+        await send("in_progress")
+        await send("failed")
         self.assertEqual([event["state"] for event in events], ["started", "failed", "running", "failed"])
 
     async def test_streamed_activity_persists_transitions_through_real_http_and_sqlite(self):
@@ -519,13 +521,12 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
                 self.assert_failed(result, "native_turn_unconfirmed")
                 self.assertIsNone(self.receipt(result)["proof"])
 
-    async def test_unclosed_tool_nonzero_exit_and_no_progress_are_rejected(self):
-        cases = {"unclosed_tool": "native_tool_unpaired", "nonzero": "cli_nonzero_exit",
-                 "no_progress": "native_no_progress"}
+    async def test_unclosed_tool_and_nonzero_exit_are_rejected(self):
+        cases = {"unclosed_tool": "native_tool_unpaired", "nonzero": "cli_nonzero_exit"}
         for case, code in cases.items():
             with self.subTest(case=case):
                 self.scenario(case)
-                result = await self.invoke(progress_fingerprint=lambda: "0" * 64)
+                result = await self.invoke()
                 self.assert_failed(result, code)
                 if case == "unclosed_tool":
                     self.assertEqual(result["native_execution"]["tool_results"], 0)
@@ -574,6 +575,89 @@ class KimiACPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(row for row in self.trace() if row.get("method") == "session/set_mode")["modeId"], "auto")
         probe = next(row["write_probe"] for row in self.trace() if "write_probe" in row)
         self.assertEqual(probe, {"project": "written", "temporary": "written"})
+
+    async def test_only_a_full_access_call_starts_kimi_with_the_inherited_environment(self):
+        # Catches: Full Access Kimi still started with the minimal environment (the user's build
+        # variables stripped), or a read-only call or the account check starting to inherit the host's.
+        from unittest.mock import call
+        for permission, inherited in (("full_access", True), ("plan", False)):
+            with self.subTest(permission=permission):
+                self.scenario()
+                self.wire_path().unlink(missing_ok=True)
+                adapters._environment.reset_mock()
+                result = await self.invoke(permission=permission)
+                self.assertEqual(result["status"], "completed", result.get("failure_code"))
+                starts = [item for item in adapters._environment.call_args_list if item != call()]
+                self.assertEqual(starts, [call(inherit=inherited)])
+
+    async def test_a_final_answer_longer_than_four_megabytes_is_returned_whole(self):
+        # Catches: a long final answer ending the turn as output_limit, or coming back cut.
+        self.scenario(no_tools=True, final="长" + "x" * 4_300_000)
+        result = await self.invoke(permission="full_access")
+        self.assertEqual((result["status"], result.get("failure_code")), ("completed", None))
+        self.assertEqual((len(result["text"]), result["text"][:3], result["text"][-2:]), (4_300_001, "长xx", "xx"))
+        self.assertEqual(self.receipt(result)["proof"]["reason"], "completed")
+
+    def test_a_turn_whose_wire_grew_past_64_megabytes_is_still_proven_and_counted(self):
+        # Catches: a long turn failing as native_turn_unconfirmed, or losing its usage, only because of how
+        # much it wrote. The proof still reads every record: the same wire without its ending is refused.
+        path = self.root / "wire.jsonl"
+        filler = json.dumps({"type": "tool.output", "time": 1, "text": "x" * (23 * 1024 * 1024)}) + "\n"
+        used = {"inputOther": 120, "output": 30, "inputCacheRead": 4000, "inputCacheCreation": 0}
+        with path.open("w") as stream:
+            stream.write(json.dumps({"type": "metadata", "protocol_version": "1.5"}) + "\n")
+            offset = stream.tell()
+            stream.write(json.dumps({"type": "turn.prompt", "time": 1, "origin": {"kind": "user"}, "input": []}) + "\n")
+            for _ in range(3):
+                stream.write(filler)
+            stream.write(json.dumps({"type": "usage.record", "time": 1, "usage": used, "usageScope": "turn"}) + "\n")
+            unfinished = stream.tell()
+            stream.write(json.dumps({"type": "turn.ended", "time": 1, "turnId": 23, "reason": "completed"}) + "\n")
+        size = path.stat().st_size
+        self.assertGreater(size - offset, 64 * 1024 * 1024)
+        info = path.stat()
+        initial = ((info.st_dev, info.st_ino), offset)
+        def proof():
+            try:
+                return kimi_acp.completed_turn(path, initial)
+            except kimi_acp.ACPError as error:
+                return error.code
+        self.assertEqual(proof(), {"turn_id": 23, "reason": "completed", "wire_offset": offset, "wire_through": size})
+        self.assertEqual(kimi_acp.turn_usage(path, initial), {"input_tokens": 120, "output_tokens": 30,
+            "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 0})
+        os.truncate(path, unfinished)
+        self.assertEqual(proof(), "native_turn_unconfirmed")
+
+    async def test_a_tool_update_the_host_cannot_read_neither_ends_the_turn_nor_leaves_it_unpaired(self):
+        # Catches: a tool state, tool ID or update shape a newer Kimi Code added ending the turn as
+        # native_protocol_invalid; the tool it belongs to being left open (native_tool_unpaired) or
+        # counted as finished; and the turn then being reported as effect-free.
+        events = []
+        updates = kimi_acp.TurnUpdates(events.append)
+        updates.session_id, updates.active = SID, True
+        raised = None
+        try:
+            for update in ({"sessionUpdate": "tool_call", "toolCallId": "future", "kind": "read", "status": "in_progress"},
+                           {"sessionUpdate": "tool_call_update", "toolCallId": "future", "status": "superseded"},
+                           {"sessionUpdate": "tool_call_update", "toolCallId": "future", "status": "completed"},
+                           {"sessionUpdate": "tool_call", "toolCallId": 7, "kind": "read", "status": "completed"},
+                           "not an update object",
+                           {"sessionUpdate": "agent_message_chunk", "content": "not a content object"},
+                           {"sessionUpdate": "tool_call", "toolCallId": "known", "kind": "read", "status": "pending"},
+                           {"sessionUpdate": "tool_call_update", "toolCallId": "known", "status": "completed"},
+                           # Words before a tool are not the final answer, whatever the tool's state.
+                           {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "said before a tool"}},
+                           {"sessionUpdate": "tool_call", "toolCallId": "unseen", "kind": "read", "status": "superseded"},
+                           {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "final"}}):
+                await updates({"sessionId": SID, "update": update})
+        except kimi_acp.ACPError as error:
+            raised = error.code
+        self.assertIsNone(raised)
+        self.assertEqual({identifier: tool["state"] for identifier, tool in updates.tools.items()}, {"known": "completed"})
+        self.assertEqual([(event["kind"], event["state"]) for event in events],
+                         [("file_read", "running"), ("file_read", "started"), ("file_read", "completed")])
+        self.assertEqual(updates.text, "final")
+        self.assertTrue(updates.possible_effects)
 
     async def test_native_room_calls_ask_for_the_sandbox_and_text_rooms_do_not(self):
         # Catches: the native path dropping the sandbox (read-only Kimi back to refusing every

@@ -19,18 +19,44 @@ from .roles import prompt_role
 from .runtime_settings import read_only, read_only_capabilities
 
 
+# Who builds is decided by the host, from who is free and able right now. A
+# real room stalled when the plan named an implementer the quota reserve kept
+# idle and the members refused tasks the pool had handed them.
+IMPLEMENTER_RULE = (
+    "Who implements a task is the host's call: it hands each task to whichever member is free and able, and "
+    "team.members[].takes_build_work says who can take build work now (a member near its quota reserve, out of "
+    "quota or in a role that does not build cannot). Never name an implementer in a task, never block or refuse a "
+    "task because of who holds it, and treat a request that several partners share the work as met by whoever is "
+    "available. ")
+
 _BLOCK_PROTOCOL = (
+    IMPLEMENTER_RULE +
     "A block requires reason and cause: technical, coordination_required, user_decision, permission_required or external_dependency. "
+    "Only two causes go to the user, and the task waits for the answer while the rest of the board keeps moving: "
+    "user_decision for a specific unresolved choice that is the user's to make, and permission_required for a new "
+    "permission only the user can grant; state the exact question. Every other block comes back to the team, never "
+    "to the user: you and your peers judge it, replan, hand the work to someone else or try another way. "
     "Use technical for an implementation, test or environment failure that can be investigated within the current "
     "goal and permissions; the host will seek peer help or resume the owner for diagnosis, not ask the user to "
-    "choose routine engineering steps. Use coordination_required only to request internal replanning within the "
+    "choose routine engineering steps. Use coordination_required to request internal replanning within the "
     "existing goal and permissions: the work needs a file another unfinished task holds, or must be split differently; "
-    "it grants no file access. A file no unfinished task holds needs no replanning: extend your own task with it. The plan author must propose concrete work, "
-    "members confirm the exact revised plan, and the new tasks then go to the shared pool. Use the other causes only for a specific unresolved business choice, "
-    "new permission, or a concrete missing external condition, with the relevant evidence. A cause label never "
+    "it grants no file access. A file no unfinished task holds needs no replanning: extend your own task with it. "
+    "Use external_dependency for a concrete missing external condition, with the relevant evidence; it is replanned "
+    "the same way, so the team can work around it, reorder the work or substitute for it. In a replan the plan author must propose concrete work, "
+    "members confirm the exact revised plan, and the new tasks then go to the shared pool. A cause label never "
     "overrides a user prohibition, withdrawn work, ownership or frozen permissions. Do not relabel a host safety "
-    "failure as technical to bypass it. Repeated blockers with unchanged file/result evidence stop as no progress. "
+    "failure as technical to bypass it. The host does not decide for you that work is stuck: when the same blocker, "
+    "help request or review verdict returns with unchanged file/result evidence, it says so in "
+    "context.objective.repeated_results and then hands the task back to the team for replanning. "
 )
+
+REPEATED_RESULTS_INSTRUCTION = (
+    " The same outcome has come back more than once with nothing new to show for it. "
+    "context.objective.repeated_results lists each case in this run and "
+    "context.objective.continuation.repeated_results those of the run before it, with the task and how many times. "
+    "These are facts, not a verdict; the user is not asked. Do not send the same thing again: change the approach, "
+    "replan so another partner takes the step, accept what is already good enough, or block with user_decision "
+    "only when a real choice belongs to the user. ")
 
 
 MID_RUN_ADJUSTMENT_INSTRUCTION = (
@@ -572,7 +598,7 @@ class RoomPromptMixin:
             "When only part of a task needs another task's result, split off the part that does not into its own task so a partner can start it now. "
             "The order or numbering in which the user lists things is not a dependency, nor is wording like \"first\" or \"if it works\" unless the later part really needs the earlier result; only an explicit user instruction that one must come after another, or a real need for another task's output, makes one. Before plan_ready, check every dependency against that. "
             "Independent peer review is automatically scheduled for EVERY delivered task; do not add duplicate review-only "
-            "tasks just to trigger that built-in review. Nobody claims tasks while planning: the confirmed tasks form a shared pool, "
+            "tasks just to trigger that built-in review. " + IMPLEMENTER_RULE + "Nobody claims tasks while planning: the confirmed tasks form a shared pool, "
             "and whenever a member is free the host hands it the next task whose dependencies are done, by whoever did them. "
             "So independent tasks run in parallel and a chain is done step by step; do not divide the list between members. "
             "The plan author may propose the whole list and plan_ready in the SAME response. "
@@ -629,6 +655,31 @@ class RoomPromptMixin:
                          "host_authorized_transfer_paths are exact host grants allowing this task to change those retired-owner files; "
                          "they do not authorize other paths. A task marked review_kind=self_check requires an honest self review, "
                          "never claiming an independent reviewer. ")
+            carried = snapshot["objective"].get("continuation") or {}
+            if carried.get("carried_user_request"):
+                protocol += (" Before the previous run stopped, the user added the request in "
+                             "context.objective.continuation.carried_user_request to this goal. "
+                             "It is still part of the acceptance scope. ")
+            if carried.get("user_messages_while_stopped"):
+                protocol += (" context.objective.continuation.user_messages_while_stopped are messages the user sent "
+                             "while this room could not continue. They are the user's current instructions for this "
+                             "goal: act on them, and answer what they ask. ")
+            if snapshot["objective"].get("repeated_results") or carried.get("repeated_results"):
+                protocol += REPEATED_RESULTS_INSTRUCTION
+            if carried.get("previous_stop"):
+                protocol += (" The previous run ended before its calls reported a result; "
+                             "context.objective.continuation.previous_stop says which calls ended and why. "
+                             "Nothing from them was accepted or will be replayed. Judge for yourselves what is already "
+                             "done: inspect the current files and state, keep what is good, and redo or reassign the rest. "
+                             "A call marked may_have_acted_outside_private_tree may have changed things outside its "
+                             "private project (commits, pushes, external files): check before repeating such a step. "
+                             "A call marked process_may_still_be_running was not confirmed to have exited: its partner "
+                             "looks for that process and ends it before touching the same files. "
+                             "shared_commit_unconfirmed means the last publish to the shared files may or may not have "
+                             "landed: read the current files instead of assuming either. "
+                             "unowned_private_changes lists files a partner changed in its private project that no "
+                             "task owns; that partner decides: add the file to its task with extend to publish it, "
+                             "or restore it. ")
             if (snapshot["objective"].get("continuation") or {}).get("kind") == "user_followup":
                 protocol += (" This linked follow-up preserves the earlier original goal and deliveries, and the user has "
                              "directly requested additional work in context.objective.continuation.user_request. "
@@ -882,6 +933,7 @@ class RoomPromptMixin:
             "a wait-for-user/external-runner condition that a later direct update has withdrawn; use the permitted native tools "
             "and available environment instead. Report a specific remaining dependency, permission or execution blocker honestly. "
             "Do not edit or create tasks in checkpoints. A complete decision ends the goal without the host accepting for the user. "
+            "Never continue a goal only to change who did the work: who implemented is the host's call and does not make work unfinished. "
             "For single-member self_check, clearly label it as your own check, never independent peer review. "
             "Keep chat natural, specific and brief in the user's language. No internal IDs, hashes, quota or tool logs in chat. "
             "Put implementation/check evidence in complete.result; put review findings in review.reason, never result or summary. "

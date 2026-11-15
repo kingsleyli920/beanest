@@ -79,13 +79,22 @@ class NativeVcsNoticeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result['status'], 'failed')
                 self.assertEqual(result['failure_code'], failure)
 
-    async def test_vcs_notice_rejects_invalid_typed_fields(self):
+    async def test_vcs_notice_with_unreadable_fields_is_skipped_and_the_turn_completes(self):
+        # Catches: a repository-cache hint whose fields a CLI release changed
+        # ending a turn that ran its tool and finished, or the skip going
+        # unrecorded in the receipt.
         for changes in ({'kind': 1}, {'cwd': None}, {'branch': []},
                         {'uuid': 'invalid'}, {'session_id': 1}):
             with self.subTest(field=next(iter(changes))):
                 result = await self.invoke(self.events(self.notice(**changes)))
-                self.assertEqual(result['status'], 'failed')
-                self.assertEqual(result['failure_code'], 'native_protocol_invalid')
+                self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
+                self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
+                evidence = result['native_execution']
+                self.assertEqual((evidence['tool_calls'], evidence['tool_results']), (1, 1))
+                with open(evidence['receipt_path']) as receipt:
+                    rows = [json.loads(line)['data'] for line in receipt]
+                self.assertEqual(rows[1], {'type': 'native_protocol_diagnostic', 'ignored': ['native_protocol_invalid'],
+                                           'event_type': 'system', 'event_subtype': 'vcs_state_changed'})
 
 
 # unittest discovers imported TestCase classes too; retain only helper methods.
