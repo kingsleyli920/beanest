@@ -83,6 +83,8 @@ EXTEND_INSTRUCTION = (
     "extend{type,task_id,write_paths:[the new paths]} in the same response as its complete, request_help or block, and keep "
     "working: the files you change there are imported like the rest of your task and reviewed with it. You may add a file no "
     "unfinished task on the board lists (a finished task's file is fine, whoever wrote it: the host hands it over to your task). "
+    "A task holds exactly the paths it lists: a folder in another task's write_paths does not hold the files or "
+    "subfolders under it, so a new file or subfolder there that no task lists by its own path is yours to add. "
     "A file another unfinished task holds still needs block "
     "coordination_required. If extend breaks a rule, the whole response is rejected and nothing is imported. ")
 
