@@ -356,7 +356,7 @@ const replyCorrectedCodes = new Set(['team_task_permission', 'team_plan_locked',
   'team_capability_unavailable', 'native_json_files_forbidden', 'team_write_path_conflict', 'invalid_agent_response',
   'invalid_team_commands', 'invalid_team_task', 'invalid_team_dependencies', 'invalid_project_files', 'invalid_text',
   'team_task_not_found', 'team_result_missing', 'message_too_large', 'native_unchanged_reason_required',
-  'team_plan_adjusted_meanwhile', 'team_extend_path_held', 'team_extend_path_owned']);
+  'team_plan_adjusted_meanwhile', 'team_extend_path_held', 'team_extend_path_owned', 'invalid_team_allocation']);
 // A scope conflict is a state conflict, so the service never corrects it inside
 // the call. It still asks nothing of the user: stop_policy continues the
 // objective, so the page words it the same way.
@@ -2244,6 +2244,8 @@ async function refreshAvailability({ immediate = false } = {}) {
 const builtinRoles = ['builder', 'reviewer', 'planner'];
 const roleAbilityIds = ['plan', 'work', 'review', 'checkpoint'];
 const workloadLevels = ['low', 'normal', 'high'];
+// A partner's workload for this task: nothing (the partners split the work), a level the user fixes, or a ceiling of 1-100 percent.
+function copyWorkload(value) { return workloadLevels.includes(value) || Number.isInteger(value) && value >= 1 && value <= 100 ? value : null; }
 const customRolesKey = 'beanest.customRoles';
 function roleAbilityLabels() { return { plan: t("规划"), work: t("干活"), review: t("审查"), checkpoint: t("阶段检查") }; }
 function builtinRoleInfo() {
@@ -2280,7 +2282,7 @@ function copyRuntimeSettings(settings) {
   const members = {};
   for (const [id, choice] of Object.entries(settings?.members || {})) {
     if (!agentPattern.test(id) || !choice || typeof choice !== 'object') continue;
-    const role = copyRole(choice.role); const workload = workloadLevels.includes(choice.workload) ? choice.workload : null;
+    const role = copyRole(choice.role); const workload = copyWorkload(choice.workload);
     members[id] = { model: typeof choice.model === 'string' ? choice.model : null, effort: typeof choice.effort === 'string' ? choice.effort : null,
       ...(role ? { role } : {}), ...(workload ? { workload } : {}) };
   }
@@ -2294,7 +2296,7 @@ function validRuntimeSettings(value) {
       && !Array.isArray(choice) && (choice.model == null || typeof choice.model === 'string')
       && (choice.effort == null || typeof choice.effort === 'string')
       && (choice.role == null || typeof choice.role === 'object' && !Array.isArray(choice.role))
-      && (choice.workload == null || typeof choice.workload === 'string'));
+      && (choice.workload == null || typeof choice.workload === 'string' || Number.isInteger(choice.workload)));
 }
 function naturalRuntimeConfiguration(snapshot = state.snapshot) {
   if (!state.naturalRuntimeSupported || !snapshot?.room) return null;
@@ -2557,7 +2559,8 @@ function partnerRuntimeLabels(id, context = runtimeContext()) {
   const effort = unrecorded ? t("未记录强度") : effortLabels()[choice?.effort] || choice?.effort || t("默认强度");
   const shortEffort = effort === t("默认强度") ? t("默认") : effort;
   const role = roleName(copyRole(choice?.role));
-  const workloadName = { low: t("少"), normal: t("中"), high: t("多") }[choice?.workload] || '';
+  const workloadName = Number.isInteger(choice?.workload) ? t("上限 {p0}%", { p0: choice.workload })
+    : { low: t("少"), normal: t("中"), high: t("多") }[choice?.workload] || '';
   return { historical, choice, model, fullModelLabel, modelLabel, effort, shortEffort, role, workloadName };
 }
 function renderRuntimeShortcuts(context = runtimeContext()) {
@@ -2822,11 +2825,31 @@ function renderRoleControls(card, id, choice, disabled) {
   }
   if (state.roleEditor?.partner === id && !disabled) section.append(roleEditor(id));
   const loadLabel = element('label', t("工作量 ")); const loadSelect = element('select'); loadSelect.id = `runtime-workload-${id}`;
-  for (const [value, text] of [['', t("跟随账号设置")], ['low', t("少")], ['normal', t("中")], ['high', t("多")]]) { const option = element('option', text); option.value = value; loadSelect.append(option); }
-  loadSelect.value = choice.workload || ''; loadSelect.disabled = disabled;
-  loadSelect.addEventListener('change', () => { if (!loadSelect.disabled) setMemberChoice(id, { workload: loadSelect.value || null }); });
-  loadLabel.append(loadSelect);
-  section.append(loadLabel, element('p', t("只对这个任务生效，覆盖账号上的工作量设置。"), 'detail-caption'));
+  for (const [value, text] of [['', t("伙伴们自己分（默认）")], ['low', t("少")], ['normal', t("中")], ['high', t("多")], ['percent', t("自定占比上限…")]]) { const option = element('option', text); option.value = value; loadSelect.append(option); }
+  const ceiling = Number.isInteger(choice.workload) ? choice.workload : null;
+  loadSelect.value = ceiling !== null ? 'percent' : choice.workload || ''; loadSelect.disabled = disabled;
+  loadSelect.addEventListener('change', () => {
+    if (loadSelect.disabled) return;
+    // Choosing a ceiling starts from an even share of the chosen partners; the number field then takes the user's own figure.
+    if (loadSelect.value === 'percent') { setMemberChoice(id, { workload: ceiling ?? Math.round(100 / Math.max(1, state.participantIds.length)) }); $(`runtime-workload-percent-${id}`)?.focus(); return; }
+    setMemberChoice(id, { workload: loadSelect.value || null });
+  });
+  loadLabel.append(loadSelect); section.append(loadLabel);
+  if (ceiling !== null) {
+    const percentLabel = element('label', t("占比上限（%） ")); const percent = element('input'); percent.id = `runtime-workload-percent-${id}`;
+    percent.type = 'number'; percent.min = '1'; percent.max = '100'; percent.step = '1'; percent.inputMode = 'numeric';
+    percent.value = String(ceiling); percent.disabled = disabled;
+    percent.addEventListener('change', () => {
+      if (percent.disabled) return;
+      const value = Math.round(Number(percent.value));
+      // Anything that is not a number keeps the last ceiling; a number outside 1-100 is pulled to the nearest end.
+      const next = percent.value.trim() && Number.isFinite(value) ? Math.min(100, Math.max(1, value)) : ceiling;
+      percent.value = String(next);
+      if (next !== ceiling) setMemberChoice(id, { workload: next });
+    });
+    percentLabel.append(percent); section.append(percentLabel);
+  }
+  section.append(element('p', t("留空时伙伴们自己商量怎么分，做的过程中会自己调整。你定了占比，他们就不会给它派超过这个比例的活；选少、中、多则固定它的份额。任务进行中改的，随下一条消息生效。"), 'detail-caption'));
   card.append(section);
 }
 function roleEditor(id) {

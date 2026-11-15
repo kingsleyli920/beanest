@@ -235,9 +235,9 @@ class MidRunSchema(unittest.TestCase):
         # so the partner the user asked could not express the split at all.
         from local_agent_coordinator.room_response_schema import command_shape
         kinds, _ = command_shape(team_phase="user", can_propose=False, native=True)
-        self.assertEqual(sorted(kinds), ["adjust", "claim", "propose"])
+        self.assertEqual(sorted(kinds), ["adjust", "allocate", "claim", "propose"])
         kinds, _ = command_shape(team_phase="coordinate", can_propose=False, native=True)
-        self.assertEqual(sorted(kinds), ["claim", "plan_ready"])
+        self.assertEqual(sorted(kinds), ["allocate", "claim", "plan_ready"])
 
 
 class MidRunService(unittest.IsolatedAsyncioTestCase):

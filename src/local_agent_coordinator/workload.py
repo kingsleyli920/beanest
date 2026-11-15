@@ -10,6 +10,93 @@ from dataclasses import dataclass
 LEVELS = {"low": 1, "normal": 2, "high": 3}
 DEFAULT_LEVEL = "normal"
 IDLE = "idle"  # takes no share of the work being handed out (its role does not build)
+# Who decided a member's part of the round: the user (a level, or a ceiling that
+# is holding it down), the partners (their latest allocate), or nobody.
+USER, PARTNERS, DEFAULT = "user", "partners", "default"
+MAX_PERCENT = 100
+
+
+def user_limit(value):
+    """A member's workload setting as ("level", name), ("percent", n) or None."""
+    if type(value) is int and 1 <= value <= MAX_PERCENT:
+        return ("percent", value)
+    return ("level", value) if isinstance(value, str) and value in LEVELS else None
+
+
+def _kind(limits, member):
+    return limits[member][0] if limits.get(member) else None
+
+
+def level_percents(members, limits):
+    """What each level the user fixed is worth, in percent of the round.
+
+    A level keeps its old meaning: 1, 2 or 3 parts, where everyone the user
+    left alone counts as 2.
+    """
+    units = {member: LEVELS[limits[member][1]] if _kind(limits, member) == "level" else LEVELS[DEFAULT_LEVEL]
+             for member in members}
+    total = sum(units.values())
+    return {member: units[member] * 100 / total for member in members if _kind(limits, member) == "level"}
+
+
+def clamp_allocation(members, limits, shares):
+    """The partners' shares with the user's settings applied, and what that changed.
+
+    A level the user chose is fixed, so the member gets exactly that part. A
+    percent is a ceiling: less is the partners' call, more is cut down to it.
+    """
+    fixed = level_percents(members, limits)
+    result, limited = {}, []
+    for member, asked in shares.items():
+        kind, applied = _kind(limits, member), asked
+        if kind == "level":
+            applied = round(fixed[member])
+        elif kind == "percent" and asked > limits[member][1]:
+            applied = limits[member][1]
+        result[member] = applied
+        if applied != asked:
+            limited.append({"member": member, "asked": asked, "applied": applied,
+                            "by": "user_level" if kind == "level" else "user_percent"})
+    return result, limited
+
+
+def targets(members, limits=None, allocation=None):
+    """Each member's intended part of the round: {member: (share, source)}.
+
+    Without a ceiling or an allocation the shares are the plain level parts, so
+    a room nobody touched hands work out exactly as before. Otherwise shares
+    are percents: fixed levels first, the rest split by the partners'
+    allocation (evenly without one), no member above the user's ceiling.
+    """
+    members, limits = list(members), limits or {}
+    ceilings = {member: limits[member][1] for member in members if _kind(limits, member) == "percent"}
+    fixed = level_percents(members, limits)
+    if not allocation and not ceilings:
+        return {member: (LEVELS[limits[member][1]], USER) if member in fixed else (LEVELS[DEFAULT_LEVEL], DEFAULT)
+                for member in members}
+    even = MAX_PERCENT / len(members)
+    raw = {member: float(allocation[member]) if allocation and member in allocation else even
+           for member in members if member not in fixed}
+    result = {member: (percent, USER) for member, percent in fixed.items()}
+    rest, open_members = MAX_PERCENT - sum(fixed.values()), set(raw)
+    while open_members:
+        total = sum(raw[member] for member in open_members)
+        if total <= 0:
+            result.update({member: (0.0, PARTNERS) for member in open_members})
+            break
+        over = [member for member in open_members if member in ceilings and rest * raw[member] / total > ceilings[member]]
+        if not over:
+            result.update({member: (rest * raw[member] / total, PARTNERS if allocation and member in allocation else DEFAULT)
+                           for member in open_members})
+            break
+        for member in over:
+            result[member] = (float(ceilings[member]), USER)
+            rest -= ceilings[member]
+            open_members.discard(member)
+    if not any(share for share, _ in result.values()):
+        return {member: (LEVELS[DEFAULT_LEVEL], DEFAULT) for member in members}
+    # Rounded so shares that are equal on paper compare equal.
+    return {member: (round(share, 6), source) for member, (share, source) in result.items()}
 
 
 @dataclass(frozen=True)
@@ -83,12 +170,16 @@ def accounts(members, loads, profile):
     average = reported_points / reported_calls if reported_calls else 1.0
     rows = {}
     for member in members:
-        scope, level = profile(member)
-        share = 0 if level == IDLE else LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
-        row = rows.setdefault(scope, {"scope": scope, "members": [], "share": 0, "level": level, "points": 0.0, "calls": 0})
+        # A profile gives (account, level) or, when shares were worked out, (account, level, share, source).
+        entry = profile(member)
+        scope, level = entry[0], entry[1]
+        share = 0 if level == IDLE else entry[2] if len(entry) > 2 else LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
+        source = entry[3] if len(entry) > 3 else DEFAULT
+        row = rows.setdefault(scope, {"scope": scope, "members": [], "share": 0, "level": level, "source": source,
+                                      "points": 0.0, "calls": 0})
         row["members"].append(member)
         if share > row["share"]:
-            row["share"], row["level"] = share, level
+            row["share"], row["level"], row["source"] = share, level, source
         load = loads.get(member)
         if load:
             row["points"] += load["points"] + (load["calls"] - load["reported"]) * average
@@ -96,14 +187,17 @@ def accounts(members, loads, profile):
     return list(rows.values())
 
 
-def fair_order(candidates, members, loads, profile):
+def fair_order(candidates, members, loads, profile, *, when_equal=None):
     """Candidates, least used for their share first.
 
-    Equal shares keep the given order, so a room nobody configured behaves as before.
+    Equal shares keep the given order, so a room nobody configured behaves as
+    before. when_equal, a key per member, orders them in that case instead
+    (ties keep the given order): the task pool passes how many tasks each has
+    taken, so new work reaches a free member who has had less of it.
     """
     by_member = {member: row for row in accounts(members, loads, profile) for member in row["members"]}
     if len({row["share"] for row in by_member.values()}) <= 1:
-        return list(candidates)
+        return sorted(candidates, key=when_equal) if when_equal else list(candidates)
     # An account with no share goes last: it takes work only when nobody else can.
     return sorted(candidates, key=lambda member: (by_member[member]["share"] == 0,
                                                   by_member[member]["points"] / (by_member[member]["share"] or 1), -by_member[member]["share"]))

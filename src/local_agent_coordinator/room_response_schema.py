@@ -14,21 +14,23 @@ from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT, 
 
 _TEAM_PHASES = frozenset({"plan", "coordinate", "work", "review", "help", "user", "checkpoint", "checkpoint_review"})
 _PHASE_COMMANDS = {
-    "plan": {"propose", "claim", "plan_ready"},
-    "coordinate": {"propose", "claim", "plan_ready"},
-    "work": {"complete", "request_help", "block", "extend"},
+    # allocate (how the round's work is split) is any partner's to send wherever
+    # the split can be judged: planning, answering the user, working, a checkpoint.
+    "plan": {"propose", "claim", "plan_ready", "allocate"},
+    "coordinate": {"propose", "claim", "plan_ready", "allocate"},
+    "work": {"complete", "request_help", "block", "extend", "allocate"},
     "review": {"review", "block"},
     "help": set(),
     # Any partner answering the user may change the unstarted part of a working
     # board (new tasks, adjust); the service refuses it in any other team phase.
-    "user": {"claim", "propose", "adjust"},
-    "checkpoint": {"checkpoint"},
+    "user": {"claim", "propose", "adjust", "allocate"},
+    "checkpoint": {"checkpoint", "allocate"},
     "checkpoint_review": {"checkpoint_review"},
 }
 PLAN_AUTHOR_COMMANDS = frozenset({"propose", "adjust"})
 # Command kinds added after release; a call made by an older release sent a
 # schema without them, and its receipt must still prove itself after upgrade.
-ADDED_COMMAND_KINDS = ("adjust", "extend")
+ADDED_COMMAND_KINDS = ("adjust", "extend", "allocate")
 # Per-phase schemas require these as non-empty strings. A stable schema leaves
 # them nullable, so the service enforces the same rule from the job's phase.
 PHASE_NONEMPTY_TEXT = {
@@ -157,6 +159,14 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
             command_properties[STABLE_ONLY_FIELD] = handoff_schema()
         for field in {"dependencies", "write_paths", "repair_paths"} & fields:
             command_properties[field] = {"type": ["array", "null"], "items": {"type": "string"}}
+        if "shares" in fields:
+            command_properties["shares"] = {
+                "type": ["object", "null"],
+                "properties": {member: {"type": ["integer", "null"], "minimum": 0, "maximum": 100} for member in member_ids},
+                "required": list(member_ids), "additionalProperties": False,
+                "description": ("For allocate, each member's part of this round's work as a whole number from 0 to 100; "
+                                "null for a member leaves its part as it was. For every other command, use null."),
+            }
         if "repair_paths" in fields:
             command_properties["repair_paths"]["description"] = (
                 "For request_help, optional exact project-relative paths needing engineering repair "
@@ -189,7 +199,10 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
                 if field in fields:
                     command_properties[field]["description"] = description
             for field in PHASE_NONEMPTY_TEXT.get(team_phase, ()):
-                command_properties[field].update(type="string", minLength=1)
+                # The schema can require it only when every kind of the phase uses the field; where
+                # another kind must leave it null it stays nullable and the service enforces the rule.
+                if all(field in _COMMAND_FIELDS[kind] for kind in kinds):
+                    command_properties[field].update(type="string", minLength=1)
         if native:
             for field in fields - {"type", STABLE_ONLY_FIELD}:
                 users = [kind for kind in kinds if field in _COMMAND_FIELDS[kind]]

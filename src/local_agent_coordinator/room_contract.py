@@ -39,6 +39,9 @@ COMMAND_FIELDS = {
     # task holds them, applied before its result is imported. Existing field
     # names again, so the stable union schema only gains this kind.
     "extend": {"type", "task_id", "write_paths"},
+    # Any partner's split of this round's work among the members: shares maps a
+    # member id to 0-100. The one field this adds to the union schema is shares.
+    "allocate": {"type", "shares", "reason"},
 }
 
 

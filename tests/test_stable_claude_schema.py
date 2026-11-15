@@ -18,7 +18,7 @@ PHASES = ("plan", "coordinate", "work", "review", "help", "user", "checkpoint", 
 MEMBERS = ("claude", "codex")
 SESSION = "42619ac2-4bfa-446c-a773-5193109566ae"
 ALL_KINDS = ["propose", "claim", "complete", "block", "review", "request_help", "plan_ready",
-             "checkpoint", "checkpoint_review", "adjust", "extend"]
+             "checkpoint", "checkpoint_review", "adjust", "extend", "allocate"]
 
 
 def claude_bytes(phase, can_propose, members=MEMBERS):
@@ -119,13 +119,16 @@ class ServerSideRejections(unittest.TestCase):
         # Catches the parser inheriting the schema's wider enum instead of the job's phase.
         self.assert_rejected("work", flat(type="propose", id="T1", title="t", description="d", acceptance="a",
                                           dependencies=[], write_paths=[], capability="text"),
-                             "allowed_operations", ["block", "complete", "extend", "request_help"])
+                             "allowed_operations", ["allocate", "block", "complete", "extend", "request_help"])
         self.assert_rejected("review", flat(type="complete", task_id="T1", result="done"),
                              "allowed_operations", ["block", "review"])
         self.assert_rejected("checkpoint", flat(type="checkpoint_review", verdict="accept", reason="ok", proposal_digest="a" * 64),
-                             "allowed_operations", ["checkpoint"])
+                             "allowed_operations", ["allocate", "checkpoint"])
         self.assert_rejected("plan", flat(type="review", task_id="T1", verdict="accept", reason="ok"),
-                             "allowed_operations", ["claim", "plan_ready", "propose"])
+                             "allowed_operations", ["allocate", "claim", "plan_ready", "propose"])
+        # A review call cannot judge the split from one task, so allocate stays out of it.
+        self.assert_rejected("review", flat(type="allocate", shares={"claude": 40, "codex": 60}, reason="Even it out."),
+                             "allowed_operations", ["block", "review"])
 
     def test_help_phase_rejects_every_command(self):
         # Catches the help phase gaining commands now that its schema is no longer maxItems 0.
@@ -135,13 +138,13 @@ class ServerSideRejections(unittest.TestCase):
         # Catches a non plan author proposing tasks once the schema always lists propose.
         self.assert_rejected("plan", flat(type="propose", id="T1", title="t", description="d", acceptance="a",
                                           dependencies=[], write_paths=[], capability="text"),
-                             "allowed_operations", ["claim", "plan_ready"], can_propose=False)
+                             "allowed_operations", ["allocate", "claim", "plan_ready"], can_propose=False)
 
     def test_solo_room_still_cannot_request_help(self):
         # Catches the roster rule being lost alongside the phase rules.
         self.assert_rejected("work", {"type": "request_help", "task_id": "T1", "to": None, "text": "help",
                                       "capability": "text", "repair_paths": None},
-                             "allowed_operations", ["block", "complete", "extend"], members=("claude",))
+                             "allowed_operations", ["allocate", "block", "complete", "extend"], members=("claude",))
 
     def test_unused_field_must_be_null(self):
         # Catches widened transport fields letting another phase's values through.
@@ -225,9 +228,19 @@ class ReceiptCompatibility(unittest.TestCase):
                                   team_phase="work", can_propose=False)
         older = copy.deepcopy(current)
         items = older["properties"]["commands"]["items"]
+        # The release after that had extend but not yet allocate: no allocate kind and no shares field.
+        before_allocate = copy.deepcopy(current)
+        between = before_allocate["properties"]["commands"]["items"]
+        between["properties"]["type"]["enum"] = ["complete", "block", "request_help", "extend"]
+        del between["properties"]["shares"]
+        between["required"] = [field for field in between["required"] if field != "shares"]
+        between["properties"]["reason"]["description"] = between["properties"]["reason"]["description"].replace(
+            "Used only by block, allocate;", "Used only by block;")
+        self.assertIs(self.matches(before_allocate), True)
         items["properties"]["type"]["enum"] = ["complete", "block", "request_help"]
-        del items["properties"]["write_paths"]
-        items["required"] = [field for field in items["required"] if field != "write_paths"]
+        for field in ("write_paths", "shares"):
+            del items["properties"][field]
+        items["required"] = [field for field in items["required"] if field not in {"write_paths", "shares"}]
         self.assertIs(self.matches(older), True)
         # Dropping a kind that has always existed is still a different schema.
         items["properties"]["type"]["enum"] = ["complete", "block"]
@@ -348,10 +361,10 @@ class ServiceDispatch(unittest.IsolatedAsyncioTestCase):
 
     def test_prompt_names_the_phase_commands_only_for_claude(self):
         # Catches Claude losing the phase contract that used to live in the schema enum.
-        self.assertIn("The only command types allowed now are complete, block, request_help, extend.", self.schema_sentence("claude", "work"))
+        self.assertIn("The only command types allowed now are complete, block, request_help, extend, allocate.", self.schema_sentence("claude", "work"))
         self.assertIn("This job_phase is work.", self.schema_sentence("claude", "work"))
-        self.assertIn("are propose, claim, plan_ready.", self.schema_sentence("claude", "plan"))
-        self.assertIn("are claim, plan_ready.", self.schema_sentence("claude", "plan", author="codex"))
+        self.assertIn("are propose, claim, plan_ready, allocate.", self.schema_sentence("claude", "plan"))
+        self.assertIn("are claim, plan_ready, allocate.", self.schema_sentence("claude", "plan", author="codex"))
         self.assertIn("No commands are allowed now, so commands must be [].", self.schema_sentence("claude", "help"))
         self.assertIn("reason must be a non-empty string.", self.schema_sentence("claude", "review"))
         self.assertIn("summary must be a non-empty string.", self.schema_sentence("claude", "checkpoint"))

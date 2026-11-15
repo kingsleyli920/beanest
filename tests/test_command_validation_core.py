@@ -21,7 +21,8 @@ class CommandValidationTests(unittest.TestCase):
                   "acceptance":"Checked", "dependencies":[], "write_paths":[], "capability":"text", "result":"Result",
                   "reason":"Observed", "cause":"technical", "to":"codex", "text":"Question", "repair_paths":None,
                   "verdict":"accept", "decision":"complete", "summary":"Summary", "next_goal":None,
-                  "scope_reference":"Original goal", "question":None, "proposal_digest":"a" * 64}
+                  "scope_reference":"Original goal", "question":None, "proposal_digest":"a" * 64,
+                  "shares":{"claude":40, "codex":60}}
         for phase in ("plan", "coordinate", "work", "review", "help", "user", "checkpoint", "checkpoint_review"):
             kinds, fields = command_shape(team_phase=phase, native=True)
             for kind in kinds:

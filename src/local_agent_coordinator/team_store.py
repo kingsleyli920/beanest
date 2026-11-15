@@ -208,6 +208,8 @@ class TeamStore:
 
         ObjectiveStore.initialize(db)
         for table, columns in {
+            # The partners' latest split of this round's work: {member: 0-100}.
+            "team_runs": {"allocation_json": "TEXT"},
             "shared_tasks": {"assignment_epoch": "INTEGER NOT NULL DEFAULT 0", "ownership_grant_json": "TEXT",
                              "review_kind": "TEXT NOT NULL DEFAULT 'independent_review'", "inherited_from_run": "TEXT",
                              "block_cause": "TEXT", "internal_replan_revision": "INTEGER"},
@@ -444,6 +446,9 @@ class TeamStore:
         new_id = self._create_run(db, room_id, len(runs)+1)
         rotated = rotate_after_handoff and not retry and self._rotate_after_handoff(db, room_id, room, objective, run_id, new_id)
         if objective_id:
+            # The same goal goes on, so the partners' split of the work goes on with it.
+            db.execute("UPDATE team_runs SET allocation_json=(SELECT allocation_json FROM team_runs WHERE id=?) WHERE id=?",
+                       (run_id, new_id))
             db.execute("UPDATE team_runs SET objective_id=? WHERE id=?", (objective_id, new_id))
             db.execute("UPDATE objectives SET status='running',stop_reason=NULL WHERE id=?", (objective_id,))
             self.objectives.apply_stage_limits(db, room_id)
@@ -1524,6 +1529,10 @@ class TeamStore:
                                        "Nothing was imported, including your private changes to it. Restore that file to "
                                        "its shared version, then finish within your scope, or request_help with repair_paths "
                                        "naming it so its owner makes the change."),
+            "invalid_team_allocation": (" An allocate must give shares as an object from member id to a whole number from 0 to 100, "
+                                        "naming only members listed as available in context, with at least one member left "
+                                        "above 0 once the shares it does not mention are kept, and a non-empty reason. Send at "
+                                        "most one allocate in a response. Correct it, or leave it out to keep the current split."),
             "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
                                          "neither depends on the other. Add that existing task to the new task's dependencies, "
                                          "or choose write_paths no other task writes. When taking files from a task nobody has started, "
@@ -1843,6 +1852,14 @@ class TeamStore:
         if not isinstance(commands, list) or len(commands) > MAX_RESPONSE_COMMANDS:
             raise RoomError("invalid_team_commands")
         if context["job_phase"] in {"checkpoint", "checkpoint_review"}:
+            # A checkpoint may also say how the next stretch of work is split.
+            allocations = [command for command in commands if context["job_phase"] == "checkpoint"
+                           and isinstance(command, dict) and command.get("type") == "allocate"]
+            commands = [command for command in commands if not any(command is item for item in allocations)]
+            if len(allocations) > 1 or any(set(command) != _COMMAND_FIELDS["allocate"] for command in allocations):
+                raise RoomError("invalid_team_allocation")
+            for command in allocations:
+                self._check_allocation(db, context, command, set(self.objectives.available_members(db, job["room_id"])))
             if (len(commands) != 1 or not isinstance(commands[0], dict)
                     or commands[0].get("type") != context["job_phase"]
                     or set(commands[0]) - ({"handoff"} if context["job_phase"] == "checkpoint" else set())
@@ -1906,7 +1923,7 @@ class TeamStore:
         unstarted = self._unstarted_task_ids(db, job["room_id"], context["run_id"], rows) if mid_run else set()
         idle = self._idle_task_ids(db, job["room_id"], context["run_id"], rows) - unstarted if mid_run else set()
         task_terminal_commands = 0
-        extends = False
+        extends = allocated = False
         for command in commands:
             if (not isinstance(command, dict) or not isinstance(command.get("type"), str)
                     or command["type"] not in _COMMAND_FIELDS):
@@ -1979,6 +1996,15 @@ class TeamStore:
                 if command["write_paths"] and read_only(room["work_mode"], json.loads(room["runtime_settings_json"] or "null")):
                     raise RoomError("team_files_forbidden")
                 extends = True
+            elif kind == "allocate":
+                # How the round's work is split is the partners' own call, whoever makes it;
+                # one allocate per response, so a reply never argues with itself.
+                if context["job_phase"] not in {"plan", "coordinate", "user", "work"}:
+                    raise RoomError("team_task_permission")
+                if allocated:
+                    raise RoomError("invalid_team_allocation")
+                self._check_allocation(db, context, command, members)
+                allocated = True
             elif kind == "plan_ready":
                 same_plan_in_progress = (team["phase"] == "working"
                                          and context["revision"] == team["revision"])
@@ -2166,6 +2192,10 @@ class TeamStore:
         # gate before filesystem commits, never a replacement for this check.
         if not self.validate(db, {**dict(job), "status": "working"}, commands):
             raise RoomError("team_context_changed")
+        for command in commands:
+            if command["type"] == "allocate":
+                self._allocate(db, job, context, command)
+        commands = [command for command in commands if command["type"] != "allocate"]
         if context["job_phase"] == "checkpoint":
             self.objectives.propose(db, room_id, provider, commands[0])
             self._record_round_handoff(db, job, context, commands[0].get("handoff"), usage)
@@ -2418,28 +2448,86 @@ class TeamStore:
             "SELECT provider,points,calls,reported FROM partner_load WHERE room_id=? AND run_id=?", (room_id, run_id))}
 
     def _workload_profile(self, db, room_id, *, building=False):
-        """Each member's account and level; a level chosen for this room wins.
+        """Each member's account, level, share of this round and who set that share.
 
-        For handing out work, an account whose members cannot build in this
-        room gets no share, as long as someone else can build.
+        The user's setting for a member comes first, then the partners' latest
+        allocation for this round, then an even split. For handing out work, an
+        account whose members cannot build in this room gets no share, as long
+        as someone else can build.
         """
         profiles = self.store.account_workloads()
-        settings = self._settings(db, room_id)
-        levels, abilities = roles.workload_levels(settings), roles.member_abilities(settings)
+        abilities = roles.member_abilities(self._settings(db, room_id))
+        members = self.objectives.available_members(db, room_id)
         idle = set()
         if building and abilities:
-            members = self.objectives.available_members(db, room_id)
             if any(roles.can(abilities, member, "work") for member in members):
                 idle = {member for member in members if not roles.can(abilities, member, "work")}
 
         reserved = self._reserved(db, room_id, profiles)
-        if not set(self.objectives.available_members(db, room_id)) <= idle | reserved:
+        if not set(members) <= idle | reserved:
             idle |= reserved
+        limits = self._user_limits(db, room_id, members, profiles)
+        team = self.team(db, room_id)
+        shares = workload.targets(members, limits, self._allocation(db, team["current_run_id"]) if team else None)
 
         def profile(member):
             entry = profiles.get(member, (member, workload.DEFAULT_LEVEL))
-            return entry[0], workload.IDLE if member in idle else levels.get(member, entry[1])
+            share, source = shares.get(member, (workload.LEVELS[workload.DEFAULT_LEVEL], workload.DEFAULT))
+            level = limits[member][1] if member in limits and limits[member][0] == "level" else workload.DEFAULT_LEVEL
+            return entry[0], workload.IDLE if member in idle else level, share, source
         return profile
+
+    def _user_limits(self, db, room_id, members, profiles=None):
+        """What the user fixed for each member: this task's setting, else an account level other than the default.
+
+        Read from the latest settings the user sent, so a change made while
+        calls are running decides the very next hand-out.
+        """
+        profiles = self.store.account_workloads() if profiles is None else profiles
+        chosen = roles.workload_levels(self.store._desired_runtime(self.store._room(db, room_id))["runtime_settings"])
+        limits = {}
+        for member in members:
+            value = chosen.get(member)
+            if value is None and member in profiles and profiles[member][1] != workload.DEFAULT_LEVEL:
+                value = profiles[member][1]
+            limit = workload.user_limit(value)
+            if limit is not None:
+                limits[member] = limit
+        return limits
+
+    @staticmethod
+    def _allocation(db, run_id):
+        """The partners' latest allocation for this round: {member: 0-100}, or None."""
+        row = db.execute("SELECT allocation_json FROM team_runs WHERE id=?", (run_id,)).fetchone() if run_id else None
+        return json.loads(row[0]) if row and row[0] else None
+
+    @staticmethod
+    def _allocation_shares(command):
+        """The members an allocate names; a null share leaves that member as it was."""
+        shares = command.get("shares")
+        return {member: value for member, value in shares.items() if value is not None} if isinstance(shares, dict) else None
+
+    def _check_allocation(self, db, context, command, members):
+        shares = self._allocation_shares(command)
+        if (not shares or any(member not in members or type(value) is not int or not 0 <= value <= workload.MAX_PERCENT
+                              for member, value in shares.items())):
+            raise RoomError("invalid_team_allocation")
+        checked_text(command["reason"], MAX_PARTNER_TEXT)
+        merged = {**(self._allocation(db, context["run_id"]) or {}), **shares}
+        if all(merged.get(member) == 0 for member in members):
+            raise RoomError("invalid_team_allocation")
+
+    def _allocate(self, db, job, context, command):
+        """Keep the partners' split of this round, inside what the user fixed, and say what was cut."""
+        room_id = job["room_id"]
+        members = self.objectives.available_members(db, room_id)
+        previous = self._allocation(db, context["run_id"]) or {}
+        shares, limited = workload.clamp_allocation(members, self._user_limits(db, room_id, members),
+                                                    self._allocation_shares(command))
+        current = {**previous, **shares}
+        db.execute("UPDATE team_runs SET allocation_json=? WHERE id=?", (json.dumps(current, sort_keys=True), context["run_id"]))
+        self.store._event(db, room_id, "workload_allocated", sender=job["provider"], job_id=job["id"], run_id=context["run_id"],
+                          shares=current, previous_shares=previous, reason=command["reason"], limited=limited)
 
     def _reserved(self, db, room_id, profiles=None, members=None):
         """Members whose account is down to its reserve, while someone else still has more."""
@@ -2470,6 +2558,9 @@ class TeamStore:
             summary["phases"] = self.phase_load(db, room_id, team["current_run_id"])
             abilities = self._abilities(db, room_id)
             summary["roles"] = {member: sorted(abilities[member]) for member in members if member in abilities}
+            # What the user fixed, so the page and the partners can tell a level or ceiling from the partners' own split.
+            summary["user_limits"] = {member: {"kind": kind, "value": value}
+                                      for member, (kind, value) in self._user_limits(db, room_id, members).items()}
         return summary
 
     def phase_load(self, db, room_id, run_id):
@@ -3059,6 +3150,28 @@ class TeamStore:
                 holders.setdefault(path.casefold(), set()).add(row["owner"])
         return holders
 
+    def _held_back(self, db, room_id):
+        """Members who take pool work only when nobody else could.
+
+        An account down to its reserve, a member whose share of the round is 0,
+        and a member whose account has already done more of the round than the
+        ceiling the user set for it. The partners' own shares only decide who
+        goes first; they never keep a free member waiting.
+        """
+        members = self.objectives.available_members(db, room_id)
+        profile = self._workload_profile(db, room_id)
+        limits = self._user_limits(db, room_id, members)
+        rows = workload.accounts(members, self._loads(db, room_id, self.team(db, room_id)["current_run_id"]), profile)
+        total = sum(row["points"] for row in rows)
+        done = {member: row["points"] * 100 / total for row in rows for member in row["members"]} if total else {}
+        held = set()
+        for member in members:
+            entry = profile(member)
+            ceiling = limits[member][1] if member in limits and limits[member][0] == "percent" else None
+            if entry[1] == workload.IDLE or entry[2] == 0 or ceiling is not None and done.get(member, 0) > ceiling:
+                held.add(member)
+        return held if len(held) < len(members) else set()
+
     def _pool_takers(self, db, room_id, members):
         """(able, can_take): who could ever do a pool task, and who may take it now, busy or not.
 
@@ -3066,14 +3179,14 @@ class TeamStore:
         anyone in the room builds). can_take adds two rules: no other partner
         may hold one of its files in unfinished work (the plan's path check
         already forbids that; this is a guard against two editors at once),
-        and an account down to its reserve takes it only when no one else could.
+        and a member held back (see _held_back) takes it only when no one else could.
         A file another partner wrote and is done with moves to the taker by
         grant when its work call starts.
         """
         abilities = self._abilities(db, room_id)
         builders = [member for member in members if roles.can(abilities, member, "work")]
         holders = self._unfinished_holders(db, room_id)
-        reserved = self._reserved(db, room_id)
+        reserved = self._held_back(db, room_id)
 
         def able(task, member):
             return task["capability"] in self.store.task_capabilities(member) and (member in builders or not builders)
@@ -3093,7 +3206,8 @@ class TeamStore:
         A task is ready once all its dependencies are settled, by anyone. The
         member who did one of those dependencies goes first (it keeps the
         chain's context), then the earliest task in plan order. Among free
-        members, the one least used for its share picks first. Binding the
+        members, the one least used for its share picks first (with equal
+        shares, the one that has taken fewest tasks this round). Binding the
         owner and queueing its call happen in this one transaction, guarded
         on the task still being open, so two members never get the same task.
         """
@@ -3106,8 +3220,11 @@ class TeamStore:
             return False
         able, can_take = self._pool_takers(db, room_id, members)
         free = [member for member in members if not self._busy(db, room_id, member)]
+        # With equal shares, whoever has taken fewest tasks this round goes first: otherwise the first
+        # member in room order would take every new task and a free one behind it none.
+        held = {member: sum(row["owner"] == member for row in rows) for member in free}
         order = workload.fair_order(free, members, self._loads(db, room_id, run_id),
-                                    self._workload_profile(db, room_id, building=True)) if len(free) > 1 else free
+                                    self._workload_profile(db, room_id, building=True), when_equal=held.get) if len(free) > 1 else free
         taken, given, changed = set(), set(), False
         for chained in (True, False):
             for member in order:
@@ -3316,9 +3433,9 @@ class TeamStore:
                 value["call_running"] = True
             tasks.append(value)
         # Who can take build work now, so planners never name an implementer the
-        # quota reserve, an exhausted quota or a role keeps idle.
+        # quota reserve, an exhausted quota, a share of 0, the user's ceiling or a role keeps idle.
         available = self.objectives.available_members(db, room_id)
-        reserved = self._reserved(db, room_id, members=available) if team["current_run_id"] else set()
+        reserved = self._held_back(db, room_id) if team["current_run_id"] else set()
         abilities = self._abilities(db, room_id)
         builders = [member for member in available if roles.can(abilities, member, "work")]
         def takes_build_work(provider):
