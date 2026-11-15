@@ -244,6 +244,29 @@ class Transport(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, {"plan": "read-only", "read_only": "read-only",
                                 "workspace_write": "workspace-write", "full_access": "danger-full-access"})
 
+    async def test_full_access_inherits_the_host_environment_but_never_the_users_own_dsh_settings(self):
+        # Catches Full Access stricter than dsh in a terminal (toolchain variables dropped), the user's own
+        # DEEPSEEK_BASE_URL or DSH_* reaching the child, or a restricted call inheriting the host environment.
+        with patch.dict(os.environ, {"FAKE_TOOLCHAIN_HOME": "/opt/toolchain", "DEEPSEEK_BASE_URL": "http://127.0.0.1:9",
+                                     "DSH_PERMISSION_MODE": "read-only"}):
+            self.scenario()
+            await self.call("full_access")
+            full = traces(self.home)[-1]
+            self.scenario()
+            await self.call("workspace_write")
+            restricted = traces(self.home)[-1]
+        self.assertEqual((full["host_variable"], full["base_url_variable"], full["permission_mode"]),
+                         ("/opt/toolchain", False, "danger-full-access"))
+        self.assertEqual((restricted["host_variable"], restricted["base_url_variable"], restricted["permission_mode"]),
+                         (None, False, "workspace-write"))
+
+    async def test_the_host_learns_the_launched_process_at_once(self):
+        # Catches a dsh call the host cannot find and end after it is killed mid-turn.
+        seen = []
+        self.scenario()
+        await self.call(on_process=seen.append)
+        self.assertEqual(seen, [traces(self.home)[-1]["pid"]])
+
     async def test_an_escalation_is_refused_below_full_access_and_never_asked_at_full_access(self):
         # Catches Beanest approving a wider sandbox the user never granted, or being stricter than dsh at Full Access.
         self.scenario("escalate")

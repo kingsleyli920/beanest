@@ -300,7 +300,7 @@ def not_started(error, permission):
 
 async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permission="plan",
                         response_schema=None, runtime_settings=None, on_activity=None,
-                        receipt_dir=None, progress_fingerprint=None, progress_file=None):
+                        receipt_dir=None, progress_file=None, on_process=None):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
     from .message_capacity import MAX_PROMPT_BYTES
     if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
@@ -339,11 +339,13 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     except adapters.ApiKeyUnavailable as error:
         raise not_started(error, permission) from None
     secret = next(iter(key_environment.values()))
-    environment = {**adapters._environment(), **key_environment, "DSH_PERMISSION_MODE": PERMISSION_MODES[permission]}
+    # Full access inherits the host's environment as a terminal would, minus what
+    # selects another account; the user's own DEEPSEEK_* and DSH_* never pass.
+    environment = {**adapters._environment(inherit=permission == "full_access"), **key_environment, "DSH_PERMISSION_MODE": PERMISSION_MODES[permission]}
     if progress_file is not None:
         environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
 
-    updates = DshTurnUpdates(on_activity, progress_fingerprint)
+    updates = DshTurnUpdates(on_activity)
 
     async def scrubbed(params):
         # The one place the key is taken out: everything dsh sends (message
@@ -362,6 +364,8 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
     async def turn():
         nonlocal process, connection, session_id, before, prompt_sent, proof, facts
         process, connection = await start(cwd, environment, home, on_update=scrubbed, permission=permission)
+        if on_process is not None:
+            on_process(process.pid)
         _remember(process.pid, owned, await asyncio.to_thread(_processes))
         initialized = await initialize(connection)
         if session_id is None:

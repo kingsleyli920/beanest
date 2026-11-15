@@ -341,7 +341,7 @@ def native_home(agent, home=None) -> Path:
 # started from inside it. BEANEST_* is this host's own.
 # Deliberately not by suffix: NODE_AUTH_TOKEN, a project's own *_API_KEY or
 # *_BASE_URL belong to the user's build, which is what this call is for.
-_ACCOUNT_ENVIRONMENT_PREFIXES = ('ANTHROPIC_', 'CLAUDE', 'OPENAI_', 'CODEX_', 'KIMI_', 'MOONSHOT_', 'BEANEST_')
+_ACCOUNT_ENVIRONMENT_PREFIXES = ('ANTHROPIC_', 'CLAUDE', 'OPENAI_', 'CODEX_', 'KIMI_', 'MOONSHOT_', 'DEEPSEEK_', 'DSH_', 'BEANEST_')
 
 
 def _environment(*, inherit: bool = False) -> dict[str, str]:

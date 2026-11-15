@@ -25,7 +25,8 @@ MODE = os.environ.get("DSH_PERMISSION_MODE", "workspace-write")
 PROVIDER = "deepseek-official"
 TRACE = {"argv": sys.argv[1:], "cwd": os.getcwd(), "permission_mode": MODE, "has_key": KEY is not None,
          "key_sha256": hashlib.sha256(KEY.encode()).hexdigest() if KEY else None,
-         "base_url_variable": "DEEPSEEK_BASE_URL" in os.environ, "methods": [], "selected": {}}
+         "base_url_variable": "DEEPSEEK_BASE_URL" in os.environ,
+         "host_variable": os.environ.get("FAKE_TOOLCHAIN_HOME"), "pid": os.getpid(), "methods": [], "selected": {}}
 
 
 TRACE_PATH = HOME / "fake-traces" / f"{time.time_ns()}-{os.getpid()}.json"
