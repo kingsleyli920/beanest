@@ -92,6 +92,16 @@ class ScopeExtensionStore(unittest.TestCase):
         self.assertEqual([event for event in self.store.snapshot(self.room_id)["events"]
                           if event["kind"].startswith("internal_replan")], [])
 
+    def test_a_folder_another_task_lists_does_not_hold_what_is_under_it(self):
+        # Catches a folder entry locking everything below it: one task listing "shared" would make
+        # every other partner wait for it before adding a new file or subfolder there.
+        with self.store._connection(write=True) as db:  # Fixture: the unfinished T2 lists a folder.
+            db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND id='T2'", ('["b.py", "shared"]', self.room_id))
+        self.refused(self.t1_work, [extend("T1", ["shared"]), complete("T1")], "team_extend_path_held")
+        self.finish(self.t1_work, [extend("T1", ["shared/probe/util.py"]), complete("T1")])
+        self.assertEqual(self.tasks()["T1"]["write_paths"], ["a.py", "shared/probe/util.py"])
+        self.assertEqual(self.tasks()["T2"]["write_paths"], ["b.py", "shared"])
+
     def test_a_file_an_unfinished_task_holds_is_refused_whole(self):
         # Catches two tasks that are both still open writing the same file, ignoring case too.
         self.refused(self.t1_work, [extend("T1", ["b.py"]), complete("T1")], "team_extend_path_held")

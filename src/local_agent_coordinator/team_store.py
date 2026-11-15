@@ -1494,8 +1494,10 @@ class TeamStore:
             "team_plan_locked": (" The plan changes only in two places: the plan author proposes while planning, and any "
                                  "partner answering a user message while the team is working may propose new tasks and "
                                  "adjust tasks nobody has started (open or assigned, no result, no call ever made for them). "
-                                 "A task that has started, is under review or has a result cannot be adjusted. Omit those "
-                                 "commands now."),
+                                 "A started task nobody is working on right now (open, assigned, blocked or waiting for a "
+                                 "peer, with no call running) may only give files away: repeat its dependencies "
+                                 "unchanged and list fewer write_paths. A task being worked on, under review or accepted "
+                                 "cannot be adjusted. Omit those commands now."),
             "team_plan_adjusted_meanwhile": (" Another partner changed the unstarted part of the board after this call began. "
                                              "Read the current board and context.plan_adjustments, and send only the changes "
                                              "the user asked for that are still missing; do not repeat a split already made."),
@@ -1524,7 +1526,8 @@ class TeamStore:
                                        "naming it so its owner makes the change."),
             "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
                                          "neither depends on the other. Add that existing task to the new task's dependencies, "
-                                         "or choose write_paths no other task writes. When splitting a task nobody has started, "
+                                         "or choose write_paths no other task writes. When taking files from a task nobody has started, "
+                                         "or from a started task nobody is working on right now, "
                                          "adjust it in the same response so it no longer lists the moved paths."),
         }.get(error, "")
         diagnostic = (rejection_evidence or {}).get("response_validation") or {}
@@ -1763,6 +1766,23 @@ class TeamStore:
                 and not json.loads(row["ownership_grant_json"] or "{}")}
 
     @staticmethod
+    def _idle_task_ids(db, room_id, run_id, rows):
+        """Started tasks nobody is working on right now.
+
+        Their owner is busy elsewhere or waiting, and no call for them is
+        running; a call still queued behind its owner's other work has not
+        read anything yet. A partner answering the user may take files out of
+        such a task so the work does not wait for one member; the task keeps
+        its owner, its dependencies and whatever it already delivered.
+        """
+        busy = {row[0] for row in db.execute(
+            "SELECT DISTINCT t.task_id FROM team_jobs t JOIN jobs j ON j.id=t.job_id WHERE t.room_id=? AND t.run_id=? "
+            "AND t.task_id IS NOT NULL AND j.status='working'", (room_id, run_id))}
+        return {row["id"] for row in rows
+                if row["status"] in {"open", "assigned", "blocked", "waiting_peer"} and row["id"] not in busy
+                and not row["repair_execution_id"]}
+
+    @staticmethod
     def _scope_extension(tasks, task_id, commands):
         """Paths this work call's extend commands add to its own task.
 
@@ -1884,6 +1904,7 @@ class TeamStore:
         # its binding.
         mid_run = team["phase"] == "working" and context["job_phase"] == "user"
         unstarted = self._unstarted_task_ids(db, job["room_id"], context["run_id"], rows) if mid_run else set()
+        idle = self._idle_task_ids(db, job["room_id"], context["run_id"], rows) - unstarted if mid_run else set()
         task_terminal_commands = 0
         extends = False
         for command in commands:
@@ -1929,9 +1950,13 @@ class TeamStore:
                     raise RoomError("team_task_not_found")
                 if task_id in adjustments:
                     raise RoomError("invalid_team_commands")
-                # Started, reviewed or delivered work, or any task a work call
-                # was ever made for, keeps its dependencies and file authority.
-                if task_id not in unstarted:
+                # A task being worked on, under review or delivered keeps its
+                # dependencies and file authority. A started task nobody is
+                # working on may only give files away.
+                if task_id not in unstarted and task_id not in idle:
+                    raise RoomError("team_plan_locked")
+                if task_id in idle and (set(command["dependencies"]) != set(json.loads(tasks[task_id]["dependencies_json"]))
+                        or len(command["write_paths"]) >= len(json.loads(tasks[task_id]["write_paths_json"]))):
                     raise RoomError("team_plan_locked")
                 if (not isinstance(command["dependencies"], list) or len(command["dependencies"]) > MAX_TASK_DEPENDENCIES
                         or len({_task_id(value) for value in command["dependencies"]}) != len(command["dependencies"])
@@ -2168,9 +2193,14 @@ class TeamStore:
                 continue
             before = self.task(db, room_id, command["task_id"])
             db.execute("UPDATE shared_tasks SET dependencies_json=?,write_paths_json=? WHERE room_id=? AND run_id=? AND id=? "
-                       "AND status IN ('open','assigned') AND result_version=0",
+                       "AND status IN ('open','assigned','blocked','waiting_peer')",
                        (json.dumps(command["dependencies"]), json.dumps(command["write_paths"]), room_id, context["run_id"], command["task_id"]))
+            started = (before["result_version"] > 0 or db.execute(
+                "SELECT 1 FROM team_jobs WHERE room_id=? AND run_id=? AND task_id=? LIMIT 1",
+                (room_id, context["run_id"], command["task_id"])).fetchone() is not None)
             adjusted.append({"task_id": command["task_id"], "title": before["title"],
+                             # Its owner may hold edits to the released files that were never published.
+                             **({"released_by_started_task": True, "previous_owner": before["owner"]} if started else {}),
                              "previous_dependencies": json.loads(before["dependencies_json"]), "dependencies": command["dependencies"],
                              "previous_write_paths": json.loads(before["write_paths_json"]), "write_paths": command["write_paths"]})
         for command in commands:

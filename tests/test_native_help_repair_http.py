@@ -243,17 +243,17 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
         self.assertEqual([file["content"] for file in files], ["original src/a.txt\n", "original src/b.txt\n"])
         self.assertFalse(any(event["kind"] == "native_repairs_scheduled" for event in final["events"]))
 
-    def test_unowned_or_unknown_structured_repair_path_cannot_create_a_write_task(self):
+    def test_unowned_or_unknown_structured_repair_path_becomes_ordinary_help_and_creates_no_write_task(self):
+        # Catches a help request naming a file no member owns either voiding
+        # the reply or turning into a repair task with write permission.
         self.repair_paths = ["notes.md"]  # Captured source has no canonical member owner.
+        self.text_help = True  # The fictional helper answers in text.
         final = self.create()
         self.assertEqual(final["objective"]["status"], "complete", final["team"])
-        failed = [job for job in final["jobs"] if job["error"] == "invalid_team_commands"]
-        self.assertEqual(len(failed), 1)
-        corrections = [call for call in self.native.calls if call["context"]["job"].get("correction_of") == failed[0]["id"]]
-        self.assertEqual(len(corrections), 1)
-        self.assertIn("commands[0].repair_paths", corrections[0]["prompt"])
-        self.assertIn("canonical member owner", corrections[0]["prompt"])
-        self.assertEqual(corrections[0]["permission"], "full_access")
+        self.assertEqual([job["error"] for job in final["jobs"] if job["error"]], [])
+        asked = [job["text"] for job in final["jobs"] if job["kind"] == "team_help"]
+        self.assertEqual(len(asked), 1)
+        self.assertIn("Files named in this request: notes.md.", asked[0])
         self.assertEqual(len(final["team"]["tasks"]), 3)
         self.assertFalse(any(event["kind"] == "native_repairs_scheduled" for event in final["events"]))
         self.assertEqual(self.service._project(final["room"]["id"]).files_for_paths(["notes.md"])[0]["content"], "Unchanged source.\n")

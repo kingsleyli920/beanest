@@ -172,6 +172,30 @@ class MidRunStore(unittest.TestCase):
         self.assertEqual(self.tasks()["L1"]["status"], "review")
         self.refused(job, [adjust("L1", [], ["load.py"])], "team_plan_locked")
 
+    def test_a_started_task_nobody_is_working_on_gives_files_away_and_nothing_else(self):
+        # Catches files staying locked to a started task while its owner waits or works elsewhere, so
+        # idle partners wait for one member; and catches such a task losing a dependency, gaining
+        # nothing-released "adjustments", or the release going unreported to whoever takes the files.
+        with self.store._connection(write=True) as db:  # Fixture: L1 holds two files.
+            db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND id='L1'",
+                       ('["load.py", "extra.py"]', self.room_id))
+        job = self.user_reply_job("claude")
+        self.refused(job, [proposal("X1", paths=["extra.py"]), adjust("L1", [], ["load.py"])], "team_plan_locked")
+        self.finish(self.l1_work, [{"type": "request_help", "task_id": "L1", "to": "codex",
+                                    "text": "Which loader format?", "capability": "text"}])
+        self.assertEqual(self.tasks()["L1"]["status"], "waiting_peer")
+        self.refused(job, [adjust("L1", [], ["load.py", "extra.py"])], "team_plan_locked")
+        self.refused(job, [proposal("X1", paths=["extra.py"]), adjust("L1", ["X1"], ["load.py"])], "team_plan_locked")
+        self.finish(job, [proposal("X1", paths=["extra.py"]), adjust("L1", [], ["load.py"])])
+        tasks = self.tasks()
+        self.assertEqual((tasks["L1"]["status"], tasks["L1"]["owner"], tasks["L1"]["write_paths"]),
+                         ("waiting_peer", "kimi", ["load.py"]))
+        self.assertEqual(tasks["X1"]["write_paths"], ["extra.py"])
+        event = next(event for event in self.snapshot()["events"] if event["kind"] == "plan_adjusted")
+        self.assertEqual([(item["task_id"], item.get("released_by_started_task"), item.get("previous_owner"),
+                           item["previous_write_paths"], item["write_paths"]) for item in event["adjusted"]],
+                         [("L1", True, "kimi", ["load.py", "extra.py"], ["load.py"])])
+
     def test_a_task_with_a_queued_work_call_cannot_be_adjusted(self):
         # Catches a queued call being treated as unstarted: it is the owner's next step on the old binding.
         job = self.user_reply_job("claude")
@@ -230,6 +254,10 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         if context["job"]["job_phase"] != "user":
             return await pool.PoolService.handler(self, agent, context, cwd)
         self.user_replies.append(context["self"])
+        if getattr(self, "answers_only", False):
+            self.answering[context["self"]] = context.get("answering_now")
+            await asyncio.sleep(0.05)  # both replies overlap
+            return native_reply(context, [])
         self.plan.append(pool.plan("L2a", paths=["l2_side.py"]))
         return native_reply(context, [
             native.proposal("L2a", paths=["l2_side.py"], capability="python", dependencies=[]),
@@ -293,6 +321,38 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         # The answering partner's reply was told it may do this.
         reply = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "user")
         self.assertIn("adjust{type,task_id,dependencies,write_paths}", reply["prompt"])
+        self.assertNotIn("answering_now", reply["context"], "one partner answering alone has nobody to agree with")
+
+    async def test_partners_answering_the_same_message_are_told_who_else_is_and_in_what_order(self):
+        # Catches two free partners each drafting a plan change for one user message without knowing
+        # of each other: the later draft is returned and that whole call repeated. A partner busy
+        # with other work answers later and must not be named as the one to draft.
+        self.plan = [pool.plan("L1"), pool.plan("L2", dependencies=["L1"]), pool.plan("D1", dependencies=["L1"])]
+        self.user_replies, self.answering, self.answers_only = [], {}, True
+        released = asyncio.Event()
+
+        async def until():
+            return released.is_set()
+        self.holds["L1"] = until
+        await self.create(["claude", "codex", "ember"])
+        for _ in range(300):
+            state = await self.state()
+            if ("claude", "L1") in self.works and not any(
+                    job["provider"] in {"codex", "ember"} and job["status"] in {"queued", "working"} for job in state["jobs"]):
+                break
+            await asyncio.sleep(0.01)
+        await self.service.send_message(self.room_id, "Can any of this start earlier?", "all", str(uuid4()), source="user")
+        for _ in range(300):
+            if {"codex", "ember"} <= set(self.answering):
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual({key: self.answering.get(key) for key in ("codex", "ember")},
+                         {"codex": ["codex", "ember"], "ember": ["codex", "ember"]})
+        released.set()
+        await self.settle()
+        state = await self.state()
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        self.assertNotIn("native_response_rejected", {event["kind"] for event in state["events"]})
 
 
 if __name__ == "__main__":

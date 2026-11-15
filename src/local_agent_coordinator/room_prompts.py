@@ -66,11 +66,20 @@ MID_RUN_ADJUSTMENT_INSTRUCTION = (
     "not started (status open or assigned, result_version 0, no call made for it yet), giving its complete new dependency "
     "list and its write_paths with any moved paths removed. To split a task, propose the independent part with the moved "
     "paths and adjust the original in the same response; add the new task to the dependencies of any unstarted task that "
-    "needs its result. Drop a dependency only when the task really does not need that result. Never adjust a task that "
-    "has started, is under review or has a result. Running work continues untouched and nobody re-confirms the plan. "
+    "needs its result. Drop a dependency only when the task really does not need that result. A started task nobody is "
+    "working on right now (status open, assigned, blocked or waiting_peer, call_running not true) may "
+    "give files away so nobody waits for its owner: adjust it with its dependencies unchanged and fewer write_paths, and "
+    "propose or extend the task that takes them. Its owner may hold edits to those files that were never published; "
+    "plan_adjustments marks such a change released_by_started_task with previous_owner, so ask that partner or check "
+    "before overwriting. Never adjust a task that is being worked on, is under review or is accepted. Running work "
+    "continues untouched and nobody re-confirms the plan. "
     "New tasks go to the shared pool and the next free partner takes them. If any command breaks a "
     "rule, the whole response is rejected and nothing changes. context.plan_adjustments lists such changes made in this "
-    "round; the current board is what counts. ")
+    "round; the current board is what counts. When context.answering_now is present, those partners are answering user "
+    "messages at the same time as you. Only the first plan change lands: one sent from a board another partner has "
+    "changed since is returned and that whole call is repeated. So the first partner listed drafts any propose or adjust; "
+    "the others answer the user and put what they would change in their message, and send plan commands themselves only "
+    "for something the first partner's change cannot cover. ")
 
 
 EXTEND_INSTRUCTION = (
@@ -78,6 +87,8 @@ EXTEND_INSTRUCTION = (
     "extend{type,task_id,write_paths:[the new paths]} in the same response as its complete, request_help or block, and keep "
     "working: the files you change there are imported like the rest of your task and reviewed with it. You may add a file no "
     "unfinished task on the board lists (a finished task's file is fine, whoever wrote it: the host hands it over to your task). "
+    "A task holds exactly the paths it lists: a folder in another task's write_paths does not hold the files or "
+    "subfolders under it, so a new file or subfolder there that no task lists by its own path is yours to add. "
     "A file another unfinished task holds still needs block "
     "coordination_required. If extend breaks a rule, the whole response is rejected and nothing is imported. ")
 
@@ -446,6 +457,15 @@ class RoomPromptMixin:
                        if event["kind"] == "plan_adjusted" and event.get("run_id") == job["team"]["run_id"]][-6:]
         if adjustments:
             context["plan_adjustments"] = adjustments
+        if job["team"].get("job_phase") == "user":
+            # Everyone answering now, in board order, so they can agree who drafts plan changes.
+            # A partner in the middle of other work answers later, so it is not listed.
+            busy = {item["provider"] for item in snapshot["jobs"]
+                    if item["status"] == "working" and item["kind"] != "team_user"}
+            answering = ({item["provider"] for item in snapshot["jobs"]
+                          if item["kind"] == "team_user" and item["status"] in {"queued", "working"}} - busy) | {job["provider"]}
+            if len(answering) > 1:
+                context["answering_now"] = [member["id"] for member in snapshot["members"] if member["id"] in answering]
         if snapshot.get("objective"):
             context["current_stage_goal"] = job["goal"]
             if job["team"]["job_phase"] in {"checkpoint", "checkpoint_review"}:
