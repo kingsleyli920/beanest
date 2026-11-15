@@ -83,7 +83,8 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.01)
                 else:
                     self.fail(f"{task['id']} was held past its condition")
-            for path in task["write_paths"]:
+            for path in getattr(self, "folder_files", {}).get(task["id"], task["write_paths"]):
+                (cwd / path).parent.mkdir(parents=True, exist_ok=True)
                 (cwd / path).write_text(f"# {task['id']} by {member}\n")
             return native_reply(context, [{"type": "complete", "task_id": task["id"], "result": "Written."}])
         if phase == "review":
@@ -117,6 +118,18 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(task_id for _, task_id in self.works), sorted(item["id"] for item in self.plan),
                          "every task was worked exactly once")
         return state
+
+    async def test_a_task_that_owns_a_folder_delivers_the_files_it_writes_under_it(self):
+        # Catches the real stop: a task owning "code/scripts" could not be collected or submitted, because the folder
+        # was read as a file (invalid_native_file) and each written file was outside the exact write paths.
+        self.plan = [plan("T1", paths=["code/scripts"])]
+        self.folder_files = {"T1": ["code/scripts/walk.gd", "code/scripts/nested/path.gd"]}
+        await self.create(["claude", "codex"])
+        state = await self.finished()
+        task = next(item for item in state["team"]["tasks"] if item["id"] == "T1")
+        self.assertEqual(task["status"], "accepted")
+        self.assertEqual(sorted(file["path"] for file in task["result_files"]),
+                         ["code/scripts/nested/path.gd", "code/scripts/walk.gd"])
 
     async def test_free_partners_take_chain_steps_and_independent_work_as_it_becomes_ready(self):
         # The user's case: chain T1 -> T2 -> T3 and independent T4, T5, T6 among three partners.

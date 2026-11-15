@@ -5847,7 +5847,7 @@ class RoomService(RoomPromptMixin):
             else:
                 current = project.snapshot()
                 files, revision = current["files"], current["revision"]
-            if all(file["owner"] in {None, job["provider"]} for file in files if file["path"] in task["write_paths"]):
+            if all(file["owner"] in {None, job["provider"]} for file in files if native_workspace.path_within(file["path"], task["write_paths"])):
                 return
             baseline = ({file["path"]: (file["owner"], file["sha256"]) for file in project.snapshot(1)["files"]}
                         if job["mode"] == "project_files" else None)
@@ -6233,12 +6233,12 @@ class RoomService(RoomPromptMixin):
                     or any(path in held and held[path]["sha256"] != file["sha256"] for path, file in archived.items())):
                 raise RoomError("native_recovery_unpublished_changes")
             held.update(archived)
-        held = {path: file for path, file in held.items() if path not in allowed}
+        held = {path: file for path, file in held.items() if not native_workspace.path_within(path, allowed)}
         changes = native_workspace.collect_changes(state["project"], state, sorted(set(allowed) | set(held)), resolved_conflicts=resolved)
         observed = self._native_metadata_observation(state, changes, list(held), [])
         if any(file["sha256"] != held[file["path"]]["sha256"] for file in observed["files"]):
             raise RoomError("native_recovery_unpublished_changes")
-        return {**changes, "files": [file for file in changes["files"] if file["path"] in allowed],
+        return {**changes, "files": [file for file in changes["files"] if native_workspace.path_within(file["path"], allowed)],
                 "retained_files": [{"path": path, "sha256": held[path]["sha256"]} for path in sorted(held)]}
 
     def _finish_partner_handoff_inspection(self, job, parsed, identity, usage, observation):
@@ -6454,12 +6454,13 @@ class RoomService(RoomPromptMixin):
                     cwd = Path(workspace["project"])
                     prompt = self._prompt(job)
                     task = next((item for item in self.store.snapshot(room_id)["team"]["tasks"] if item["id"] == job["team"]["task_id"]), None)
-                    selected = set(task["write_paths"]) if task else set()
+                    selected = list(task["write_paths"]) if task else []
                     job["native_binding"] = {"revision": job["artifact_inspected_revision"],
                         "digest": _project_digest(self._project(room_id).snapshot(revision=job["artifact_inspected_revision"])),
                         "index_sha256": workspace["index_sha256"], "task_id": job["team"]["task_id"],
                         "result_version": job["team"]["result_version"],
-                        "files": [{"path": entry["path"], "sha256": entry["sha256"]} for entry in workspace["files"] if entry["path"] in selected]}
+                        "files": [{"path": entry["path"], "sha256": entry["sha256"]} for entry in workspace["files"]
+                                  if native_workspace.path_within(entry["path"], selected)]}
                     remaining = seconds_available(job["deadline"], self.clock())
                     if remaining is not None and remaining <= 0:
                         raise RoomError("deadline_exceeded")
@@ -6781,7 +6782,8 @@ class RoomService(RoomPromptMixin):
         extension = [path for path in _with_extension(task["write_paths"], self._extension_paths(job, parsed))
                      if path not in task["write_paths"]] if task else []
         allowed = set(task["write_paths"]) | set(extension) if task else set()
-        if any(not isinstance(file, dict) or file.get("path") not in allowed for file in files):
+        if any(not isinstance(file, dict) or not isinstance(file.get("path"), str)
+               or not native_workspace.path_within(file["path"], allowed) for file in files):
             raise RoomError("team_scope_conflict")
         project = self._project(job["room_id"]).snapshot()
         if job["mode"] == "native_project":
@@ -7051,14 +7053,18 @@ class RoomService(RoomPromptMixin):
                     # Complete commands still validate all required paths above.
                     actual_files = (self._project(job["room_id"]).metadata_for_paths(sorted(paths), revision=artifact_revision)
                                     if native else actual["files"])
+                    # A folder write path ("code/scripts") delivers every file under it.
+                    listed = {file["path"] for file in actual_files}
+                    actual_files = [*actual_files, *(file for file in actual["files"] if file["path"] not in listed
+                                                     and native_workspace.path_within(file["path"], paths))]
                     artifact_files = [{"path": file["path"], "sha256": file["sha256"]}
-                                      for file in actual_files if file["path"] in paths]
+                                      for file in actual_files if native_workspace.path_within(file["path"], paths)]
                     if native:
                         # A captured file this task removed is part of its
                         # result: no bytes, like a wanted None in delivery.
                         present = {file["path"] for file in artifact_files}
                         artifact_files += [{"path": file["path"], "sha256": None} for file in actual.get("deleted_files", [])
-                                           if file["path"] in paths and file["path"] not in present]
+                                           if native_workspace.path_within(file["path"], paths) and file["path"] not in present]
                         artifact_files.sort(key=lambda file: file["path"])
                 else:
                     actual = self._project(job["room_id"]).snapshot(revision=artifact_revision)

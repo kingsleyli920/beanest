@@ -408,6 +408,11 @@ def prepare_retained_workspace(destination, canonical_export, canonical_manifest
         raise
 
 
+def path_within(path, write_paths):
+    """A file a task may write: listed itself, or under a listed folder (whole path segments)."""
+    return any(path == owned or path.startswith(owned.rstrip("/") + "/") for owned in write_paths)
+
+
 def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_conflicts=()):
     """Read every change to authorized paths; final owner/grant/CAS checks are external.
 
@@ -431,7 +436,14 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
     candidates, blocked, generated = [], [], []
     untracked = {_path(name) for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if name}
     checked = set()
-    for name in sorted(set(entries) | allowed | untracked):
+    # A task may own a whole folder ("code/scripts"): every file under it is its
+    # own, and the folder itself is never read as a file.
+    folders = {name for name in allowed if any(other.startswith(name + "/") for other in set(entries) | untracked)
+               or os.path.isdir(os.path.join(str(root), name)) and not os.path.islink(os.path.join(str(root), name))}
+
+    def owned(name):
+        return name in allowed or any(name.startswith(folder + "/") for folder in folders)
+    for name in sorted(set(entries) | (allowed - folders) | untracked):
         path = _file(root, name, checked)
         before = entries.get(name)
         exists = path.exists()
@@ -441,7 +453,7 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
             continue
         if exists and not path.is_file():
             raise NativeWorkspaceError("invalid_native_file")
-        if _excluded(name) and (before is None or name in allowed):
+        if _excluded(name) and (before is None or owned(name)):
             # Never project inputs: build/cache outputs and credentials. Keep
             # their bytes private without importing them or treating a routine
             # native check, or a local .env, as an unauthorized source edit.
@@ -462,7 +474,7 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
             mode_changed = before is not None and before.get("executable") is not None and executable != before["executable"]
             if before and sha == before["sha256"] and not mode_changed:
                 continue
-        if name not in allowed:
+        if not owned(name):
             blocked.append({"path": name, "reason": "native_path_not_owned"})
             continue
         if (name in conflicts and name not in resolved

@@ -117,6 +117,29 @@ class NativeWorkspaceTests(unittest.TestCase):
         self.assertEqual({item["path"] for item in changes["blocked"]}, {"peer.py", "unowned.py"})
         self.assertEqual((source[0] / "own.py").read_text(), "old\n")
 
+    def test_a_task_that_owns_a_folder_owns_every_file_under_it(self):
+        # Catches the real stop: a task listed folders ("code/scripts", "design") as write paths, collection read
+        # the folder as a file and raised invalid_native_file, which recovery reported as unpublished changes,
+        # blocking the automatic continue and the composer.
+        source = self.export("source", {"code/scripts/a.gd": "old\n", "code/other.gd": "peer\n", "design/x.json": "{}\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        try:
+            unchanged = collect_changes(project, receipt, ["code/scripts", "design"])
+        except NativeWorkspaceError as error:
+            self.fail(f"a folder write path was read as a file: {error.code}")
+        self.assertEqual(unchanged, {"files": [], "blocked": []})
+        (project / "code/scripts/a.gd").write_text("new\n")
+        (project / "code/scripts/new.gd").write_text("added\n")
+        (project / "code/other.gd").write_text("unowned\n")
+        changes = collect_changes(project, receipt, ["code/scripts", "design"])
+        self.assertEqual({item["path"]: item.get("content") for item in changes["files"]},
+                         {"code/scripts/a.gd": "new\n", "code/scripts/new.gd": "added\n"})
+        self.assertEqual([item["path"] for item in changes["blocked"]], ["code/other.gd"])
+        # A folder name is a prefix of whole path segments only.
+        (project / "code/scripts_extra.gd").write_text("near miss\n")
+        self.assertIn("code/scripts_extra.gd", {item["path"] for item in collect_changes(project, receipt, ["code/scripts"])["blocked"]})
+
     def test_owned_binary_changes_deletions_and_mode_flips_are_collected(self):
         # Catches owned deletions, binaries and chmod +x being blocked instead of imported.
         source = self.export("source", {"asset.bin": b"\x00", "old.py": "old\n", "run.sh": "echo hi\n"})
