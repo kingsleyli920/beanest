@@ -336,7 +336,7 @@ test('every version declaration agrees with the desktop package', async () => {
   const pyproject = await fs.readFile(path.join(root, 'pyproject.toml'), 'utf8');
   assert.match(pyproject, new RegExp(`^version = "${version}"$`, 'm'));
   for (const [file, declaration] of [
-    ['kimi_acp.py', `"version": "${version}"`], ['room_mcp.py', `version="${version}"`],
+    ['kimi_acp.py', `"version": "${version}"`], ['dsh_acp.py', `"version": "${version}"`], ['room_mcp.py', `version="${version}"`],
     ['mcp_server.py', `version="${version}"`], ['adapters.py', `'version': '${version}'`]]) {
     const source = await fs.readFile(path.join(root, 'src', 'local_agent_coordinator', file), 'utf8');
     assert.ok(source.includes(declaration), file);

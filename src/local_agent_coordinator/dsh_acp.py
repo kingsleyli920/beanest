@@ -278,7 +278,7 @@ async def start(cwd, environment, home, *, on_update=None, permission="plan"):
 
 async def initialize(connection):
     result = await connection.request("initialize", {"protocolVersion": 1, "clientCapabilities": {},
-                                      "clientInfo": {"name": "beanest", "version": "0.3.0"}})
+                                      "clientInfo": {"name": "beanest", "version": "0.4.0"}})
     if result.get("protocolVersion") != 1:
         raise ACPError("native_protocol_invalid")
     return result
