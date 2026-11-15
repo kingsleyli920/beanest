@@ -316,6 +316,11 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
                 # the job's own; only the shape of unused null fields widens.
                 _, transport_fields = stable_command_shape(has_peers=has_peers)
                 nonempty_fields = PHASE_NONEMPTY_TEXT.get(native_phase, nonempty_fields)
+            else:
+                # A per-phase schema requires these itself, except where another command kind of the
+                # phase must leave the field null (a checkpoint that also allocates); that case is kept here.
+                nonempty_fields = frozenset(field for field in PHASE_NONEMPTY_TEXT.get(native_phase, ())
+                                            if not all(field in _COMMAND_FIELDS[kind] for kind in allowed_kinds))
         else:
             allowed_kinds, transport_fields = set(_COMMAND_FIELDS), set().union(*_COMMAND_FIELDS.values())
         commands, command_issues = [], []
@@ -330,7 +335,7 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
             # Preserve static adapters' existing full transport compatibility.
             if isinstance(candidate, dict):
                 missing = transport_fields - set(candidate)
-                compatible = {"cause", "repair_paths"}
+                compatible = {"cause", "repair_paths", "shares"}
                 if missing and missing <= compatible and set(candidate) == transport_fields - missing:
                     candidate = {**candidate, **{key: None for key in missing}}
             if isinstance(candidate, dict) and set(candidate) == transport_fields:

@@ -102,6 +102,19 @@ class ScopeExtensionStore(unittest.TestCase):
         self.assertEqual(self.tasks()["T1"]["write_paths"], ["a.py", "shared/probe/util.py"])
         self.assertEqual(self.tasks()["T2"]["write_paths"], ["b.py", "shared"])
 
+    def test_a_file_held_by_the_same_partners_other_unfinished_task_moves_to_this_one(self):
+        # Catches a partner blocking its own task because a file it must fix sits in another of its own
+        # unfinished tasks: it cannot be working there while it is working here.
+        with self.store._connection(write=True) as db:  # Fixture: the waiting T2 belongs to claude too.
+            db.execute("UPDATE shared_tasks SET owner='claude',write_paths_json=? WHERE room_id=? AND id='T2'",
+                       ('["b.py", "keep.py"]', self.room_id))
+        self.finish(self.t1_work, [extend("T1", ["b.py"]), complete("T1")])
+        self.assertEqual(self.tasks()["T1"]["write_paths"], ["a.py", "b.py"])
+        self.assertEqual(self.tasks()["T2"]["write_paths"], ["keep.py"])
+        [event] = self.events("task_scope_extended")
+        self.assertEqual((event["paths"], event["moved_from_own_tasks"], event["dependencies_added"]),
+                         (["b.py"], [{"task_id": "T2", "paths": ["b.py"]}], []))
+
     def test_a_file_an_unfinished_task_holds_is_refused_whole(self):
         # Catches two tasks that are both still open writing the same file, ignoring case too.
         self.refused(self.t1_work, [extend("T1", ["b.py"]), complete("T1")], "team_extend_path_held")

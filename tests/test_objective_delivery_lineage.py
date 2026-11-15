@@ -72,6 +72,28 @@ class ObjectiveDeliveryLineageTests(unittest.TestCase):
         with self.store._connection(write=True) as db:
             db.execute("UPDATE objectives SET continuation_json=? WHERE id=?", (json.dumps(value), objective))
 
+    def test_a_task_the_hosts_own_stop_left_blocked_is_open_again_in_the_next_round(self):
+        # Catches the real room where a five second lock wait stopped the team with project_busy and
+        # four tasks stayed blocked for good after the automatic continue, with nobody able to take them.
+        # A task waiting for the user's own decision, and one whose scene must be kept, stay as they are;
+        # so does one blocked over files whose origin the host could not confirm.
+        run, _ = self.current()
+        with self.store._connection(write=True) as db:
+            for task, owner, status, reason, cause in (
+                    ("B1", "claude", "blocked", "project_busy", None), ("B2", None, "blocked", "project_busy", None),
+                    ("B3", "claude", "blocked", "Which licence?", "user_decision"),
+                    ("B4", "claude", "blocked", "project_commit_unconfirmed", None),
+                    ("B5", "claude", "blocked", "team_scope_conflict", None)):
+                db.execute("INSERT INTO shared_tasks(room_id,run_id,id,title,description,acceptance,dependencies_json,write_paths_json,"
+                           "capability,status,owner,blocked_reason,block_cause) VALUES (?,?,?,?,?,?,'[]','[]','text',?,?,?,?)",
+                           (self.room, run, task, task, "Constructed fixture.", "Done.", status, owner, reason, cause))
+        self.next_objective()
+        tasks = {task["id"]: (task["status"], task["owner"], task["blocked_reason"]) for task in self.store.snapshot(self.room)["team"]["tasks"]}
+        self.assertEqual(tasks, {"B1": ("assigned", "claude", None), "B2": ("open", None, None),
+                                 "B3": ("blocked", "claude", "Which licence?"),
+                                 "B4": ("blocked", "claude", "project_commit_unconfirmed"),
+                                 "B5": ("blocked", "claude", "team_scope_conflict")})
+
     def test_original_same_objective_deliveries_remain_unchanged(self):
         expected = self.evidence("main.py", "version one")
         self.assertEqual(self.store.objective_deliveries(self.room), [expected])

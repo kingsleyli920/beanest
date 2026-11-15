@@ -208,6 +208,8 @@ class TeamStore:
 
         ObjectiveStore.initialize(db)
         for table, columns in {
+            # The partners' latest split of this round's work: {member: 0-100}.
+            "team_runs": {"allocation_json": "TEXT"},
             "shared_tasks": {"assignment_epoch": "INTEGER NOT NULL DEFAULT 0", "ownership_grant_json": "TEXT",
                              "review_kind": "TEXT NOT NULL DEFAULT 'independent_review'", "inherited_from_run": "TEXT",
                              "block_cause": "TEXT", "internal_replan_revision": "INTEGER"},
@@ -444,6 +446,9 @@ class TeamStore:
         new_id = self._create_run(db, room_id, len(runs)+1)
         rotated = rotate_after_handoff and not retry and self._rotate_after_handoff(db, room_id, room, objective, run_id, new_id)
         if objective_id:
+            # The same goal goes on, so the partners' split of the work goes on with it.
+            db.execute("UPDATE team_runs SET allocation_json=(SELECT allocation_json FROM team_runs WHERE id=?) WHERE id=?",
+                       (run_id, new_id))
             db.execute("UPDATE team_runs SET objective_id=? WHERE id=?", (objective_id, new_id))
             db.execute("UPDATE objectives SET status='running',stop_reason=NULL WHERE id=?", (objective_id,))
             self.objectives.apply_stage_limits(db, room_id)
@@ -473,7 +478,9 @@ class TeamStore:
                      # Running out of quota pauses a task; it is not a question for the user.
                      "all_partners_quota_exhausted", "agent_quota_exhausted", "subscription_limit_reached",
                      # The call never reached a model; the task simply was not started.
-                     NATIVE_PREFLIGHT_FAILED}
+                     NATIVE_PREFLIGHT_FAILED,
+                     # Another call held the shared project too long; nothing about the task itself.
+                     "project_busy"}
         # A reply mistake applied nothing; the carried task is redone, not a
         # question for the user.
         resumable.update(REPLY_MISTAKES)
@@ -1524,6 +1531,10 @@ class TeamStore:
                                        "Nothing was imported, including your private changes to it. Restore that file to "
                                        "its shared version, then finish within your scope, or request_help with repair_paths "
                                        "naming it so its owner makes the change."),
+            "invalid_team_allocation": (" An allocate must give shares as an object from member id to a whole number from 0 to 100, "
+                                        "naming only members listed as available in context, with at least one member left "
+                                        "above 0 once the shares it does not mention are kept, and a non-empty reason. Send at "
+                                        "most one allocate in a response. Correct it, or leave it out to keep the current split."),
             "team_write_path_conflict": (" A proposed task writes a path that another task on the board also writes, and "
                                          "neither depends on the other. Add that existing task to the new task's dependencies, "
                                          "or choose write_paths no other task writes. When taking files from a task nobody has started, "
@@ -1787,9 +1798,12 @@ class TeamStore:
         """Paths this work call's extend commands add to its own task.
 
         Maps each new path to the finished tasks that held it. A path another
-        unfinished task holds still needs coordination, so the reply is refused.
+        partner's unfinished task holds still needs coordination, so the reply
+        is refused. A path held by another unfinished task of the same owner
+        simply moves: that partner is here now, so it cannot be working there.
         """
         own = {path.casefold() for path in json.loads(tasks[task_id]["write_paths_json"])}
+        owner = tasks[task_id]["owner"]
         added = {}
         for command in commands:
             if command["type"] != "extend":
@@ -1799,11 +1813,24 @@ class TeamStore:
                     continue
                 holders = [key for key, row in tasks.items() if key != task_id
                            and path.casefold() in {value.casefold() for value in json.loads(row["write_paths_json"])}]
-                if any(not task_settled(tasks[key]) for key in holders):
+                if any(not task_settled(tasks[key]) and (owner is None or tasks[key]["owner"] != owner) for key in holders):
                     raise RoomError("team_extend_path_held")
                 own.add(path.casefold())
-                added[path] = holders
+                added[path] = [key for key in holders if task_settled(tasks[key])]
         return added
+
+    @staticmethod
+    def _own_moves(tasks, task_id, paths):
+        """The same owner's other unfinished tasks that hold these paths, with what each gives up."""
+        owner, wanted = tasks[task_id]["owner"], {path.casefold() for path in paths}
+        moves = {}
+        for key, row in tasks.items():
+            if key == task_id or owner is None or row["owner"] != owner or task_settled(row):
+                continue
+            given = [value for value in json.loads(row["write_paths_json"]) if value.casefold() in wanted]
+            if given:
+                moves[key] = given
+        return moves
 
     @staticmethod
     def _ordering_dependencies(tasks, task_id, added):
@@ -1843,6 +1870,14 @@ class TeamStore:
         if not isinstance(commands, list) or len(commands) > MAX_RESPONSE_COMMANDS:
             raise RoomError("invalid_team_commands")
         if context["job_phase"] in {"checkpoint", "checkpoint_review"}:
+            # A checkpoint may also say how the next stretch of work is split.
+            allocations = [command for command in commands if context["job_phase"] == "checkpoint"
+                           and isinstance(command, dict) and command.get("type") == "allocate"]
+            commands = [command for command in commands if not any(command is item for item in allocations)]
+            if len(allocations) > 1 or any(set(command) != _COMMAND_FIELDS["allocate"] for command in allocations):
+                raise RoomError("invalid_team_allocation")
+            for command in allocations:
+                self._check_allocation(db, context, command, set(self.objectives.available_members(db, job["room_id"])))
             if (len(commands) != 1 or not isinstance(commands[0], dict)
                     or commands[0].get("type") != context["job_phase"]
                     or set(commands[0]) - ({"handoff"} if context["job_phase"] == "checkpoint" else set())
@@ -1906,7 +1941,7 @@ class TeamStore:
         unstarted = self._unstarted_task_ids(db, job["room_id"], context["run_id"], rows) if mid_run else set()
         idle = self._idle_task_ids(db, job["room_id"], context["run_id"], rows) - unstarted if mid_run else set()
         task_terminal_commands = 0
-        extends = False
+        extends = allocated = False
         for command in commands:
             if (not isinstance(command, dict) or not isinstance(command.get("type"), str)
                     or command["type"] not in _COMMAND_FIELDS):
@@ -1979,6 +2014,15 @@ class TeamStore:
                 if command["write_paths"] and read_only(room["work_mode"], json.loads(room["runtime_settings_json"] or "null")):
                     raise RoomError("team_files_forbidden")
                 extends = True
+            elif kind == "allocate":
+                # How the round's work is split is the partners' own call, whoever makes it;
+                # one allocate per response, so a reply never argues with itself.
+                if context["job_phase"] not in {"plan", "coordinate", "user", "work"}:
+                    raise RoomError("team_task_permission")
+                if allocated:
+                    raise RoomError("invalid_team_allocation")
+                self._check_allocation(db, context, command, members)
+                allocated = True
             elif kind == "plan_ready":
                 same_plan_in_progress = (team["phase"] == "working"
                                          and context["revision"] == team["revision"])
@@ -2051,6 +2095,7 @@ class TeamStore:
         combined.update({key: item["dependencies"] for key, item in adjustments.items()})
         combined.update({item["id"]: item["dependencies"] for item in proposals})
         extended = self._scope_extension(tasks, context["task_id"], commands) if extends else {}
+        own_moves = self._own_moves(tasks, context["task_id"], extended) if extended else {}
         if extended:
             # The task as it will stand once extended must pass the same checks.
             combined[context["task_id"]] = (combined[context["task_id"]]
@@ -2080,6 +2125,8 @@ class TeamStore:
         task_paths.update({item["id"]: item["write_paths"] for item in proposals})
         if extended:
             task_paths[context["task_id"]] = task_paths[context["task_id"]] + list(extended)
+            for key, given in own_moves.items():
+                task_paths[key] = [value for value in task_paths[key] if value not in given]
 
         def depends_on(task_id, other):
             return any(value == other or depends_on(value, other) for value in combined[task_id])
@@ -2166,6 +2213,10 @@ class TeamStore:
         # gate before filesystem commits, never a replacement for this check.
         if not self.validate(db, {**dict(job), "status": "working"}, commands):
             raise RoomError("team_context_changed")
+        for command in commands:
+            if command["type"] == "allocate":
+                self._allocate(db, job, context, command)
+        commands = [command for command in commands if command["type"] != "allocate"]
         if context["job_phase"] == "checkpoint":
             self.objectives.propose(db, room_id, provider, commands[0])
             self._record_round_handoff(db, job, context, commands[0].get("handoff"), usage)
@@ -2375,10 +2426,17 @@ class TeamStore:
                    (json.dumps(json.loads(task["write_paths_json"]) + list(added)),
                     json.dumps(json.loads(task["dependencies_json"]) + ordering),
                     json.dumps(grants) if grants else None, room_id, context["run_id"], task_id, job["provider"]))
+        moves = self._own_moves(tasks, task_id, added)
+        for key, given in moves.items():
+            db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND run_id=? AND id=?",
+                       (json.dumps([value for value in json.loads(tasks[key]["write_paths_json"]) if value not in given]),
+                        room_id, context["run_id"], key))
         self.store._event(db, room_id, "task_scope_extended", sender=job["provider"], job_id=job["id"],
                           run_id=context["run_id"], task_id=task_id, title=task["title"], paths=list(added),
                           taken_from=[{"path": path, "task_ids": holders} for path, holders in added.items() if holders],
-                          dependencies_added=ordering)
+                          dependencies_added=ordering,
+                          **({"moved_from_own_tasks": [{"task_id": key, "paths": given} for key, given in moves.items()]}
+                             if moves else {}))
 
     def _record_round_handoff(self, db, job, context, value, usage):
         """Keep a Claude checkpoint's handoff. A bad one is noted, never corrected:
@@ -2418,28 +2476,86 @@ class TeamStore:
             "SELECT provider,points,calls,reported FROM partner_load WHERE room_id=? AND run_id=?", (room_id, run_id))}
 
     def _workload_profile(self, db, room_id, *, building=False):
-        """Each member's account and level; a level chosen for this room wins.
+        """Each member's account, level, share of this round and who set that share.
 
-        For handing out work, an account whose members cannot build in this
-        room gets no share, as long as someone else can build.
+        The user's setting for a member comes first, then the partners' latest
+        allocation for this round, then an even split. For handing out work, an
+        account whose members cannot build in this room gets no share, as long
+        as someone else can build.
         """
         profiles = self.store.account_workloads()
-        settings = self._settings(db, room_id)
-        levels, abilities = roles.workload_levels(settings), roles.member_abilities(settings)
+        abilities = roles.member_abilities(self._settings(db, room_id))
+        members = self.objectives.available_members(db, room_id)
         idle = set()
         if building and abilities:
-            members = self.objectives.available_members(db, room_id)
             if any(roles.can(abilities, member, "work") for member in members):
                 idle = {member for member in members if not roles.can(abilities, member, "work")}
 
         reserved = self._reserved(db, room_id, profiles)
-        if not set(self.objectives.available_members(db, room_id)) <= idle | reserved:
+        if not set(members) <= idle | reserved:
             idle |= reserved
+        limits = self._user_limits(db, room_id, members, profiles)
+        team = self.team(db, room_id)
+        shares = workload.targets(members, limits, self._allocation(db, team["current_run_id"]) if team else None)
 
         def profile(member):
             entry = profiles.get(member, (member, workload.DEFAULT_LEVEL))
-            return entry[0], workload.IDLE if member in idle else levels.get(member, entry[1])
+            share, source = shares.get(member, (workload.LEVELS[workload.DEFAULT_LEVEL], workload.DEFAULT))
+            level = limits[member][1] if member in limits and limits[member][0] == "level" else workload.DEFAULT_LEVEL
+            return entry[0], workload.IDLE if member in idle else level, share, source
         return profile
+
+    def _user_limits(self, db, room_id, members, profiles=None):
+        """What the user fixed for each member: this task's setting, else an account level other than the default.
+
+        Read from the latest settings the user sent, so a change made while
+        calls are running decides the very next hand-out.
+        """
+        profiles = self.store.account_workloads() if profiles is None else profiles
+        chosen = roles.workload_levels(self.store._desired_runtime(self.store._room(db, room_id))["runtime_settings"])
+        limits = {}
+        for member in members:
+            value = chosen.get(member)
+            if value is None and member in profiles and profiles[member][1] != workload.DEFAULT_LEVEL:
+                value = profiles[member][1]
+            limit = workload.user_limit(value)
+            if limit is not None:
+                limits[member] = limit
+        return limits
+
+    @staticmethod
+    def _allocation(db, run_id):
+        """The partners' latest allocation for this round: {member: 0-100}, or None."""
+        row = db.execute("SELECT allocation_json FROM team_runs WHERE id=?", (run_id,)).fetchone() if run_id else None
+        return json.loads(row[0]) if row and row[0] else None
+
+    @staticmethod
+    def _allocation_shares(command):
+        """The members an allocate names; a null share leaves that member as it was."""
+        shares = command.get("shares")
+        return {member: value for member, value in shares.items() if value is not None} if isinstance(shares, dict) else None
+
+    def _check_allocation(self, db, context, command, members):
+        shares = self._allocation_shares(command)
+        if (not shares or any(member not in members or type(value) is not int or not 0 <= value <= workload.MAX_PERCENT
+                              for member, value in shares.items())):
+            raise RoomError("invalid_team_allocation")
+        checked_text(command["reason"], MAX_PARTNER_TEXT)
+        merged = {**(self._allocation(db, context["run_id"]) or {}), **shares}
+        if all(merged.get(member) == 0 for member in members):
+            raise RoomError("invalid_team_allocation")
+
+    def _allocate(self, db, job, context, command):
+        """Keep the partners' split of this round, inside what the user fixed, and say what was cut."""
+        room_id = job["room_id"]
+        members = self.objectives.available_members(db, room_id)
+        previous = self._allocation(db, context["run_id"]) or {}
+        shares, limited = workload.clamp_allocation(members, self._user_limits(db, room_id, members),
+                                                    self._allocation_shares(command))
+        current = {**previous, **shares}
+        db.execute("UPDATE team_runs SET allocation_json=? WHERE id=?", (json.dumps(current, sort_keys=True), context["run_id"]))
+        self.store._event(db, room_id, "workload_allocated", sender=job["provider"], job_id=job["id"], run_id=context["run_id"],
+                          shares=current, previous_shares=previous, reason=command["reason"], limited=limited)
 
     def _reserved(self, db, room_id, profiles=None, members=None):
         """Members whose account is down to its reserve, while someone else still has more."""
@@ -2470,6 +2586,9 @@ class TeamStore:
             summary["phases"] = self.phase_load(db, room_id, team["current_run_id"])
             abilities = self._abilities(db, room_id)
             summary["roles"] = {member: sorted(abilities[member]) for member in members if member in abilities}
+            # What the user fixed, so the page and the partners can tell a level or ceiling from the partners' own split.
+            summary["user_limits"] = {member: {"kind": kind, "value": value}
+                                      for member, (kind, value) in self._user_limits(db, room_id, members).items()}
         return summary
 
     def phase_load(self, db, room_id, run_id):
@@ -2642,6 +2761,46 @@ class TeamStore:
         self.store._event(db, job["room_id"], "internal_replan_requested", sender=job["provider"],
                           job_id=job["id"], task_id=task["id"], assignment_epoch=task["assignment_epoch"],
                           result_version=task["result_version"])
+
+    def _offer_blocked_tasks(self, db, room_id, requested):
+        """Ask one free partner to act on tasks blocked for the team while other calls run.
+
+        First a partner other than the ones who just reported the blocks, once.
+        After another task has been settled since, once more, to an owner
+        first: what its task waited for may exist now. The partner answers
+        under the rules for changing the board while work runs. What it cannot
+        settle still gets the whole-team replan when the running calls end.
+        """
+        run_id = self.team(db, room_id)["current_run_id"]
+        ids = sorted([task["id"], task["result_version"], task["assignment_epoch"]] for task in requested)
+        settled = db.execute("SELECT COUNT(*) FROM shared_tasks WHERE room_id=? AND run_id=? AND status IN "
+                             "('accepted','self_checked')", (room_id, run_id)).fetchone()[0]
+        last = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')="
+                          "'blocked_tasks_offered' AND json_extract(value_json,'$.run_id')=? ORDER BY seq DESC LIMIT 1",
+                          (room_id, run_id)).fetchone()
+        last = json.loads(last[0]) if last else None
+        again = last is not None and last.get("tasks") == ids
+        if again and last.get("settled") == settled:
+            return False
+        free = [member for member in self.objectives.available_members(db, room_id) if not self._busy(db, room_id, member)]
+        owners = [task["owner"] for task in requested if task["owner"] in free]
+        others = self._fair_order(db, room_id, [member for member in free if member not in owners])
+        candidates = owners + others if again else others
+        if not candidates:
+            return False
+        text = ("The host is asking, not the user. These tasks are blocked for the team to sort out, and other calls are "
+                "still running, so the whole-team replan has not started:\n"
+                + "\n".join("- " + task["id"] + " (owner " + str(task["owner"]) + "): " + (task["blocked_reason"] or "")[:1500]
+                            for task in requested)
+                + "\nCheck the current board and files first: what a task waited for may exist by now. You may act now "
+                "under the rules for changing the board while work runs: claim your own blocked task to resume it, propose "
+                "tasks, adjust a task nobody has started, or take files from a started task nobody is working on. If "
+                "nothing can change yet, say in one or two sentences what each blocked task is waiting for.")
+        if not self._queue(db, room_id, candidates[0], "user", text=text):
+            return False
+        self.store._event(db, room_id, "blocked_tasks_offered", sender="system", provider=candidates[0], tasks=ids,
+                          settled=settled, run_id=run_id)
+        return True
 
     def _begin_internal_replan(self, db, room_id, tasks):
         requested = [task for task in tasks if task["status"] == "blocked"
@@ -3047,7 +3206,22 @@ class TeamStore:
                     changed = self._queue(db, room_id, task["owner"], "work", task=task) or changed
         if calls_available(self._remaining(db, room_id)):
             changed = self._take_from_pool(db, room_id, members) or changed
+        # A replan that waits for running calls: whoever is still free after
+        # all ready work was handed out looks at the blocked tasks now, so
+        # nobody waits for the whole team to fall idle.
+        if team["phase"] == "working" and calls_available(self._remaining(db, room_id)):
+            requested = [task for task in db.execute(
+                "SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked' AND internal_replan_revision=-1 "
+                "AND block_cause IN " + _REPLAN_CAUSES_SQL + " ORDER BY rowid", (room_id, team["current_run_id"]))]
+            if requested and self._work_running(db, room_id):
+                changed = self._offer_blocked_tasks(db, room_id, requested) or changed
         return changed
+
+    @staticmethod
+    def _work_running(db, room_id):
+        """A work call is queued or running: the long kind, unlike a review or a reply the replan can wait out."""
+        return db.execute("SELECT 1 FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.phase='work' "
+                          "AND j.status IN ('queued','working') LIMIT 1", (room_id,)).fetchone() is not None
 
     def _unfinished_holders(self, db, room_id):
         """Case-folded path -> partners whose unfinished task in this run lists it."""
@@ -3059,6 +3233,28 @@ class TeamStore:
                 holders.setdefault(path.casefold(), set()).add(row["owner"])
         return holders
 
+    def _held_back(self, db, room_id):
+        """Members who take pool work only when nobody else could.
+
+        An account down to its reserve, a member whose share of the round is 0,
+        and a member whose account has already done more of the round than the
+        ceiling the user set for it. The partners' own shares only decide who
+        goes first; they never keep a free member waiting.
+        """
+        members = self.objectives.available_members(db, room_id)
+        profile = self._workload_profile(db, room_id)
+        limits = self._user_limits(db, room_id, members)
+        rows = workload.accounts(members, self._loads(db, room_id, self.team(db, room_id)["current_run_id"]), profile)
+        total = sum(row["points"] for row in rows)
+        done = {member: row["points"] * 100 / total for row in rows for member in row["members"]} if total else {}
+        held = set()
+        for member in members:
+            entry = profile(member)
+            ceiling = limits[member][1] if member in limits and limits[member][0] == "percent" else None
+            if entry[1] == workload.IDLE or entry[2] == 0 or ceiling is not None and done.get(member, 0) > ceiling:
+                held.add(member)
+        return held if len(held) < len(members) else set()
+
     def _pool_takers(self, db, room_id, members):
         """(able, can_take): who could ever do a pool task, and who may take it now, busy or not.
 
@@ -3066,14 +3262,14 @@ class TeamStore:
         anyone in the room builds). can_take adds two rules: no other partner
         may hold one of its files in unfinished work (the plan's path check
         already forbids that; this is a guard against two editors at once),
-        and an account down to its reserve takes it only when no one else could.
+        and a member held back (see _held_back) takes it only when no one else could.
         A file another partner wrote and is done with moves to the taker by
         grant when its work call starts.
         """
         abilities = self._abilities(db, room_id)
         builders = [member for member in members if roles.can(abilities, member, "work")]
         holders = self._unfinished_holders(db, room_id)
-        reserved = self._reserved(db, room_id)
+        reserved = self._held_back(db, room_id)
 
         def able(task, member):
             return task["capability"] in self.store.task_capabilities(member) and (member in builders or not builders)
@@ -3093,7 +3289,8 @@ class TeamStore:
         A task is ready once all its dependencies are settled, by anyone. The
         member who did one of those dependencies goes first (it keeps the
         chain's context), then the earliest task in plan order. Among free
-        members, the one least used for its share picks first. Binding the
+        members, the one least used for its share picks first (with equal
+        shares, the one that has taken fewest tasks this round). Binding the
         owner and queueing its call happen in this one transaction, guarded
         on the task still being open, so two members never get the same task.
         """
@@ -3106,8 +3303,11 @@ class TeamStore:
             return False
         able, can_take = self._pool_takers(db, room_id, members)
         free = [member for member in members if not self._busy(db, room_id, member)]
+        # With equal shares, whoever has taken fewest tasks this round goes first: otherwise the first
+        # member in room order would take every new task and a free one behind it none.
+        held = {member: sum(row["owner"] == member for row in rows) for member in free}
         order = workload.fair_order(free, members, self._loads(db, room_id, run_id),
-                                    self._workload_profile(db, room_id, building=True)) if len(free) > 1 else free
+                                    self._workload_profile(db, room_id, building=True), when_equal=held.get) if len(free) > 1 else free
         taken, given, changed = set(), set(), False
         for chained in (True, False):
             for member in order:
@@ -3316,9 +3516,9 @@ class TeamStore:
                 value["call_running"] = True
             tasks.append(value)
         # Who can take build work now, so planners never name an implementer the
-        # quota reserve, an exhausted quota or a role keeps idle.
+        # quota reserve, an exhausted quota, a share of 0, the user's ceiling or a role keeps idle.
         available = self.objectives.available_members(db, room_id)
-        reserved = self._reserved(db, room_id, members=available) if team["current_run_id"] else set()
+        reserved = self._held_back(db, room_id) if team["current_run_id"] else set()
         abilities = self._abilities(db, room_id)
         builders = [member for member in available if roles.can(abilities, member, "work")]
         def takes_build_work(provider):

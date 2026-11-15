@@ -58,9 +58,12 @@ def normalized_role(value):
 
 
 def normalized_workload(value):
+    """None (the partners split the work), a level the user fixes, or a ceiling of 1-100 percent."""
     if value is None:
         return None
-    if value not in WORKLOADS:
+    if type(value) is int and 1 <= value <= 100:
+        return value
+    if not isinstance(value, str) or value not in WORKLOADS:
         raise RoleError("invalid_workload")
     return value
 

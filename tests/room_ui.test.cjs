@@ -3786,6 +3786,106 @@ test('each partner can be given a role and a workload for the new task, and a mo
   });
 });
 
+test('a partner\'s workload can be left to the partners, fixed at a level or capped at a share, and each choice is sent and shown again', async () => {
+  // Catches: the share limit never reaching the server, the number field missing or keeping a stale figure, an out-of-range figure sent as typed, or a cleared setting still sent.
+  const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });
+  const ui = await browser({ agents: catalog.slice(0, 2), route(request) {
+    if (request.path === '/api/runtime-options') return runtimeOptionsFixture();
+    if (request.path === '/api/rooms' && request.method === 'POST') return saved;
+  } });
+  const percentField = (id) => descendants(ui.get(`runtime-card-${id}`)).find((node) => node.id === `runtime-workload-percent-${id}`);
+  const setPercent = (id, value) => { const field = percentField(id); field.value = value; field.fire('change'); };
+  await openRuntimeSettings(ui);
+  assert.deepEqual(ui.get('runtime-workload-claude').children.map((node) => node.textContent), ['伙伴们自己分（默认）', '少', '中', '多', '自定占比上限…']);
+  assert.equal(ui.get('runtime-workload-claude').value, ''); assert.equal(percentField('claude'), undefined, 'no number field until a share limit is chosen');
+  assert.match(ui.get('runtime-card-claude').textContent, /留空时伙伴们自己商量怎么分，做的过程中会自己调整。你定了占比，他们就不会给它派超过这个比例的活/);
+  assert.doesNotMatch(ui.get('runtime-card-claude').textContent, /请先处理|副本|内部|审批|跟随账号设置/);
+  selectRuntime(ui, 'runtime-workload-claude', 'percent');
+  assert.equal(ui.get('runtime-workload-claude').value, 'percent'); assert.equal(percentField('claude').value, '50', 'starts from an even share of the two chosen partners');
+  setPercent('claude', '30');
+  assert.equal(percentField('claude').value, '30'); assert.match(ui.get('runtime-shortcut-claude').title, /工作量上限 30%/);
+  setPercent('claude', '250'); assert.equal(percentField('claude').value, '100', 'a figure above 100 is pulled back to 100');
+  setPercent('claude', '0'); assert.equal(percentField('claude').value, '1', 'a figure below 1 is pulled up to 1');
+  setPercent('claude', ''); assert.equal(percentField('claude').value, '1', 'an empty field keeps the last limit');
+  setPercent('claude', '30');
+  selectRuntime(ui, 'runtime-workload-codex', 'low'); assert.equal(percentField('codex'), undefined);
+  await ui.click('runtime-settings-close'); await openRuntimeSettings(ui);
+  assert.equal(ui.get('runtime-workload-claude').value, 'percent'); assert.equal(percentField('claude').value, '30', 'the limit shows again when the settings reopen');
+  assert.equal(ui.get('runtime-workload-codex').value, 'low');
+  selectRuntime(ui, 'runtime-workload-codex', 'percent'); setPercent('codex', '45');
+  selectRuntime(ui, 'runtime-workload-codex', ''); assert.equal(percentField('codex'), undefined, 'handing it back to the partners removes the number field');
+  await ui.click('runtime-settings-close'); ui.type('分工完成一个虚构小任务'); await ui.submit();
+  const create = ui.posts().find((request) => request.path === '/api/rooms'); assert.ok(create);
+  assert.deepEqual(create.body.runtime_settings.members, { claude: { model: null, effort: null, workload: 30 }, codex: { model: null, effort: null } });
+
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), route(request) { if (request.path === '/api/runtime-options') return runtimeOptionsFixture(); } });
+  await openRuntimeSettings(english);
+  assert.deepEqual(english.get('runtime-workload-claude').children.map((node) => node.textContent), ['Partners decide (default)', 'Less', 'Medium', 'More', 'Set a share limit…']);
+  selectRuntime(english, 'runtime-workload-claude', 'percent');
+  assert.match(english.get('runtime-card-claude').textContent, /Share limit \(%\)/);
+  assert.match(english.get('runtime-card-claude').textContent, /Left empty, the partners work out the split themselves and adjust it as they go\./);
+  assert.match(english.get('runtime-shortcut-claude').title, /workload up to 50%/);
+});
+
+test('a share limit saved on a running task shows again and a changed one goes out with the next message', async () => {
+  // Catches a saved limit reading back as "partners decide", or a mid-task change never being sent.
+  const saved = withRuntimeConfiguration(withNaturalContinuation(objectiveSnapshot({ status: 'running' })));
+  for (const settings of [saved.room.runtime_settings, saved.current_run.runtime_settings, saved.runtime_configuration.desired.runtime_settings]) {
+    settings.members.claude.workload = 30; settings.members.codex.workload = 'high';
+  }
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, naturalRuntimeSupport: true, route(request) {
+    if (request.path === '/api/runtime-options') return runtimeOptionsFixture();
+    if (request.path.endsWith('/messages')) return saved;
+  } });
+  await openRuntimeSettings(ui);
+  const field = () => descendants(ui.get('runtime-card-claude')).find((node) => node.id === 'runtime-workload-percent-claude');
+  assert.equal(ui.get('runtime-workload-claude').value, 'percent'); assert.equal(field().value, '30');
+  assert.equal(ui.get('runtime-workload-codex').value, 'high');
+  field().value = '40'; field().fire('change'); selectRuntime(ui, 'runtime-workload-codex', '');
+  await ui.click('runtime-settings-close'); assert.equal(ui.posts().length, 0);
+  ui.type('按新的分工接着做'); await ui.submit();
+  const members = ui.posts()[0].body.runtime_settings.members;
+  assert.equal(members.claude.workload, 40); assert.equal(Object.hasOwn(members.codex, 'workload'), false);
+});
+
+test('each card says whether its target was set by the user or split by the partners', async () => {
+  // Catches the card showing one unlabelled target, so the user cannot tell their own limit from the partners' split.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  saved.workload = { configured: true, user_limits: { claude: { kind: 'percent', value: 30 } }, accounts: [
+    { scope: 'claude', members: ['claude'], share: 30, level: 'normal', source: 'user', points: 450, calls: 2, target_percent: 30, actual_percent: 45 },
+    { scope: 'codex', members: ['codex'], share: 70, level: 'normal', source: 'partners', points: 550, calls: 2, target_percent: 70, actual_percent: 55 },
+  ] };
+  const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.equal(ui.get('member-workload-claude').textContent, '角色：全能 · 本轮工作量 45% · 目标 30%（你定的）');
+  assert.equal(ui.get('member-workload-codex').textContent, '角色：全能 · 本轮工作量 55% · 目标 70%（伙伴们分的）');
+  const english = await browser({ language: 'en', agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.equal(english.get('member-workload-claude').textContent, 'Role: All-round · This round 45% of the work · target 30% (set by you)');
+  assert.equal(english.get('member-workload-codex').textContent, 'Role: All-round · This round 55% of the work · target 70% (set by the partners)');
+  saved.workload.accounts[1].source = 'default';
+  const plain = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  assert.equal(plain.get('member-workload-codex').textContent, '角色：全能 · 本轮工作量 55% · 设定 70%');
+});
+
+test('the partners\' split of the work is named in the chat in both languages, with what the user\'s setting cut', async () => {
+  // Catches the partners re-splitting the work without the user seeing it, losing the reason, or hiding that a share was cut to the user's limit.
+  const saved = objectiveSnapshot({ status: 'running' });
+  saved.team = { run_id: saved.current_run.id, phase: 'working', tasks: [{ id: 'L1', title: '跑完整回归', owner: 'codex', status: 'working' }] };
+  saved.jobs = [];
+  const event = { seq: 1, kind: 'workload_allocated', sender: 'claude', run_id: saved.current_run.id, created_at: 1100,
+    shares: { claude: 30, codex: 70 }, previous_shares: {}, reason: '回归这块活更重，交给 Codex。',
+    limited: [{ member: 'claude', asked: 60, applied: 30, by: 'user_percent' }] };
+  saved.events = [event];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(ui.get('events').textContent, /Claude Code 分了这一轮的工作量，按 Claude Code 30、Codex 70 的比例派活。给Claude Code的超出了你定的范围，已按你的设置算。理由：回归这块活更重，交给 Codex。/);
+  assert.doesNotMatch(ui.get('events').textContent, /请先处理|副本|内部|审批/);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(english.get('events').textContent, /Claude Code split this round's work: tasks are handed out in the proportion Claude Code 30, Codex 70\. The share for Claude Code went past what you set, so your setting was used\. Reason: 回归这块活更重，交给 Codex。/);
+  saved.events = [{ ...event, limited: [], reason: '' }];
+  const plain = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  assert.match(plain.get('events').textContent, /Claude Code 分了这一轮的工作量，按 Claude Code 30、Codex 70 的比例派活。/);
+  assert.doesNotMatch(plain.get('events').textContent, /超出了你定的范围|理由：/);
+});
+
 test('任务选项 sets each chosen partner\'s model, role and workload in place, the same way the per-partner popover does', async () => {
   // Catches the settings moving into 任务选项 but writing a different draft than the popover (lost role, reset workload) or not reaching the new task.
   const saved = snapshot({ agents: catalog.slice(0, 2), status: 'running' });

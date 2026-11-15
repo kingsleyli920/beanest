@@ -46,9 +46,12 @@ function renderMemberWorkload(id, workload, role = partnerRuntimeLabels(id).role
   const holder = document.getElementById(`member-workload-${id}`);
   if (!holder) return;
   const account = workload?.accounts?.find((row) => row.members.includes(id));
+  // The target says who set it: the user's own setting, or the split the partners agreed on.
   const share = !Number.isInteger(account?.actual_percent) ? ''
-    : workload.configured ? t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent })
-      : t("本轮工作量 {p0}%", { p0: account.actual_percent });
+    : !workload.configured ? t("本轮工作量 {p0}%", { p0: account.actual_percent })
+      : account.source === 'user' ? t("本轮工作量 {p0}% · 目标 {p1}%（你定的）", { p0: account.actual_percent, p1: account.target_percent })
+        : account.source === 'partners' ? t("本轮工作量 {p0}% · 目标 {p1}%（伙伴们分的）", { p0: account.actual_percent, p1: account.target_percent })
+          : t("本轮工作量 {p0}% · 设定 {p1}%", { p0: account.actual_percent, p1: account.target_percent });
   const partner = state.partners.find((entry) => entry.id === id);
   const reserve = partner?.quota_reserve;
   // Always named, the default too, so every card shows that a role is set and what it is.
@@ -400,7 +403,7 @@ function workloadControl(id, partner) {
   status.setAttribute('role', 'status'); status.hidden = !saving && !saved;
   row.append(status);
   const holder = element('div', '', 'account-workload-setting');
-  holder.append(row, element('p', t("额度高的账号选多，低的选少。使用同一账号的伙伴一起变化。用于分配审查和还没开工的任务；任务里单独设置时以任务为准。"), 'detail-caption'));
+  holder.append(row, element('p', t("选少或多会固定这个账号的份额：额度高的选多，低的选少。选中就交给伙伴们自己分。使用同一账号的伙伴一起变化；任务里单独设置时以任务为准。"), 'detail-caption'));
   return holder;
 }
 async function saveWorkload(id, level) {

@@ -260,6 +260,16 @@ function progressText(event, jobs, archive = false) {
     if (changed.length) return t("{p0} 改了还没开始的{p1}的前置任务或修改范围，进行中的工作照常继续。", { p0: who, p1: interfaceList(changed) });
     return t("{p0} 调整了还没开始的任务，进行中的工作照常继续。", { p0: who });
   }
+  if (event.kind === 'workload_allocated') {
+    // The partners split the round's work themselves; anything past the user's own setting was cut to it.
+    const shares = Object.entries(event.shares && typeof event.shares === 'object' ? event.shares : {})
+      .filter(([, value]) => Number.isInteger(value)).map(([member, value]) => `${displayName(member)} ${value}`);
+    const limited = (Array.isArray(event.limited) ? event.limited : []).filter((item) => typeof item?.member === 'string').map((item) => displayName(item.member));
+    const reason = typeof event.reason === 'string' && event.reason.trim() ? event.reason.trim() : '';
+    return t("{p0} 分了这一轮的工作量，按 {p1} 的比例派活。", { p0: displayName(event.sender), p1: interfaceList(shares) })
+      + (limited.length ? t("给{p0}的超出了你定的范围，已按你的设置算。", { p0: interfaceList(limited) }) : '')
+      + (reason ? t("理由：{p0}", { p0: reason }) : '');
+  }
   if (event.kind === 'task_scope_extended') {
     // A partner took files no unfinished task held into its own task and kept working instead of replanning.
     const paths = (Array.isArray(event.paths) ? event.paths : []).filter((path) => typeof path === 'string' && path);
@@ -386,7 +396,7 @@ function eventNode(event, jobs, sourceMembers = null) {
       || ['run_started', 'run_accepted', 'round_handoff_recorded', 'task_handoff_recorded', 'partner_session_rotated', 'user_message_redelivered'].includes(event.kind)
       || (event.kind === 'team_command' && ['claim', 'complete', 'request_help', 'review', 'block'].includes(event.command))
       || ['team_plan', 'team_task_created', 'team_task_claimed', 'team_task_completed', 'team_task_reviewed', 'team_help_requested', 'team_help_finished', 'team_stopped'].includes(event.kind)
-      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'task_taken' || event.kind === 'task_returned_to_pool' || event.kind === 'plan_adjusted' || event.kind === 'task_scope_extended' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
+      || event.kind === 'task_taken_over' || event.kind === 'task_rebalanced' || event.kind === 'task_taken' || event.kind === 'task_returned_to_pool' || event.kind === 'plan_adjusted' || event.kind === 'workload_allocated' || event.kind === 'task_scope_extended' || event.kind === 'task_withdrawn' || event.kind === 'source_advanced_externally'
       || executionNeedsAttention
       || typeof event.cancellation_confirmed === 'boolean'
       || (event.kind === 'job_created' && jobKind(event, jobs) === 'feedback');
