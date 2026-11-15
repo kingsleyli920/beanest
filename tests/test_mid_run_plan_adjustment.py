@@ -197,6 +197,29 @@ class MidRunStore(unittest.TestCase):
                            item["previous_write_paths"], item["write_paths"]) for item in event["adjusted"]],
                          [("L1", True, "kimi", ["load.py", "extra.py"], ["load.py"])])
 
+    def test_a_partner_with_nothing_to_do_is_told_what_waits_behind_busy_partners_once(self):
+        # Catches the real room where one partner held three tasks, another two, and a third sat idle
+        # for an hour: tasks belong to their owners, the pool was empty, and nothing told the idle one.
+        # Also catches asking a partner that has work of its own, and asking twice about the same board.
+        with self.store._connection(write=True) as db:  # Fixture: codex owns nothing; kimi has L2 after L1.
+            db.execute("UPDATE shared_tasks SET owner='kimi' WHERE room_id=? AND id='L2'", (self.room_id,))
+        self.finish(self.user_reply_job("claude"), [adjust("D1", [], ["docs.md"]), adjust("I1", [], ["main.py"])])
+        d1 = self.store.claim(self.room_id, "claude")
+        self.assertEqual((d1["kind"], d1["team"]["task_id"]), ("team_work", "D1"))
+        self.store.reconcile_team(self.room_id)  # the next hand-out, now that the call is running
+        offered = [event for event in self.snapshot()["events"] if event["kind"] == "queued_work_offered"]
+        self.assertEqual([(event["provider"], event["tasks"]) for event in offered], [("codex", [["I1", "claude"]])])
+        ask = self.store.claim(self.room_id, "codex")
+        self.assertEqual(ask["kind"], "team_user")
+        self.assertIn("You hold no unfinished task and the pool has nothing for you", ask["text"])
+        self.assertIn("- I1 (owner claude, now working on D1): ", ask["text"])
+        self.assertNotIn("L2", ask["text"], "a task still waiting for its prerequisite is not on offer")
+        self.finish(ask, [])
+        self.store.reconcile_team(self.room_id)
+        self.assertEqual(len([event for event in self.snapshot()["events"] if event["kind"] == "queued_work_offered"]), 1)
+        self.assertIsNone(self.store.claim(self.room_id, "codex"))
+        self.assertEqual(self.tasks()["I1"]["owner"], "claude")
+
     def test_a_task_with_a_queued_work_call_cannot_be_adjusted(self):
         # Catches a queued call being treated as unstarted: it is the owner's next step on the old binding.
         job = self.user_reply_job("claude")

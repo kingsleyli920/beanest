@@ -3215,7 +3215,55 @@ class TeamStore:
                 "AND block_cause IN " + _REPLAN_CAUSES_SQL + " ORDER BY rowid", (room_id, team["current_run_id"]))]
             if requested and self._work_running(db, room_id):
                 changed = self._offer_blocked_tasks(db, room_id, requested) or changed
+            elif not requested:
+                changed = self._offer_queued_work(db, room_id) or changed
         return changed
+
+    def _offer_queued_work(self, db, room_id):
+        """Tell a partner with nothing to do about work queued behind busy partners, once per such board.
+
+        Tasks belong to their owners, so a partner that owns none and finds the
+        pool empty would sit idle while others have several tasks in line. It
+        is asked under the rules for changing the board while work runs, and
+        decides: split the work again, take files from a task nobody is working
+        on, or propose something of its own.
+        """
+        run_id = self.team(db, room_id)["current_run_id"]
+        rows = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid", (room_id, run_id)).fetchall()
+        working = {row[0]: row[1] for row in db.execute(
+            "SELECT j.provider,t.task_id FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.run_id=? "
+            "AND t.phase='work' AND j.status='working'", (room_id, run_id))}
+        by_id = {row["id"]: row for row in rows}
+        waiting = [row for row in rows if row["status"] == "assigned" and row["owner"] in working
+                   and working[row["owner"]] != row["id"]
+                   and all(task_settled(by_id[value]) for value in json.loads(row["dependencies_json"]) if value in by_id)]
+        if not waiting:
+            return False
+        holders = {row["owner"] for row in rows if row["owner"] and not task_settled(row)}
+        idle = [member for member in self.objectives.available_members(db, room_id)
+                if member not in holders and not self._busy(db, room_id, member)]
+        if not idle:
+            return False
+        ids = sorted([row["id"], row["owner"]] for row in waiting)
+        last = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')="
+                          "'queued_work_offered' AND json_extract(value_json,'$.run_id')=? ORDER BY seq DESC LIMIT 1",
+                          (room_id, run_id)).fetchone()
+        if last and json.loads(last[0]).get("tasks") == ids:
+            return False
+        provider = self._fair_order(db, room_id, idle)[0]
+        text = ("The host is asking, not the user. You hold no unfinished task and the pool has nothing for you, while these "
+                "tasks wait behind partners who are busy with something else:\n"
+                + "\n".join("- " + row["id"] + " (owner " + row["owner"] + ", now working on " + str(working[row["owner"]])
+                            + "): " + row["title"][:300] for row in waiting)
+                + "\nDecide what makes the whole goal finish sooner and act now under the rules for changing the board while "
+                "work runs: send allocate to split the round's work again, take files from a waiting task nobody is working "
+                "on and propose the task that uses them, or propose independent work of your own (checks, reviews of delivered "
+                "results, groundwork a waiting task will need). Do not repeat what a running call is doing. If waiting is "
+                "really the best choice, say why in one or two sentences.")
+        if not self._queue(db, room_id, provider, "user", text=text):
+            return False
+        self.store._event(db, room_id, "queued_work_offered", sender="system", provider=provider, tasks=ids, run_id=run_id)
+        return True
 
     @staticmethod
     def _work_running(db, room_id):

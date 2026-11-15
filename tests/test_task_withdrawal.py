@@ -41,6 +41,9 @@ class TaskWithdrawal(unittest.IsolatedAsyncioTestCase):
             if board["tasks"] or commands:
                 commands.append({"type": "plan_ready"})
             return native_reply(context, commands)
+        if phase == "user":
+            # The host telling a partner with nothing to do what waits behind busy partners; it has nothing to add.
+            return native_reply(context, [])
         if phase == "work":
             self.worked.append(task["id"])
             hold = self.holds.get(("work", task["id"]))
