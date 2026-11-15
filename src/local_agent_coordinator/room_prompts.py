@@ -89,7 +89,8 @@ EXTEND_INSTRUCTION = (
     "unfinished task on the board lists (a finished task's file is fine, whoever wrote it: the host hands it over to your task). "
     "A task holds exactly the paths it lists: a folder in another task's write_paths does not hold the files or "
     "subfolders under it, so a new file or subfolder there that no task lists by its own path is yours to add. "
-    "A file another unfinished task holds still needs block "
+    "A file held by another unfinished task of your own moves to this task when you extend with it. "
+    "A file another partner's unfinished task holds still needs block "
     "coordination_required. If extend breaks a rule, the whole response is rejected and nothing is imported. ")
 
 

@@ -31,7 +31,8 @@ class MidRunStore(unittest.TestCase):
                                agents={"claude": "Claude", "codex": "Codex", "kimi": "Kimi"})
         # Planned owners stay put, so each case knows who holds what.
         native.planned_owners(self.store)
-        self.room_id = self.store.create_room("Ship the report tool", "claude", str(uuid4()), collaboration=True)[0]
+        self.room_id = self.store.create_room("Ship the report tool", "claude", str(uuid4()), collaboration=True,
+                                              **getattr(self, "room_options", {}))[0]
         plans = {provider: self.store.claim(self.room_id, provider) for provider in ("claude", "codex", "kimi")}
         self.finish(plans["claude"], [proposal("L1", paths=["load.py"]),
                                       proposal("L2", dependencies=["L1"], paths=["core.py", "side.py"]),
@@ -227,6 +228,59 @@ class MidRunStore(unittest.TestCase):
         # Catches adjust being used to grant an unstarted task files it never had.
         job = self.user_reply_job("claude")
         self.refused(job, [adjust("D1", [], ["docs.md", "core.py"])], "invalid_team_task")
+
+
+class BlockedWhileOthersWork(MidRunStore):
+    """The same board on an objective that keeps going by itself: a block for the team asks for a replan."""
+    room_options = {"execution_policy": {"mode": "autonomous"}}
+
+    def queued(self):
+        return sorted((job["provider"], job["kind"]) for job in self.snapshot()["jobs"] if job["status"] in {"queued", "working"})
+
+    def offers(self):
+        return [(event["provider"], event["settled"]) for event in self.snapshot()["events"] if event["kind"] == "blocked_tasks_offered"]
+
+    def test_a_free_partner_is_asked_at_once_and_the_owner_again_when_the_board_has_moved(self):
+        # Catches the real room where two tasks stayed blocked for over an hour: the replan waits until no
+        # call runs, a long work call was always running, and three free partners were never asked. Also
+        # catches asking the partner that just reported the block, asking twice for the same board, and
+        # the owner being unable to resume once what it waited for exists.
+        self.finish(self.user_reply_job("claude"), [adjust("D1", [], ["docs.md"])])
+        d1 = self.store.claim(self.room_id, "claude")
+        self.assertEqual((d1["kind"], d1["team"]["task_id"]), ("team_work", "D1"))
+        self.finish(self.l1_work, [{"type": "block", "task_id": "L1", "cause": "coordination_required",
+                                    "reason": "Needs a loader format nobody owns."}])
+        self.assertEqual(self.queued(), [("claude", "team_work"), ("codex", "team_user")])
+        self.assertEqual(self.offers(), [("codex", 0)])
+        offer = self.store.claim(self.room_id, "codex")
+        self.assertIn("The host is asking, not the user.", offer["text"])
+        self.assertIn("- L1 (owner kimi): Needs a loader format nobody owns.", offer["text"])
+        self.finish(offer, [proposal("X1", paths=["x.py"])])
+        self.store.reconcile_team(self.room_id)
+        self.assertEqual(self.offers(), [("codex", 0)], "the same board is not asked about twice")
+        self.assertEqual(self.snapshot()["team"]["phase"], "working")
+        self.finish(d1, [{"type": "complete", "task_id": "D1", "result": "Docs written."}])
+        review = self.store.claim(self.room_id, "kimi")
+        self.assertEqual(review["kind"], "team_review")
+        self.finish(review, [{"type": "review", "task_id": "D1", "verdict": "accept", "reason": "Read it."}])
+        self.assertEqual(self.offers(), [("codex", 0), ("kimi", 1)])
+        again = self.store.claim(self.room_id, "kimi")
+        self.assertEqual(again["kind"], "team_user")
+        self.finish(again, [{"type": "claim", "task_id": "L1"}])
+        self.assertEqual((self.tasks()["L1"]["status"], self.tasks()["L1"]["owner"]), ("assigned", "kimi"))
+        resumed = self.store.claim(self.room_id, "kimi")
+        self.assertEqual((resumed["kind"], resumed["team"]["task_id"]), ("team_work", "L1"))
+        self.assertEqual([event for event in self.snapshot()["events"] if event["kind"] == "internal_replan_started"], [])
+
+    def test_nobody_is_asked_while_only_a_short_call_runs(self):
+        # Catches an extra call being spent just before a replan that starts anyway once a review ends.
+        self.finish(self.user_reply_job("claude"), [adjust("D1", [], ["docs.md"])])
+        self.finish(self.store.claim(self.room_id, "claude"), [{"type": "complete", "task_id": "D1", "result": "Docs written."}])
+        self.assertEqual(self.queued(), [("codex", "team_review"), ("kimi", "team_work")])
+        self.finish(self.l1_work, [{"type": "block", "task_id": "L1", "cause": "coordination_required",
+                                    "reason": "Needs a loader format nobody owns."}])
+        self.assertEqual(self.queued(), [("codex", "team_review")])
+        self.assertEqual(self.offers(), [])
 
 
 class MidRunSchema(unittest.TestCase):

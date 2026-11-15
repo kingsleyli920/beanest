@@ -1796,9 +1796,12 @@ class TeamStore:
         """Paths this work call's extend commands add to its own task.
 
         Maps each new path to the finished tasks that held it. A path another
-        unfinished task holds still needs coordination, so the reply is refused.
+        partner's unfinished task holds still needs coordination, so the reply
+        is refused. A path held by another unfinished task of the same owner
+        simply moves: that partner is here now, so it cannot be working there.
         """
         own = {path.casefold() for path in json.loads(tasks[task_id]["write_paths_json"])}
+        owner = tasks[task_id]["owner"]
         added = {}
         for command in commands:
             if command["type"] != "extend":
@@ -1808,11 +1811,24 @@ class TeamStore:
                     continue
                 holders = [key for key, row in tasks.items() if key != task_id
                            and path.casefold() in {value.casefold() for value in json.loads(row["write_paths_json"])}]
-                if any(not task_settled(tasks[key]) for key in holders):
+                if any(not task_settled(tasks[key]) and (owner is None or tasks[key]["owner"] != owner) for key in holders):
                     raise RoomError("team_extend_path_held")
                 own.add(path.casefold())
-                added[path] = holders
+                added[path] = [key for key in holders if task_settled(tasks[key])]
         return added
+
+    @staticmethod
+    def _own_moves(tasks, task_id, paths):
+        """The same owner's other unfinished tasks that hold these paths, with what each gives up."""
+        owner, wanted = tasks[task_id]["owner"], {path.casefold() for path in paths}
+        moves = {}
+        for key, row in tasks.items():
+            if key == task_id or owner is None or row["owner"] != owner or task_settled(row):
+                continue
+            given = [value for value in json.loads(row["write_paths_json"]) if value.casefold() in wanted]
+            if given:
+                moves[key] = given
+        return moves
 
     @staticmethod
     def _ordering_dependencies(tasks, task_id, added):
@@ -2077,6 +2093,7 @@ class TeamStore:
         combined.update({key: item["dependencies"] for key, item in adjustments.items()})
         combined.update({item["id"]: item["dependencies"] for item in proposals})
         extended = self._scope_extension(tasks, context["task_id"], commands) if extends else {}
+        own_moves = self._own_moves(tasks, context["task_id"], extended) if extended else {}
         if extended:
             # The task as it will stand once extended must pass the same checks.
             combined[context["task_id"]] = (combined[context["task_id"]]
@@ -2106,6 +2123,8 @@ class TeamStore:
         task_paths.update({item["id"]: item["write_paths"] for item in proposals})
         if extended:
             task_paths[context["task_id"]] = task_paths[context["task_id"]] + list(extended)
+            for key, given in own_moves.items():
+                task_paths[key] = [value for value in task_paths[key] if value not in given]
 
         def depends_on(task_id, other):
             return any(value == other or depends_on(value, other) for value in combined[task_id])
@@ -2405,10 +2424,17 @@ class TeamStore:
                    (json.dumps(json.loads(task["write_paths_json"]) + list(added)),
                     json.dumps(json.loads(task["dependencies_json"]) + ordering),
                     json.dumps(grants) if grants else None, room_id, context["run_id"], task_id, job["provider"]))
+        moves = self._own_moves(tasks, task_id, added)
+        for key, given in moves.items():
+            db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND run_id=? AND id=?",
+                       (json.dumps([value for value in json.loads(tasks[key]["write_paths_json"]) if value not in given]),
+                        room_id, context["run_id"], key))
         self.store._event(db, room_id, "task_scope_extended", sender=job["provider"], job_id=job["id"],
                           run_id=context["run_id"], task_id=task_id, title=task["title"], paths=list(added),
                           taken_from=[{"path": path, "task_ids": holders} for path, holders in added.items() if holders],
-                          dependencies_added=ordering)
+                          dependencies_added=ordering,
+                          **({"moved_from_own_tasks": [{"task_id": key, "paths": given} for key, given in moves.items()]}
+                             if moves else {}))
 
     def _record_round_handoff(self, db, job, context, value, usage):
         """Keep a Claude checkpoint's handoff. A bad one is noted, never corrected:
@@ -2733,6 +2759,46 @@ class TeamStore:
         self.store._event(db, job["room_id"], "internal_replan_requested", sender=job["provider"],
                           job_id=job["id"], task_id=task["id"], assignment_epoch=task["assignment_epoch"],
                           result_version=task["result_version"])
+
+    def _offer_blocked_tasks(self, db, room_id, requested):
+        """Ask one free partner to act on tasks blocked for the team while other calls run.
+
+        First a partner other than the ones who just reported the blocks, once.
+        After another task has been settled since, once more, to an owner
+        first: what its task waited for may exist now. The partner answers
+        under the rules for changing the board while work runs. What it cannot
+        settle still gets the whole-team replan when the running calls end.
+        """
+        run_id = self.team(db, room_id)["current_run_id"]
+        ids = sorted([task["id"], task["result_version"], task["assignment_epoch"]] for task in requested)
+        settled = db.execute("SELECT COUNT(*) FROM shared_tasks WHERE room_id=? AND run_id=? AND status IN "
+                             "('accepted','self_checked')", (room_id, run_id)).fetchone()[0]
+        last = db.execute("SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')="
+                          "'blocked_tasks_offered' AND json_extract(value_json,'$.run_id')=? ORDER BY seq DESC LIMIT 1",
+                          (room_id, run_id)).fetchone()
+        last = json.loads(last[0]) if last else None
+        again = last is not None and last.get("tasks") == ids
+        if again and last.get("settled") == settled:
+            return False
+        free = [member for member in self.objectives.available_members(db, room_id) if not self._busy(db, room_id, member)]
+        owners = [task["owner"] for task in requested if task["owner"] in free]
+        others = self._fair_order(db, room_id, [member for member in free if member not in owners])
+        candidates = owners + others if again else others
+        if not candidates:
+            return False
+        text = ("The host is asking, not the user. These tasks are blocked for the team to sort out, and other calls are "
+                "still running, so the whole-team replan has not started:\n"
+                + "\n".join("- " + task["id"] + " (owner " + str(task["owner"]) + "): " + (task["blocked_reason"] or "")[:1500]
+                            for task in requested)
+                + "\nCheck the current board and files first: what a task waited for may exist by now. You may act now "
+                "under the rules for changing the board while work runs: claim your own blocked task to resume it, propose "
+                "tasks, adjust a task nobody has started, or take files from a started task nobody is working on. If "
+                "nothing can change yet, say in one or two sentences what each blocked task is waiting for.")
+        if not self._queue(db, room_id, candidates[0], "user", text=text):
+            return False
+        self.store._event(db, room_id, "blocked_tasks_offered", sender="system", provider=candidates[0], tasks=ids,
+                          settled=settled, run_id=run_id)
+        return True
 
     def _begin_internal_replan(self, db, room_id, tasks):
         requested = [task for task in tasks if task["status"] == "blocked"
@@ -3138,7 +3204,22 @@ class TeamStore:
                     changed = self._queue(db, room_id, task["owner"], "work", task=task) or changed
         if calls_available(self._remaining(db, room_id)):
             changed = self._take_from_pool(db, room_id, members) or changed
+        # A replan that waits for running calls: whoever is still free after
+        # all ready work was handed out looks at the blocked tasks now, so
+        # nobody waits for the whole team to fall idle.
+        if team["phase"] == "working" and calls_available(self._remaining(db, room_id)):
+            requested = [task for task in db.execute(
+                "SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND status='blocked' AND internal_replan_revision=-1 "
+                "AND block_cause IN " + _REPLAN_CAUSES_SQL + " ORDER BY rowid", (room_id, team["current_run_id"]))]
+            if requested and self._work_running(db, room_id):
+                changed = self._offer_blocked_tasks(db, room_id, requested) or changed
         return changed
+
+    @staticmethod
+    def _work_running(db, room_id):
+        """A work call is queued or running: the long kind, unlike a review or a reply the replan can wait out."""
+        return db.execute("SELECT 1 FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.phase='work' "
+                          "AND j.status IN ('queued','working') LIMIT 1", (room_id,)).fetchone() is not None
 
     def _unfinished_holders(self, db, room_id):
         """Case-folded path -> partners whose unfinished task in this run lists it."""
