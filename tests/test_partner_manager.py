@@ -172,6 +172,7 @@ class PartnerManagerTests(unittest.TestCase):
         with patch('local_agent_coordinator.partner_manager.adapters.find_claude', return_value='/virtual/claude') as claude, \
              patch('local_agent_coordinator.partner_manager.adapters.find_codex', side_effect=RuntimeError('missing')) as codex, \
              patch('local_agent_coordinator.partner_manager.adapters.find_kimi', side_effect=RuntimeError('missing')) as kimi, \
+             patch('local_agent_coordinator.partner_manager.adapters.find_dsh', side_effect=RuntimeError('missing')) as dsh, \
              patch('local_agent_coordinator.partner_manager.adapters._run', side_effect=AssertionError('no CLI execution')), \
              patch('local_agent_coordinator.partner_manager.adapters.doctor', side_effect=AssertionError('no auth checks')):
             manager = PartnerManager(self.root, self.base, clock=lambda: 42, startup_discovery=True)
@@ -179,7 +180,8 @@ class PartnerManagerTests(unittest.TestCase):
                 'state': 'completed', 'observed_at': 42, 'scope': 'supported_cli_locations',
                 'tools': [{'adapter': 'claude', 'name': 'Claude Code', 'installed': True},
                           {'adapter': 'codex', 'name': 'Codex', 'installed': False},
-                          {'adapter': 'kimi', 'name': 'Kimi Code', 'installed': False}],
+                          {'adapter': 'kimi', 'name': 'Kimi Code', 'installed': False},
+                          {'adapter': 'dsh', 'name': 'DeepSeek Harness', 'installed': False}],
             })
             self.assertEqual(manager.available_ids(), ('claude',))
             self.assertEqual(manager.enabled_ids(), ('claude', 'codex'))
@@ -187,6 +189,7 @@ class PartnerManagerTests(unittest.TestCase):
             self.assertEqual(claude.call_count, 1)
             self.assertEqual(codex.call_count, 1)
             self.assertEqual(kimi.call_count, 1)
+            self.assertEqual(dsh.call_count, 1)
             profiles = {item['id']: item for item in manager.profiles()}
             self.assertEqual(profiles['claude']['installation'], {'state': 'found'})
             self.assertEqual(profiles['codex']['installation'], {'state': 'missing'})

@@ -26,7 +26,8 @@ jobs:
   interface:
     name: Interface
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The suite takes 13 to 16 minutes on a hosted runner and grows with every view.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

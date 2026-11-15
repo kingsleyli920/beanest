@@ -19,14 +19,14 @@ EXPECTED = {
     # deadline are always zero, so they only come from one call running out of time.
     # objective_no_progress is the partners' to sort out; the host continues it after a pause.
     "auto": {"budget_exhausted", "deadline_exceeded", "objective_no_progress",
-             "cli_nonzero_exit", "empty_response", "execution_failed", "execution_repair_no_change",
+             "api_key_rejected", "cli_nonzero_exit", "empty_response", "execution_failed", "execution_repair_no_change",
              "execution_version_stale", "invalid_agent_response", "invalid_project_files", "invalid_response_json",
              "invalid_target", "invalid_team_commands", "invalid_team_dependencies", "invalid_team_task", "invalid_text",
              "message_too_large", "native_auth_unconfirmed", "native_json_files_forbidden", "native_no_progress", "native_preflight_failed",
              "native_permission_required", "native_process_or_protocol_failure", "native_progress_unconfirmed",
              "native_protocol_invalid", "native_protocol_unknown", "native_provider_error", "native_tool_unpaired",
              "native_turn_incomplete", "native_turn_unconfirmed", "native_unchanged_reason_required", "output_limit",
-             "process_or_output_failure", "protocol_turn_incomplete", "service_restarted", "service_shutdown",
+             "process_or_output_failure", "protocol_turn_incomplete", "provider_rate_limited", "service_restarted", "service_shutdown",
              "subscription_limit_reached", "team_capability_unavailable", "team_extend_path_held", "team_extend_path_owned", "team_files_forbidden", "team_plan_adjusted_meanwhile", "team_plan_locked",
              "team_plan_missing", "team_plan_stalled", "team_result_missing", "team_task_not_found",
              "team_task_permission", "team_write_path_conflict", "unexpected_tool_event", "unknown_provider_error"},

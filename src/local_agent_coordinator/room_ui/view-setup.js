@@ -141,19 +141,20 @@ function nativeSetupCard(adapter) {
 function firstRunVisible() {
   if (state.selected || state.firstRunDismissed || !state.adapters.length || state.discovery?.state !== 'completed' || state.discoveryInFlight) return !state.selected && !state.firstRunDismissed && !!state.firstRunOpen;
   // A status that could not be read must not nag someone whose tools already work.
-  if (!state.adapters.some((adapter) => ['ready', 'unknown'].includes(adapter.setup?.state))) state.firstRunOpen = true;
+  if (!state.adapters.some((adapter) => !adapter.pay_per_use && ['ready', 'unknown'].includes(adapter.setup?.state))) state.firstRunOpen = true;
   return !!state.firstRunOpen;
 }
 function renderFirstRun() {
   const visible = firstRunVisible();
   $('first-run-setup').hidden = !visible;
   $('empty-room').classList.toggle('needs-setup', visible);
-  $('first-run-done').hidden = !visible || !state.adapters.some((adapter) => adapter.setup?.state === 'ready');
+  $('first-run-done').hidden = !visible || !state.adapters.some((adapter) => !adapter.pay_per_use && adapter.setup?.state === 'ready');
   if (!visible) return;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), state.adapters.map((item) => item.setup), [...state.nativeLogins], [...state.nativeInstalls], [...state.nativeLoginBusy], [...state.nativeLoginErrors], state.connected]);
   if (fingerprint === state.firstRunFingerprint) return;
   state.firstRunFingerprint = fingerprint;
-  $('first-run-cards').replaceChildren(...state.adapters.filter((adapter) => adapter.setup).map(nativeSetupCard));
+  // A pay-per-use tool has no sign-in; it is set up with a key under 伙伴与额度, not here.
+  $('first-run-cards').replaceChildren(...state.adapters.filter((adapter) => adapter.setup && !adapter.pay_per_use).map(nativeSetupCard));
 }
 $('first-run-done').addEventListener('click', () => {
   state.firstRunDismissed = true; state.firstRunOpen = false;
@@ -162,7 +163,7 @@ $('first-run-done').addEventListener('click', () => {
   $('message').focus();
 });
 function renderNativeSetup() {
-  const adapters = state.adapters.filter((adapter) => adapter.setup
+  const adapters = state.adapters.filter((adapter) => adapter.setup && !adapter.pay_per_use
     && ['not_installed', 'login_required', 'ready', 'unknown'].includes(adapter.setup.state)
     && (adapter.setup.login_supported === true || adapter.setup.state === 'not_installed' && adapter.setup.install_url)
     && !(adapter.setup.state === 'unknown' && state.partners.some((partner) => partner.adapter === adapter.id && partner.account?.state === 'available' && !partner.account.stale))

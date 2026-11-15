@@ -331,6 +331,25 @@ class KilledHostTests(unittest.IsolatedAsyncioTestCase):
         final = await self.service.read_room(room_id)
         self.assertEqual(final["objective"]["status"], "complete", final["team"])
 
+    async def test_a_cut_off_pay_per_use_call_is_counted_once_as_unpriced_never_as_free(self):
+        # Catches: a call the host was killed under vanishing from a pay-per-use
+        # partner's ledger (its usage died with the host), or being counted on every pass.
+        room_id, orphan = await self.kill_host_during_work()
+        counted = []
+
+        class Ledger:
+            def record_api_spend(self, provider, by_model, model=None):
+                counted.append((provider, by_model))
+        self.service.partner_manager = Ledger()
+        try:
+            await self.host_passes(room_id, 4)
+        finally:
+            self.service.partner_manager = None
+        self.assertEqual(orphan.wait(timeout=5), -9)
+        cut_off = [job for job in self.service.store.snapshot(room_id)["jobs"] if job["error"] == "service_restarted"]
+        self.assertEqual(counted, [(job["provider"], None) for job in cut_off])
+        self.assertEqual(len(counted), 1)
+
     async def test_a_call_claimed_before_processes_were_recorded_is_not_assumed_clean(self):
         # Catches the confirmation above being given to a call whose process
         # this host has no record of and so cannot have ended.

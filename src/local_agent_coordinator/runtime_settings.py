@@ -113,7 +113,8 @@ def validate_choices(settings, specs, catalogs):
         spec = specs.get(identifier)
         if spec is None or not spec.supports_runtime_settings or spec.adapter not in NATIVE_IDS:
             raise RuntimeSettingsError("runtime_settings_unsupported")
-        catalog = catalogs.get(spec.adapter, {})
+        # A partner with its own model list (an API model partner) is checked against it.
+        catalog = catalogs.get(identifier) or catalogs.get(spec.adapter, {})
         if catalog.get("state") != "ready":
             raise RuntimeSettingsError("runtime_options_required")
         model = next((item for item in catalog.get("models", []) if item["id"] == choice["model"]), None)

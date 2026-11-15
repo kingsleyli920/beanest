@@ -210,16 +210,24 @@ function acceptPartners(result) {
   state.connectionProtocol = result.connection_protocol?.id === 'beanest-json-v1' ? result.connection_protocol : null;
   renderDiscovery();
   const combined = [...result.supported_adapters, ...state.connectionTemplates.map((template) => ({ id: template.adapter, name: t(template.name) }))];
+  const payPerUse = new Set(result.supported_adapters.filter((adapter) => adapter?.pay_per_use === true).map((adapter) => adapter.id));
   const adapters = combined.filter((adapter, index) => adapter && agentPattern.test(adapter.id) && combined.findIndex((item) => item.id === adapter.id) === index);
+  const presets = Array.isArray(result.api_model_presets) ? result.api_model_presets.filter((preset) => preset && agentPattern.test(preset.id)
+    && typeof preset.name === 'string' && typeof preset.host === 'string' && Array.isArray(preset.models)) : [];
   acceptBeanStyles(result.bean_styles);
   rememberAgents(state.partners);
-  if (JSON.stringify(adapters) !== JSON.stringify(state.adapters)) {
-    state.adapters = adapters;
-    const previous = state.pendingPartner?.adapter || $('partner-adapter').value;
-    $('partner-adapter').replaceChildren(...state.adapters.map((adapter) => {
+  if (JSON.stringify([adapters, presets]) !== JSON.stringify([state.adapters, state.apiPresets])) {
+    state.adapters = adapters; state.apiPresets = presets;
+    const pendingPreset = state.pendingPartner?.api_model ? state.apiPresets.find((preset) => preset.host === state.pendingPartner.api_model.host) : null;
+    const previous = pendingPreset ? apiPresetPrefix + pendingPreset.id : state.pendingPartner?.adapter || $('partner-adapter').value;
+    // Pay-per-use API models are offered beside the tools; each preset fills the form with editable numbers.
+    const options = [...state.adapters.filter((adapter) => !payPerUse.has(adapter.id)),
+      ...state.apiPresets.map((preset) => ({ id: apiPresetPrefix + preset.id, name: apiPresetLabel(preset) }))];
+    $('partner-adapter').replaceChildren(...options.map((adapter) => {
       const option = element('option', adapter.name || adapter.id); option.value = adapter.id; return option;
     }));
-    $('partner-adapter').value = state.adapters.some((adapter) => adapter.id === previous) ? previous : state.adapters[0]?.id || '';
+    $('partner-adapter').value = options.some((adapter) => adapter.id === previous) ? previous : options[0]?.id || '';
+    if (selectedApiPreset() && !state.apiDraft) fillApiForm(selectedApiPreset());
   }
   setCatalog(state.catalog);
   renderMembers(state.snapshot);
@@ -280,7 +288,8 @@ function renderGlobalPartners() {
     const invitation = !activeEntry(partner) ? lifecycleLabels[lifecycleState(partner)] : partner.enabled === false ? state.partnerLifecycleSupported ? t("已停用，不再派发新工作") : t("新任务中已停用")
       : notSetUp(partner) ? partnerSetupState(partner.id) === 'not_installed' ? t("还没安装，装好后才能选入新任务") : t("还差登录，登录后才能选入新任务")
       : availability.blocked ? availability.summary : (state.catalog.some((agent) => agent.id === partner.id) ? t("可选入新任务") : t("暂不能加入新任务"));
-    const toolName = ({ claude: 'Claude Code', codex: 'Codex' })[partner.adapter]
+    const toolName = isApiPartner(partner) ? t("{p0} · API 按量计费", { p0: partner.api_model?.host_name || partner.adapter })
+      : ({ claude: 'Claude Code', codex: 'Codex' })[partner.adapter]
       || state.adapters.find((adapter) => adapter.id === partner.adapter)?.name || t("工具待确认");
     identity.append(element('h3', partner.name), element('p', notSetUp(partner) ? memberLoginCaption(partner.account, partner.id) : accountLoginCaption(partner.account), 'account-email'), element('p', `${toolName}${isAdditionalSession(partner) ? t(" 的独立会话") : ''} · ${invitation}`, 'detail-caption'));
     heading.append(avatar(partner.id, partner), identity, appearanceButton(partner.id));
@@ -309,6 +318,9 @@ function renderGlobalPartners() {
       connection_not_configured: t("已保存工具模板，还没有配置本机连接器，不能参加任务。"),
       protocol_invalid: t("本机连接器未按豆窝 JSON 协议返回，尚未接通。"),
       connector_not_ready: t("连接器尚未就绪，不能参加任务。"),
+      api_key_unavailable: t("读不到密钥：检查密钥位置里的 .env 文件或钥匙串条目。"),
+      api_key_rejected: t("DeepSeek 不认这个密钥。换好密钥后点“检查连接”。"),
+      api_balance_exhausted: t("DeepSeek 账户余额不足。充值后点“检查连接”，它就能继续接活。"),
     };
     const connection = element('details', '', 'member-details');
     connection.dataset.detailKind = 'connection'; connection.open = expanded.get(partner.id)?.get('connection') || false;
@@ -510,11 +522,23 @@ function renderManagementControls() {
   $('verify-partner-save').disabled = blocked || state.partnerVerifying;
   const adapter = $('partner-adapter').value || 'claude';
   const connector = state.connectionTemplates.some((template) => template.adapter === adapter);
-  $('partner-connection').hidden = !connector;
-  $('cancel-connection').hidden = !state.configuringPartnerId;
+  const apiMode = !!selectedApiPreset() || !!state.editingApiPartnerId;
+  $('partner-connection').hidden = !connector || apiMode;
+  $('partner-api').hidden = !apiMode;
+  for (const id of apiFieldIds) $(id).disabled = blocked || !!state.pendingPartner;
+  for (const node of descendantsOf($('api-models'))) if (['INPUT', 'BUTTON'].includes(node.tagName)) node.disabled = blocked || !!state.pendingPartner || node.dataset.locked === 'true';
+  // The endpoint and currency are who an API partner is; a different one is a new partner.
+  if (state.editingApiPartnerId) for (const id of ['api-currency', 'partner-adapter', 'partner-id', 'partner-name', 'partner-avatar']) $(id).disabled = true;
+  $('api-host-status').textContent = apiMode ? apiHostStatus() : '';
+  const keychain = $('api-key-kind').value === 'keychain';
+  for (const id of ['api-key-variable-field', 'api-key-path-field']) $(id).hidden = keychain;
+  for (const id of ['api-key-service-field', 'api-key-account-field']) $(id).hidden = !keychain;
+  $('cancel-connection').hidden = !state.configuringPartnerId && !state.editingApiPartnerId;
   $('cancel-connection').disabled = blocked || !!state.pendingPartner;
-  $('save-partner').textContent = state.configuringPartnerId ? t("保存连接配置") : connector ? t("保存工具") : t("创建会话");
-  $('partner-save-help').textContent = connector ? t("可以先保存待配置工具；没有连接器或未通过检查时，不会加入可选伙伴，也不会启动模型。")
+  $('save-partner').textContent = state.editingApiPartnerId ? t("保存价格与上限") : state.configuringPartnerId ? t("保存连接配置")
+    : apiMode ? t("保存 API 伙伴") : connector ? t("保存工具") : t("创建会话");
+  $('partner-save-help').textContent = apiMode ? t("保存后不会开始任务。可以先点“检查连接”确认能读到密钥；检查不会调用接口。")
+    : connector ? t("可以先保存待配置工具；没有连接器或未通过检查时，不会加入可选伙伴，也不会启动模型。")
     : t("新会话使用所选工具现有的登录。创建后不会开始任务，也不会自动参加其它任务。");
   $('partner-name').setAttribute('placeholder', t("{p0}（可留空）", { p0: defaultPartnerName(adapter) }));
   $('partner-avatar').setAttribute('placeholder', t("自动使用 {p0}", { p0: defaultPartnerAvatar(adapter) }));
@@ -530,7 +554,8 @@ function renderManagementControls() {
 }
 
 function defaultPartnerName(adapter) {
-  const base = adapter === 'codex' ? t("Codex 会话") : adapter === 'claude' ? t("Claude 会话")
+  const preset = apiPresetFor(adapter);
+  const base = preset ? preset.name : adapter === 'codex' ? t("Codex 会话") : adapter === 'claude' ? t("Claude 会话")
     : t("{p0} 工具", { p0: state.adapters.find((item) => item.id === adapter)?.name || t("本机工具") });
   const taken = new Set(state.partners.map((partner) => partner.name));
   if (!taken.has(base)) return base;
@@ -540,11 +565,13 @@ function defaultPartnerName(adapter) {
 }
 
 function defaultPartnerAvatar(adapter) {
+  const preset = apiPresetFor(adapter);
+  if (preset) return [...defaultPartnerName(adapter)][0].toUpperCase();
   return adapter === 'codex' ? 'X' : adapter === 'claude' ? 'C' : [...(state.adapters.find((item) => item.id === adapter)?.name || t("本"))][0];
 }
 
 function generatedPartnerId(adapter) {
-  const prefix = adapter.slice(0, 16);
+  const prefix = (apiPresetFor(adapter)?.id || adapter).replaceAll('_', '-').slice(0, 16);
   const suffixLength = Math.min(24, 31 - prefix.length);
   return `${prefix}-${crypto.randomUUID().replaceAll('-', '').slice(0, suffixLength)}`;
 }
@@ -598,6 +625,8 @@ function rememberPendingPartner() {
 function clearPartnerForm() {
   for (const id of ['partner-id', 'partner-name', 'partner-avatar']) $(id).value = '';
   fillConnection(null); state.configuringPartnerId = null;
+  state.editingApiPartnerId = null; state.apiDraft = null;
+  if (selectedApiPreset()) fillApiForm(selectedApiPreset());
   // The look follows the chosen tool until the user picks one themselves.
   state.selectedBeanStyle = defaultBeanStyle($('partner-adapter').value); state.beanStyleChosen = false;
   state.pendingPartner = null; state.partnerSaveUncertain = false;
@@ -619,6 +648,8 @@ function restorePendingPartner() {
     $('partner-adapter').value = body.adapter; state.selectedBeanStyle = body.bean_style; state.beanStyleChosen = true;
     state.configuringPartnerId = saved.configuring === body.id ? body.id : null;
     fillConnection(body.connection);
+    const preset = body.api_model && typeof body.api_model === 'object' ? state.apiPresets.find((item) => item.host === body.api_model.host) : null;
+    if (preset) { $('partner-adapter').value = apiPresetPrefix + preset.id; fillApiForm(body.api_model); }
   } catch (_error) {
     try { sessionStorage.removeItem(pendingPartnerStorageKey); } catch (_ignored) { /* Storage can be unavailable. */ }
   }
@@ -639,4 +670,146 @@ async function verifyPendingPartner() {
       : t("暂未找到完全一致的保存记录，结果仍待确认。原信息已保留，没有重新发送。"), true);
   } catch (error) { managerNotice(error.message, true); }
   finally { state.partnerVerifying = false; renderManagementControls(); }
+}
+
+
+// --- API model partners: presets, the editable price form and its payload ---
+
+const apiPresetPrefix = 'api:';
+const apiFieldIds = ['api-key-kind', 'api-key-path', 'api-key-variable', 'api-key-service', 'api-key-account',
+  'api-add-model', 'api-currency', 'api-timezone', 'api-peak', 'api-cap-daily', 'api-cap-monthly'];
+function descendantsOf(node) { return [...(node?.children || [])].flatMap((child) => [child, ...descendantsOf(child)]); }
+function apiPresetFor(value) {
+  return typeof value === 'string' && value.startsWith(apiPresetPrefix)
+    ? state.apiPresets.find((preset) => apiPresetPrefix + preset.id === value) || null : null;
+}
+function selectedApiPreset() { return apiPresetFor($('partner-adapter').value); }
+// Whether the tool that will run this partner is on this computer; found by the startup scan, nothing is run.
+function apiHostStatus() {
+  const host = state.apiDraft?.host || selectedApiPreset()?.host || 'dsh';
+  const setup = state.adapters.find((adapter) => adapter.id === host)?.setup?.state;
+  if (setup === 'not_installed') return t("这台电脑上还没找到 DeepSeek Harness（dsh）。在终端运行 npm install -g @deepseek-ai/dsh 装好，再重新打开豆窝。");
+  return setup === 'ready' ? t("已找到本机的 DeepSeek Harness（dsh）。") : t("还没确认这台电脑是否装了 DeepSeek Harness（dsh）。");
+}
+function apiPresetLabel(preset) { return t("{p0}（API 按量计费）", { p0: t(preset.name) }); }
+const apiPriceFields = ['input', 'output', 'cache_read', 'cache_write'];
+const apiPriceLabels = () => ({ input: t("输入"), output: t("输出"), cache_read: t("缓存读"), cache_write: t("缓存写") });
+
+function apiPeakText(windows) {
+  return (Array.isArray(windows) ? windows : []).map((window) => {
+    const days = Array.isArray(window.days) && window.days.length < 7 ? window.days.map((day) => day + 1) : [];
+    const contiguous = days.length > 1 && days.every((day, index) => index === 0 || day === days[index - 1] + 1);
+    return `${window.start}-${window.end}${days.length ? ` ${contiguous ? `${days[0]}-${days.at(-1)}` : days.join(',')}` : ''}`;
+  }).join('\n');
+}
+function parseApiPeak(text) {
+  const windows = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim(); if (!line) continue;
+    const match = line.match(/^([0-2][0-9]:[0-5][0-9])\s*[-–]\s*([0-2][0-9]:[0-5][0-9])(?:\s+([1-7](?:\s*[-,]\s*[1-7])*))?$/);
+    if (!match) throw new RequestError(t("高峰时段写法不对：{p0}", { p0: line }));
+    let days = [0, 1, 2, 3, 4, 5, 6];
+    if (match[3]) {
+      days = [];
+      for (const part of match[3].split(',')) {
+        const [from, to = from] = part.split('-').map((value) => Number(value.trim()));
+        if (to < from) throw new RequestError(t("高峰时段写法不对：{p0}", { p0: line }));
+        for (let day = from; day <= to; day += 1) if (!days.includes(day - 1)) days.push(day - 1);
+      }
+      days.sort();
+    }
+    windows.push({ start: match[1], end: match[2], days });
+  }
+  return windows;
+}
+function apiNumber(value, { optional = false } = {}) {
+  const text = String(value ?? '').trim();
+  if (!text && optional) return null;
+  const number = Number(text);
+  if (!text || !Number.isFinite(number) || number < 0) throw new RequestError(t("价格和上限要填不小于 0 的数字。"));
+  return number;
+}
+function fillApiForm(value) {
+  const key = value.key || {};
+  $('api-key-kind').value = key.kind === 'keychain' ? 'keychain' : 'env_file';
+  $('api-key-path').value = key.path || ''; $('api-key-variable').value = key.variable || '';
+  $('api-key-service').value = key.service || ''; $('api-key-account').value = key.account || '';
+  $('api-currency').value = value.currency || 'USD'; $('api-timezone').value = value.timezone || 'UTC';
+  $('api-peak').value = apiPeakText(value.peak_windows);
+  for (const [cap, id] of [['daily', 'api-cap-daily'], ['monthly', 'api-cap-monthly']]) $(id).value = Number.isFinite(value.caps?.[cap]) ? String(value.caps[cap]) : '';
+  state.apiDraft = { host: value.host || 'dsh', default_model: value.default_model || '', models: (Array.isArray(value.models) ? value.models : []).map((model) => ({
+    id: model.id, ...Object.fromEntries(apiPriceFields.map((field) => [field, String(model[field] ?? '')])),
+    peak: Object.fromEntries(apiPriceFields.map((field) => [field, model.peak ? String(model.peak[field] ?? '') : ''])) })) };
+  if (!state.apiDraft.models.length) state.apiDraft.models.push(emptyApiModel());
+  renderApiModels();
+}
+function emptyApiModel() {
+  return { id: '', ...Object.fromEntries(apiPriceFields.map((field) => [field, ''])), peak: Object.fromEntries(apiPriceFields.map((field) => [field, ''])) };
+}
+function renderApiModels() {
+  const draft = state.apiDraft || { models: [emptyApiModel()], default_model: '' };
+  const labels = apiPriceLabels();
+  $('api-models').replaceChildren(...draft.models.map((model, index) => {
+    const row = element('div', '', 'api-model-row');
+    const name = element('input'); name.value = model.id; name.maxLength = 200; name.placeholder = t("模型 ID");
+    name.setAttribute('aria-label', t("模型 ID")); name.addEventListener('input', () => {
+      if (draft.default_model === model.id) draft.default_model = name.value.trim();
+      model.id = name.value.trim();
+    });
+    const chosen = element('label', '', 'api-model-default'); const radio = element('input'); radio.type = 'radio'; radio.name = 'api-default-model';
+    radio.checked = draft.default_model === model.id && !!model.id; radio.addEventListener('change', () => { draft.default_model = model.id; });
+    chosen.append(radio, element('span', t("默认")));
+    const remove = element('button', t("移除"), 'quiet-button'); remove.type = 'button'; remove.dataset.locked = String(draft.models.length < 2);
+    remove.addEventListener('click', () => { draft.models.splice(index, 1); renderApiModels(); });
+    const heading = element('div', '', 'api-model-heading'); heading.append(name, chosen, remove);
+    const prices = (target, caption) => {
+      const line = element('div', '', 'api-price-line'); line.append(element('span', caption, 'api-price-caption'));
+      for (const field of apiPriceFields) {
+        // Each number keeps its own visible label; a placeholder disappears once a preset fills it.
+        const cell = element('label', '', 'api-price-cell');
+        const input = element('input'); input.inputMode = 'decimal'; input.value = target[field];
+        input.setAttribute('aria-label', `${model.id || t("模型")} · ${caption} · ${labels[field]}`);
+        input.addEventListener('input', () => { target[field] = input.value; });
+        cell.append(element('span', labels[field]), input);
+        line.append(cell);
+      }
+      return line;
+    };
+    row.append(heading, prices(model, t("平时价")), prices(model.peak, t("高峰价（可留空）")));
+    return row;
+  }));
+  renderManagementControls();
+}
+function readApiModel() {
+  const draft = state.apiDraft || { models: [], default_model: '' };
+  const kind = $('api-key-kind').value;
+  const key = kind === 'keychain'
+    ? { kind, service: $('api-key-service').value.trim(), account: $('api-key-account').value.trim() || null }
+    : { kind: 'env_file', path: $('api-key-path').value.trim(), variable: $('api-key-variable').value.trim() };
+  if (kind === 'keychain' ? !key.service : !key.path.startsWith('/') || !key.variable) throw new RequestError(t("请填写密钥所在的 .env 文件完整路径和变量名，或钥匙串条目名称。"));
+  const models = draft.models.map((model) => {
+    if (!model.id) throw new RequestError(t("每个模型都要填模型 ID。"));
+    const entry = { id: model.id, ...Object.fromEntries(apiPriceFields.map((field) => [field, apiNumber(model[field])])) };
+    const peak = apiPriceFields.map((field) => String(model.peak[field] ?? '').trim());
+    if (peak.some(Boolean)) {
+      if (!peak.every(Boolean)) throw new RequestError(t("高峰价要么四项都填，要么都留空。"));
+      entry.peak = Object.fromEntries(apiPriceFields.map((field) => [field, apiNumber(model.peak[field])]));
+    }
+    return entry;
+  });
+  if (!models.length) throw new RequestError(t("至少要有一个模型。"));
+  const fallback = models.some((model) => model.id === draft.default_model) ? draft.default_model : models[0].id;
+  return { host: draft.host || selectedApiPreset()?.host || 'dsh', key, currency: $('api-currency').value.trim().toUpperCase(),
+    timezone: $('api-timezone').value.trim() || 'UTC', peak_windows: parseApiPeak($('api-peak').value), default_model: fallback, models,
+    caps: { daily: apiNumber($('api-cap-daily').value, { optional: true }), monthly: apiNumber($('api-cap-monthly').value, { optional: true }) } };
+}
+function beginApiEdit(partner) {
+  if (state.pendingPartner || state.managementBusy || state.busy || state.pending || !partner?.api_model) return;
+  state.editingApiPartnerId = partner.id;
+  $('partner-id').value = partner.id; $('partner-name').value = partner.name; $('partner-avatar').value = partner.avatar;
+  const preset = state.apiPresets[0]; if (preset) $('partner-adapter').value = apiPresetPrefix + preset.id;
+  fillApiForm(partner.api_model);
+  $('partner-add-details').open = true;
+  renderManagementControls(); renderGlobalPartners();
+  $('api-cap-daily').focus();
 }

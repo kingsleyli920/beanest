@@ -206,15 +206,26 @@ $('project-form').addEventListener('submit', (event) => {
 $('partner-form').addEventListener('submit', (event) => {
   event.preventDefault();
   if (state.pendingPartner || state.managementBusy || state.busy || state.pending) return;
-  const adapter = $('partner-adapter').value;
+  const choice = $('partner-adapter').value;
+  const preset = selectedApiPreset();
+  if (state.editingApiPartnerId) {
+    // Editing an API partner changes only its prices, caps, models and key location.
+    let api_model;
+    try { api_model = readApiModel(); } catch (error) { managerNotice(error.message, true); return; }
+    void manageMutation(workspaceApi.partner(state.editingApiPartnerId, 'api-model'), { api_model }, t("价格与上限已保存，下一次调用起按新数字计算。"))
+      .then((saved) => { if (saved) clearPartnerForm(); });
+    return;
+  }
+  const adapter = preset ? preset.host : choice;
   const body = {
-    id: $('partner-id').value.trim() || generatedPartnerId(adapter),
-    name: $('partner-name').value.trim() || defaultPartnerName(adapter),
-    avatar: $('partner-avatar').value.trim() || defaultPartnerAvatar(adapter),
+    id: $('partner-id').value.trim() || generatedPartnerId(choice),
+    name: $('partner-name').value.trim() || defaultPartnerName(choice),
+    avatar: $('partner-avatar').value.trim() || defaultPartnerAvatar(choice),
     adapter, bean_style: state.selectedBeanStyle,
   };
-  const connector = state.connectionTemplates.some((template) => template.adapter === adapter);
+  const connector = !preset && state.connectionTemplates.some((template) => template.adapter === adapter);
   try {
+    if (preset) body.api_model = readApiModel();
     if (connector) body.connection = readConnection();
     if (state.configuringPartnerId && !body.connection) throw new RequestError(t("请填写本机连接器路径与调用方式后保存配置。"));
   } catch (error) { managerNotice(error.message, true); return; }
@@ -226,7 +237,7 @@ $('partner-form').addEventListener('submit', (event) => {
   state.pendingPartner = body; state.partnerSaveUncertain = false; rememberPendingPartner();
   const path = state.configuringPartnerId ? workspaceApi.partner(state.configuringPartnerId, 'connection') : workspaceApi.partners;
   const payload = state.configuringPartnerId ? { connection: body.connection } : body;
-  const success = connector ? t("工具配置已保存。安装并通过连接检查后才能参加任务，没有启动模型。") : t("独立会话已创建，需要时可在“更多会话”中选择。");
+  const success = preset ? t("API 伙伴已保存。没有调用接口；新任务里可以选它。") : connector ? t("工具配置已保存。安装并通过连接检查后才能参加任务，没有启动模型。") : t("独立会话已创建，需要时可在“更多会话”中选择。");
   void manageMutation(path, payload, success).then((saved) => {
     if (saved) clearPartnerForm();
     else if (!state.partnerSaveUncertain) { state.pendingPartner = null; rememberPendingPartner(); renderManagementControls(); }
@@ -235,7 +246,13 @@ $('partner-form').addEventListener('submit', (event) => {
 $('partner-avatar').addEventListener('input', renderBeanStylePicker);
 $('partner-adapter').addEventListener('change', () => {
   if (!state.beanStyleChosen && !state.configuringPartnerId) state.selectedBeanStyle = defaultBeanStyle($('partner-adapter').value);
+  if (selectedApiPreset() && !state.editingApiPartnerId) fillApiForm(selectedApiPreset());
   renderManagementControls();
+});
+$('api-key-kind').addEventListener('change', renderManagementControls);
+$('api-add-model').addEventListener('click', () => {
+  if (!state.apiDraft) state.apiDraft = { models: [], default_model: '' };
+  state.apiDraft.models.push(emptyApiModel()); renderApiModels();
 });
 $('cancel-connection').addEventListener('click', clearPartnerForm);
 $('verify-partner-save').addEventListener('click', () => void verifyPendingPartner());
