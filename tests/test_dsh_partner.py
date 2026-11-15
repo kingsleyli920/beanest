@@ -260,6 +260,19 @@ class Transport(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((restricted["host_variable"], restricted["base_url_variable"], restricted["permission_mode"]),
                          (None, False, "workspace-write"))
 
+    async def test_a_reply_only_call_keeps_its_answer_when_dsh_reached_for_a_tool(self):
+        # Catches a room stopping with unexpected_tool_event because dsh, which cannot run without
+        # its tools, tried one before answering; and a reply-only call that could write after all.
+        self.scenario("tool", answer="looked, then answered")
+        with adapters.account_home("dsh", self.home, self.endpoint):
+            result = await adapters.invoke("dsh", "Say hi.", self.work, None, 30)
+        trace = traces(self.home)[-1]
+        self.assertEqual((trace["permission_mode"], trace["permission_answer"]), ("read-only", "reject-once"))
+        self.assertFalse((self.work / "made-by-dsh.txt").exists())
+        self.assertEqual((result["status"], result["text"]), ("completed", "looked, then answered"), result)
+        self.assertEqual(result["native_execution"]["tool_calls"], 1)
+        self.assertNotIn("tool_observed", [event.get("type") for event in result["events"]])
+
     async def test_the_host_learns_the_launched_process_at_once(self):
         # Catches a dsh call the host cannot find and end after it is killed mid-turn.
         seen = []

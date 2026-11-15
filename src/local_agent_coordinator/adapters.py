@@ -1442,12 +1442,12 @@ async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = No
         return result
     if agent == 'dsh':
         from .dsh_acp import invoke_native as invoke_dsh
-        # A reply-only call runs in dsh's own read-only mode.
-        result = await invoke_dsh(prompt, cwd, session_id, timeout, permission='plan',
-                                  response_schema=response_schema, runtime_settings=runtime_settings)
-        if result.get('native_execution', {}).get('tool_calls'):
-            result['events'] = [*result.get('events', []), {'type': 'tool_observed'}]
-        return result
+        # A reply-only call runs in dsh's own read-only mode. dsh has no switch
+        # that takes its tools away, so the model may still look around before
+        # it answers: its sandbox refuses every write and a wider sandbox it
+        # asks for is declined. Looking is not a reason to throw the reply away.
+        return await invoke_dsh(prompt, cwd, session_id, timeout, permission='plan',
+                                response_schema=response_schema, runtime_settings=runtime_settings)
     if agent not in ('codex', 'claude'):
         raise ValueError('agent must be codex or claude')
     if not 0 < timeout <= 600:

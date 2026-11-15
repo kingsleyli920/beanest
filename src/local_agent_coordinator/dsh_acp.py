@@ -45,7 +45,6 @@ from .kimi_acp import ACPConnection, ACPError, TurnUpdates
 PROVIDER = "deepseek-official"
 _SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _LOG_NAME = re.compile(r"session\.v([1-9][0-9]{0,3})\.jsonl\Z")
-_MAX_LOG_BYTES = 256 * 1024 * 1024
 _MAX_LINE = 64 * 1024 * 1024
 PATCH_NAME = "beanest-acp.patch.yml"
 # The persistence plugin's whole config: its root as dsh ships it, and plain JSON lines.
@@ -179,25 +178,28 @@ def log_offsets(home, session_id, cwd):
     return result
 
 
-def _appended(path, before):
-    """Rows appended after a recorded offset; a replaced or shrunk file is refused."""
+def _appended(path, before, each):
+    """Hand each row appended after a recorded offset to ``each``; return the size read through.
+
+    A replaced or shrunk file is refused. How much a turn wrote is not evidence
+    against it: a long turn is read to its end, one row at a time.
+    """
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         identity, offset = before if before is not None else (None, 0)
         if (not stat.S_ISREG(info.st_mode) or identity is not None and identity != (info.st_dev, info.st_ino)
-                or info.st_size < offset or info.st_size - offset > _MAX_LOG_BYTES):
+                or info.st_size < offset):
             raise ACPError("native_turn_unconfirmed")
         stream.seek(offset)
-        rows = []
         while raw := stream.readline(_MAX_LINE + 1):
             if len(raw) > _MAX_LINE or not raw.endswith(b"\n"):
                 raise ACPError("native_turn_unconfirmed")
             row = json.loads(raw)
             if not isinstance(row, dict):
                 raise ACPError("native_turn_unconfirmed")
-            rows.append(row)
-        return rows, info.st_size
+            each(row)
+        return info.st_size
 
 
 def turn_facts(home, session_id, cwd, before):
@@ -207,13 +209,13 @@ def turn_facts(home, session_id, cwd, before):
     """
     usage, ends, retries, through = {}, [], 0, None
     for identifier, path in session_tree(home, session_id, cwd).items():
-        rows, size = _appended(path, before.get(identifier))
-        if identifier == session_id:
-            through = size
-        for row in rows:
+        root = identifier == session_id
+
+        def take(row):
+            nonlocal retries
             kind, data = row.get("type"), row.get("data")
             if not isinstance(data, dict):
-                continue
+                return
             if kind == "assistant/message" and isinstance(data.get("usage"), dict):
                 source = data.get("message", {}).get("source", {}) if isinstance(data.get("message"), dict) else {}
                 model = source.get("model") if isinstance(source, dict) else None
@@ -224,15 +226,19 @@ def turn_facts(home, session_id, cwd, before):
                     if type(value) is not int or value < 0:
                         raise ACPError("native_turn_unconfirmed")
                     counts[field] += value
-            elif kind == "llm/retry" and identifier == session_id:
+            elif kind == "llm/retry" and root:
                 retries += 1
-            elif kind == "turn/end" and identifier == session_id:
+            elif kind == "turn/end" and root:
                 reason = data.get("reason") if isinstance(data.get("reason"), dict) else {}
                 error = reason.get("error") if isinstance(reason.get("error"), dict) else {}
                 status = error.get("status")
                 ends.append({"kind": reason.get("kind") if isinstance(reason.get("kind"), str) else None,
                              "code": error.get("code") if isinstance(error.get("code"), str) and len(error["code"]) <= 64 else None,
                              "status": status if type(status) is int and 100 <= status <= 599 else None})
+
+        size = _appended(path, before.get(identifier), take)
+        if root:
+            through = size
     return {"usage": usage, "ends": ends, "retries": retries, "log_through": through}
 
 
