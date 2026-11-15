@@ -162,6 +162,18 @@ class Schemas(unittest.TestCase):
         self.assertIs(item["shares"]["additionalProperties"], False)
         self.assertEqual(item["shares"]["properties"]["ember"], {"type": ["integer", "null"], "minimum": 0, "maximum": 100})
 
+    def test_a_receipt_proves_itself_whatever_order_the_roster_was_recorded_in(self):
+        # Catches the quota hand-off regression: the call's schema listed members in room order (kimi first), the
+        # receipt check rebuilt it from the context's member list in another order, shares.required differed and
+        # the proof was refused, so a partner out of quota stopped the room instead of handing its work on.
+        from local_agent_coordinator.room_service import RoomService
+        sent = native_room_response_schema("kimi", member_ids=("kimi", "claude", "codex"), provider="kimi",
+                                           team_phase="work", can_propose=True)
+        self.assertEqual(command_item(sent)["shares"]["required"], ["claude", "codex", "kimi"])
+        self.assertEqual(list(command_item(sent)["shares"]["properties"]), ["claude", "codex", "kimi"])
+        context = {"members": [{"id": "claude"}, {"id": "codex"}, {"id": "kimi"}]}
+        self.assertIs(RoomService._native_receipt_schema_matches(sent, context, "kimi", "work", can_propose=True), True)
+
     def test_a_checkpoint_that_may_allocate_leaves_summary_nullable(self):
         # Catches the checkpoint schema still forcing a summary onto the allocate command beside it.
         item = command_item(native_room_response_schema("codex", member_ids=self.members, provider="codex",

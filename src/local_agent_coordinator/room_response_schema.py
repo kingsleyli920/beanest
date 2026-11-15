@@ -162,8 +162,10 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
         if "shares" in fields:
             command_properties["shares"] = {
                 "type": ["object", "null"],
-                "properties": {member: {"type": ["integer", "null"], "minimum": 0, "maximum": 100} for member in member_ids},
-                "required": list(member_ids), "additionalProperties": False,
+                # In sorted order, whatever order the roster was passed in: a call's schema must be
+                # rebuilt exactly from its recorded context to prove a receipt.
+                "properties": {member: {"type": ["integer", "null"], "minimum": 0, "maximum": 100} for member in sorted(member_ids)},
+                "required": sorted(member_ids), "additionalProperties": False,
                 "description": ("For allocate, each member's part of this round's work as a whole number from 0 to 100; "
                                 "null for a member leaves its part as it was. For every other command, use null."),
             }
