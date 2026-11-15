@@ -207,6 +207,10 @@ class MidRunStore(unittest.TestCase):
         d1 = self.store.claim(self.room_id, "claude")
         self.assertEqual((d1["kind"], d1["team"]["task_id"]), ("team_work", "D1"))
         self.store.reconcile_team(self.room_id)  # the next hand-out, now that the call is running
+        self.assertEqual([event for event in self.snapshot()["events"] if event["kind"] == "queued_work_offered"], [],
+                         "a call that has only just started is not worth a question")
+        self.store.clock = lambda: 1000.0 + 300
+        self.store.reconcile_team(self.room_id)
         offered = [event for event in self.snapshot()["events"] if event["kind"] == "queued_work_offered"]
         self.assertEqual([(event["provider"], event["tasks"]) for event in offered], [("codex", [["I1", "claude"]])])
         ask = self.store.claim(self.room_id, "codex")

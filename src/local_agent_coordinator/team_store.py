@@ -21,6 +21,8 @@ from .room_contract import (COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT,
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 # Blocks the partners resolve among themselves; their tasks may be replanned.
+# How long an owner's call must have been running before a partner with nothing to do is told what waits behind it.
+_QUEUED_WORK_AFTER_SECONDS = 300
 _REPLAN_CAUSES_SQL = "(" + ",".join("'" + cause + "'" for cause in sorted(PARTNER_BLOCK_CAUSES)) + ")"
 from .stop_policy import continues_automatically
 from .native_outcome import CALL_DIED, FORMAT_ERRORS, NATIVE_METADATA_ERROR, NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES
@@ -3230,9 +3232,12 @@ class TeamStore:
         """
         run_id = self.team(db, room_id)["current_run_id"]
         rows = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? ORDER BY rowid", (room_id, run_id)).fetchall()
+        # Only behind a call that has already run for a while: a quick call frees its owner before a
+        # question about its queue could be answered, and asking would only cost a call.
         working = {row[0]: row[1] for row in db.execute(
             "SELECT j.provider,t.task_id FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND t.run_id=? "
-            "AND t.phase='work' AND j.status='working'", (room_id, run_id))}
+            "AND t.phase='work' AND j.status='working' AND j.created_at<=?",
+            (room_id, run_id, self.store.clock() - _QUEUED_WORK_AFTER_SECONDS))}
         by_id = {row["id"]: row for row in rows}
         waiting = [row for row in rows if row["status"] == "assigned" and row["owner"] in working
                    and working[row["owner"]] != row["id"]

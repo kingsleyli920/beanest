@@ -429,6 +429,9 @@ class TaskHandoffService(unittest.IsolatedAsyncioTestCase):
             if board["tasks"] or commands:
                 commands.append({"type": "plan_ready"})
             return native_reply(context, commands)
+        if phase == "user":
+            # The host telling a partner with nothing to do what waits behind busy partners; it has nothing to add.
+            return native_reply(context, [])
         if phase == "work":
             (cwd / f"{task['id']}.py").write_text(f"VALUE = {len(self.work_calls()) + 1}\n")
             return self.with_record(agent, task, native_reply(context, [{"type": "complete", "task_id": task["id"], "result": "Updated the file."}]))
