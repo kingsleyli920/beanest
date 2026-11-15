@@ -40,6 +40,9 @@ class NativeHelpRepairHTTPTests(unittest.TestCase):
                     commands = [{"type": "claim", "task_id": name} for name in names
                                 if next(item for item in board["tasks"] if item["id"] == name)["owner"] is None]
                 return native.native_reply(context, [*commands, {"type": "plan_ready"}])
+            if phase == "user":
+                # The host telling a partner with nothing to do what waits behind busy partners; it has nothing to add.
+                return native.native_reply(context)
             if phase == "work":
                 if call["permission"] == "read_only":
                     path = task["write_paths"][0]
