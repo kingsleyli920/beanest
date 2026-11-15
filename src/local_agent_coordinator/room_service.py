@@ -5217,6 +5217,14 @@ class RoomService(RoomPromptMixin):
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
                     continue
             self.store.record_job_cleanup(job["id"], confirmed=True)
+            if process is not None and self.partner_manager is not None:
+                # A pay-per-use call that was launched was charged for what it
+                # had done, and its usage died with the host: counted as a call
+                # with no reported usage, never as free.
+                try:
+                    self.partner_manager.record_api_spend(job["provider"], None)
+                except (PartnerError, OSError, ValueError, TypeError, KeyError):
+                    pass
 
     def _confirm_late_cleanup(self, room_id, snapshot):
         """A call cancelled while the service shut down can record cleanup as
