@@ -118,47 +118,45 @@ class NativeHelpScopeHTTPTests(unittest.TestCase):
         self.addCleanup(value.close)
         return value
 
-    def test_unowned_repair_is_corrected_to_text_help_without_grant_or_replaying_accepted_work(self):
-        fixture = self.fixture(hold_correction=True)
+    def test_unowned_repair_goes_to_the_peer_as_ordinary_help_and_the_reply_stands(self):
+        # Catches the host voiding a whole work reply, and making the partner
+        # redo it, because the files its help request names have no member
+        # owner; and catches such a request creating a repair task or a grant.
+        fixture = self.fixture()
         fixture.create()
-        held = fixture.wait(lambda value: bool(fixture.t3_calls) and any(
-            job['id'] == fixture.t3_calls[0]['job_id'] and job['status'] == 'failed' for job in value['jobs']))
-        rejected_id = fixture.t3_calls[0]['job_id']
-        rejected = next(job for job in held['jobs'] if job['id'] == rejected_id)
-        self.assertEqual(rejected['error'], 'invalid_team_commands')
-        self.assertNotEqual(held['team']['phase'], 'stopped')
-        self.assertFalse(any(event['kind'] == 'native_repairs_scheduled' for event in held['events']))
-        metadata = fixture.service._project(fixture.room_id).metadata_for_paths(['README.md', 'final.md'])
-        self.assertEqual([(entry['path'], entry['owner']) for entry in metadata], [('README.md', None)])
-        fixture.wait(lambda value: len(fixture.t3_calls) == 2)
-        self.assertIn('commands[0].repair_paths', fixture.t3_calls[1]['prompt'])
-        first_result = next(item['result'] for item in fixture.results if item['job_id'] == rejected_id)
-        self.assert_native_completed(first_result)
-        self.assertEqual(fixture.t3_calls[1]['session_id'], first_result['session_id'])
-        fixture.release_correction.set()
         final = fixture.settled()
+        first = next(job for job in final['jobs'] if job['id'] == fixture.t3_calls[0]['job_id'])
+        self.assertEqual((first['status'], first['error']), ('completed', None))
+        self.assertEqual([job['error'] for job in final['jobs'] if job['error']], [])
+        asked = [job['text'] for job in final['jobs'] if job['kind'] == 'team_help']
+        self.assertEqual(len(asked), 2)
+        self.assertIn('Files named in this request: README.md.', asked[0])
+        self.assertIn('The host scheduled no repair task for them', asked[0])
+        self.assertFalse(any(event['kind'] == 'native_repairs_scheduled' for event in final['events']))
+        metadata = fixture.service._project(fixture.room_id).metadata_for_paths(['README.md'])
+        self.assertEqual([(entry['path'], entry['owner']) for entry in metadata], [('README.md', None)])
         self.assertEqual(final['objective']['status'], 'complete', final['team'])
-        self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
+        self.assertEqual({task['id']: task['status'] for task in final['team']['tasks']},
+                         {'T1': 'accepted', 'T2': 'accepted', 'T3': 'accepted'})
         self.assertEqual(fixture.work_tasks.count('T1'), 1)
         self.assertEqual(fixture.work_tasks.count('T2'), 1)
         self.assertEqual(len(set(fixture.private_hashes)), 1)
-        self.assertEqual(len(fixture.private_hashes), 3)
-        self.assertTrue(any(call['phase'] == 'help' and call['agent'] == 'claude' for call in fixture.calls))
-        self.assertFalse(any(event['kind'] == 'native_repairs_scheduled' for event in final['events']))
-        self.assertEqual(next(job['error'] for job in final['jobs'] if job['id'] == rejected_id), 'invalid_team_commands')
         self.assertTrue(all(call['permission'] == 'full_access' for call in fixture.calls))
         self.assertFalse(any(member['identity_uncertain'] for member in final['members']))
 
-    def test_same_invalid_request_blocks_only_the_current_task_without_looping(self):
+    def test_the_same_unroutable_request_again_goes_back_to_the_team_without_looping(self):
+        # Catches a partner that keeps naming files the host cannot route
+        # being answered with the same help call forever, or with a rejected
+        # reply; the repeat is handed to the team to replan instead.
         fixture = self.fixture('repeat')
         fixture.create()
         final = fixture.settled()
-        self.assertNotEqual(final['team']['phase'], 'stopped')
-        self.assertEqual(final['room']['status'], 'needs_user')
-        self.assertEqual(len(fixture.t3_calls), 2)
+        self.assertEqual([job['error'] for job in final['jobs'] if job['error']], [])
+        self.assertEqual(len(fixture.t3_calls), 3)
+        self.assertEqual(sum(call['phase'] == 'help' for call in fixture.calls), 2)
+        self.assertTrue(any(event['kind'] == 'internal_replan_requested' for event in final['events']))
         self.assertEqual({task['id']: task['status'] for task in final['team']['tasks']},
                          {'T1': 'accepted', 'T2': 'accepted', 'T3': 'blocked'})
-        self.assertTrue(any(event['kind'] == 'native_response_blocked' for event in final['events']))
         self.assertFalse(any(event['kind'] == 'native_repairs_scheduled' for event in final['events']))
         self.assertFalse(any(member['identity_uncertain'] for member in final['members']))
 

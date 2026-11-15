@@ -6472,6 +6472,25 @@ class RoomService(RoomPromptMixin):
             if pending:
                 self.store.finish_stop(room_id, confirmed=False, final_status="unknown")
 
+    @staticmethod
+    def _plain_help(snapshot, job, command):
+        """Turn a repair request the host cannot route into ordinary help, in place.
+
+        Goes to the peer the partner named, else to whoever holds one of the
+        files in an unfinished task, else to any other member.
+        """
+        paths = command.pop("repair_paths")
+        members = [member["id"] for member in snapshot["team"]["members"] if member["id"] != job["provider"]]
+        if command.get("to") not in members:
+            wanted = {path.casefold() for path in paths}
+            holders = [task["owner"] for task in snapshot["team"]["tasks"]
+                       if task.get("owner") in members and task["status"] not in {"accepted", "self_checked", "withdrawn"}
+                       and wanted.intersection(path.casefold() for path in task.get("write_paths") or ())]
+            command["to"] = (holders or members or [None])[0]
+        command["text"] = (command["text"] + "\n\nFiles named in this request: " + ", ".join(paths)
+                           + ". The host scheduled no repair task for them: they are not shared text files with a "
+                           "member owner. Whoever may write them decides how to change them.")
+
     def _validate_team_result(self, job, parsed):
         if job["team"]["job_phase"] == "work":
             # A work reply may settle only its own task. An extra terminal for
@@ -6503,12 +6522,11 @@ class RoomService(RoomPromptMixin):
                 except RoomError as error:
                     if error.code != "team_scope_conflict":
                         raise
-                    # A rejected coordination request grants no write scope.
-                    # Let a known completed caller correct its request instead
-                    # of treating the request itself as an actual trespass.
-                    raise ResponseValidationError("invalid_team_commands", {"commands": [{
-                        "index": index, "operation": "request_help",
-                        "constraint": "canonical_member_owned_text_files"}]}) from None
+                    # The host can only route a repair for shared text files a
+                    # member owns. For anything else the request is still a
+                    # request: it goes to a peer as ordinary help that names
+                    # the files, instead of voiding the whole reply.
+                    self._plain_help(snapshot, job, command)
         if not project_mode:
             return True
         files = parsed["files"]

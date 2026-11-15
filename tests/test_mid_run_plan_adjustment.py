@@ -172,6 +172,30 @@ class MidRunStore(unittest.TestCase):
         self.assertEqual(self.tasks()["L1"]["status"], "review")
         self.refused(job, [adjust("L1", [], ["load.py"])], "team_plan_locked")
 
+    def test_a_started_task_nobody_is_working_on_gives_files_away_and_nothing_else(self):
+        # Catches files staying locked to a started task while its owner waits or works elsewhere, so
+        # idle partners wait for one member; and catches such a task losing a dependency, gaining
+        # nothing-released "adjustments", or the release going unreported to whoever takes the files.
+        with self.store._connection(write=True) as db:  # Fixture: L1 holds two files.
+            db.execute("UPDATE shared_tasks SET write_paths_json=? WHERE room_id=? AND id='L1'",
+                       ('["load.py", "extra.py"]', self.room_id))
+        job = self.user_reply_job("claude")
+        self.refused(job, [proposal("X1", paths=["extra.py"]), adjust("L1", [], ["load.py"])], "team_plan_locked")
+        self.finish(self.l1_work, [{"type": "request_help", "task_id": "L1", "to": "codex",
+                                    "text": "Which loader format?", "capability": "text"}])
+        self.assertEqual(self.tasks()["L1"]["status"], "waiting_peer")
+        self.refused(job, [adjust("L1", [], ["load.py", "extra.py"])], "team_plan_locked")
+        self.refused(job, [proposal("X1", paths=["extra.py"]), adjust("L1", ["X1"], ["load.py"])], "team_plan_locked")
+        self.finish(job, [proposal("X1", paths=["extra.py"]), adjust("L1", [], ["load.py"])])
+        tasks = self.tasks()
+        self.assertEqual((tasks["L1"]["status"], tasks["L1"]["owner"], tasks["L1"]["write_paths"]),
+                         ("waiting_peer", "kimi", ["load.py"]))
+        self.assertEqual(tasks["X1"]["write_paths"], ["extra.py"])
+        event = next(event for event in self.snapshot()["events"] if event["kind"] == "plan_adjusted")
+        self.assertEqual([(item["task_id"], item.get("released_by_started_task"), item.get("previous_owner"),
+                           item["previous_write_paths"], item["write_paths"]) for item in event["adjusted"]],
+                         [("L1", True, "kimi", ["load.py", "extra.py"], ["load.py"])])
+
     def test_a_task_with_a_queued_work_call_cannot_be_adjusted(self):
         # Catches a queued call being treated as unstarted: it is the owner's next step on the old binding.
         job = self.user_reply_job("claude")
