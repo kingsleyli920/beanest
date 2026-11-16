@@ -1987,20 +1987,27 @@ function disabledPartnersNote() {
   return disabled.length ? t("已停用：{p0}。要用的话，到“伙伴与额度”里点“启用”。", { p0: interfaceList(disabled) }) : '';
 }
 
-function memberCard(id, descriptor = {}) {
-  const card = element('article', '', 'member-card');
-  card.id = `member-${id}`;
-  const heading = element('div', '', 'member-heading');
-  const identity = element('div');
+// One partner is one row: name, what it is doing, and its tightest quota. Opening the row
+// shows everything else, so ten partners fit where two cards used to.
+function memberCard(id, descriptor = {}, open = false) {
+  const card = element('details', '', 'member-card');
+  card.id = `member-${id}`; card.open = open;
+  const row = element('summary', '', 'member-row'); row.id = `member-row-${id}`;
   const name = element('h3', names[id]); name.id = `name-${id}`;
+  const rowLine = element('span', '', 'member-row-line');
+  const rowState = element('span', '', 'member-row-state'); rowState.id = `row-state-${id}`;
+  const rowTask = element('span', '', 'member-row-task'); rowTask.id = `row-task-${id}`;
+  rowLine.append(rowState, rowTask);
+  const rowQuota = element('span', '', 'member-row-quota'); rowQuota.id = `row-quota-${id}`;
+  row.append(avatar(id, descriptor), name, rowLine, rowQuota);
+  const body = element('div', '', 'member-body');
   const status = element('span', t("未启动"), 'member-status'); status.id = `status-${id}`;
   const email = element('p', '', 'account-email'); email.id = `account-email-${id}`;
-  identity.append(name, email);
+  body.append(email);
   const adapter = descriptor.adapter || descriptor.provider;
-  if (adapter) identity.append(element('p', ({ claude: 'Claude Code', codex: 'Codex' })[adapter] || adapter, 'adapter-identity'));
+  if (adapter) body.append(element('p', ({ claude: 'Claude Code', codex: 'Codex' })[adapter] || adapter, 'adapter-identity'));
   // The card only reports; model, role and workload are set from the bottom bar or 任务选项, appearance from 伙伴与额度.
   const model = element('p', '', 'member-model'); model.id = `member-model-${id}`;
-  heading.append(avatar(id, descriptor), identity);
   const doing = element('p', '', 'member-doing'); doing.append(status);
   const task = element('p', '', 'current-task'); task.id = `task-${id}`;
   const publicProgress = element('div', '', 'member-public-progress'); publicProgress.id = `public-progress-${id}`;
@@ -2014,8 +2021,84 @@ function memberCard(id, descriptor = {}) {
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
   const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
   const workload = element('p', '', 'member-workload'); workload.id = `member-workload-${id}`;
-  card.append(heading, doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, model, workload, usageSummary, details, accountFooter(id));
+  body.append(doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, model, workload, usageSummary, details, accountFooter(id));
+  card.append(row, body);
   return card;
+}
+// The row repeats the open body's own facts in short form, so it reads them from there.
+function renderMemberRow(id) {
+  const status = $(`status-${id}`); const kind = status.className.replace('member-status', '').trim();
+  const name = $(`name-${id}`).textContent; const task = $(`task-${id}`).textContent;
+  const setup = partnerSetupState(id);
+  const missing = kind === 'working' ? '' : setup === 'not_installed' ? t("还没安装") : setup === 'login_required' ? t("还差登录") : '';
+  const stuck = $(`public-progress-${id}`).dataset.stuck === 'true';
+  const availability = availabilityInfo(id); const line = memberAvailabilityLine(availability);
+  const label = missing || (stuck ? t("可能卡住了") : compactActivityLabel({ label: status.textContent }));
+  const asks = stuck || !!missing || !!line || ['needs_user', 'waiting_peer', 'queued'].includes(kind);
+  const tone = kind === 'failed' ? 'bad' : asks ? 'ask' : kind === 'working' ? 'go' : ['cancelled', 'interrupted', 'unknown'].includes(kind) ? 'stop' : 'idle';
+  const rowState = $(`row-state-${id}`);
+  if (rowState.textContent !== label) rowState.textContent = label;
+  rowState.className = `member-row-state ${tone}`;
+  // The task name alone when the sentence quotes one: the state beside it already says what is happening.
+  const quoted = task.match(/[「“](.+)[」”]$/u)?.[1];
+  // Placeholder lines say nothing the state beside them does not, so the row leaves them out.
+  const resting = [t("现在没在做事"), t("现在没在做事。做完的内容在“交付”里看。"), t("开始任务后，在这里查看分工。")].includes(task);
+  const short = line ? line.text : resting ? '' : quoted || task;
+  const rowTask = $(`row-task-${id}`);
+  if (rowTask.textContent !== short) rowTask.textContent = short;
+  $(`member-row-${id}`).title = `${name}${interfaceColon()}${line ? `${line.text} · ` : ''}${task}`;
+  const entries = memberQuotaWindows(id);
+  const exhausted = availability.blocked && ['subscription_limit_reached', 'quota_exhausted', 'spend_cap_reached', 'api_balance_exhausted'].includes(availability.value?.reason);
+  const left = exhausted ? 0 : entries.length ? Math.min(...entries.map((entry) => entry.remaining)) : null;
+  const rowQuota = $(`row-quota-${id}`);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), left]);
+  if (rowQuota.dataset.fingerprint !== fingerprint) {
+    rowQuota.dataset.fingerprint = fingerprint;
+    rowQuota.className = `member-row-quota${left === null ? ' none' : left <= 0 ? ' zero' : left < 20 ? ' low' : ''}`;
+    if (left === null) { rowQuota.replaceChildren(); rowQuota.textContent = '—'; rowQuota.title = t("还没查到额度"); rowQuota.setAttribute('aria-label', t("还没查到额度")); }
+    else {
+      const meter = element('progress', `${left}%`); meter.max = 100; meter.value = left; meter.setAttribute('aria-hidden', 'true');
+      rowQuota.replaceChildren(element('span', `${left}%`), meter);
+      rowQuota.title = t("最紧的一条额度还剩 {p0}%", { p0: left }); rowQuota.setAttribute('aria-label', rowQuota.title);
+    }
+  }
+  const alert = kind === 'failed' ? { text: label, tone: 'bad' } : stuck || missing ? { text: label, tone: 'ask' }
+    : line?.tone === 'ask' ? { text: line.text.split(' · ')[0], tone: 'ask' } : kind === 'needs_user' ? { text: label, tone: 'ask' }
+      : line ? { text: line.text.split(' · ')[0], tone: 'plain' } : left !== null && left < 20 ? { text: t("额度剩 {p0}%", { p0: left }), tone: 'plain' } : null;
+  return { id, name, group: kind === 'working' ? 'work' : asks ? 'wait' : 'rest', alert };
+}
+// How many are working, waiting or free, and who needs a look. A chip opens that partner's row.
+function renderMemberOverview(rows, counted) {
+  const holder = $('member-overview'); const alerts = rows.filter((row) => row.alert);
+  const show = alerts.length > 0 || counted && rows.length >= 3;
+  holder.hidden = !show;
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), show, counted, rows, state.memberFingerprint]);
+  if (holder.dataset.fingerprint === fingerprint) return;
+  const refocus = [...holder.children].flatMap((node) => [...node.children]).find((node) => node === document.activeElement)?.dataset.memberJump;
+  holder.dataset.fingerprint = fingerprint; holder.replaceChildren();
+  if (!show) return;
+  if (counted && rows.length >= 3) {
+    const counts = element('p', '', 'member-counts');
+    const count = (group) => rows.filter((row) => row.group === group).length;
+    counts.append(element('span', t("{p0} 位在干活", { p0: count('work') }), 'go'), element('span', t("{p0} 位等着", { p0: count('wait') }), 'ask'),
+      element('span', t("{p0} 位没在做事", { p0: count('rest') }), 'idle'));
+    holder.append(counts);
+  }
+  if (!alerts.length) return;
+  const list = element('div', '', 'member-alerts');
+  for (const row of alerts) {
+    const chip = element('button', '', `member-alert ${row.alert.tone}`); chip.type = 'button'; chip.dataset.memberJump = row.id;
+    const full = `${row.name}${interfaceColon()}${row.alert.text}`;
+    chip.title = full; chip.setAttribute('aria-label', full);
+    chip.append(avatar(row.id, state.snapshot?.members?.find((member) => member.id === row.id) || state.catalog.find((agent) => agent.id === row.id)), element('span', row.alert.text));
+    chip.addEventListener('click', () => {
+      const card = $(`member-${row.id}`); const summary = $(`member-row-${row.id}`);
+      card.open = true; summary.scrollIntoView?.({ block: 'nearest' }); summary.focus({ preventScroll: true });
+    });
+    list.append(chip);
+    if (refocus === row.id) chip.focus({ preventScroll: true });
+  }
+  holder.append(list);
 }
 
 function partnerAvailability(id) {
@@ -3074,12 +3157,25 @@ function syncParticipants(snapshot) {
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), participants.map((agent) => [agent.id, agent.name, initials[agent.id], agent.adapter, agent.provider, beanStyle(agent.id, agent), state.partners.some((partner) => partner.id === agent.id)])]);
   if (fingerprint === state.memberFingerprint) return;
   state.memberFingerprint = fingerprint;
-  $('member-cards').replaceChildren(...participants.filter((agent) => state.participantIds.includes(agent.id)).map((agent) => memberCard(agent.id, agent)));
-  $('empty-avatars').replaceChildren(...participants.map((agent) => {
-    const pal = element('div', '', 'bean-pal');
+  // Rebuilding the rows (a partner joins, the language changes) keeps the ones the user had opened.
+  const opened = new Set([...$('member-cards').children].filter((card) => card.open).map((card) => card.id));
+  $('member-cards').replaceChildren(...participants.filter((agent) => state.participantIds.includes(agent.id)).map((agent) => memberCard(agent.id, agent, opened.has(`member-${agent.id}`))));
+  // The welcome picture keeps its big beans for up to four partners; more of them shrink into one or two
+  // rows that stay on the plate, and past twelve the rest fold into a "+N".
+  const pictured = participants.length > 12 ? participants.slice(0, 11) : participants;
+  const pals = pictured.map((agent) => {
+    const pal = element('div', '', 'bean-pal'); pal.title = names[agent.id];
     pal.append(avatar(agent.id, agent), element('span', names[agent.id], 'bean-pal-name'));
     return pal;
-  }));
+  });
+  if (pictured.length < participants.length) {
+    const more = element('div', `+${participants.length - pictured.length}`, 'bean-pal bean-pal-more');
+    more.title = interfaceList(participants.slice(pictured.length).map((agent) => names[agent.id]));
+    pals.push(more);
+  }
+  // Seven or more split into two even rows (4+4, 5+5, 6+6) instead of a full row and a short one.
+  $('empty-avatars').className = `empty-avatars${participants.length > 6 ? ` crowd per-${Math.ceil(pals.length / 2)}` : participants.length > 4 ? ' many' : participants.length === 4 ? ' four' : ''}`;
+  $('empty-avatars').replaceChildren(...pals);
   const picker = $('target-picker');
   picker.replaceChildren(element('span', t("先接手"), 'target-label'));
   for (const id of ['all', ...state.participantIds]) {
@@ -5471,6 +5567,7 @@ function renderMemberPublicProgress(snapshot, member) {
   const progressStatus = active && progressStatusLine(active, active.latest_progress_status || [...events].reverse().find((event) => event.kind === 'native_progress_status'
     && event.sender === member.id && event.job_id === active.id));
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [scope, publicMessage, tool, liveness, progressStatus]]);
+  holder.dataset.stuck = String(liveness?.warning === true);
   if (holder.dataset.fingerprint === fingerprint) return;
   const expanded = holder.dataset.scope === scope && holder.firstChild?.open === true;
   holder.dataset.fingerprint = fingerprint; holder.dataset.scope = scope; holder.replaceChildren();
@@ -5546,6 +5643,7 @@ function renderMembers(snapshot) {
   renderCacheMissNote(snapshot);
   const loading = !!state.selected && !snapshot;
   const objective = currentObjective(snapshot);
+  const rows = [];
   for (const provider of state.participantIds) {
     const member = snapshot?.members.find((entry) => entry.id === provider);
     const { account } = currentAccount(provider);
@@ -5607,7 +5705,9 @@ function renderMembers(snapshot) {
       fields.dataset.fingerprint = fingerprint;
       renderUsage(fields, usage);
     }
+    rows.push(renderMemberRow(provider));
   }
+  renderMemberOverview(rows, !!snapshot);
   renderProject(snapshot?.project);
   renderExecutions(snapshot?.executions);
   renderNativeExecutions(snapshot);
