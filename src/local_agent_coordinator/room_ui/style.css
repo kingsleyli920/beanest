@@ -291,7 +291,9 @@ h1 { max-width: 40vw; overflow: hidden; margin: 0; color: var(--ink); font-size:
 .empty-avatars.crowd.per-5 { max-width: min(388px, 100%); }
 /* Four sit in one row rather than three and a straggler. */
 .empty-avatars.four { max-width: min(430px, 100%); }
-.empty-avatars.many::before, .empty-avatars.crowd::before { inset: 26% 0 0; }
+.empty-avatars.many::before { inset: 26% 0 0; }
+/* Two rows sit on one pill that reaches up behind the first row; a percentage inset left that row floating above the plate. */
+.empty-avatars.crowd::before { inset: 14px 0 0; border-radius: 84px; }
 .empty-avatars.many .bean-pal { width: 68px; gap: 5px; }
 .empty-avatars.crowd .bean-pal { width: 66px; gap: 4px; }
 .empty-avatars.many .avatar { width: 56px; height: 61px; }

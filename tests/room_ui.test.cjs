@@ -12052,6 +12052,10 @@ test('the welcome picture shrinks and folds as partners are added instead of sta
   assert.equal(fourteen.children[10].title, '伙伴 11');
   assert.equal(fourteen.children[11].className, 'bean-pal bean-pal-more'); assert.equal(fourteen.children[11].textContent, '+3');
   assert.equal(fourteen.children[11].title, '伙伴 12、伙伴 13、伙伴 14');
+  // Two rows share one plate: a percentage top inset started it below the first row, which then floated above it.
+  const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8');
+  assert.match(css, /\.empty-avatars\.crowd::before \{ inset: 14px 0 0; border-radius: 84px; \}/);
+  assert.doesNotMatch(css, /\.empty-avatars\.crowd::before[^{]*\{[^}]*inset: \d+%/);
 });
 
 test('the sidebar quota hint keeps the four tightest meters when there are more partners than fit', async () => {
