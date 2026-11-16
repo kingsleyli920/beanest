@@ -22,6 +22,15 @@ class ReserveTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_what_is_left_is_reported_at_any_level_and_only_from_a_fresh_reading(self):
+        # Catches the partners being told only about accounts already at their reserve, or being told
+        # a number from a reading too old to mean anything.
+        self.assertEqual(self.gate.left("codex", account(31)), 69)
+        self.assertEqual(self.gate.left("codex", account(97.6)), 2)
+        self.assertEqual(self.gate.left("codex", account(100)), 0)
+        self.now = 1000.0 + 1801
+        self.assertIsNone(self.gate.left("codex", account(31)))
+
     def test_threshold(self):
         # Catches the boundary drifting: 15% left is reserve, 16% is not.
         self.assertEqual(self.gate.reserve_left("codex", account(85)), 15)

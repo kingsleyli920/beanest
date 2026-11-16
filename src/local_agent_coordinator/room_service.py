@@ -440,6 +440,7 @@ class RoomService(RoomPromptMixin):
         self.store.task_capabilities = self._task_capabilities
         if self.partner_manager is not None:
             self.store.account_workloads = self._account_workloads
+            self.store.account_capacity = self._account_capacity
         self.user_outbox_scope = self.store.user_outbox_scope(hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest())
         self._outbox_submissions = set()
         try:
@@ -1391,6 +1392,13 @@ class RoomService(RoomPromptMixin):
         """Unreadable settings must not stop scheduling; every partner is then an ordinary account."""
         try:
             return self.partner_manager.workload_profiles()
+        except PartnerError:
+            return {}
+
+    def _account_capacity(self):
+        """Unreadable accounts must not stop scheduling; what is left is then simply unknown."""
+        try:
+            return self.partner_manager.capacity_left()
         except PartnerError:
             return {}
 
@@ -2542,6 +2550,14 @@ class RoomService(RoomPromptMixin):
             if export.exists():
                 shutil.rmtree(export)
 
+    @staticmethod
+    def _handoff_order(choices, team):
+        """Who should take over a partner's work, best first; ties keep the given order."""
+        held = {member: sum(item.get("owner") == member and not task_settled(item) for item in team["tasks"])
+                for member in choices}
+        builds = {item["id"]: item.get("takes_build_work", True) for item in team["members"]}
+        return sorted(choices, key=lambda member: (not builds.get(member, True), held[member]))
+
     def _partial_recovery_receivers(self, snapshot, *, blocked=None):
         candidates = self.store.native_partial_recovery_candidates(snapshot["room"]["id"])
         receivers = {}
@@ -2573,6 +2589,9 @@ class RoomService(RoomPromptMixin):
             choices = [member["id"] for member in snapshot["members"] if member["id"] not in used and available(member["id"])]
             if not snapshot["objective"]["execution_policy"]["quota_failover"] or not choices:
                 return None
+            # Whoever holds least takes it over; a member the team keeps back (low quota, past the user's
+            # ceiling, a role that does not build) only when nobody else can.
+            choices = self._handoff_order(choices, snapshot["team"])
             receivers[candidate["job_id"]] = choices[0]
             used.add(choices[0])
         return receivers

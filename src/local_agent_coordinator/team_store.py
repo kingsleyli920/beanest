@@ -2589,6 +2589,9 @@ class TeamStore:
             abilities = self._abilities(db, room_id)
             summary["roles"] = {member: sorted(abilities[member]) for member in members if member in abilities}
             # What the user fixed, so the page and the partners can tell a level or ceiling from the partners' own split.
+            # What each member can still take on, so the partners can lean on whoever has room.
+            capacity = self.store.account_capacity()
+            summary["capacity_left"] = {member: capacity[member] for member in members if member in capacity}
             summary["user_limits"] = {member: {"kind": kind, "value": value}
                                       for member, (kind, value) in self._user_limits(db, room_id, members).items()}
         return summary

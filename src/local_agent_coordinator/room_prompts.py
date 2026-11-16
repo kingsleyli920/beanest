@@ -105,6 +105,9 @@ ALLOCATE_INSTRUCTION = (
     "has done least for its share; a share above 0 never keeps a free member waiting while ready work sits. "
     "context.workload shows the facts: each account's target_percent, who set it (set_by user, partners or default), its "
     "actual_percent of the round so far, how many unfinished tasks each member holds, and how many tasks nobody has taken. "
+    "capacity_left, when present, says how each member is billed and the percent it has left: of its tightest subscription "
+    "window, or for a pay_per_use member of the spending limit the user set (null means not known). Lean on members with "
+    "room: one running low will soon be out and its work cut off, while a member with plenty left can carry more now. "
     "A member with user_limit was set by the user: a level is fixed and a percent is a ceiling, so a share above it is cut "
     "to it and recorded, and a member already past its ceiling takes new work only when nobody else can. Re-allocate whenever the facts call for it, for example when one member holds nothing while "
     "another has tasks queued up, or when the work turned out heavier on one side than estimated. Leave it out when the "
@@ -229,6 +232,7 @@ def _workload_facts(snapshot, tasks, run_id):
                          if any(member in limits for member in row["members"]) else {})}
                      for row in summary["accounts"]],
         "unfinished_tasks_held": in_hand,
+        **({"capacity_left": summary["capacity_left"]} if summary.get("capacity_left") else {}),
         "tasks_nobody_has_taken": sum(task.get("owner") is None and task.get("status") == "open" for task in tasks),
     }
     latest = next((event for event in reversed(snapshot["events"])

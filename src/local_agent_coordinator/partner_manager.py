@@ -1064,6 +1064,26 @@ class PartnerManager:
         return {item["id"]: (_scope(item), item.get("workload_level", workload.DEFAULT_LEVEL), self._reserve_left(item, data) is not None)
                 for item in data["profiles"]}
 
+    def capacity_left(self) -> dict:
+        """How much room each partner has to take on more: how it is billed and the percent left.
+
+        For a subscription, the tightest freshly read window; for a pay-per-use
+        partner, the tighter of the user's daily and monthly spending limits.
+        The percent is None when it is not known.
+        """
+        with self._locked():
+            data = self._load()
+        result = {}
+        for item in data["profiles"]:
+            if _api(item):
+                spend = self._spend(item)
+                left = spend.get("left_percent") if spend else None
+                result[item["id"]] = {"billing": "pay_per_use", "left_percent": None if left is None else max(0, round(left))}
+            elif item["adapter"] in TRUSTED_ADAPTERS and not _connector(item):
+                result[item["id"]] = {"billing": "subscription",
+                                      "left_percent": self.quota_gate.left(_scope(item), self._account_snapshot(item, data))}
+        return result
+
     def _reserve_left(self, item, data):
         if _api(item):
             # Near its spending cap an API partner is held back the way a low subscription is.

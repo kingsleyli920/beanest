@@ -411,6 +411,12 @@ class Manager(unittest.TestCase):
         self.manager.record_api_spend("ds", {})
         self.assertEqual(self.manager.get("ds")["spend"]["month_unpriced_calls"], 1)
 
+    def test_how_much_of_the_spending_limit_is_left_is_known_at_any_level(self):
+        # Catches the partners learning that a pay-per-use partner has room only once it is nearly out.
+        self.assertEqual(self.manager.capacity_left()["ds"], {"billing": "pay_per_use", "left_percent": 100})
+        self.spend(500_000)  # 0.33 of the 1.00 daily limit
+        self.assertEqual(self.manager.capacity_left()["ds"], {"billing": "pay_per_use", "left_percent": 67})
+
     def test_near_the_cap_it_is_held_back_like_a_low_subscription(self):
         # Catches the reserve flag never reaching scheduling for a spending cap.
         self.assertFalse(self.manager.workload_profiles()["ds"][2])

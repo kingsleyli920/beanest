@@ -163,6 +163,13 @@ class QuotaGate:
         left = [100 - row["used_percent"] for row in self._shared_windows(scope, account, max_age=RESERVE_FRESH_SECONDS)]
         return round(min(left)) if left and min(left) <= RESERVE_PERCENT else None
 
+    def left(self, scope, account):
+        """The least left in a freshly read shared window, in percent; None when nothing fresh is known."""
+        if not isinstance(account, dict) or self.identity(account) is None:
+            return None
+        left = [100 - row["used_percent"] for row in self._shared_windows(scope, account, max_age=RESERVE_FRESH_SECONDS)]
+        return max(0, round(min(left))) if left else None
+
     def observe_account(self, scope, account):
         adapter, identity = scope, self.identity(account)
         if identity is None or account.get("stale") is not False:
