@@ -12133,3 +12133,20 @@ test('how many tasks a partner may work on at once is set on its account card, a
     [['/api/partners/claude/parallel-limit', { limit: 6 }]]);
   assert.equal(control('claude').value, '6');
 });
+
+// Catches a row action that hides for everyone: it may disappear only where a pointer can hover, and
+// must come back for the row under the pointer and for keyboard focus. Also catches the refresh
+// putting the heavy shadows and the boxed chat bubbles back.
+test('the refresh hides row actions only for hover pointers and keeps partner messages unboxed', () => {
+  const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8');
+  const refresh = css.slice(css.indexOf('/* ---- Refresh: fewer boxes'));
+  assert.ok(refresh.length > 1000, 'the refresh layer is the last part of the stylesheet');
+  const hover = refresh.match(/@media \(hover: hover\) \{([\s\S]*?)\n\}/)[1];
+  assert.match(hover, /\.task-row \.task-withdraw \{ opacity: 0;/);
+  assert.match(hover, /\.task-row:hover \.task-withdraw, \.task-row:focus-within \.task-withdraw, \.task-row \.task-withdraw:focus-visible \{ opacity: 1; \}/);
+  assert.equal(refresh.replace(hover, '').includes('.task-withdraw'), false, 'outside the hover query the action is never hidden');
+  assert.match(refresh, /\n\.event-text \{ padding: 0; border: 0; border-radius: 0; background: transparent;/);
+  assert.match(refresh, /\n\.event\.user \.event-text, \.event\.request \.event-text \{[^}]*background: var\(--go-bg\)/);
+  assert.match(refresh, /\n\.now-card \{ flex-direction: row;[^}]*box-shadow: none; \}/);
+  assert.match(refresh, /\.now-actions \.btn\.danger:hover \{[^}]*color: var\(--bad\); \}/, 'the stop button turns red only under the pointer');
+});

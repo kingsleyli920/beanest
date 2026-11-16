@@ -74,13 +74,16 @@ class ObjectiveDeliveryLineageTests(unittest.TestCase):
 
     def test_a_task_the_hosts_own_stop_left_blocked_is_open_again_in_the_next_round(self):
         # Catches the real room where a five second lock wait stopped the team with project_busy and
-        # four tasks stayed blocked for good after the automatic continue, with nobody able to take them.
+        # four tasks stayed blocked for good after the automatic continue, with nobody able to take them;
+        # and the later one where a replan nobody answered (team_plan_stalled) and an unreadable reply
+        # (invalid_agent_response) left the whole remaining chain blocked across every automatic continue.
         # A task waiting for the user's own decision, and one whose scene must be kept, stay as they are;
         # so does one blocked over files whose origin the host could not confirm.
         run, _ = self.current()
         with self.store._connection(write=True) as db:
             for task, owner, status, reason, cause in (
                     ("B1", "claude", "blocked", "project_busy", None), ("B2", None, "blocked", "project_busy", None),
+                    ("B6", None, "blocked", "team_plan_stalled", None), ("B7", "claude", "blocked", "invalid_agent_response", None),
                     ("B3", "claude", "blocked", "Which licence?", "user_decision"),
                     ("B4", "claude", "blocked", "project_commit_unconfirmed", None),
                     ("B5", "claude", "blocked", "team_scope_conflict", None)):
@@ -90,6 +93,7 @@ class ObjectiveDeliveryLineageTests(unittest.TestCase):
         self.next_objective()
         tasks = {task["id"]: (task["status"], task["owner"], task["blocked_reason"]) for task in self.store.snapshot(self.room)["team"]["tasks"]}
         self.assertEqual(tasks, {"B1": ("assigned", "claude", None), "B2": ("open", None, None),
+                                 "B6": ("open", None, None), "B7": ("assigned", "claude", None),
                                  "B3": ("blocked", "claude", "Which licence?"),
                                  "B4": ("blocked", "claude", "project_commit_unconfirmed"),
                                  "B5": ("blocked", "claude", "team_scope_conflict")})

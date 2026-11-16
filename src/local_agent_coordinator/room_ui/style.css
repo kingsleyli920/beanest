@@ -1843,3 +1843,52 @@ html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .t
 .api-price-cell input { width: 100%; min-width: 0; }
 .api-price-list { display: grid; gap: 4px; margin: 10px 0; }
 @media (max-width: 640px) { .api-price-line { grid-template-columns: repeat(2, minmax(0, 1fr)); } .api-price-caption { grid-column: 1 / -1; } }
+
+/* ---- Refresh: fewer boxes, one accent, actions where they are needed ----
+   Regions are separated by space and a hairline, not by a bordered card inside a bordered card.
+   Shadows are kept for things that float (menus, dialogs); what sits on the page is flat. */
+/* The task's state is one strip: what is happening on the left, the one action on the right. */
+.now-card { flex-direction: row; align-items: center; gap: 16px; margin: 10px 24px 0; padding: 11px 14px 11px 16px; border-radius: 12px; box-shadow: none; }
+.now-body { flex: 1; gap: 1px; }
+.now-label { font-size: 11.5px; }
+.now-title { font-size: 15px; line-height: 1.45; }
+.now-text { color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+.now-actions { flex: none; }
+.now-actions .btn { height: 32px; padding: 0 12px; font-size: 12.5px; }
+.now-actions .btn.danger { border-color: transparent; background: transparent; color: var(--muted); font-weight: 500; }
+.now-actions .btn.danger:hover { border-color: var(--bad-line); background: var(--bad-bg); color: var(--bad); }
+/* Discussion reads like a conversation, not a stack of forms: partners speak in plain text, only your own words sit in a bubble. */
+.timeline { padding: 18px 24px; }
+.event { gap: 10px; margin: 2px 0 18px; }
+.event-heading { gap: 6px; margin: 0 0 3px; }
+.event-author { font-size: 13px; font-weight: 650; }
+.event-time { font-size: 11px; }
+.event-text { padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 13.5px; line-height: 1.75; }
+.event.user .event-text, .event.request .event-text { display: inline-block; max-width: 100%; padding: 9px 13px; border: 0; border-radius: 4px 14px 14px 14px; background: var(--go-bg); color: var(--ink); }
+.event-task { margin: 5px 8px 0 0; padding: 0; background: transparent; font-size: 11px; }
+.event-task::before { content: "# "; opacity: .6; }
+/* A row's own action shows when the row is under the pointer or holds the keyboard focus. */
+@media (hover: hover) {
+  .task-row .task-withdraw { opacity: 0; transition: opacity .12s ease; }
+  .task-row:hover .task-withdraw, .task-row:focus-within .task-withdraw, .task-row .task-withdraw:focus-visible { opacity: 1; }
+}
+/* The message box: one soft outline, a clear ring when it has the focus. */
+.composer-card { padding: 10px 12px 9px; border-radius: 14px; box-shadow: 0 1px 2px rgba(20, 24, 18, .04); }
+.composer-card:focus-within, .composer-card:has(#message:focus-visible) { border-color: var(--focus); outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
+/* The side panel lists facts; only the partner list itself is a surface. */
+.budget-card { margin: 14px 3px 8px; padding: 10px 12px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+.room-card.selected { box-shadow: none; outline: 1px solid var(--line); }
+/* Partner settings: each card states who it is and whether it can work; checks and housekeeping stay quiet until wanted. */
+.partner-discovery { margin: 6px 0 14px; padding: 10px 14px; border: 0; border-radius: 10px; background: var(--sunken); font-size: 12.5px; }
+.partner-discovery .quiet-button { margin-top: 8px; }
+.manager-card.partner-monitor { padding: 14px 16px 12px; border-radius: 12px; box-shadow: none; }
+.partner-monitor .installation-state, .partner-monitor .availability-note, .partner-monitor .monitor-overview { margin: 2px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.partner-monitor .member-heading + .installation-state { margin-top: 10px; }
+.partner-monitor .health-state { margin: 4px 0; padding: 2px 8px; border-radius: 6px; font-size: 11.5px; }
+.partner-monitor .monitor-tasks { margin: 2px 0 8px; font-size: 12px; }
+.partner-monitor > .member-details { margin-top: 4px; }
+.partner-monitor .manager-card-actions { gap: 6px; margin-top: 10px; }
+.partner-monitor .manager-card-actions .quiet-button { padding: 4px 10px; border-color: transparent; background: var(--hover); font-size: 12px; }
+.partner-monitor .manager-card-actions .quiet-button:hover { border-color: var(--line-strong); }
+.partner-monitor .manager-card-actions .quiet-button.danger { background: transparent; color: var(--muted); }
+.partner-monitor .manager-card-actions .quiet-button.danger:hover { border-color: var(--bad-line); background: var(--bad-bg); color: var(--bad); }
