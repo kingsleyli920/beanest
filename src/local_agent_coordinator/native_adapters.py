@@ -827,14 +827,21 @@ def end_orphaned(pid, launched_at):
 
 
 def _remember(pid, owned, table):
+    """Record the launch group and the children of processes already recorded.
+
+    A recorded parent counts only while the table still shows that same
+    process. Over a long call the system gives the PID of a child that
+    exited to an unrelated program, and what that program starts is not ours.
+    """
     changed = True
     while changed:
         changed = False
         for child, (parent, group, birth, _state) in table.items():
-            if child == pid or group == pid or parent in owned:
-                if child not in owned:
-                    owned[child] = birth
-                    changed = True
+            live_parent = parent in owned and parent in table and table[parent][2] == owned[parent]
+            # A recorded number that is ours again under a new start time is a new process of ours.
+            if (child == pid or group == pid or live_parent) and owned.get(child) != birth:
+                owned[child] = birth
+                changed = True
 
 
 async def _cleanup(process, owned):
