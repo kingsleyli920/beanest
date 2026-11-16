@@ -11839,7 +11839,7 @@ test('a capped API partner waits like a used-up quota instead of asking the user
   await settle();
   assert.match(ui.get('availability-ds').textContent, /已到花费上限/);
   assert.equal(ui.get('availability-ds').classList.contains('waiting'), true);
-  assert.equal(ui.get('member-quota-ds').parentNode.classList.contains('quota-blocked'), false);
+  assert.equal(ui.get('member-ds').classList.contains('quota-blocked'), false);
 });
 
 test('an empty balance or a refused key says what to do, not that the quota ran out', async () => {
@@ -11920,4 +11920,150 @@ test('adding DeepSeek Harness sends dsh, the editable prices and only the key lo
   assert.deepEqual(body.api_model.models.map((model) => [model.id, model.input, !!model.peak]), [['deepseek-flash', 0.15, true], ['deepseek-v4-pro', 0.66, false]]);
   assert.deepEqual(body.api_model.peak_windows[1], { start: '06:00', end: '10:00', days: [0, 1, 2, 3, 4] });
   assert.equal(body.api_model.default_model, 'deepseek-flash');
+});
+
+function partnerRowsFixture() {
+  // Three partners: one working with no record for 15 minutes, one queued with 15% quota left, one failed.
+  const now = Date.now() / 1000;
+  const saved = activeActivitySnapshot(); saved.room.mode = 'native_project';
+  saved.members.push({ ...catalog[2], provider: 'test_peer', status: 'failed', session_id: null, current_task: null, usage: null });
+  saved.jobs[0].claimed_at = now - 900;
+  const partners = [
+    { ...catalog[0], adapter: 'claude', enabled: true, account: claudeUsageAccount([
+      { name: 'claude:five_hour', scope: 'provider_account', kind: 'session', window_minutes: 300, used_percent: 8, remaining_percent: 92, resets_at: now + 3000 },
+      { name: 'claude:seven_day', scope: 'provider_account', kind: 'weekly_all', window_minutes: 10080, used_percent: 36, remaining_percent: 64, resets_at: now + 9000 }]) },
+    { ...catalog[1], adapter: 'codex', enabled: true, account: accountFixture({ quota: { state: 'available', scope: 'provider_account', source: 'x', checked_at: now, stale: false, reason: null,
+      windows: [{ name: 'codex:primary', remaining_percent: 15, used_percent: 85, window_minutes: 300, resets_at: now + 3000 }] } }) },
+    { ...catalog[2], adapter: 'claude', enabled: true },
+  ];
+  return { saved, partners };
+}
+
+test('each partner is one closed row that names its task and state, and opens to everything the card showed', async () => {
+  // Catches: a partner still drawn as a tall open card, the row missing the task or state, the quoted task name
+  // not cut out of its sentence, or any of the card's lines dropped when it moved under the row.
+  const saved = activeActivitySnapshot(); const ui = await browser({ rooms: [saved.room], saved });
+  const card = ui.get('member-claude');
+  assert.equal(card.tagName, 'DETAILS'); assert.equal(card.open, false);
+  assert.equal(card.children.length, 2);
+  assert.equal(card.children[0], ui.get('member-row-claude')); assert.equal(card.children[0].tagName, 'SUMMARY');
+  assert.deepEqual(card.children[0].children.map((node) => node.id || node.className.split(' ')[0]), ['avatar', 'name-claude', 'member-row-line', 'row-quota-claude']);
+  assert.equal(ui.get('name-claude').textContent, 'Claude Code');
+  assert.equal(ui.get('row-state-claude').textContent, '正在处理'); assert.equal(ui.get('row-state-claude').className, 'member-row-state go');
+  assert.equal(ui.get('row-task-claude').textContent, '实现计分规则');
+  assert.equal(ui.get('row-state-codex').textContent, '等待开始'); assert.equal(ui.get('row-state-codex').className, 'member-row-state ask');
+  assert.equal(ui.get('row-task-codex').textContent, '核对边界条件');
+  assert.equal(ui.get('member-row-claude').title, 'Claude Code：正在开发「实现计分规则」', 'the full sentence stays on hover when the row cuts it');
+  const body = descendants(card.children[1]).map((node) => node.id).filter(Boolean);
+  for (const id of ['account-email-claude', 'status-claude', 'task-claude', 'public-progress-claude', 'availability-claude', 'member-quota-claude',
+    'member-model-claude', 'member-workload-claude', 'session-claude', 'usage-claude', 'provider-account-claude']) assert.ok(body.includes(id), `${id} is still under the row`);
+  assert.equal(ui.get('task-claude').textContent, '正在开发「实现计分规则」');
+  assert.equal(ui.get('member-overview').hidden, true, 'two partners with nothing wrong need no summary');
+  const fresh = await browser({ agents: catalog.slice(0, 2) });
+  assert.equal(fresh.get('row-state-claude').textContent, '未启动');
+  assert.equal(fresh.get('row-task-claude').textContent, '', 'a placeholder task line is not repeated on the row');
+  assert.equal(fresh.get('task-claude').textContent, '开始任务后，在这里查看分工。');
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.equal(english.get('row-task-claude').textContent, '实现计分规则');
+  assert.equal(english.get('row-state-codex').textContent, 'Waiting to start');
+});
+
+test('the overview counts who works, waits and rests, and a chip opens the partner it names', async () => {
+  // Catches: wrong counts, a stuck, low-quota or failed partner not named, a chip that opens the wrong row
+  // or leaves the keyboard focus behind, and missing English copy.
+  const { saved, partners } = partnerRowsFixture();
+  const ui = await browser({ partners, rooms: [saved.room], saved, nativeProjectSupport: true });
+  const overview = ui.get('member-overview');
+  assert.equal(overview.hidden, false);
+  assert.deepEqual(overview.children[0].children.map((node) => node.textContent), ['1 位在干活', '1 位等着', '1 位没在做事']);
+  const chips = overview.children[1].children;
+  assert.deepEqual(chips.map((chip) => [chip.dataset.memberJump, chip.lastChild.textContent, chip.className, chip.getAttribute('aria-label')]), [
+    ['claude', '可能卡住了', 'member-alert ask', 'Claude Code：可能卡住了'],
+    ['codex', '额度剩 15%', 'member-alert plain', 'Codex：额度剩 15%'],
+    ['test_peer', '执行失败', 'member-alert bad', '第三位测试伙伴：执行失败'],
+  ]);
+  assert.equal(ui.get('row-state-claude').textContent, '可能卡住了'); assert.equal(ui.get('row-state-claude').className, 'member-row-state ask');
+  assert.equal(ui.get('row-state-test_peer').className, 'member-row-state bad');
+  assert.equal(ui.get('member-codex').open, false);
+  chips[1].fire('click');
+  assert.equal(ui.get('member-codex').open, true); assert.equal(ui.get('member-claude').open, false);
+  assert.equal(ui.document.activeElement, ui.get('member-row-codex'));
+  assert.doesNotMatch(overview.textContent, /请先处理|副本|内部|审批/);
+  const english = await browser({ language: 'en', partners, rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.deepEqual(english.get('member-overview').children[0].children.map((node) => node.textContent), ['1 working', '1 waiting', '1 free']);
+  assert.deepEqual(english.get('member-overview').children[1].children.map((chip) => chip.lastChild.textContent), ['May be stuck', '15% quota left', 'Execution failed']);
+});
+
+test('a row shows the tightest quota window, a used-up account as 0%, and a dash when nothing was read', async () => {
+  // Catches: the row showing the first window instead of the tightest, a blocked account still reading as its old
+  // percentage, or an unread quota drawn as an empty bar that looks like 0%.
+  const { saved, partners } = partnerRowsFixture();
+  const ui = await browser({ partners, rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(ui.get('row-quota-claude').textContent, '64%64%'); assert.equal(ui.get('row-quota-claude').className, 'member-row-quota');
+  assert.equal(ui.get('row-quota-claude').children[1].tagName, 'PROGRESS'); assert.equal(ui.get('row-quota-claude').children[1].value, 64);
+  assert.equal(ui.get('row-quota-claude').title, '最紧的一条额度还剩 64%');
+  assert.equal(ui.get('row-quota-codex').children[0].textContent, '15%'); assert.equal(ui.get('row-quota-codex').className, 'member-row-quota low');
+  assert.equal(ui.get('row-quota-test_peer').textContent, '—'); assert.equal(ui.get('row-quota-test_peer').className, 'member-row-quota none');
+  assert.equal(ui.get('row-quota-test_peer').getAttribute('aria-label'), '还没查到额度');
+  const blocked = partnerRowsFixture();
+  blocked.partners[0].availability = availabilityFixture({ state: 'blocked', selectable: false, reason: 'subscription_limit_reached', resets_at: null });
+  const held = await browser({ partners: blocked.partners, rooms: [blocked.saved.room], saved: blocked.saved, nativeProjectSupport: true });
+  assert.equal(held.get('row-quota-claude').children[0].textContent, '0%'); assert.equal(held.get('row-quota-claude').className, 'member-row-quota zero');
+  assert.equal(held.get('row-task-claude').textContent, '额度用完 · 供应商没给恢复时间，每小时自动试一次', 'a held partner says why on its row');
+  const english = await browser({ language: 'en', partners, rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(english.get('row-quota-claude').title, 'Tightest quota: 64% left');
+  assert.equal(english.get('row-quota-test_peer').title, 'No quota reading yet');
+});
+
+test('a row the user opened stays open when the rows are rebuilt', async () => {
+  // Catches: a partner joining or being renamed collapsing the row the user was reading.
+  const saved = activeActivitySnapshot(); const ui = await browser({ rooms: [saved.room], saved });
+  const before = ui.get('member-claude'); before.open = true;
+  saved.members[1].name = 'Codex 改名'; await ui.poll();
+  assert.notEqual(ui.get('member-claude'), before, 'the rows were rebuilt');
+  assert.equal(ui.get('name-codex').textContent, 'Codex 改名');
+  assert.equal(ui.get('member-claude').open, true); assert.equal(ui.get('member-codex').open, false);
+});
+
+function manyAgents(count) {
+  return Array.from({ length: count }, (_, index) => ({ id: `pal${index + 1}`, name: `伙伴 ${index + 1}`, avatar: 'P' }));
+}
+
+test('the welcome picture shrinks and folds as partners are added instead of stacking big beans', async () => {
+  // Catches: ten big beans piling into four rows that push the prompt off screen, a straggler row at four,
+  // uneven rows at eight, names without a hover title once they are cut, or no "+N" past twelve.
+  const picture = async (count) => {
+    const agents = manyAgents(count); const saved = snapshot({ agents });
+    const ui = await browser({ agents, rooms: [saved.room], saved });
+    return ui.get('empty-avatars');
+  };
+  assert.equal((await picture(2)).className, 'empty-avatars');
+  assert.equal((await picture(4)).className, 'empty-avatars four');
+  assert.equal((await picture(6)).className, 'empty-avatars many');
+  const eight = await picture(8);
+  assert.equal(eight.className, 'empty-avatars crowd per-4'); assert.equal(eight.children.length, 8);
+  assert.equal(eight.children[7].title, '伙伴 8'); assert.equal(eight.children[7].lastChild.textContent, '伙伴 8');
+  assert.equal((await picture(10)).className, 'empty-avatars crowd per-5');
+  const twelve = await picture(12);
+  assert.equal(twelve.className, 'empty-avatars crowd per-6'); assert.equal(twelve.children.length, 12);
+  assert.equal(twelve.children[11].className, 'bean-pal');
+  const fourteen = await picture(14);
+  assert.equal(fourteen.className, 'empty-avatars crowd per-6'); assert.equal(fourteen.children.length, 12);
+  assert.equal(fourteen.children[10].title, '伙伴 11');
+  assert.equal(fourteen.children[11].className, 'bean-pal bean-pal-more'); assert.equal(fourteen.children[11].textContent, '+3');
+  assert.equal(fourteen.children[11].title, '伙伴 12、伙伴 13、伙伴 14');
+});
+
+test('the sidebar quota hint keeps the four tightest meters when there are more partners than fit', async () => {
+  // Catches: one meter per partner squeezing the "伙伴与额度" label onto several lines, or the hint dropping
+  // the partner that is nearly out.
+  const agents = manyAgents(6); const saved = snapshot({ agents });
+  const left = [92, 31, 64, 5, 18, 76];
+  const partners = agents.map((agent, index) => ({ ...agent, adapter: 'codex', enabled: true, account: accountFixture({ quota: { state: 'available', scope: 'provider_account', source: 'x',
+    checked_at: 1000, stale: false, reason: null, windows: [{ name: 'codex:primary', remaining_percent: left[index], used_percent: 100 - left[index], window_minutes: 300, resets_at: 1300 }] } }) }));
+  const ui = await browser({ agents, partners, rooms: [saved.room], saved });
+  assert.deepEqual(ui.get('nav-quota').children.map((meter) => [meter.value, meter.className, meter.title]), [
+    [5, 'low', '伙伴 4：剩余 5%'], [18, 'low', '伙伴 5：剩余 18%'], [31, '', '伙伴 2：剩余 31%'], [64, '', '伙伴 3：剩余 64%']]);
+  const few = await browser({ agents: agents.slice(0, 3), partners: partners.slice(0, 3), rooms: [snapshot({ agents: agents.slice(0, 3) }).room], saved: snapshot({ agents: agents.slice(0, 3) }) });
+  assert.deepEqual(few.get('nav-quota').children.map((meter) => meter.value), [92, 31, 64], 'up to four partners keep their own order');
 });
