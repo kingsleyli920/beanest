@@ -4697,7 +4697,7 @@ class RoomService(RoomPromptMixin):
                 or self._team_worker_cleanup_unknown(snapshot) or any(self._team_cleanup_unknown({**snapshot, "current_run": run})
                                                              for run in snapshot["runs"])):
             return "team_cleanup_unconfirmed"
-        if any(self.registry.get(member["id"]) is None or member["id"] not in self.store.agents
+        if any(self.registry.get(member["id"]) is None or partner_of(member["id"]) not in self.store.agents
                or self.registry.get(member["id"]).adapter != member["adapter"] for member in snapshot["members"]):
             return "agent_unavailable"
         return None
