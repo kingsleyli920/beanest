@@ -123,6 +123,34 @@ class ParallelSessions(pool.PoolService):
         self.assertEqual([member["parallel_work"] for member in after["members"]], [[], []])
         self.assertEqual([member["id"] for member in after["members"]], ["claude", "codex"])
 
+    async def test_a_message_to_everyone_reaches_the_partners_while_one_does_several_tasks(self):
+        # Catches "send to all" being refused with agent_unavailable (seen in a real room: the hidden
+        # second session was counted as a recipient the host has no tool for), and a parallel session
+        # being addressable as if it were a partner of its own.
+        self.limits = {"claude": 3, "codex": 1}
+        self.plan = [plan("T1"), plan("T2"), plan("T3")]
+        release = asyncio.Event()
+        async def until_released():
+            return release.is_set()
+        for task in self.plan:
+            self.holds[task["id"]] = until_released
+        await self.create(["claude", "codex"])
+        for _ in range(500):
+            if len(self.works) >= 3:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual([session["id"] for session in (await self.state())["parallel_sessions"]], ["claude~x2"])
+        await self.service.send_message(self.room_id, "Everyone: keep the mouse where it is.", "all", "to-everyone", source="user")
+        state = await self.state()
+        message = next(event for event in state["events"] if event["kind"] == "message" and event.get("text") == "Everyone: keep the mouse where it is.")
+        self.assertEqual((message["sender"], message["recipient"]), ("user", "all"))
+        with self.assertRaises(RoomError) as refused:
+            await self.service.send_message(self.room_id, "Only the second session.", "claude~x2", "to-a-session", source="user")
+        self.assertEqual(str(refused.exception), "invalid_target")
+        release.set()
+        final = await self.finished()
+        self.assertEqual({task["id"]: task["status"] for task in final["team"]["tasks"]}, {"T1": "accepted", "T2": "accepted", "T3": "accepted"})
+
     async def test_a_limit_of_one_keeps_every_partner_to_one_task_at_a_time(self):
         # Catches the user's limit being ignored: with 1 nobody may work on two tasks at once.
         self.limits = {member: 1 for member in self.limits}

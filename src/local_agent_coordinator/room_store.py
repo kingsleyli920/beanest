@@ -4571,8 +4571,8 @@ class RoomStore:
         with self._connection(write=True) as db:
             room = self._room(db, room_id)
             self._require_active(room)
-            members = tuple(row[0] for row in db.execute(
-                "SELECT provider FROM members WHERE room_id=? ORDER BY rowid", (room_id,)))
+            # A message goes to partners; a partner's parallel session is not someone to address.
+            members = self.partner_ids_in_transaction(db, room_id)
             recipients = checked_target(target, members)
             parameters = ["message", room_id, text, target] + ([source] if source != "user" else [])
             key, fingerprint, previous = self._request(db, request_id, request_identity or parameters)
