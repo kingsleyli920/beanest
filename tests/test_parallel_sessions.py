@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from local_agent_coordinator import parallel_sessions, room_service
+from local_agent_coordinator import parallel_sessions, room_service, ui_server
 from local_agent_coordinator.agent_registry import default_registry
 from local_agent_coordinator.partner_manager import PartnerError, PartnerManager
 from local_agent_coordinator.room_store import RoomError
@@ -28,10 +28,11 @@ class ParallelSessions(pool.PoolService):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.limits = {"claude": 3, "codex": 3, "third": 3, "ember": 3}
-        self.capacity = {"claude": {"billing": "subscription", "left_percent": 80},
+        # Not in room order, so "most room left" and "first in the room" give different answers.
+        self.capacity = {"claude": {"billing": "subscription", "left_percent": 40},
                          "codex": {"billing": "subscription", "left_percent": 60},
-                         "third": {"billing": "subscription", "left_percent": 40},
-                         "ember": {"billing": "subscription", "left_percent": 20}}
+                         "third": {"billing": "subscription", "left_percent": 20},
+                         "ember": {"billing": "pay_per_use", "left_percent": 90}}
         self.service.store.parallel_limits = lambda: self.limits
         self.service.store.account_capacity = lambda: self.capacity
         # Each partner on its own account, so nobody's quota is another's.
@@ -82,12 +83,14 @@ class ParallelSessions(pool.PoolService):
         state = await self.finished()
         self.assertEqual(self.peak, 6, "all six work calls were running together")
         # Work calls start side by side, so their order is not fixed; who did what is.
-        self.assertEqual(sorted(self.works), [("claude", "T1"), ("claude", "T5"), ("codex", "T2"), ("codex", "T6"),
-                                              ("ember", "T4"), ("third", "T3")])
+        # The fifth goes to ember (90% left, 45 per session against codex's 30); the sixth to codex
+        # (30 per session, level with ember's 30 for a third session, and codex runs fewer).
+        self.assertEqual(sorted(self.works), [("claude", "T1"), ("codex", "T2"), ("codex", "T6"),
+                                              ("ember", "T4"), ("ember", "T5"), ("third", "T3")])
         public = self.public(state)
         self.assertEqual([member["id"] for member in public["members"]], ["claude", "codex", "ember", "third"])
         self.assertEqual({task["id"]: task["owner"] for task in public["team"]["tasks"]},
-                         {"T1": "claude", "T2": "codex", "T3": "third", "T4": "ember", "T5": "claude", "T6": "codex"})
+                         {"T1": "claude", "T2": "codex", "T3": "third", "T4": "ember", "T5": "ember", "T6": "codex"})
         self.assertNotIn("~x", repr(public))
         taken = {event["task_id"]: event.get("parallel_session") for event in state["events"] if event["kind"] == "task_taken"}
         self.assertEqual(taken, {"T1": None, "T2": None, "T3": None, "T4": None, "T5": 2, "T6": 2})
@@ -102,6 +105,7 @@ class ParallelSessions(pool.PoolService):
             return release.is_set()
         for task in self.plan:
             self.holds[task["id"]] = until_released
+        self.limits = {"claude": 3, "codex": 1}
         await self.create(["claude", "codex"])
         for _ in range(500):
             if len(self.works) >= 3:
@@ -113,7 +117,7 @@ class ParallelSessions(pool.PoolService):
                          [(1, "T1", "work", "working"), (2, "T3", "work", "working")])
         self.assertEqual(claude["parallel_work"][1]["task_title"], next(task["title"] for task in during["team"]["tasks"] if task["id"] == "T3"))
         self.assertEqual(codex["parallel_work"], [])
-        self.assertEqual((claude["parallel_limit"], len(during["members"])), (3, 2))
+        self.assertEqual(len(during["members"]), 2)
         release.set()
         after = self.public(await self.finished())
         self.assertEqual([member["parallel_work"] for member in after["members"]], [[], []])
@@ -177,20 +181,24 @@ class ParallelSessions(pool.PoolService):
         # starting yet another session on the account that just ran out.
         self.limits = {"claude": 3, "codex": 1}
         self.plan = [plan("T1"), plan("T2"), plan("T3")]
-        guards = []
+        refused = []
         async def guard(members):
-            if members == ["claude"] and self.room_id is not None and (await self.state())["team"]["phase"] == "working":
-                guards.append(len(self.works))
-                if len(guards) == 2:   # claude's second session is about to start its task
-                    raise RoomError("agent_quota_exhausted")
+            # The quota check names the partner; which of its sessions asks is the worker it runs in.
+            session = next((key[1] for key, worker in self.service._workers.items() if worker is asyncio.current_task()), None)
+            if session == "claude~x2" and members == ["claude"] and not refused:
+                refused.append(session)
+                raise RoomError("agent_quota_exhausted")
         self.service._guard_availability = guard
         release = asyncio.Event()
         async def until_released():
             return release.is_set()
-        self.holds.update(T1=until_released, T2=self.until_statuses(("T3",), "open"))
+        async def until_returned():
+            # The event, not the task's status: the returned task is taken again at once.
+            return any(event["kind"] == "task_returned_to_pool" for event in (await self.state())["events"])
+        self.holds.update(T1=until_released, T2=until_returned)
         await self.create(["claude", "codex"])
         for _ in range(500):
-            if any(event["kind"] == "task_returned_to_pool" for event in (await self.state())["events"]):
+            if ("codex", "T3") in self.works:   # codex finished T2 and took what the session gave back
                 break
             await asyncio.sleep(0.01)
         state = await self.state()
@@ -233,7 +241,7 @@ class ParallelSessions(pool.PoolService):
         self.assertEqual(state["objective"]["status"], "complete")
         self.assertEqual({task["id"]: (task["status"], task["owner"]) for task in state["team"]["tasks"]},
                          {"T1": ("accepted", "claude"), "T2": ("accepted", "codex"), "T3": ("accepted", "third"),
-                          "T4": ("accepted", "ember"), "T5": ("accepted", "claude~x2"), "T6": ("accepted", "codex~x2")})
+                          "T4": ("accepted", "ember"), "T5": ("accepted", "ember~x2"), "T6": ("accepted", "codex~x2")})
 
     async def test_a_parallel_sessions_calls_count_as_its_partners_work(self):
         # Catches a second ledger row for the session: the partner would look half as busy as it is,
@@ -266,6 +274,20 @@ class Folding(unittest.TestCase):
             "retired": {"codex": {"reason": "x"}},
             "holders": ["codex", "claude"], "both": ["claude"],
             "text": "T5 (owner claude, now working on T9) and HEAD~2, main~x9, a~x2b"})
+
+    def test_every_http_response_is_folded_before_it_is_sent(self):
+        # Catches the one place every response leaves through sending a session's id to the page or a client.
+        sent = []
+
+        class Response:
+            def _response(self, status, body, content_type):
+                sent.append((status, json.loads(body)))
+        ui_server._Handler._json(Response(), 200, {"members": [{"id": "claude"}], "jobs": [{"provider": "claude~x2"}],
+                                                   "events": [{"sender": "claude~x3", "text": "by claude~x3"}]})
+        ui_server._Handler._json(Response(), 200, {"text": "no session here: main~2"})
+        self.assertEqual(sent, [(200, {"members": [{"id": "claude"}], "jobs": [{"provider": "claude"}],
+                                       "events": [{"sender": "claude", "text": "by claude"}]}),
+                                (200, {"text": "no session here: main~2"})])
 
     def test_ids(self):
         # Catches a session number outside the limit being minted, or a partner id read as a session.

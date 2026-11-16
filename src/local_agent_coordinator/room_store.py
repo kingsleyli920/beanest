@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 from . import job_progress, roles
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
-from .parallel_sessions import MIN_LIMIT as MIN_PARALLEL, is_lane, lane_number, partner_of
+from .parallel_sessions import is_lane, lane_number, partner_of
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached, task_settled
 from .room_contract import MAX_ROOM_MEMBERS, RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
@@ -5268,7 +5268,6 @@ class RoomStore:
         from them, the parallel sessions' own entries: those are for the host's
         sweeps over every session and workspace, and never leave the host.
         """
-        limits = self.parallel_limits()
         by_partner = {}
         for job in db.execute(
                 "SELECT j.id,j.provider,j.status,t.phase,t.task_id,s.title FROM jobs j "
@@ -5280,7 +5279,6 @@ class RoomStore:
         partners = [member for member in members if not is_lane(member["id"])]
         for member in partners:
             running = sorted(by_partner.get(member["id"], []), key=lambda item: item["session"])
-            member["parallel_limit"] = limits.get(member["id"], MIN_PARALLEL)
             member["parallel_work"] = running if len(running) > 1 else []
         return partners, [{**member, "partner": partner_of(member["id"])} for member in members if is_lane(member["id"])]
 

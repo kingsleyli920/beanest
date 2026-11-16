@@ -12071,3 +12071,65 @@ test('the sidebar quota hint keeps the four tightest meters when there are more 
   const few = await browser({ agents: agents.slice(0, 3), partners: partners.slice(0, 3), rooms: [snapshot({ agents: agents.slice(0, 3) }).room], saved: snapshot({ agents: agents.slice(0, 3) }) });
   assert.deepEqual(few.get('nav-quota').children.map((meter) => meter.value), [92, 31, 64], 'up to four partners keep their own order');
 });
+
+test('a partner working on several tasks at once stays one row that says how many, and its open card lists each', async () => {
+  // Catches: a parallel session drawn as a second partner, the row naming only one of the tasks, the list
+  // left on screen after the rush, or a queued piece shown as already running.
+  const saved = activeActivitySnapshot(); const runId = saved.current_run.id;
+  saved.jobs.push({ id: 'second-work', provider: 'claude', kind: 'team_work', status: 'working', text: 'private dispatch two' },
+    { id: 'third-work', provider: 'claude', kind: 'team_work', status: 'queued', text: 'private dispatch three' });
+  saved.events.push({ seq: 4, kind: 'job_created', run_id: runId, job_id: 'second-work', recipient: 'claude', created_at: 111 },
+    { seq: 5, kind: 'job_claimed', run_id: runId, job_id: 'second-work', sender: 'claude', created_at: 112 },
+    { seq: 6, kind: 'job_created', run_id: runId, job_id: 'third-work', recipient: 'claude', created_at: 113 });
+  saved.team.tasks.push({ id: 'c', title: '补导出说明', owner: 'claude', status: 'working', write_paths: ['docs/export.md'] },
+    { id: 'd', title: '整理示例数据', owner: 'claude', status: 'assigned', write_paths: ['data/sample.csv'] });
+  const claude = saved.members.find((member) => member.id === 'claude');
+  claude.parallel_work = [
+    { session: 1, job_id: jobId, status: 'working', phase: 'work', task_id: 'a', task_title: '实现计分规则' },
+    { session: 2, job_id: 'second-work', status: 'working', phase: 'work', task_id: 'c', task_title: '补导出说明' },
+    { session: 3, job_id: 'third-work', status: 'queued', phase: 'work', task_id: 'd', task_title: '整理示例数据' }];
+  saved.members.find((member) => member.id === 'codex').parallel_work = [];
+  const ui = await browser({ rooms: [saved.room], saved });
+  assert.deepEqual(ui.get('member-cards').children.map((node) => node.id), ['member-claude', 'member-codex'], 'still one row per partner');
+  assert.equal(ui.get('row-state-claude').textContent, '同时在做 3 项'); assert.equal(ui.get('row-state-claude').className, 'member-row-state go');
+  assert.equal(ui.get('row-task-claude').textContent, '实现计分规则、补导出说明、整理示例数据');
+  assert.equal(ui.get('parallel-claude').hidden, false);
+  assert.deepEqual(ui.get('parallel-claude').children.map((line) => line.children.map((part) => part.textContent)),
+    [['实现计分规则', '正在做'], ['补导出说明', '正在做'], ['整理示例数据', '等待开始']]);
+  assert.equal(ui.get('parallel-codex').hidden, true); assert.equal(ui.get('parallel-codex').children.length, 0);
+  assert.equal(ui.get('row-state-codex').textContent, '等待开始');
+  assert.equal(ui.get('task-claude').hidden, true, 'the list already names every task');
+  assert.equal(ui.get('work-indicator-text').textContent, 'Claude Code 正在处理', 'two running calls of one partner name it once');
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.equal(english.get('row-state-claude').textContent, 'Doing 3 things at once');
+  assert.deepEqual(english.get('parallel-claude').children.map((line) => line.children[1].textContent), ['Working on it', 'Working on it', 'Waiting to start']);
+
+  // The rush is over: one task left, so the row is an ordinary row again and the list is gone.
+  claude.parallel_work = []; saved.jobs = saved.jobs.slice(0, 2); saved.team.tasks = saved.team.tasks.slice(0, 2);
+  const after = await browser({ rooms: [saved.room], saved });
+  assert.equal(after.get('row-state-claude').textContent, '正在处理');
+  assert.equal(after.get('row-task-claude').textContent, '实现计分规则');
+  assert.equal(after.get('parallel-claude').hidden, true); assert.equal(after.get('parallel-claude').children.length, 0);
+  assert.equal(after.get('task-claude').hidden, false);
+});
+
+test('how many tasks a partner may work on at once is set on its account card, and only where the tool can', async () => {
+  // Catches: the limit never reaching the server or sent as text, the control offered for a tool the host
+  // runs through the user's own command, or a choice outside 1 to 8.
+  const saved = snapshot({ agents: catalog.slice(0, 2) });
+  const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, parallel_limit: 3, account: claudeUsageAccount([]) },
+    { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, parallel_limit: 1, connection_state: 'configured' }];
+  const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
+    route(request) { if (request.path === '/api/partners/claude/parallel-limit') return { partners: [{ ...partners[0], parallel_limit: 6 }, partners[1]], supported_adapters: [] }; } });
+  const control = (id) => descendants(ui.get(`provider-account-${id}`)).find((node) => node.dataset?.focusKey === 'account-parallel');
+  const select = control('claude');
+  assert.equal(select.value, '3');
+  assert.deepEqual(select.children.map((option) => [option.value, option.textContent]),
+    [['1', '1 项（不同时做）'], ['2', '2 项'], ['3', '3 项'], ['4', '4 项'], ['5', '5 项'], ['6', '6 项'], ['7', '7 项'], ['8', '8 项']]);
+  assert.equal(select.getAttribute('aria-label'), 'Claude Code最多同时做几项任务');
+  assert.equal(control('codex') === undefined, true, 'a tool reached through the user\'s own command keeps to one task');
+  select.value = '6'; select.fire('change'); await settle();
+  assert.deepEqual(ui.posts().filter((post) => post.path.endsWith('/parallel-limit')).map((post) => [post.path, post.body]),
+    [['/api/partners/claude/parallel-limit', { limit: 6 }]]);
+  assert.equal(control('claude').value, '6');
+});

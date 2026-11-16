@@ -2010,6 +2010,8 @@ function memberCard(id, descriptor = {}, open = false) {
   const model = element('p', '', 'member-model'); model.id = `member-model-${id}`;
   const doing = element('p', '', 'member-doing'); doing.append(status);
   const task = element('p', '', 'current-task'); task.id = `task-${id}`;
+  // One line per task while the partner works on several at once; empty and hidden otherwise.
+  const parallel = element('ul', '', 'member-parallel'); parallel.id = `parallel-${id}`; parallel.hidden = true;
   const publicProgress = element('div', '', 'member-public-progress'); publicProgress.id = `public-progress-${id}`;
   const availability = element('p', '', 'member-availability'); availability.id = `availability-${id}`;
   const usageSummary = element('p', '', 'usage-summary'); usageSummary.id = `usage-summary-${id}`;
@@ -2021,7 +2023,7 @@ function memberCard(id, descriptor = {}, open = false) {
     element('p', t("本任务的供应商用量快照，与账号订阅额度分开。"), 'detail-caption'), fields, configurationHistory);
   const quota = element('div', '', 'member-quota'); quota.id = `member-quota-${id}`;
   const workload = element('p', '', 'member-workload'); workload.id = `member-workload-${id}`;
-  body.append(doing, element('p', t("当前任务"), 'member-caption'), task, publicProgress, availability, quota, model, workload, usageSummary, details, accountFooter(id));
+  body.append(doing, element('p', t("当前任务"), 'member-caption'), task, parallel, publicProgress, availability, quota, model, workload, usageSummary, details, accountFooter(id));
   card.append(row, body);
   return card;
 }
@@ -5638,6 +5640,32 @@ function renderCacheMissNote(snapshot) {
     element('time', timeLabel(miss.created_at, true), 'cache-miss-time'));
 }
 
+// What a partner is working on in each of its sessions, when that is more than one thing.
+// Each entry: the task's name and what that piece of work is doing right now.
+function parallelWork(snapshot, member) {
+  const items = Array.isArray(member?.parallel_work) ? member.parallel_work.filter((item) => item && typeof item.job_id === 'string') : [];
+  if (items.length < 2) return [];
+  const events = activityRunEvents(snapshot);
+  return items.map((item) => {
+    const job = (snapshot.jobs || []).find((entry) => entry.id === item.job_id);
+    const tool = job?.latest_native_activity || [...events].reverse().find((event) => event.kind === 'native_tool_activity' && event.job_id === item.job_id);
+    const doing = item.status === 'queued' ? t("等待开始")
+      : tool && ['started', 'running'].includes(tool.state) ? nativeActionSentence(tool, true)
+        : item.phase === 'work' ? t("正在做") : item.phase === 'review' ? t("正在评审") : item.phase === 'help' ? t("正在答疑") : t("正在处理");
+    return { job: item.job_id, title: typeof item.task_title === 'string' && item.task_title ? item.task_title : item.task_id || t("这次处理"), doing };
+  });
+}
+function renderParallelWork(id, items) {
+  const holder = $(`parallel-${id}`);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), items]);
+  if (holder.dataset.fingerprint === fingerprint) return;
+  holder.dataset.fingerprint = fingerprint; holder.hidden = !items.length;
+  holder.replaceChildren(...items.map((item) => {
+    const line = element('li');
+    line.append(element('span', item.title, 'member-parallel-task'), element('span', item.doing, 'member-parallel-doing'));
+    return line;
+  }));
+}
 function renderMembers(snapshot) {
   syncParticipants(snapshot);
   renderCacheMissNote(snapshot);
@@ -5691,6 +5719,17 @@ function renderMembers(snapshot) {
     $(`task-${provider}`).textContent = quotaWaiting ? teamMemberTask(snapshot, member) || t("额度恢复后接着做。") : preferredActivity ? preferredActivity.task : paused ? pausedTask : taskActivity ? taskActivity.task : member?.identity_uncertain ? uncertainty.task
       : teamMemberTask(snapshot, member) || (typeof member?.current_task === 'string' && member.current_task ? member.current_task
         : loading ? t("正在读取本次任务的实际分工…") : notStarted ? t("开始任务后，在这里查看分工。") : t("现在没在做事"));
+    // Several tasks at once are still this one partner: its row says how many, the open card lists each.
+    const several = taskActivity && !preferredActivity && !paused && !quotaWaiting && !resumes && !member.identity_uncertain
+      ? parallelWork(snapshot, member) : [];
+    renderParallelWork(provider, several);
+    // The list names every task, so the sentence above it would only repeat them; the row still reads it.
+    $(`task-${provider}`).hidden = several.length > 0;
+    if (several.length) {
+      $(`status-${provider}`).textContent = t("同时在做 {p0} 项", { p0: several.length });
+      $(`status-${provider}`).className = 'member-status working';
+      $(`task-${provider}`).textContent = several.map((item) => item.title).join(t("、"));
+    }
     const historicalWarning = configurationActivity?.historyWarning;
     $(`configuration-history-${provider}`).hidden = !historicalWarning; $(`configuration-history-${provider}`).textContent = historicalWarning || '';
     renderMemberPublicProgress(snapshot, member || { id: provider });
@@ -6137,7 +6176,8 @@ function renderWorkIndicator(snapshot) {
         : ['checkpoint', 'checkpoint_review'].includes(phase) ? t("{p0} 正在核对下一步", { p0: name })
           : job.native_readonly_discussion ? t("{p0} 正在讨论", { p0: name }) : t("{p0} 正在处理", { p0: name });
   };
-  const value = working.length ? working.map(jobText).join(' · ') : queued.length
+  // A partner working on several tasks at once is named once.
+  const value = working.length ? [...new Set(working.map(jobText))].join(' · ') : queued.length
     ? t("{p0} 等待开始", { p0: interfaceList([...new Set(queued.map((job) => displayName(job.provider)))]) }) : '';
   box.hidden = !value; box.classList.toggle('is-working', working.length > 0);
   // Polling may update timing elsewhere, but only a real phase/name transition

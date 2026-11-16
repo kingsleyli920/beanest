@@ -1648,6 +1648,12 @@ textarea { min-height: 52px; font-size: 14px; line-height: 1.7; }
 .member-body { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 4px 12px 12px; background: var(--sunken); }
 .member-body > * { min-width: 0; }
 .member-body .current-task { -webkit-line-clamp: 6; overflow-wrap: anywhere; }
+.member-parallel { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.member-parallel[hidden] { display: none; }
+.member-body .current-task[hidden] { display: none; }
+.member-parallel li { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.5; }
+.member-parallel-task { flex: 1 1 0; min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.member-parallel-doing { flex: none; color: var(--muted); white-space: nowrap; }
 .member-body .member-availability.waiting { background: var(--surface); }
 .member-overview { margin: 0 0 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .member-overview[hidden] { display: none; }

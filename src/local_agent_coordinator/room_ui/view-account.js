@@ -236,7 +236,7 @@ function updateApiAccountFooter(details, id, partner) {
     ? t("本月 {p0} / {p1}", { p0: moneyText(spend.month_spent, currency), p1: capText(spend.caps.monthly) })
     : t("今天 {p0} / {p1}", { p0: moneyText(spend.day_spent, currency), p1: capText(spend.caps?.daily) });
   const body = details.lastChild;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), partner.api_model, spend, partner.availability, partner.workload_level, partner.quota_reserve,
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), partner.api_model, spend, partner.availability, partner.workload_level, partner.parallel_limit, partner.quota_reserve,
     state.workloadSavingId, state.workloadRevision, state.managementBusy, state.editingApiPartnerId]);
   if (body.dataset.fingerprint === fingerprint) return;
   body.dataset.fingerprint = fingerprint;
@@ -285,7 +285,7 @@ function updateAccountFooter(details, id) {
     : windows.length ? t("{p0} 个额度窗口{p1}", { p0: windows.length, p1: quota.stale ? t(" · 上次记录") : '' }) : t("本次未取得额度");
   details.firstChild.lastChild.textContent = status;
   const body = details.lastChild;
-  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.workload_level, state.workloadSavingId, state.workloadRevision, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, partner?.quota_reserve, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
+  const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [account, partner?.workload_level, partner?.parallel_limit, state.workloadSavingId, state.workloadRevision, partner?.account_source, partnerWorking(partner), state.accountSourceBusy, state.accountSourceErrors.get(id), partner?.lifecycle_state, state.accountRefreshErrors.get(id), state.accountAuto.get(id) !== false, state.accountRefreshId, state.managementBusy, state.busy, !!state.pending, partner?.availability, partner?.quota_reserve, availabilityInfo(id).stale, state.availabilityError, state.availabilityRecheck?.id]]);
   if (body.dataset.fingerprint === fingerprint) return;
   body.dataset.fingerprint = fingerprint;
   body.replaceChildren();
@@ -383,6 +383,7 @@ function updateAccountFooter(details, id) {
   body.append(refresh, auto);
   if (loginSource) body.append(...accountSourceControls(id, partner, loginSource));
   if (partner) body.append(workloadControl(id, partner));
+  if (partner && parallelLimitSupported(partner)) body.append(parallelLimitControl(id, partner));
   if (!compact) body.append(element('p', availabilityWatchSupported()
     ? t("只查询登录与额度，不启动模型。面板收起后停止单独刷新；前台仍每分钟检查可用状态，页面隐藏后暂停。")
     : t("只查询登录与额度，不启动模型。面板收起或页面隐藏后停止自动查询。"), 'detail-caption'));
@@ -407,6 +408,37 @@ function workloadControl(id, partner) {
   const holder = element('div', '', 'account-workload-setting');
   holder.append(row, element('p', t("选少或多会固定这个账号的份额：额度高的选多，低的选少。选中就交给伙伴们自己分。使用同一账号的伙伴一起变化；任务里单独设置时以任务为准。"), 'detail-caption'));
   return holder;
+}
+// A tool the host only reaches through the user's own command runs one call at a time.
+function parallelLimitSupported(partner) {
+  return Number.isInteger(partner.parallel_limit) && !['configured', 'not_configured'].includes(partner.connection_state);
+}
+// How many tasks this partner may work on at once. It stays one partner; every extra task uses the same account.
+function parallelLimitControl(id, partner) {
+  const row = element('label', '', 'account-workload');
+  const select = element('select'); select.dataset.focusKey = 'account-parallel';
+  select.disabled = state.workloadSavingId === id || state.managementBusy;
+  for (let value = 1; value <= 8; value += 1) {
+    const option = element('option', value === 1 ? t("1 项（不同时做）") : t("{p0} 项", { p0: value })); option.value = String(value); select.append(option);
+  }
+  select.value = String(partner.parallel_limit);
+  select.setAttribute('aria-label', t("{p0}最多同时做几项任务", { p0: displayName(id) }));
+  select.addEventListener('change', () => void saveParallelLimit(id, Number(select.value)));
+  row.append(element('span', t("最多同时做")), select);
+  const holder = element('div', '', 'account-workload-setting');
+  holder.append(row, element('p', t("能同时做的任务比空闲伙伴多时，它会同时做几项，不用排队等人。还是这一个伙伴，每多一项就多用一份同一个账号的额度；额度快用完或接近花费上限时不会多开。"), 'detail-caption'));
+  return holder;
+}
+async function saveParallelLimit(id, limit) {
+  state.workloadSavingId = id; renderMembers(state.snapshot); renderGlobalPartners();
+  try {
+    acceptPartners(await api(workspaceApi.partner(id, 'parallel-limit'), 'POST', { limit }));
+  } catch (error) {
+    showNotice(error.message || t("这项设置未确认保存，请重试。"), 'error');
+  } finally {
+    state.workloadSavingId = null; state.workloadRevision = (state.workloadRevision || 0) + 1;
+    renderMembers(state.snapshot); renderGlobalPartners();
+  }
 }
 async function saveWorkload(id, level) {
   state.workloadSavingId = id; renderMembers(state.snapshot); renderGlobalPartners();

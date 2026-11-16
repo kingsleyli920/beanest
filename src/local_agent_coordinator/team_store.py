@@ -3256,7 +3256,8 @@ class TeamStore:
                    and all(task_settled(by_id[value]) for value in json.loads(row["dependencies_json"]) if value in by_id)]
         if not waiting:
             return False
-        holders = {row["owner"] for row in rows if row["owner"] and not task_settled(row)}
+        # A partner whose parallel session holds a task holds it.
+        holders = {partner_of(row["owner"]) for row in rows if row["owner"] and not task_settled(row)}
         idle = [member for member in self.objectives.available_members(db, room_id)
                 if member not in holders and not self._busy(db, room_id, member)]
         if not idle:
@@ -3375,7 +3376,7 @@ class TeamStore:
         free = [member for member in members if not self._busy(db, room_id, member)]
         # With equal shares, whoever has taken fewest tasks this round goes first: otherwise the first
         # member in room order would take every new task and a free one behind it none.
-        held = {member: sum(row["owner"] == member for row in rows) for member in free}
+        held = {member: sum(partner_of(row["owner"]) == member for row in rows) for member in free}
         order = workload.fair_order(free, members, self._loads(db, room_id, run_id),
                                     self._workload_profile(db, room_id, building=True), when_equal=held.get) if len(free) > 1 else free
         taken, given, changed = set(), set(), False
@@ -3405,7 +3406,7 @@ class TeamStore:
         return changed
 
     def _parallel_room(self, db, room_id, members):
-        """{partner: (sessions it may still start, sessions busy now)} for partners that may work in parallel.
+        """{partner: (its limit, sessions busy now)} for partners that may start another session.
 
         A partner may: its limit is above one, it is not held back (quota down
         to its reserve, close to its spending limit, past the ceiling the user
@@ -3424,7 +3425,7 @@ class TeamStore:
         for member in members:
             limit = limits.get(member, parallel_sessions.MIN_LIMIT)
             if limit > 1 and member not in held and busy.get(member, 0) < limit:
-                room[member] = (limit - busy.get(member, 0), busy.get(member, 0))
+                room[member] = (limit, busy.get(member, 0))
         return room
 
     def _lane_for(self, db, room_id, partner, task, by_id, limit, holder=None):
@@ -3465,7 +3466,6 @@ class TeamStore:
         able, _ = self._pool_takers(db, room_id, members)
         holders = self._unfinished_holders(db, room_id)
         capacity = self.store.account_capacity()
-        limits = self.store.parallel_limits()
         changed = False
         for task in ready:
             if not calls_available(self._remaining(db, room_id)):
@@ -3483,8 +3483,7 @@ class TeamStore:
                 return (percent is None, -(percent or 0) / (room[member][1] + 1), room[member][1], members.index(member))
             for partner in sorted((member for member in room if able(task, member)
                                    and (holder is None or partner_of(holder) == member)), key=left):
-                lane, chained = self._lane_for(db, room_id, partner, task, by_id,
-                                               limits.get(partner, parallel_sessions.MIN_LIMIT), holder)
+                lane, chained = self._lane_for(db, room_id, partner, task, by_id, room[partner][0], holder)
                 if lane is not None and self._take(db, room_id, task, lane, chained=chained):
                     changed = True
                     break
