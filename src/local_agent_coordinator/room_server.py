@@ -29,7 +29,7 @@ from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload|api-model)")
+PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload|parallel-limit|api-model)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
 AVAILABILITY_RECHECK_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/availability/recheck")
 ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/account/refresh")
@@ -39,7 +39,8 @@ ERROR_STATUS = {
     "invalid_api_model":400, "unsupported_api_host":400, "api_model_required":400, "invalid_api_key_reference":400,
     "invalid_api_prices":400, "invalid_api_models":400, "invalid_api_peak_windows":400, "invalid_api_caps":400,
     "invalid_api_timezone":400,
-    "native_login_unsupported":400, "native_install_unsupported":400, "invalid_workload_level":400, "login_operation_changed":409, "user_native_login_required":403,
+    "native_login_unsupported":400, "native_install_unsupported":400, "invalid_workload_level":400,
+    "invalid_parallel_limit":400, "parallel_sessions_unsupported":409, "login_operation_changed":409, "user_native_login_required":403,
     "invalid_delivery_repository":409, "delivery_repository_unavailable":409, "user_delivery_repository_required":403,
     "invalid_code_workspace":400, "user_code_status_required":403,
     "media_not_found":404, "media_unavailable":404, "media_invalid_path":400,
@@ -644,6 +645,8 @@ class _RoomHandler(_Handler):
                 return await service.set_partner_api_model(partner[1], body["api_model"])
             if partner[2] == "workload" and set(body) == {"level"} and isinstance(body["level"], str):
                 return await service.set_partner_workload(partner[1], body["level"])
+            if partner[2] == "parallel-limit" and set(body) == {"limit"} and type(body["limit"]) is int:
+                return await service.set_partner_parallel_limit(partner[1], body["limit"])
             if partner[2] == "connection" and set(body) == {"connection"} and isinstance(body["connection"],dict):
                 return await service.configure_partner(partner[1],body["connection"])
             if partner[2] == "check" and not body:

@@ -21,7 +21,7 @@ import tempfile
 import time
 from typing import Callable
 
-from . import adapters, api_models, workload
+from . import adapters, api_models, parallel_sessions, workload
 from .agent_registry import (AgentRegistry, AgentSpec, BEAN_STYLE_IDS,
                              TOKEN_FIELDS, default_bean_style, safe_agent_id, native_spec, uuid_session_id)
 from .quota_gate import QuotaGate
@@ -383,9 +383,11 @@ class PartnerManager:
             seen = set()
             for item in data["profiles"]:
                 if (not isinstance(item, dict)
-                        or set(item) - {"workload_level"} not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"},
+                        or set(item) - {"workload_level", "parallel_limit"} not in (_PROFILE_KEYS, _PROFILE_KEYS | {"connection"}, _PROFILE_KEYS | {"account_source"},
                                                                   _PROFILE_KEYS | {"api_model"})
                         or item.get("workload_level", workload.DEFAULT_LEVEL) not in workload.LEVELS
+                        or type(item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT)) is not int
+                        or not parallel_sessions.MIN_LIMIT <= item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT) <= parallel_sessions.MAX_LIMIT
                         or not safe_agent_id(item["id"]) or item["id"] in seen
                         or not isinstance(item["bean_style"], str) or item["bean_style"] not in BEAN_STYLE_IDS
                         or not isinstance(item["lifecycle_state"], str)
@@ -520,6 +522,7 @@ class PartnerManager:
         result["account"] = (_unknown_account("configured_cli") if connector else self._account_snapshot(item, data))
         result["availability"] = self.quota_gate.snapshot(_scope(item), result["account"])
         result["workload_level"] = item.get("workload_level", workload.DEFAULT_LEVEL)
+        result["parallel_limit"] = self._parallel_limit(item)
         # Percent left when the account is down to its reserve; it then gets work only when nobody else can.
         result["quota_reserve"] = None if connector else self._reserve_left(item, data)
         if not connector and item["adapter"] in TRUSTED_ADAPTERS:
@@ -547,6 +550,7 @@ class PartnerManager:
                       connection_state="api_model",
                       configuration_selectable=available and (not self._startup_discovery or installation["state"] == "found"),
                       workload_level=item.get("workload_level", workload.DEFAULT_LEVEL),
+                      parallel_limit=self._parallel_limit(item),
                       api_model={**json.loads(json.dumps(settings)), "host_name": api_models.HOSTS[item["adapter"]]["name"]},
                       spend=spend,
                       # Percent of the tighter cap left once it is down to the reserve.
@@ -605,6 +609,7 @@ class PartnerManager:
         Empty or missing usage counts the call as unpriced, never as free.
         Returns the new spend snapshot, or None for a partner that is not an API model partner.
         """
+        partner_id = parallel_sessions.partner_of(partner_id)
         item = self._item(partner_id)
         if not _api(item):
             return None
@@ -627,6 +632,7 @@ class PartnerManager:
         """
         if reason not in API_FAULTS:
             raise PartnerError("invalid_partner_profile")
+        partner_id = parallel_sessions.partner_of(partner_id)
         if not _api(self._item(partner_id)):
             return
         health = _unknown_health()
@@ -663,6 +669,7 @@ class PartnerManager:
         raise PartnerError("unknown_partner")
 
     def home_path(self, partner_id) -> Path:
+        partner_id = parallel_sessions.partner_of(partner_id)
         if not safe_agent_id(partner_id):
             raise PartnerError("invalid_partner_profile")
         return self.root / "homes" / partner_id
@@ -697,6 +704,8 @@ class PartnerManager:
     def _item(self, partner_id):
         with self._locked():
             data = self._load()
+        # A partner's parallel session is that partner: same profile, login, key and spend.
+        partner_id = parallel_sessions.partner_of(partner_id)
         item = next((item for item in data["profiles"] if item["id"] == partner_id), None)
         if item is None:
             raise PartnerError("unknown_partner")
@@ -908,6 +917,7 @@ class PartnerManager:
             return [self._describe(item, data) for item in data["profiles"]]
 
     def get(self, partner_id: str) -> dict:
+        partner_id = parallel_sessions.partner_of(partner_id)
         for item in self.profiles():
             if item["id"] == partner_id:
                 return item
@@ -1056,6 +1066,36 @@ class PartnerManager:
                     item["workload_level"] = level
             self._save(data)
             return self._describe(target, data)
+
+    @staticmethod
+    def _parallel_limit(item):
+        """How many tasks this partner may work on at once. A tool the host only
+        reaches through a user-written command keeps to one: nothing says it can run twice."""
+        if not _api(item) and (item["adapter"] not in TRUSTED_ADAPTERS or _connector(item)):
+            return parallel_sessions.MIN_LIMIT
+        return item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT)
+
+    def set_parallel_limit(self, partner_id: str, limit: int) -> dict:
+        """Set how many tasks one partner may work on at once (1 keeps it to one at a time)."""
+        try:
+            parallel_sessions.checked_limit(limit)
+        except ValueError:
+            raise PartnerError("invalid_parallel_limit") from None
+        with self._locked():
+            data = self._load()
+            target = next((item for item in data["profiles"] if item["id"] == partner_id), None)
+            if target is None:
+                raise PartnerError("unknown_partner")
+            if self._parallel_limit({**target, "parallel_limit": parallel_sessions.MAX_LIMIT}) == parallel_sessions.MIN_LIMIT:
+                raise PartnerError("parallel_sessions_unsupported")
+            target["parallel_limit"] = limit
+            self._save(data)
+            return self._describe(target, data)
+
+    def parallel_limits(self) -> dict:
+        with self._locked():
+            data = self._load()
+        return {item["id"]: self._parallel_limit(item) for item in data["profiles"]}
 
     def workload_profiles(self) -> dict:
         """Each partner's account and how much that account should take on."""

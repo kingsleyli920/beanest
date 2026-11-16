@@ -21,7 +21,7 @@ import stat
 import time
 from uuid import UUID, uuid4
 
-from .agent_registry import safe_agent_id
+from .agent_registry import safe_member_id
 from .project_catalog import (MAX_TEXT_BYTES, ProjectCatalogError, source_hash,
                               validate_text_path, validate_text_content)
 
@@ -346,7 +346,7 @@ class ProjectWorkspace:
                 content = _path_and_content(item["path"], item["content"], kind=self.kind)
             except ProjectWorkspaceError:
                 raise ProjectWorkspaceError("project_corrupt") from None
-            if (item["path"].casefold() in seen or not safe_agent_id(item["owner"])
+            if (item["path"].casefold() in seen or not safe_member_id(item["owner"])
                     or item["sha256"] != _digest(content)):
                 raise ProjectWorkspaceError("project_corrupt")
             seen.add(item["path"].casefold())
@@ -504,7 +504,7 @@ class ProjectWorkspace:
         return {**result, "changes": changes}
 
     def seed(self, capture, owner) -> dict:
-        if self.kind != "text" or self.allow_new_text_files or not safe_agent_id(owner) or not isinstance(capture, dict):
+        if self.kind != "text" or self.allow_new_text_files or not safe_member_id(owner) or not isinstance(capture, dict):
             raise ProjectWorkspaceError("invalid_project_request")
         if set(capture) != {"id", "name", "path", "files", "created_at", "source_hash"} or not isinstance(capture["files"], list):
             raise ProjectWorkspaceError("invalid_project_files")
@@ -544,7 +544,7 @@ class ProjectWorkspace:
         """
         if (self.kind != "text" or not isinstance(mapping, dict) or not mapping
                 or not isinstance(allowed_owners, (list, tuple)) or not 1 <= len(allowed_owners) <= 8
-                or any(not safe_agent_id(owner) for owner in allowed_owners)
+                or any(not safe_member_id(owner) for owner in allowed_owners)
                 or len(set(allowed_owners)) != len(allowed_owners)):
             raise ProjectWorkspaceError("invalid_project_request")
         for path, owner in mapping.items():
@@ -552,7 +552,7 @@ class ProjectWorkspace:
                 validate_text_path(path)
             except ProjectCatalogError:
                 raise ProjectWorkspaceError("invalid_project_files") from None
-            if not safe_agent_id(owner) or owner not in allowed_owners:
+            if not safe_member_id(owner) or owner not in allowed_owners:
                 raise ProjectWorkspaceError("invalid_project_request")
         fingerprint = _digest(_json({"source_owners": mapping}))
         proposal_id = "source-owners"
@@ -593,7 +593,7 @@ class ProjectWorkspace:
                 or _uuid(source_room_id) != source_room_id or source_room_id == self.room_id
                 or not isinstance(allowed_owners, (list, tuple))
                 or not 1 <= len(allowed_owners) <= 8
-                or any(not safe_agent_id(owner) for owner in allowed_owners)
+                or any(not safe_member_id(owner) for owner in allowed_owners)
                 or len(set(allowed_owners)) != len(allowed_owners)
                 or not isinstance(snapshot, dict) or set(snapshot) != {"revision", "files"}
                 or type(snapshot["revision"]) is not int or snapshot["revision"] < 1):
@@ -605,7 +605,7 @@ class ProjectWorkspace:
             if not isinstance(item, dict) or set(item) != {"path", "sha256", "owner", "content"}:
                 raise ProjectWorkspaceError("invalid_project_files")
             raw = _path_and_content(item["path"], item["content"])
-            if (item["path"].casefold() in seen or not safe_agent_id(item["owner"])
+            if (item["path"].casefold() in seen or not safe_member_id(item["owner"])
                     or item["owner"] not in allowed_owners
                     or not isinstance(item["sha256"], str) or not _HASH.fullmatch(item["sha256"])
                     or item["sha256"] != _digest(raw)):
@@ -720,7 +720,7 @@ class ProjectWorkspace:
             return {"revision": result["revision"], "paths": changed, "replayed": False}
 
     def apply(self, provider, proposal_id, base_revision, files, *, allow_disjoint=False, ownership_grants=None) -> dict:
-        if (not safe_agent_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
+        if (not safe_member_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
                 or type(base_revision) is not int or base_revision < 0 or type(allow_disjoint) is not bool):
             raise ProjectWorkspaceError("invalid_project_request")
         if not isinstance(files, list) or not 1 <= len(files) <= MAX_FILES:

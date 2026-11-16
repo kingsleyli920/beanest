@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from pathspec import GitIgnoreSpec
 
-from .agent_registry import safe_agent_id
+from .agent_registry import safe_member_id
 from .project_catalog import (_SECRET, _SENSITIVE_NAMES, _absolute_path,
                               _open_absolute, canonical_json, ProjectCatalogError)
 from .project_workspace import (ProjectWorkspace, ProjectWorkspaceError, _uuid,
@@ -214,7 +214,7 @@ class FolderWorkspace(ProjectWorkspace):
                     or not isinstance(item["sha256"], str) or not _HASH.fullmatch(item["sha256"])
                     or type(item["bytes"]) is not int or item["bytes"] < 0
                     or type(item["text"]) is not bool or type(item["changed"]) is not bool
-                    or (item["owner"] is not None and not safe_agent_id(item["owner"]))):
+                    or (item["owner"] is not None and not safe_member_id(item["owner"]))):
                 raise ProjectWorkspaceError("project_storage_corrupt")
             total += item["bytes"]
             seen.add(item["path"].casefold())
@@ -231,7 +231,7 @@ class FolderWorkspace(ProjectWorkspace):
             if (not isinstance(item, dict) or set(item) != {"path", "sha256", "owner"}
                     or not isinstance(item["path"], str) or item["path"].casefold() in seen | removed
                     or not isinstance(item["sha256"], str) or not _HASH.fullmatch(item["sha256"])
-                    or (item["owner"] is not None and not safe_agent_id(item["owner"]))):
+                    or (item["owner"] is not None and not safe_member_id(item["owner"]))):
                 raise ProjectWorkspaceError("project_storage_corrupt")
             try:
                 _path(item["path"])
@@ -531,7 +531,7 @@ class FolderWorkspace(ProjectWorkspace):
         for path, binding in mapping.items():
             _path(path)
             if (not isinstance(binding, dict) or set(binding) != {"sha256", "owner"}
-                    or binding["owner"] not in allowed_owners or not safe_agent_id(binding["owner"])
+                    or binding["owner"] not in allowed_owners or not safe_member_id(binding["owner"])
                     or not isinstance(binding["sha256"], str) or not _HASH.fullmatch(binding["sha256"])):
                 raise ProjectWorkspaceError("invalid_project_request")
         with self._locked() as (room, revisions, _):
@@ -1075,7 +1075,7 @@ class FolderWorkspace(ProjectWorkspace):
         of the user's project: secret-looking text is not refused, and a binary
         file may be replaced, since the tool itself did both.
         """
-        if (not safe_agent_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
+        if (not safe_member_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
                 or type(base_revision) is not int or base_revision < 0 or type(allow_disjoint) is not bool
                 or not isinstance(files, list) or not 1 <= len(files) <= MAX_CHANGE_FILES):
             raise ProjectWorkspaceError("invalid_project_request")

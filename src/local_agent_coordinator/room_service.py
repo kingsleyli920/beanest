@@ -16,6 +16,8 @@ from uuid import uuid4
 from urllib.parse import unquote, urlsplit
 
 from . import adapters
+from . import parallel_sessions
+from .parallel_sessions import is_lane, partner_of
 from . import job_progress, native_adapters, native_workspace
 from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
@@ -397,6 +399,11 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
     return result
 
 
+def _sessions(snapshot):
+    """Every identity with a session and a private workspace: the partners and their parallel sessions."""
+    return [*snapshot["members"], *snapshot.get("parallel_sessions", ())]
+
+
 class RoomService(RoomPromptMixin):
     def __init__(self, state_path: Path, workspace: Path, *, invoke=None, clock=time.time,
                  max_calls: int = 8, room_timeout: float = 900, call_timeout: float = 120,
@@ -441,6 +448,7 @@ class RoomService(RoomPromptMixin):
         if self.partner_manager is not None:
             self.store.account_workloads = self._account_workloads
             self.store.account_capacity = self._account_capacity
+            self.store.parallel_limits = self._parallel_limits
         self.user_outbox_scope = self.store.user_outbox_scope(hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest())
         self._outbox_submissions = set()
         try:
@@ -652,7 +660,7 @@ class RoomService(RoomPromptMixin):
                     "label": "登记目录 · " + Path(source["path"]).name,
                     "label_i18n": {"parts": [{"key": "登记目录 · {p0}", "params": {"p0": Path(source["path"]).name}}]},
                     "path": source["path"]})
-        for member in snapshot["members"]:
+        for member in _sessions(snapshot):
             state = self.store.native_workspace(room_id, member["id"])
             if state:
                 native_states.append(state)
@@ -1402,6 +1410,20 @@ class RoomService(RoomPromptMixin):
         except PartnerError:
             return {}
 
+    def _parallel_limits(self):
+        """Unreadable settings must not stop scheduling; every partner then works on one task at a time."""
+        try:
+            return self.partner_manager.parallel_limits()
+        except PartnerError:
+            return {}
+
+    async def set_partner_parallel_limit(self, partner_id, limit):
+        self._available()
+        if self.partner_manager is None:
+            raise RoomError("partner_management_unavailable")
+        self.partner_manager.set_parallel_limit(partner_id, limit)
+        return await self.list_partners()
+
     async def set_partner_api_model(self, partner_id, api_model):
         """Edit an API model partner's prices, caps, models or key location."""
         self._available()
@@ -1956,7 +1978,7 @@ class RoomService(RoomPromptMixin):
         by_provider = {item["provider"]: item for item in candidates}
         fingerprints = {}
         called = {entry["provider"] for entry in snapshot["native_executions"]}
-        for member in snapshot["members"]:
+        for member in _sessions(snapshot):
             state = self.store.native_workspace(room_id, member["id"])
             if state is None:
                 if member["id"] in called:
@@ -2493,7 +2515,7 @@ class RoomService(RoomPromptMixin):
         # Another private tree cannot be replaced merely because a helper
         # proposed a repair owned by that provider.
         called = {entry["provider"] for entry in snapshot["native_executions"]}
-        for member in snapshot["members"]:
+        for member in _sessions(snapshot):
             if member["id"] == candidate["provider"]:
                 continue
             other = self.store.native_workspace(room_id, member["id"])
@@ -2569,7 +2591,7 @@ class RoomService(RoomPromptMixin):
         # one owner's retained tree must never replace another owner's D.
         def available(provider):
             spec = self.registry.get(provider)
-            member = next(item for item in snapshot["members"] if item["id"] == provider)
+            member = next(item for item in _sessions(snapshot) if item["id"] == provider)
             availability = self.partner_manager.get(provider)["availability"] if self.partner_manager is not None else None
             # Match ordinary dispatch: unknown is usable when selectable, not
             # a positive balance. A retained identity-bound block stays closed.
@@ -2783,7 +2805,7 @@ class RoomService(RoomPromptMixin):
         # left outside every task's paths is reported to the next run, where
         # its owner keeps or restores it. Nothing is published by this audit.
         abandoning, unowned = bool(requirements.get("unconfirmed_restart")), []
-        for member in snapshot["members"]:
+        for member in _sessions(snapshot):
             state = self.store.native_workspace(snapshot["room"]["id"], member["id"])
             retained = retained_by_provider.get(member["id"])
             if state is None:
@@ -2905,7 +2927,7 @@ class RoomService(RoomPromptMixin):
                             for task in context.get("team", {}).get("tasks", [])]
             return (all(context["job"].get(key) == value for key, value in expected.items())
                 and context.get("self") == candidate["provider"] and context.get("native_permission") == candidate["permission"]
-                and {member["id"] for member in context.get("members", [])} == set(self.store.member_ids(snapshot["room"]["id"]))
+                and {member["id"] for member in context.get("members", [])} == set(self.store.partner_ids(snapshot["room"]["id"]))
                 and sorted(actual_tasks, key=lambda item: item["id"]) == candidate["tasks"])
         try:
             receipt = native_adapters.claude_quota_recovery_proof(state["project"], candidate["session_id"],
@@ -3009,7 +3031,7 @@ class RoomService(RoomPromptMixin):
                 "plan_author": candidate["plan_author"]}
             return (all(job.get(key) == value for key, value in expected.items())
                 and context.get("self") == candidate["provider"] and context.get("native_permission") == candidate["permission"]
-                and {member["id"] for member in context.get("members", [])} == set(self.store.member_ids(snapshot["room"]["id"]))
+                and {member["id"] for member in context.get("members", [])} == set(self.store.partner_ids(snapshot["room"]["id"]))
                 and self._native_receipt_schema_matches(adapters._strict_json(schema_text), context, candidate["provider"],
                     candidate["phase"], can_propose=candidate["provider"] == candidate["plan_author"]))
         kind = "native_quota_failure" if quota else "native_context_limit"
@@ -3188,7 +3210,7 @@ class RoomService(RoomPromptMixin):
                             or job.get("assignment_epoch") != candidate["assignment_epoch"]
                             or context.get("native_permission") != "full_access"
                             or job.get("plan_author") != candidate["plan_author"]
-                            or set(member["id"] for member in context["members"]) != set(self.store.member_ids(room_id))
+                            or set(member["id"] for member in context["members"]) != set(self.store.partner_ids(room_id))
                             or not self._native_receipt_schema_matches(adapters._strict_json(schema_text), context,
                                 candidate["provider"], "work", can_propose=candidate["can_propose"])):
                         raise ValueError
@@ -3375,7 +3397,7 @@ class RoomService(RoomPromptMixin):
                     if row.get("reason") != "completed":
                         raise ValueError
                     text = "".join(active["parts"])
-                    parsed = _response(text, candidate["provider"], self.store.member_ids(snapshot["room"]["id"]),
+                    parsed = _response(text, partner_of(candidate["provider"]), self.store.partner_ids(snapshot["room"]["id"]),
                         project=True, team=True, native=True, native_phase="plan", can_propose=False)
                     if (any(parsed.get(key) for key in ("commands", "files", "edits", "resolved_conflicts"))
                             or not parsed["unchanged_paths"]):
@@ -4772,7 +4794,7 @@ class RoomService(RoomPromptMixin):
             self.store.record_withdrawal_restored(room_id, event["withdrawal_id"], revision=result["revision"], paths=result["paths"])
         if mode == "native_project":
             busy = {job["provider"] for job in snapshot["jobs"] if job["status"] == "working"}
-            for member in snapshot["members"]:
+            for member in _sessions(snapshot):
                 if member["id"] not in discards or member["id"] in busy:
                     continue  # a busy partner's next call discards them first, in _prepare_native_workspace
                 state = self.store.native_workspace(room_id, member["id"])
@@ -4985,7 +5007,7 @@ class RoomService(RoomPromptMixin):
                 if file["path"].lower().endswith((".md", ".markdown")) and isinstance(file.get("content"), str):
                     texts.append((file["content"], {"run_id": run_id, "revision": project["revision"],
                         "document_path": file["path"], "document_sha256": file["sha256"]}, False))
-        for member in snapshot["members"]:
+        for member in _sessions(snapshot):
             state = self.store.native_workspace(room_id, member["id"])
             if state:
                 roots.append(Path(state["project"]))
@@ -6199,7 +6221,7 @@ class RoomService(RoomPromptMixin):
                 self._maybe_execute(room_id)
                 return
             try:
-                await self._guard_availability([provider])
+                await self._guard_availability([partner_of(provider)])
             except RoomError as error:
                 if error.code not in {"agent_quota_exhausted", "agent_quota_unconfirmed"}:
                     raise
@@ -6239,7 +6261,7 @@ class RoomService(RoomPromptMixin):
                     # under this account would fail or cross accounts.
                     raise RoomError("partner_account_home_changed")
                 settings = job.get("runtime_settings")
-                choice = model_choice(settings["members"][provider]) if settings else None
+                choice = model_choice(settings["members"][partner_of(provider)]) if settings else None
                 runtime_kwargs = ({"runtime_settings": choice} if choice and choice.get("model") is not None else {})
                 if runtime_kwargs and not spec.supports_runtime_settings:
                     raise RoomError("runtime_settings_unsupported")
@@ -6284,8 +6306,8 @@ class RoomService(RoomPromptMixin):
                     if native:
                         from .room_response_schema import native_room_response_schema
                         schema = native_room_response_schema(spec.adapter,
-                            member_ids=self.store.member_ids(room_id), provider=provider,
-                            team_phase=job["team"]["job_phase"], can_propose=provider == job["team"]["plan_author"])
+                            member_ids=self.store.partner_ids(room_id), provider=partner_of(provider),
+                            team_phase=job["team"]["job_phase"], can_propose=partner_of(provider) == job["team"]["plan_author"])
                         receipt_dir = self.workspace.parent / "native-receipts" / room_id
                         permission = self._native_permission(job)
                         operation = self._with_progress_channel(job, lambda progress_kwargs: self.native_invoke(
@@ -6300,10 +6322,10 @@ class RoomService(RoomPromptMixin):
                     elif spec.invoke_structured is not None:
                         from .room_response_schema import response_schema
                         team_schema = ({"team_phase": job["team"]["job_phase"],
-                                        "can_propose": provider == job["team"]["plan_author"]}
+                                        "can_propose": partner_of(provider) == job["team"]["plan_author"]}
                                        if job.get("team") else {})
                         schema = response_schema(project=job.get("mode") in PROJECT_MODES,
-                                                 member_ids=self.store.member_ids(room_id), provider=provider,
+                                                 member_ids=self.store.partner_ids(room_id), provider=partner_of(provider),
                                                  collaboration=bool(job.get("team")),
                                                  folder=job.get("mode") == "project_folder", **team_schema)
                         operation = spec.invoke_structured(prompt, cwd, session_id=job["session_id"],
@@ -6478,8 +6500,15 @@ class RoomService(RoomPromptMixin):
     def _retire_quota(self, room_id, provider, reason):
         snapshot = self._snapshot(room_id)
         project = snapshot.get("project") if snapshot["room"]["mode"] in PROJECT_MODES else None
-        return self.store.retire_quota(room_id, provider, reason,
-                                       files=project["files"] if project else (), revision=project["revision"] if project else None)
+        handled = self.store.retire_quota(room_id, provider, reason,
+                                          files=project["files"] if project else (), revision=project["revision"] if project else None)
+        if handled and not is_lane(provider):
+            # Its parallel sessions run on the same account. One with a call running settles that call
+            # itself; an idle one would keep its unfinished task where nobody is left to work on it.
+            for lane in self.store.idle_parallel_sessions(room_id, provider):
+                self.store.retire_quota(room_id, lane, reason, files=project["files"] if project else (),
+                                        revision=project["revision"] if project else None)
+        return handled
 
     async def _halt_team_peers(self, room_id):
         """Freeze dispatch is owned by the store; await only our real processes."""
@@ -6688,11 +6717,11 @@ class RoomService(RoomPromptMixin):
             return
         parsed = None
         try:
-            parsed = _response(result.get("text", ""), job["provider"], self.store.member_ids(job["room_id"]),
+            parsed = _response(result.get("text", ""), partner_of(job["provider"]), self.store.partner_ids(job["room_id"]),
                                project=job.get("mode") in PROJECT_MODES, team=bool(job.get("team")),
                                folder=job.get("mode") == "project_folder", native=native,
                                native_phase=(job.get("team") or {}).get("job_phase"),
-                               can_propose=job["provider"] == (job.get("team") or {}).get("plan_author"),
+                               can_propose=partner_of(job["provider"]) == (job.get("team") or {}).get("plan_author"),
                                stable_native=self._uses_stable_native_schema(job))
             # Enforce the user's chosen boundary before even expanding an edit
             # or dispatching an inspection; provider prose is not authorization.

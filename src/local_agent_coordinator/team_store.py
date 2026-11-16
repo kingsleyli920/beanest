@@ -26,7 +26,8 @@ _QUEUED_WORK_AFTER_SECONDS = 300
 _REPLAN_CAUSES_SQL = "(" + ",".join("'" + cause + "'" for cause in sorted(PARTNER_BLOCK_CAUSES)) + ")"
 from .stop_policy import continues_automatically
 from .native_outcome import CALL_DIED, FORMAT_ERRORS, NATIVE_METADATA_ERROR, NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES
-from . import roles, workload
+from . import parallel_sessions, roles, workload
+from .parallel_sessions import is_lane, partner_of
 from .round_handoff import (ROTATION_MIN_CONTEXT_TOKENS, TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS,
                             context_tokens, normalized_handoff)
 from .stop_policy import block_waits_for_user
@@ -1058,7 +1059,8 @@ class TeamStore:
                 and db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=?) "
                                "AND write_paths_json!='[]' LIMIT 1", (room_id,)).fetchone()):
             return False
-        if (provider not in self.objectives.available_members(db, room_id)
+        if (not self.objectives.session_available(db, room_id, provider)
+                or is_lane(provider) and phase not in {"work", "review"}
                 or not (deferred_resume or self.objectives.can_dispatch(db, room_id))
                 or self._busy(db, room_id, provider) and not discussion):
             return False
@@ -2463,18 +2465,20 @@ class TeamStore:
                           handoff=handoff, context_tokens=context_tokens(usage))
 
     def record_load(self, db, job, context, usage, before):
-        """Add one finished call to its round's ledger; failed calls cost quota too."""
+        """Add one finished call to its round's ledger; failed calls cost quota too.
+
+        A parallel session's call is its partner's: one ledger row per partner."""
         previous = json.loads(before["usage_json"]) if before["usage_json"] else None
         points = workload.usage_points(before["adapter"], usage, previous=previous, resumed=bool(before["session_id"]))
         db.execute("INSERT INTO partner_load(room_id,run_id,provider,points,calls,reported) VALUES (?,?,?,?,1,?) "
                    "ON CONFLICT(room_id,run_id,provider) DO UPDATE SET points=points+excluded.points,"
                    "calls=calls+1,reported=reported+excluded.reported",
-                   (job["room_id"], context["run_id"], job["provider"], points or 0.0, int(points is not None)))
+                   (job["room_id"], context["run_id"], partner_of(job["provider"]), points or 0.0, int(points is not None)))
         # The same call again by step, so a room can see what planning, work and review each cost.
         db.execute("INSERT INTO partner_phase_load(room_id,run_id,provider,phase,points,calls,reported) VALUES (?,?,?,?,?,1,?) "
                    "ON CONFLICT(room_id,run_id,provider,phase) DO UPDATE SET points=points+excluded.points,"
                    "calls=calls+1,reported=reported+excluded.reported",
-                   (job["room_id"], context["run_id"], job["provider"], context.get("job_phase") or "other",
+                   (job["room_id"], context["run_id"], partner_of(job["provider"]), context.get("job_phase") or "other",
                     points or 0.0, int(points is not None)))
 
     def _loads(self, db, room_id, run_id):
@@ -2596,6 +2600,9 @@ class TeamStore:
             # What each member can still take on, so the partners can lean on whoever has room.
             capacity = self.store.account_capacity()
             summary["capacity_left"] = {member: capacity[member] for member in members if member in capacity}
+            # How many tasks each member may work on at once (only those that may do more than one).
+            limits = self.store.parallel_limits()
+            summary["tasks_at_once"] = {member: limits[member] for member in members if limits.get(member, 1) > 1}
             summary["user_limits"] = {member: {"kind": kind, "value": value}
                                       for member, (kind, value) in self._user_limits(db, room_id, members).items()}
         return summary
@@ -3191,9 +3198,11 @@ class TeamStore:
                           "AND tj.run_id=(SELECT current_run_id FROM teams WHERE room_id=tj.room_id) AND tj.task_id=? AND j.status IN ('queued','working')", (room_id, task["id"])).fetchone():
                 continue
             if task["status"] == "review":
-                choices = roles.prefer([provider for provider in members if provider != task["owner"]], "review",
+                # A partner never reviews what one of its own parallel sessions made: they are the same partner.
+                choices = roles.prefer([provider for provider in members if provider != partner_of(task["owner"])], "review",
                                        self._abilities(db, room_id))
-                self_check = not choices and task["owner"] in members and objective is not None
+                self_check = (not choices and objective is not None
+                              and self.objectives.session_available(db, room_id, task["owner"]))
                 if self_check:
                     choices = [task["owner"]]
                 order = self._fair_order(db, room_id, choices)
@@ -3251,7 +3260,8 @@ class TeamStore:
                    and all(task_settled(by_id[value]) for value in json.loads(row["dependencies_json"]) if value in by_id)]
         if not waiting:
             return False
-        holders = {row["owner"] for row in rows if row["owner"] and not task_settled(row)}
+        # A partner whose parallel session holds a task holds it.
+        holders = {partner_of(row["owner"]) for row in rows if row["owner"] and not task_settled(row)}
         idle = [member for member in self.objectives.available_members(db, room_id)
                 if member not in holders and not self._busy(db, room_id, member)]
         if not idle:
@@ -3293,8 +3303,10 @@ class TeamStore:
                 holders.setdefault(path.casefold(), set()).add(row["owner"])
         return holders
 
-    def _held_back(self, db, room_id):
+    def _held_back(self, db, room_id, *, strict=False):
         """Members who take pool work only when nobody else could.
+
+        strict: everyone the rules hold back, even when that is the whole room.
 
         An account down to its reserve, a member whose share of the round is 0,
         and a member whose account has already done more of the round than the
@@ -3313,6 +3325,9 @@ class TeamStore:
             ceiling = limits[member][1] if member in limits and limits[member][0] == "percent" else None
             if entry[1] == workload.IDLE or entry[2] == 0 or ceiling is not None and done.get(member, 0) > ceiling:
                 held.add(member)
+        if strict:
+            profiles = self.store.account_workloads()
+            return held | {member for member in members if len(profiles.get(member, ())) > 2 and profiles[member][2]}
         return held if len(held) < len(members) else set()
 
     def _pool_takers(self, db, room_id, members):
@@ -3365,7 +3380,7 @@ class TeamStore:
         free = [member for member in members if not self._busy(db, room_id, member)]
         # With equal shares, whoever has taken fewest tasks this round goes first: otherwise the first
         # member in room order would take every new task and a free one behind it none.
-        held = {member: sum(row["owner"] == member for row in rows) for member in free}
+        held = {member: sum(partner_of(row["owner"]) == member for row in rows) for member in free}
         order = workload.fair_order(free, members, self._loads(db, room_id, run_id),
                                     self._workload_profile(db, room_id, building=True), when_equal=held.get) if len(free) > 1 else free
         taken, given, changed = set(), set(), False
@@ -3383,6 +3398,9 @@ class TeamStore:
                         given.add(member)
                         changed = True
                         break
+        left = [task for task in ready if task["id"] not in taken]
+        if left and self._take_in_parallel(db, room_id, members, left, by_id):
+            changed = True
         if not changed and not self.pending(db, room_id) and not any(
                 able(task, member) for task in ready for member in members):
             # Ready work that no partner in the room has the capability or role for would otherwise wait forever.
@@ -3391,13 +3409,98 @@ class TeamStore:
             self.stop(db, room_id, "team_plan_stalled")
         return changed
 
+    def _parallel_room(self, db, room_id, members):
+        """{partner: (its limit, sessions busy now)} for partners that may start another session.
+
+        A partner may: its limit is above one, it is not held back (quota down
+        to its reserve, close to its spending limit, past the ceiling the user
+        set, or no share of the round), none of its sessions ran out of quota
+        in this goal, and fewer of its sessions are busy than its limit allows.
+        """
+        limits = self.store.parallel_limits()
+        held = self._held_back(db, room_id, strict=True)
+        # One of its sessions already ran out of quota in this goal: the account is the same, so no more are started.
+        objective = self.objectives.current(db, room_id)
+        held |= {partner_of(provider) for provider in (json.loads(objective["retired_json"]) if objective else {})}
+        busy = {}
+        for row in db.execute("SELECT DISTINCT provider FROM jobs WHERE room_id=? AND status IN ('queued','working')", (room_id,)):
+            busy[partner_of(row[0])] = busy.get(partner_of(row[0]), 0) + 1
+        room = {}
+        for member in members:
+            limit = limits.get(member, parallel_sessions.MIN_LIMIT)
+            if limit > 1 and member not in held and busy.get(member, 0) < limit:
+                room[member] = (limit, busy.get(member, 0))
+        return room
+
+    def _lane_for(self, db, room_id, partner, task, by_id, limit, holder=None):
+        """A session of this partner that is free to take the task: one it already has, else a new one.
+
+        holder: the only session that may take it, because its unfinished work holds one of the task's files."""
+        existing = [row[0] for row in db.execute("SELECT provider FROM members WHERE room_id=? ORDER BY rowid", (room_id,))
+                    if is_lane(row[0]) and partner_of(row[0]) == partner]
+        free = [lane for lane in existing if self.objectives.session_available(db, room_id, lane)
+                and not self._busy(db, room_id, lane)]
+        # The session that did a step before this one keeps the chain's context.
+        chained = [lane for lane in free if any(by_id[value]["owner"] == lane
+                                                for value in json.loads(task["dependencies_json"]) if value in by_id)]
+        if holder is not None:
+            return (holder, holder in chained) if holder in free else (None, False)
+        if chained or free:
+            return (chained or free)[0], bool(chained)
+        for number in range(2, limit + 1):
+            lane = parallel_sessions.lane_id(partner, number)
+            if lane in existing:
+                continue
+            row = db.execute("SELECT name,adapter,bean_style FROM members WHERE room_id=? AND provider=?", (room_id, partner)).fetchone()
+            db.execute("INSERT INTO members(room_id,provider,name,status,adapter,bean_style) VALUES (?,?,?,'idle',?,?)",
+                       (room_id, lane, row["name"], row["adapter"], row["bean_style"]))
+            return lane, False
+        return None, False
+
+    def _take_in_parallel(self, db, room_id, members, ready, by_id):
+        """Hand ready tasks no free partner took to partners that can work on one more at once.
+
+        Each such task goes to a parallel session of the partner with the most
+        room left per session it would then be running: its own session, its
+        own private workspace, the same account. Nothing asks the partners or
+        the user; the user's limit per partner and the quota rules decide.
+        A parallel session is not a member: once its task is settled it just
+        has nothing to do, and the next task that needs one reuses it.
+        """
+        able, _ = self._pool_takers(db, room_id, members)
+        holders = self._unfinished_holders(db, room_id)
+        capacity = self.store.account_capacity()
+        changed = False
+        for task in ready:
+            if not calls_available(self._remaining(db, room_id)):
+                break
+            # Two sessions never write one file: a file some unfinished task holds goes only to the session holding it.
+            held = set().union(*(holders.get(path.casefold(), set()) for path in json.loads(task["write_paths_json"])))
+            if len(held) > 1 or held and not is_lane(next(iter(held))):
+                continue
+            holder = next(iter(held), None)
+            room = self._parallel_room(db, room_id, members)
+            def left(member):
+                # Room left per session it would then run; a partner whose quota is not known comes after
+                # those that are, and among such partners the one running fewest sessions goes first.
+                percent = (capacity.get(member) or {}).get("left_percent")
+                return (percent is None, -(percent or 0) / (room[member][1] + 1), room[member][1], members.index(member))
+            for partner in sorted((member for member in room if able(task, member)
+                                   and (holder is None or partner_of(holder) == member)), key=left):
+                lane, chained = self._lane_for(db, room_id, partner, task, by_id, room[partner][0], holder)
+                if lane is not None and self._take(db, room_id, task, lane, chained=chained):
+                    changed = True
+                    break
+        return changed
+
     def _take(self, db, room_id, task, member, *, chained):
         if not db.execute("UPDATE shared_tasks SET owner=?,status='assigned' WHERE room_id=? AND run_id=? AND id=? "
                           "AND status='open' AND owner IS NULL", (member, room_id, task["run_id"], task["id"])).rowcount:
             return False
         if self._queue(db, room_id, member, "work", task=self.task(db, room_id, task["id"])):
             self.store._event(db, room_id, "task_taken", sender="system", run_id=task["run_id"], task_id=task["id"],
-                              title=task["title"], owner=member, reason="chain" if chained else "next_ready")
+                              title=task["title"], owner=member, reason="chain" if chained else "next_ready",
+                              **({"parallel_session": parallel_sessions.lane_number(member)} if is_lane(member) else {}))
             return True
         # The call could not be queued now (a gate held it); the task stays in the pool.
         db.execute("UPDATE shared_tasks SET owner=NULL,status='open' WHERE room_id=? AND run_id=? AND id=?",

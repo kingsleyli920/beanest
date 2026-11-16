@@ -15,6 +15,7 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
+from . import parallel_sessions
 from .bridge import Bridge, BridgeConfig, BridgeError
 from .message_capacity import MAX_JSON_BODY_BYTES
 from .paradev import ParadevError
@@ -236,8 +237,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _json(self, status: int, value):
-        body = json.dumps(value, ensure_ascii=True, allow_nan=False).encode()
-        self._response(status, body, "application/json; charset=utf-8")
+        text = json.dumps(value, ensure_ascii=True, allow_nan=False)
+        if parallel_sessions.SEPARATOR in text:
+            # Nothing outside the host ever sees a partner's parallel session as anyone but that partner.
+            text = json.dumps(parallel_sessions.fold(value), ensure_ascii=True, allow_nan=False)
+        self._response(status, text.encode(), "application/json; charset=utf-8")
 
     def send_error(self, code, message=None, explain=None):
         # BaseHTTPRequestHandler parse errors must not reflect raw request text.
