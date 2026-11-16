@@ -482,7 +482,11 @@ class TeamStore:
                      # The call never reached a model; the task simply was not started.
                      NATIVE_PREFLIGHT_FAILED,
                      # Another call held the shared project too long; nothing about the task itself.
-                     "project_busy"}
+                     "project_busy",
+                     # The stop named no task: a replan nobody answered. What it froze was only waiting its turn.
+                     "team_plan_stalled",
+                     # A reply the host could not read applied nothing; the task is done again.
+                     "invalid_agent_response"}
         # A reply mistake applied nothing; the carried task is redone, not a
         # question for the user.
         resumable.update(REPLY_MISTAKES)
