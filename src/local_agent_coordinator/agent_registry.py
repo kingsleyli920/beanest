@@ -13,6 +13,7 @@ from typing import Awaitable, Callable, Mapping
 from uuid import UUID
 
 from . import adapters
+from .parallel_sessions import is_lane, partner_of
 
 
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
@@ -51,6 +52,11 @@ def default_bean_style(adapter: str) -> str:
 
 def safe_agent_id(value: object) -> bool:
     return isinstance(value, str) and _ID.fullmatch(value) is not None and value not in _RESERVED
+
+
+def safe_member_id(value: object) -> bool:
+    """An identity the host itself may record: a partner id or one of its parallel sessions."""
+    return safe_agent_id(value) or is_lane(value) and safe_agent_id(partner_of(value))
 
 
 def bounded_session_id(value: object) -> str | None:
@@ -146,7 +152,8 @@ class AgentRegistry:
         return tuple(self._specs)
 
     def get(self, agent_id: str) -> AgentSpec | None:
-        return self._specs.get(agent_id)
+        """A partner's parallel session runs on that partner's own spec."""
+        return self._specs.get(partner_of(agent_id))
 
     def describe(self) -> list[dict]:
         return [spec.describe() for spec in self._specs.values()]

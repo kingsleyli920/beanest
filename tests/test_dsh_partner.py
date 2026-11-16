@@ -540,6 +540,7 @@ class RoomWithDshPartner(unittest.IsolatedAsyncioTestCase):
         self.fake = native.NativeTransport()
         self.fake.handler = plan_four
         self.calls = []
+        self.one_fake_call = asyncio.Lock()
 
         async def transport(agent, prompt, cwd, session_id=None, **options):
             context = json.loads(prompt.split("CONTEXT DATA:\n", 1)[1])
@@ -558,8 +559,11 @@ class RoomWithDshPartner(unittest.IsolatedAsyncioTestCase):
                 scenario.update(case="tool", write=write)
             elif write and self.case == "leak":
                 scenario.update(write=write)
-            (self.home / "fake-scenario.json").write_text(json.dumps(scenario))
-            return await native_adapters.invoke_native(agent, prompt, cwd, session_id=session_id, **options)
+            # The fake reads one scenario file per home, and the partner may run two tasks at once in
+            # sessions that share that home: one fake call at a time, so each reads its own scenario.
+            async with self.one_fake_call:
+                (self.home / "fake-scenario.json").write_text(json.dumps(scenario))
+                return await native_adapters.invoke_native(agent, prompt, cwd, session_id=session_id, **options)
         self.service = RoomService(self.root / "rooms.sqlite3", self.root / "workspaces", partners=self.partners,
                                    native_invoke=transport)
         self.registration = await self.service.register_project("Example", str(self.source), selection_kind="folder")

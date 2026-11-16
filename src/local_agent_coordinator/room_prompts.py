@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from . import parallel_sessions
 from .execution_policy import seconds_available, task_settled
 from .folder_protocol import FOLDER_INSTRUCTION
 from .message_capacity import MAX_PROMPT_BYTES
@@ -108,6 +109,10 @@ ALLOCATE_INSTRUCTION = (
     "capacity_left, when present, says how each member is billed and the percent it has left: of its tightest subscription "
     "window, or for a pay_per_use member of the spending limit the user set (null means not known). Lean on members with "
     "room: one running low will soon be out and its work cut off, while a member with plenty left can carry more now. "
+    "tasks_at_once, when present, is how many tasks a member may work on at the same time, each in a session of its own: "
+    "when ready tasks outnumber the free members, the host starts the extra ones on the member with most room left, "
+    "unless that member is low on quota, near its spending limit or past its ceiling. So tasks that can run side by side "
+    "need not wait for a free member; split work so that independent parts are separate tasks with separate files. "
     "A member with user_limit was set by the user: a level is fixed and a percent is a ceiling, so a share above it is cut "
     "to it and recorded, and a member already past its ceiling takes new work only when nobody else can. Re-allocate whenever the facts call for it, for example when one member holds nothing while "
     "another has tasks queued up, or when the work turned out heavier on one side than estimated. Leave it out when the "
@@ -170,7 +175,8 @@ def _prompt_context(context):
         if isinstance(value, list):
             return [visit(item) for item in value]
         return value
-    result = visit(context)
+    # A partner's parallel session reads as that partner, to itself and to everyone else.
+    result = visit(parallel_sessions.fold(context))
     if texts:
         result["full_texts"] = texts
         result["text_reference_contract"] = (
@@ -223,8 +229,9 @@ def _workload_facts(snapshot, tasks, run_id):
     limits = summary.get("user_limits") or {}
     in_hand = {member: 0 for row in summary["accounts"] for member in row["members"]}
     for task in tasks:
-        if task.get("owner") in in_hand and not task_settled(task):
-            in_hand[task["owner"]] += 1
+        owner = parallel_sessions.partner_of(task.get("owner"))
+        if owner in in_hand and not task_settled(task):
+            in_hand[owner] += 1
     facts = {
         "accounts": [{"members": row["members"], "target_percent": row["target_percent"], "set_by": row.get("source", "default"),
                       "actual_percent": row["actual_percent"],
@@ -233,6 +240,7 @@ def _workload_facts(snapshot, tasks, run_id):
                      for row in summary["accounts"]],
         "unfinished_tasks_held": in_hand,
         **({"capacity_left": summary["capacity_left"]} if summary.get("capacity_left") else {}),
+        **({"tasks_at_once": summary["tasks_at_once"]} if summary.get("tasks_at_once") else {}),
         "tasks_nobody_has_taken": sum(task.get("owner") is None and task.get("status") == "open" for task in tasks),
     }
     latest = next((event for event in reversed(snapshot["events"])
@@ -849,7 +857,7 @@ class RoomPromptMixin:
         if job.get("handoff_requested"):
             context["handoff_requested"] = True
             protocol += TASK_HANDOFF_INSTRUCTION
-        role = prompt_role(job.get("runtime_settings"), job["provider"])
+        role = prompt_role(job.get("runtime_settings"), parallel_sessions.partner_of(job["provider"]))
         if role:
             context["self_role"] = role
             protocol += ROLE_INSTRUCTION
@@ -1027,7 +1035,8 @@ class RoomPromptMixin:
         from .room_response_schema import PHASE_NONEMPTY_TEXT, command_shape
         phase, provider = job["team"]["job_phase"], job["provider"]
         kinds, _ = command_shape(team_phase=phase, native=True, can_propose=provider == job["team"]["plan_author"],
-                                 has_peers=any(member != provider for member in self.store.member_ids(job["room_id"])))
+                                 has_peers=any(parallel_sessions.partner_of(member) != parallel_sessions.partner_of(provider)
+                                               for member in self.store.member_ids(job["room_id"])))
         allowed = ("The only command types allowed now are " + ", ".join(kinds) + ". " if kinds
                    else "No commands are allowed now, so commands must be []. ")
         required = "".join(field + " must be a non-empty string. " for field in sorted(PHASE_NONEMPTY_TEXT.get(phase, ())))

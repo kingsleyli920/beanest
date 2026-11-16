@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 from . import job_progress, roles
 from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, safe_agent_id
+from .parallel_sessions import MIN_LIMIT as MIN_PARALLEL, is_lane, lane_number, partner_of
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached, task_settled
 from .room_contract import MAX_ROOM_MEMBERS, RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
@@ -79,6 +80,7 @@ class RoomStore:
         self.account_workloads = dict  # replaced by the service when a partner directory exists
         self.account_capacity = dict   # likewise: each partner's billing and percent left
         self.task_capabilities = lambda provider: ("text", "python")  # replaced by the service
+        self.parallel_limits = dict    # likewise: how many tasks each partner may work on at once
         self.max_calls = max_calls
         self.room_timeout = room_timeout
         self.team_max_calls = team_max_calls
@@ -497,6 +499,7 @@ class RoomStore:
                     cache_creation_input_tokens=written, seconds_since_previous_call=round(gap, 3))
 
     def _partner_dispatch_reason(self, db, provider):
+        provider = partner_of(provider)  # a parallel session is available exactly when its partner is
         operation = db.execute("SELECT action,status FROM partner_lifecycle_operations WHERE provider=? "
                                "ORDER BY rowid DESC LIMIT 1", (provider,)).fetchone()
         if operation is not None and (operation["status"] == "pending" or operation["action"] not in {"enable", "restore"}):
@@ -565,7 +568,7 @@ class RoomStore:
 
     def coordination_member_ids(self, room_id):
         with self._connection() as db:
-            return self._team.coordination_members(db, room_id, self.member_ids_in_transaction(db, room_id))
+            return self._team.coordination_members(db, room_id, self.partner_ids_in_transaction(db, room_id))
 
     def _directed_objective_reason(self, db, room_id, target):
         room, team = self._room(db, room_id), self._team.team(db, room_id)
@@ -1785,13 +1788,26 @@ class RoomStore:
 
     def dispatchable_member_ids(self, room_id):
         with self._connection() as db:
-            return [provider for provider in self.member_ids_in_transaction(db, room_id)
+            return [provider for provider in self.partner_ids_in_transaction(db, room_id)
                     if self._partner_dispatch_reason(db, provider) is None]
 
     @staticmethod
     def member_ids_in_transaction(db, room_id) -> tuple[str, ...]:
+        """Every identity with a row in the room: the partners and their parallel sessions.
+
+        For sweeps that must miss no session or private workspace. Anything that
+        chooses, names or counts partners uses partner_ids_in_transaction.
+        """
         return tuple(row[0] for row in db.execute(
             "SELECT provider FROM members WHERE room_id=? ORDER BY rowid", (room_id,)))
+
+    @classmethod
+    def partner_ids_in_transaction(cls, db, room_id) -> tuple[str, ...]:
+        return tuple(member for member in cls.member_ids_in_transaction(db, room_id) if not is_lane(member))
+
+    def partner_ids(self, room_id) -> tuple[str, ...]:
+        with self._connection() as db:
+            return self.partner_ids_in_transaction(db, self._room(db, room_id)["id"])
 
     @staticmethod
     def _creation_parameters(goal, target, *, source="user", mode="text", participants=None,
@@ -1859,7 +1875,7 @@ class RoomStore:
         if set(change) != {"work_mode", "runtime_settings"}:
             raise RoomError("invalid_runtime_settings")
         try:
-            settings = normalized_settings(change["runtime_settings"], self.member_ids_in_transaction(db, room_id), change["work_mode"])
+            settings = normalized_settings(change["runtime_settings"], self.partner_ids_in_transaction(db, room_id), change["work_mode"])
             if change["work_mode"] not in {"legacy", "plan", "build"}:
                 raise RuntimeSettingsError("invalid_work_mode")
         except RuntimeSettingsError as error:
@@ -3668,7 +3684,7 @@ class RoomStore:
             key, fingerprint, prior = self._request(db, request_id, request_identity or parameters)
             if prior:
                 return False
-            recipients = checked_target(message_target, self.member_ids_in_transaction(db, room_id))
+            recipients = checked_target(message_target, self.partner_ids_in_transaction(db, room_id))
             self._stage_runtime(db, room_id, runtime_change)
             requirements = self._native_recovery_requirements(db, room_id, generic=True) if generic else None
             reason = ((None if requirements["unconfirmed_restart"] else "native_recovery_unavailable") if generic
@@ -4487,7 +4503,7 @@ class RoomStore:
             team = self._team.team(db, room_id)
             if team is None and room["mode"] != "text":
                 raise RoomError("invitation_mode_unsupported")
-            existing = self.member_ids_in_transaction(db, room_id)
+            existing = self.partner_ids_in_transaction(db, room_id)
             added = [provider for provider in participants if provider not in existing]
             if len(existing) + len(added) > MAX_ROOM_MEMBERS:
                 raise RoomError("member_limit_reached")
@@ -4527,7 +4543,7 @@ class RoomStore:
             self._require_active(room)
             team = self._team.team(db, room_id)
             objective = self._team.objectives.current(db, room_id)
-            checked_target(target, self.member_ids_in_transaction(db, room_id))
+            checked_target(target, self.partner_ids_in_transaction(db, room_id))
             candidates = self._native_partial_recovery_candidates(db, room_id)
             checkpoint = self._native_quota_checkpoint_candidate(db, room_id)
             if checkpoint:
@@ -4645,7 +4661,7 @@ class RoomStore:
             key,fingerprint,previous = self._request(db,request_id,parameters)
             if previous is not None:
                 return False
-            recipients = checked_target(target,self.member_ids_in_transaction(db,room_id))
+            recipients = checked_target(target,self.partner_ids_in_transaction(db,room_id))
             self._team.start_next(db,room_id,text,recipients[0],run_id,revision,digest,retry=retry,source=source,work_mode=work_mode,runtime_settings=runtime_settings,execution_policy=execution_policy,rotate_after_handoff=source == "user",
                                   directed=target not in ("all", "both"))
             self._remember_request(db, key, fingerprint, room_id)
@@ -4744,7 +4760,7 @@ class RoomStore:
             key, fingerprint, prior = self._request(db, request_id, request_identity or ["held-message", room_id, text, target])
             if prior:
                 return False
-            checked_target(target, self.member_ids_in_transaction(db, room_id))
+            checked_target(target, self.partner_ids_in_transaction(db, room_id))
             self._event(db, room_id, "message", sender="user", recipient=target, text=text, job_id=None,
                         held=True, held_reason=reason)
             self._remember_request(db, key, fingerprint, room_id)
@@ -4780,6 +4796,9 @@ class RoomStore:
     def _restore_quota_members(self, db, room_id, providers):
         objective = self._team.objectives.current(db, room_id)
         retired = json.loads(objective["retired_json"]) if objective else {}
+        # A partner back from a quota wait brings its parallel sessions back with it.
+        providers = [*providers, *(member for member in self.member_ids_in_transaction(db, room_id)
+                                   if is_lane(member) and partner_of(member) in providers)]
         for provider in providers:
             member = db.execute("SELECT identity_uncertain FROM members WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()
             if (provider in retired and self._partner_dispatch_reason(db, provider) is None
@@ -4821,7 +4840,7 @@ class RoomStore:
             key, fingerprint, prior = self._request(db, request_id, request_identity or [action, room_id, *parameters])
             if prior:
                 return False
-            recipients = checked_target(message_target, self.member_ids_in_transaction(db, room_id))
+            recipients = checked_target(message_target, self.partner_ids_in_transaction(db, room_id))
             self._stage_runtime(db, room_id, runtime_change)
             team = self._team.team(db, room_id)
             if team is None:
@@ -5234,6 +5253,36 @@ class RoomStore:
             if job is not None:
                 self._event(db, job["room_id"], "native_preflight_retry", sender=job["provider"], job_id=job_id,
                             attempt=attempt, diagnostic=diagnostic if isinstance(diagnostic, dict) else None)
+
+    def idle_parallel_sessions(self, room_id, partner):
+        """This partner's parallel sessions with no call running and nothing left behind in their workspace."""
+        with self._connection() as db:
+            return [member for member in self.member_ids_in_transaction(db, room_id)
+                    if is_lane(member) and partner_of(member) == partner and self._team.provider_clean(db, room_id, member)]
+
+    def _describe_parallel_work(self, db, room_id, members):
+        """On each partner, what it is working on in every session when there is more than one.
+
+        The page shows one row per partner; this is what lets that row say
+        "doing N things at once" and list them. Returns the partners and, apart
+        from them, the parallel sessions' own entries: those are for the host's
+        sweeps over every session and workspace, and never leave the host.
+        """
+        limits = self.parallel_limits()
+        by_partner = {}
+        for job in db.execute(
+                "SELECT j.id,j.provider,j.status,t.phase,t.task_id,s.title FROM jobs j "
+                "LEFT JOIN team_jobs t ON t.job_id=j.id LEFT JOIN shared_tasks s ON s.room_id=t.room_id AND s.run_id=t.run_id "
+                "AND s.id=t.task_id WHERE j.room_id=? AND j.status IN ('queued','working') ORDER BY j.rowid", (room_id,)):
+            by_partner.setdefault(partner_of(job["provider"]), []).append(
+                {"session": lane_number(job["provider"]), "job_id": job["id"], "status": job["status"],
+                 "phase": job["phase"], "task_id": job["task_id"], "task_title": job["title"]})
+        partners = [member for member in members if not is_lane(member["id"])]
+        for member in partners:
+            running = sorted(by_partner.get(member["id"], []), key=lambda item: item["session"])
+            member["parallel_limit"] = limits.get(member["id"], MIN_PARALLEL)
+            member["parallel_work"] = running if len(running) > 1 else []
+        return partners, [{**member, "partner": partner_of(member["id"])} for member in members if is_lane(member["id"])]
 
     def retire_quota(self, room_id, provider, reason, *, files=(), revision=None):
         with self._connection(write=True) as db:
@@ -6302,6 +6351,7 @@ class RoomStore:
                                 **self._partner_configuration(db, row["id"], member["provider"])})
             jobs = [dict(job) for job in db.execute("SELECT id,provider,kind,status,text,parent_id,error FROM jobs "
                                                    "WHERE room_id=? ORDER BY rowid", (row["id"],))]
+            members, parallel_sessions = self._describe_parallel_work(db, row["id"], members)
             timeline = None
             if events:
                 timeline = self._timeline(db, row["id"])
@@ -6327,7 +6377,8 @@ class RoomStore:
                 native_workspaces.append({"provider": item["provider"], "state": "blocked" if state.get("blocked") else "ready",
                     "conflicts": [{"path": conflict["path"], "reason": "native_merge_conflict"} for conflict in state.get("conflicts", [])],
                     "blocked": state.get("blocked", [])})
-            result = {"room": room, "workload": self._team.workload_summary(db, room_id), "runtime_configuration": self._runtime_configuration(db, row), "members": members, "events": timeline, "jobs": jobs,
+            result = {"room": room, "workload": self._team.workload_summary(db, room_id), "runtime_configuration": self._runtime_configuration(db, row), "members": members, "parallel_sessions": parallel_sessions,
+                    "events": timeline, "jobs": jobs,
                     "current_run": current, "runs": runs,
                     "conversation_budget": {"used":sum(run["budget"]["used"] for run in runs), "run_count":len(runs),
                                             "run_limit":None, "max_calls":None} if runs else None,

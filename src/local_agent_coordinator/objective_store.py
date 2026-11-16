@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .block_contract import USER_BLOCK_CAUSES
 from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached, task_settled
+from .parallel_sessions import partner_of
 from .room_contract import MAX_PARTNER_TEXT, RoomError, checked_text
 from .stop_policy import continues_automatically, OWN_RECOVERY
 
@@ -411,9 +412,24 @@ class ObjectiveStore:
     def available_members(self, db, room_id):
         row = self.current(db, room_id)
         retired = json.loads(row["retired_json"]) if row else {}
-        return [member for member in self.store.member_ids_in_transaction(db, room_id)
+        return [member for member in self.store.partner_ids_in_transaction(db, room_id)
                 if member not in retired and self.store._partner_dispatch_reason(db, member) is None
                 and not db.execute("SELECT identity_uncertain FROM members WHERE room_id=? AND provider=?", (room_id, member)).fetchone()[0]]
+
+    def session_available(self, db, room_id, provider):
+        """Whether this identity may be handed a call: a partner, or one of its parallel sessions.
+
+        A parallel session stands or falls with its partner, and on its own
+        when its own session identity is unknown or it was retired by itself.
+        """
+        partner = partner_of(provider)
+        if partner not in self.available_members(db, room_id):
+            return False
+        if partner == provider:
+            return True
+        row = self.current(db, room_id)
+        member = db.execute("SELECT identity_uncertain FROM members WHERE room_id=? AND provider=?", (room_id, provider)).fetchone()
+        return member is not None and not member[0] and provider not in (json.loads(row["retired_json"]) if row else {})
 
     def set_pause(self, db, room_id, objective_id, paused, *, defer_resume=False, waiting=False):
         """waiting: the objective is stopped on something the host resumes by
