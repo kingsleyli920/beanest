@@ -12150,3 +12150,20 @@ test('the refresh hides row actions only for hover pointers and keeps partner me
   assert.match(refresh, /\n\.now-card \{ flex-direction: row;[^}]*box-shadow: none; \}/);
   assert.match(refresh, /\.now-actions \.btn\.danger:hover \{[^}]*color: var\(--bad\); \}/, 'the stop button turns red only under the pointer');
 });
+
+// Catches the task options sheet going back to wrapped two-line partner names in ragged chips and
+// 9 to 10px captions, and a tool that still needs a step taking a tall card of its own again.
+test('task options use an even partner grid and nothing in the refresh is set below 11px', () => {
+  const css = fs.readFileSync(path.join(assetRoot, 'style.css'), 'utf8');
+  const refresh = css.slice(css.indexOf('/* ---- Refresh: fewer boxes'));
+  assert.match(refresh, /\.task-options-sheet \.participant-picker \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\); gap: 8px; \}/);
+  assert.match(refresh, /\.task-options-sheet \.participant-option > span:not\(\.avatar\) \{[^}]*white-space: nowrap; text-overflow: ellipsis; \}/);
+  assert.match(refresh, /@media \(max-width: 520px\) \{ \.task-options-sheet \.participant-picker \{ grid-template-columns: minmax\(0, 1fr\); \} \}/);
+  assert.match(refresh, /\n\.quota-summary, \.event-role, \.event-recipient, \.event-time,[^{]*\{ font-size: 11\.5px; \}/);
+  const sizes = [...refresh.matchAll(/font-size: ([\d.]+)px/g)].map((match) => Number(match[1]));
+  assert.ok(sizes.length > 20);
+  assert.equal(Math.min(...sizes), 11);
+  assert.match(refresh, /\n\.native-setup-card \{ display: flex; flex-wrap: wrap; align-items: center;/);
+  // Catches a narrow window cutting the project and more-options buttons off behind the send button again.
+  assert.match(refresh, /@media \(max-width: 520px\) \{\n  \.composer-bottom \{ flex-wrap: wrap; row-gap: 6px; \}\n  \.composer-bottom > \.composer-actions \{ flex: 1 1 100%; flex-wrap: wrap; overflow-x: visible; \}/);
+});

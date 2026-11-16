@@ -1892,3 +1892,39 @@ html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .t
 .partner-monitor .manager-card-actions .quiet-button:hover { border-color: var(--line-strong); }
 .partner-monitor .manager-card-actions .quiet-button.danger { background: transparent; color: var(--muted); }
 .partner-monitor .manager-card-actions .quiet-button.danger:hover { border-color: var(--bad-line); background: var(--bad-bg); color: var(--bad); }
+/* Task options: one readable size throughout, the partner picker as an even grid, settings as one quiet list. */
+.task-options-sheet .participant-fieldset legend, .task-options-sheet .participant-fieldset legend span { font-size: 12px; }
+.task-options-sheet .participant-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.task-options-sheet .participant-option { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 40px; padding: 6px 10px; border-radius: 10px; font-size: 13px; }
+.task-options-sheet .participant-option > span:not(.avatar) { overflow: hidden; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.task-options-sheet .participant-availability { flex-basis: auto; max-width: none; padding-left: 0; font-size: 11.5px; white-space: nowrap; }
+.task-options-sheet .task-partner-settings { gap: 0; margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.task-options-sheet .task-partner-row { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.task-options-sheet .task-partner-row:last-child { border-bottom: 0; }
+.task-options-sheet .task-partner-line { gap: 8px; padding: 7px 8px 7px 10px; font-size: 12.5px; }
+.task-options-sheet .task-partner-toggle { border-color: transparent; background: var(--hover); font-size: 12px; }
+.task-options-sheet .discovery-hint { margin-top: 10px; padding: 0; background: transparent; font-size: 12px; }
+.task-options-sheet .project-choice, .task-options-sheet .more-settings, .task-options-sheet .scope-note, .task-options-sheet #work-mode-note { font-size: 12.5px; }
+.task-options-sheet .project-choice { margin-top: 12px; }
+.task-options-sheet .more-settings { margin-top: 8px; }
+@media (max-width: 520px) { .task-options-sheet .participant-picker { grid-template-columns: minmax(0, 1fr); } }
+.task-options-sheet #participant-count { font-size: 11.5px; }
+.task-options-sheet .more-settings :where(summary, label, legend, span) { font-size: 12.5px; }
+/* Nothing a person is meant to read is set below 11.5px; captions that were 9 to 10px come up to it. */
+.quota-summary, .event-role, .event-recipient, .event-time, .bean-style-description, .bean-style-selection, .sidebar-footer, .manager-heading .eyebrow span { font-size: 11.5px; }
+.account-auto-refresh, .account-auto-refresh span, .monitor-facts dt, .monitor-facts dd, .progress-text, .progress-task { font-size: 12px; }
+.progress-marker { font-size: 11px; }
+.local-label span { font-size: 11px; }
+/* Partner settings, top of the page: a tool that still needs a step is one line with its button, not a tall card. */
+.native-setup-card { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 10px 14px; border-radius: 12px; box-shadow: none; }
+.native-setup-card > h3 { margin: 0; font-size: 13.5px; }
+.native-setup-card > .native-setup-stage { margin: 0; }
+.native-setup-card > .manager-card-actions { margin: 0 0 0 auto; }
+.native-setup-card > :not(h3):not(.native-setup-stage):not(.manager-card-actions) { flex-basis: 100%; }
+.partner-monitor .member-heading .appearance-button { grid-row: 1; grid-column: 3; align-self: start; }
+/* Narrow windows: the composer's choices take a row of their own instead of being cut off behind the send button. */
+@media (max-width: 520px) {
+  .composer-bottom { flex-wrap: wrap; row-gap: 6px; }
+  .composer-bottom > .composer-actions { flex: 1 1 100%; flex-wrap: wrap; overflow-x: visible; }
+  .composer-bottom > .send-controls { margin-left: auto; }
+}
