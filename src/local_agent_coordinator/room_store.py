@@ -77,6 +77,7 @@ class RoomStore:
                  agent_bean_styles=None, team_max_calls: int = 32, team_timeout: float = 7200):
         self.path = Path(path).absolute()
         self.account_workloads = dict  # replaced by the service when a partner directory exists
+        self.account_capacity = dict   # likewise: each partner's billing and percent left
         self.task_capabilities = lambda provider: ("text", "python")  # replaced by the service
         self.max_calls = max_calls
         self.room_timeout = room_timeout

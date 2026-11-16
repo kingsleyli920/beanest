@@ -412,3 +412,35 @@ class AllocationService(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpareCapacity(unittest.TestCase):
+    """What each member can still take on reaches the partners, and a handed-over task goes to whoever holds least."""
+
+    def test_partners_are_told_how_each_member_is_billed_and_how_much_it_has_left(self):
+        # Catches the real room where a pay-per-use partner with most of its budget left did a fifth of
+        # the work while two subscriptions ran dry: nothing told the partners who had room.
+        from local_agent_coordinator.room_prompts import _workload_facts
+        snapshot = {"events": [], "workload": {
+            "accounts": [{"members": ["claude"], "target_percent": 50, "actual_percent": 80, "source": "default"},
+                         {"members": ["ember"], "target_percent": 50, "actual_percent": 20, "source": "default"}],
+            "capacity_left": {"claude": {"billing": "subscription", "left_percent": 8},
+                              "ember": {"billing": "pay_per_use", "left_percent": 76}}}}
+        facts = _workload_facts(snapshot, [], "run")
+        self.assertEqual(facts["capacity_left"], {"claude": {"billing": "subscription", "left_percent": 8},
+                                                  "ember": {"billing": "pay_per_use", "left_percent": 76}})
+        self.assertIn("capacity_left, when present, says how each member is billed and the percent it has left", ALLOCATE_INSTRUCTION)
+        del snapshot["workload"]["capacity_left"]
+        self.assertNotIn("capacity_left", _workload_facts(snapshot, [], "run"))
+
+    def test_a_handed_over_task_goes_to_whoever_holds_least_and_a_held_back_member_last(self):
+        # Catches a partner's work always going to the first member of the room when it runs out of quota,
+        # even when that member already holds three tasks and another holds none.
+        from local_agent_coordinator.room_service import RoomService
+        team = {"tasks": [{"owner": "claude", "status": "working"}, {"owner": "claude", "status": "assigned"},
+                          {"owner": "claude", "status": "accepted"}, {"owner": "codex", "status": "assigned"},
+                          {"owner": "kimi", "status": "accepted"}],
+                "members": [{"id": "claude", "takes_build_work": True}, {"id": "codex", "takes_build_work": True},
+                            {"id": "ember", "takes_build_work": True}, {"id": "kimi", "takes_build_work": False}]}
+        self.assertEqual(RoomService._handoff_order(["claude", "codex", "ember", "kimi"], team), ["ember", "codex", "claude", "kimi"])
+        self.assertEqual(RoomService._handoff_order(["claude", "codex"], {"tasks": [], "members": team["members"]}), ["claude", "codex"])
