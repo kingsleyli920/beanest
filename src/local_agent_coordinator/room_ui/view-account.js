@@ -66,7 +66,7 @@ function renderMemberQuota(id) {
   // Only a status in doubt outlines the card; running out of quota is an ordinary wait.
   const entries = memberQuotaWindows(id); const blocked = memberAvailabilityLine(availabilityInfo(id))?.tone === 'ask';
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), entries, blocked]);
-  holder.parentNode?.classList.toggle('quota-blocked', blocked);
+  document.getElementById(`member-${id}`)?.classList.toggle('quota-blocked', blocked);
   if (holder.dataset.fingerprint === fingerprint) return;
   holder.dataset.fingerprint = fingerprint;
   holder.replaceChildren(...entries.map(({ window, remaining, stale, spend }) => {
@@ -101,7 +101,9 @@ function renderNavQuota() {
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), values.map(([id, value]) => [id, displayName(id), value])]);
   if (holder.dataset.fingerprint === fingerprint) return;
   holder.dataset.fingerprint = fingerprint;
-  holder.replaceChildren(...values.map(([id, value]) => {
+  // The sidebar has room for a handful of meters: with more partners it keeps the tightest four, which are the ones worth a glance.
+  const shown = values.length > 4 ? [...values].sort((left, right) => left[1] - right[1]).slice(0, 4) : values;
+  holder.replaceChildren(...shown.map(([id, value]) => {
     const meter = element('progress', `${value}%`, value <= 0 ? 'zero' : value < 20 ? 'low' : ''); meter.max = 100; meter.value = value;
     meter.title = t("{p0}：剩余 {p1}%", { p0: displayName(id), p1: value });
     return meter;

@@ -1230,5 +1230,13 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "高峰时段（每行一段，如 01:00-04:00 1-5；1 是周一，不写星期就是每天）": "Peak hours (one range per line, such as 01:00-04:00 1-5; 1 is Monday, no days means every day)",
   "每天花费上限（留空为不限）": "Daily spending cap (empty for none)",
   "每月花费上限（留空为不限）": "Monthly spending cap (empty for none)",
+  "伙伴概况": "Partner overview",
+  "可能卡住了": "May be stuck",
+  "还没查到额度": "No quota reading yet",
+  "最紧的一条额度还剩 {p0}%": "Tightest quota: {p0}% left",
+  "额度剩 {p0}%": "{p0}% quota left",
+  "{p0} 位在干活": "{p0} working",
+  "{p0} 位等着": "{p0} waiting",
+  "{p0} 位没在做事": "{p0} free",
   "价格和上限都是你自己填的数字，可以随时改。豆窝按它们和每次调用报告的 Token 估算花费，到上限就不再派活；实际金额以供应商账单为准。": "Prices and caps are your own numbers and you can change them at any time. Beanest estimates spending from them and the tokens each call reports, and stops sending work at the cap. Your vendor's bill is the record.",
 });
