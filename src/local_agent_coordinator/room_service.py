@@ -4341,15 +4341,17 @@ class RoomService(RoomPromptMixin):
         return [{**record, "owned_cwds": sorted(candidates), "created_before": self.clock()}
                 for record in self.store.native_session_cleanup_records(room_id)]
 
-    async def _connection_lost(self, job, result):
+    def _connection_lost(self, job, result):
         """Did this call end because the model service could not be reached, with its session intact?
 
         Either this machine has no network right now, or the call's own last
-        words carry one of the system's network errors.
+        words carry one of the system's network errors. Answered without
+        yielding: between a call's return and its handling nothing else may
+        run, or a cancellation would land on a finished call as if it were live.
         """
         if not resumable_after_outage(job["session_id"], result):
             return False
-        if not await asyncio.to_thread(self.route_available):
+        if not self.route_available():
             return True
         return network_state.names_network_error(self.store.last_job_words(job["id"]))
 
@@ -4361,7 +4363,7 @@ class RoomService(RoomPromptMixin):
             remaining = seconds_available(job["deadline"], self.clock())
             if remaining is not None and remaining <= 0:
                 raise RoomError("deadline_exceeded")
-            if await asyncio.to_thread(self.route_available):
+            if self.route_available():
                 return
             delay = _CONNECTION_POLL_SECONDS
 
@@ -6405,7 +6407,7 @@ class RoomService(RoomPromptMixin):
                                     observation[key] += outage_work[key]
                             if outage_work.get("side_effects_possible"):
                                 observation["side_effects_possible"] = True
-                        if native and outages < _CONNECTION_RETRIES and await self._connection_lost(job, result):
+                        if native and outages < _CONNECTION_RETRIES and self._connection_lost(job, result):
                             # The session is intact and nothing is running: wait for the
                             # network and let the same call go on, instead of stopping the room.
                             outages += 1
