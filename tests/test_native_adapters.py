@@ -731,6 +731,18 @@ for event in {events!r}:
         text = Path(whole['native_execution']['receipt_path']).read_text()
         self.assertEqual((text.count('native_receipt_truncated'), text.count('turn.completed')), (0, 1))
 
+    def test_claude_is_handed_its_inbox_after_every_tool_call(self):
+        # Catches the hook being dropped, pointed at a missing script, limited to some tools, or left
+        # without a time limit: a partner in a long call read its inbox once and then not again for two hours.
+        settings = json.loads(native.native_command('claude', permission='full_access')[2])
+        (group,) = settings['hooks']['PostToolUse']
+        (hook,) = group['hooks']
+        self.assertEqual((group['matcher'], hook['type'], hook['timeout']), ('*', 'command', 5))
+        import shlex
+        executable, isolated, script = shlex.split(hook['command'])
+        self.assertEqual((executable, isolated, Path(script).name), (sys.executable, '-I', 'inbox_hook.py'))
+        self.assertTrue(Path(script).is_file())
+
     async def test_claude_command_timers_are_process_local_and_settings_cannot_lower_them(self):
         expected = {'BASH_DEFAULT_TIMEOUT_MS': '2147483647', 'BASH_MAX_TIMEOUT_MS': '2147483647',
                     'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '1'}
@@ -739,7 +751,7 @@ for event in {events!r}:
         before = (f"expected={expected!r}; "
                   "assert {key:os.environ.get(key) for key in expected} == expected; "
                   "settings=json.loads(sys.argv[sys.argv.index('--settings')+1]); "
-                  "assert settings == {'apiKeyHelper':'','env':expected}")
+                  "assert (settings['apiKeyHelper'], settings['env'], sorted(settings)) == ('', expected, ['apiKeyHelper', 'env', 'hooks'])")
         inherited = {'BASH_DEFAULT_TIMEOUT_MS': '1', 'BASH_MAX_TIMEOUT_MS': '2', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '0'}
         with patch.dict(os.environ, inherited):
             with self.make_stub(events, agent='claude', before=before):

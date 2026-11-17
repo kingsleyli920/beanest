@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import sys
 import re
 import subprocess
 import tempfile
@@ -131,6 +132,19 @@ _CLAUDE_BASH_ENV = {
     'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '1',
 }
 _CLAUDE_WAKEUP_TOOLS = 'Monitor,CronCreate,CronDelete,CronList,ScheduleWakeup'
+
+
+def _claude_settings():
+    """Settings for a Beanest-owned Claude Code turn.
+
+    The hook runs after every tool call and hands over what reached the call's
+    inbox since it last looked (see inbox_hook). It prints nothing when there is
+    nothing new, and a failure or its five-second limit never stops the tool call.
+    """
+    hook = shlex.join([sys.executable, '-I', str(Path(__file__).with_name('inbox_hook.py'))])
+    return json.dumps({'apiKeyHelper': '', 'env': _CLAUDE_BASH_ENV,
+                       'hooks': {'PostToolUse': [{'matcher': '*', 'hooks': [
+                           {'type': 'command', 'command': hook, 'timeout': 5}]}]}}, separators=(',', ':'))
 
 
 def _nonnegative_number(value):
@@ -752,8 +766,7 @@ def native_command(agent, session_id=None, *, permission='read_only',
             command += ['-c', 'model_reasoning_effort=' + json.dumps(choice['effort'])]
         return command + ['-']
     if agent == 'claude':
-        settings = json.dumps({'apiKeyHelper': '', 'env': _CLAUDE_BASH_ENV}, separators=(',', ':'))
-        command = [adapters.find_claude(), '--settings', settings,
+        command = [adapters.find_claude(), '--settings', _claude_settings(),
                    '-p', '--output-format', 'stream-json', '--verbose',
                    '--permission-prompts', 'none']
         if permission in {'plan', 'full_access'}:
