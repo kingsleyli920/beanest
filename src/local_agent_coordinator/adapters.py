@@ -584,12 +584,35 @@ def _strict_json(raw):
     return json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
 
 
+def _response_json(raw):
+    """A partner's reply: as strict, except for a field written twice where one writing is null.
+
+    A model filling a closed shape sometimes writes a field's value and then the
+    same field again as null among the unused ones. Null says "not used"; the
+    value is what was meant. Two different values, or two nulls, stay ambiguous.
+    """
+    def settled(pairs):
+        value = {}
+        for key, item in pairs:
+            if key not in value:
+                value[key] = item
+            elif value[key] is None and item is not None:
+                value[key] = item
+            elif item is not None or value[key] is None:
+                raise ValueError('duplicate JSON key')
+        return value
+    def invalid_constant(_value):
+        raise ValueError('nonfinite JSON value')
+    return json.loads(raw, object_pairs_hook=settled, parse_constant=invalid_constant)
+
+
 def parse_response_object(text):
     """Read one response object, allowing unambiguous presentation around it.
 
     Transport records still use _strict_json. Response prose may precede an
     object only on separate lines. Balanced inline non-JSON bracket labels are
     prose; JSON-looking brackets, extra values and trailing prose stay ambiguous.
+    A field written twice, once as null, reads as its value.
     """
     if not isinstance(text, str):
         raise ValueError("response must be text")
@@ -624,7 +647,7 @@ def parse_response_object(text):
     wrapped = re.fullmatch(r"```(?:json)?[ \t]*\r?\n([\s\S]*)\r?\n```", candidate, re.IGNORECASE)
     if wrapped is not None:
         candidate = wrapped[1]
-    value = _strict_json(candidate)
+    value = _response_json(candidate)
     if not isinstance(value, dict):
         raise ValueError("response must be one JSON object")
     return value

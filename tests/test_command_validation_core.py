@@ -15,6 +15,24 @@ def parse(commands, phase="work"):
                      native=True, native_phase=phase, can_propose=True)
 
 
+class RepeatedNullField(unittest.TestCase):
+    def test_a_reply_that_repeats_a_field_as_null_is_accepted_as_written(self):
+        # The exact shape a real partner sent twice in a row: the paths it asks for, then every unused
+        # field as null, the paths among them again. Catches the whole reply being refused for it.
+        _, fields = command_shape(team_phase="work", native=True)
+        unused = ",".join(f'"{field}":null' for field in sorted(fields) if field not in {"type", "task_id"})
+        extend = '{"type":"extend","task_id":"T1","write_paths":["src/shared.py"],' + unused + '}'
+        complete = {field: None for field in fields}
+        complete.update(type="complete", task_id="T1", result="Concrete result")
+        text = ('{"message":"Done.","state":"working","commands":[' + extend + ',' + json.dumps(complete) + '],'
+                '"base_revision":1,"files":[],"edits":[],"unchanged_paths":[],"resolved_conflicts":[]}')
+        self.assertEqual(text.count('"write_paths"'), 3)
+        commands = _response(text, "claude", ("claude", "codex"), project=True, team=True,
+                             native=True, native_phase="work", can_propose=True)["commands"]
+        self.assertEqual([(command["type"], command["task_id"]) for command in commands], [("extend", "T1"), ("complete", "T1")])
+        self.assertEqual(commands[0]["write_paths"], ["src/shared.py"])
+
+
 class CommandValidationTests(unittest.TestCase):
     def test_canonical_and_flat_share_every_allowed_phase_command_contract(self):
         values = {"type":"complete", "id":"T1", "task_id":"T1", "title":"A task", "description":"Work",

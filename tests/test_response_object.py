@@ -43,6 +43,32 @@ class ResponseObjectTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.parse(text)
 
+    def test_a_field_written_twice_once_as_null_reads_as_its_value(self):
+        # Catches the stall seen in a real room: a partner's finished work could not be handed in because
+        # its reply wrote a field's value and then the same field again as null among the unused ones.
+        for text, value in (('{"a":[1],"b":null,"a":null}', {"a": [1], "b": None}),
+                            ('{"a":null,"b":2,"a":"x"}', {"a": "x", "b": 2}),
+                            ('{"list":[{"k":"v","n":null,"k":null}],"z":0}', {"list": [{"k": "v", "n": None}], "z": 0}),
+                            ('{"a":false,"a":null}', {"a": False}),
+                            ('{"a":0,"a":null}', {"a": 0})):
+            with self.subTest(text=text):
+                self.assertEqual(self.parse(text), value)
+
+    def test_two_values_for_one_field_stay_ambiguous(self):
+        # Catches the relaxation picking a winner where the reply really said two things, or nothing twice.
+        for text in ('{"a":1,"a":2}', '{"a":1,"a":1}', '{"a":null,"a":null}', '{"a":[1],"a":[1]}',
+                     '{"a":[1],"a":null,"a":[2]}', '{"list":[{"k":"v","k":"w"}]}'):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    self.parse(text)
+
+    def test_transport_records_still_refuse_any_repeated_field(self):
+        # Catches the relaxation leaking into records the host itself must be able to trust.
+        for text in ('{"a":[1],"a":null}', '{"a":null,"a":[1]}'):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    adapters._strict_json(text)
+
     def test_strict_json_transport_parser_still_rejects_presentation(self):
         for text in ('Intro\n{}', '```json\n{}\n```'):
             with self.subTest(text=text):
