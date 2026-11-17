@@ -5246,6 +5246,14 @@ class RoomStore:
                 self._event(db, job["room_id"], "partner_call_retry", sender=job["provider"], job_id=job_id,
                             attempt=attempt, code=code)
 
+    def last_job_words(self, job_id):
+        """The last thing a call said in public, as its tool wrote it; None when it said nothing."""
+        with self._connection() as db:
+            row = db.execute("SELECT value_json FROM events WHERE json_extract(value_json,'$.job_id')=? "
+                             "AND json_extract(value_json,'$.kind')='message' ORDER BY seq DESC LIMIT 1", (job_id,)).fetchone()
+        text = json.loads(row[0]).get("text") if row else None
+        return text if isinstance(text, str) else None
+
     def record_preflight_retry(self, job_id, attempt, diagnostic):
         """Diagnosis only: which attempt failed before its prompt was sent."""
         with self._connection(write=True) as db:

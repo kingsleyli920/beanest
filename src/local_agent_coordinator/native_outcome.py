@@ -49,6 +49,23 @@ def reply_call_died(job, result):
                 isinstance(event, dict) and event.get("type") == "tool_observed" for event in events)))
 
 
+# A call cut off because the model service could not be reached. Its session
+# is intact: once the network is back the same call goes on in it.
+CONNECTION_LOST = "connection_lost"
+_ENDED_ABRUPTLY = frozenset({"cli_nonzero_exit", "native_provider_error", "unknown_provider_error",
+                             "native_process_or_protocol_failure", "protocol_turn_incomplete"})
+
+
+def resumable_after_outage(session_id, result):
+    """A call that ended abruptly, left nothing running, and has a session its tool can take up again."""
+    observation = result.get("native_execution") if isinstance(result, dict) else None
+    return (isinstance(observation, dict) and result.get("status") != "completed"
+            and result.get("failure_code") in _ENDED_ABRUPTLY
+            and result.get("cleanup_confirmed") is True and observation.get("cleanup_confirmed") is True
+            and isinstance(result.get("session_id"), str) and bool(result["session_id"])
+            and session_id in (None, result["session_id"]))
+
+
 # A call that ended before its prompt could reach the model. The partner is
 # retried, then leaves the objective; nothing here is an unknown outcome.
 NATIVE_PREFLIGHT_FAILED = "native_preflight_failed"

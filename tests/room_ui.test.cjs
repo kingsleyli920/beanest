@@ -12184,3 +12184,22 @@ test('a partner working on several tasks at once has its messages marked main or
   const quiet = await browser({ agents: catalog.slice(0, 2), rooms: [plain.room], saved: plain });
   assert.equal(descendants(quiet.get('events')).filter((node) => node.classList.contains('event-session')).length, 0);
 });
+
+test('a partner waiting for the network says so, and goes back to its usual line once it is back', async () => {
+  // Catches a call that waits out a network outage reading "may be stuck" (or nothing at all), and the
+  // waiting line staying after the call has taken its session up again.
+  const now = Date.now() / 1000;
+  const saved = activeActivitySnapshot(); saved.room.mode = 'native_project';
+  saved.jobs[0].claimed_at = now - 5800;
+  const base = { sender: 'claude', job_id: saved.jobs[0].id, run_id: saved.current_run.id };
+  saved.events.push({ ...base, seq: 100, kind: 'native_tool_activity', state: 'running', tool_kind: 'Bash', heartbeat: true, elapsed_time_seconds: 725, created_at: now - 900 });
+  saved.events.push({ ...base, seq: 101, kind: 'partner_call_retry', attempt: 1, code: 'connection_lost', created_at: now - 800 });
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.equal(ui.get('partner-liveness-claude').textContent, '连不上模型服务，网络恢复后用原来的会话接着做');
+  assert.match(ui.get('partner-liveness-claude').className, /warning/);
+  saved.events.push({ ...base, seq: 102, kind: 'partner_call_retry', attempt: 1, code: 'connection_restored', created_at: now - 30 });
+  saved.events.push({ ...base, seq: 103, kind: 'native_tool_activity', state: 'running', tool_kind: 'Bash', heartbeat: true, elapsed_time_seconds: 20, created_at: now - 10 });
+  await ui.poll();
+  assert.match(ui.get('partner-liveness-claude').textContent, /^刚刚有活动/);
+  assert.doesNotMatch(ui.get('partner-liveness-claude').className, /warning/);
+});
