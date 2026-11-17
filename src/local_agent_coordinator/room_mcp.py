@@ -510,6 +510,8 @@ def create_server(client: RoomHTTPClient) -> MCPServer:
         native sessions. retry=True is a new attempt with fresh sessions after
         confirmed cleanup; never automatically retry an unknown mutation.
         This does not accept any delivery on the user's behalf.
+        In a room whose own goal has finished, this is a follow-up to that
+        goal and the room goes on the way the user set it up.
         Omitted work_mode inherits the current run; explicitly choose build to
         implement a delivered plan. This still cannot execute arbitrary projects.
         """

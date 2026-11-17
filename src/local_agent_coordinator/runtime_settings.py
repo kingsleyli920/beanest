@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from .native_setup import NATIVE_IDS
+from .parallel_sessions import is_lane
 from .roles import RoleError, normalized_role, normalized_workload
 
 
@@ -29,6 +30,11 @@ def normalized_settings(value, members, work_mode):
         return None
     if not isinstance(members, (list, tuple)) or any(not isinstance(member, str) for member in members):
         raise RuntimeSettingsError("invalid_runtime_settings")
+    # A partner's parallel session runs under the partner's own choices and has none of its own:
+    # it is neither a member to choose for nor, in settings stored while one existed, an unknown one.
+    members = [member for member in members if not is_lane(member)]
+    if isinstance(value, dict) and isinstance(value.get("members"), dict):
+        value = {**value, "members": {key: choice for key, choice in value["members"].items() if not is_lane(key)}}
     if (not isinstance(value, dict) or set(value) - {"permission", "effective_permission", "members"}
             or not {"permission", "members"}.issubset(value)
             or not isinstance(value["permission"], str)

@@ -2047,7 +2047,7 @@ class RoomService(RoomPromptMixin):
 
     async def objective_action(self, room_id, action, request_id, *, run_id=None, revision=None, digest=None,
                                execution_policy=None, objective_id=None, text=None, source="user", user_message=None,
-                               _request_identity=None, _runtime_update=None, _message_target="all"):
+                               _request_identity=None, _runtime_update=None, _message_target="all", _message_source="user"):
         self._available()
         if source != "user":
             raise RoomError("user_execution_policy_required")
@@ -2144,7 +2144,8 @@ class RoomService(RoomPromptMixin):
                                         user_message=user_message, request_identity=_request_identity,
                                         quota_recovered=self._recovered_quota_members(snapshot) if _request_identity is not None else [],
                                         runtime_change=runtime_change, message_target=_message_target, scope_retry=scope_retry,
-                                        retained_work=retained_work, waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"})
+                                        retained_work=retained_work, waiting=action == "pause" and snapshot.get("stop_kind") in {"auto", "quota_wait"},
+                                        message_source=_message_source)
             for member in quota_blocked:
                 self._retire_quota(room_id, member, "agent_quota_exhausted")
             self._wake(room_id)
@@ -4690,6 +4691,11 @@ class RoomService(RoomPromptMixin):
         # Validate before any await or cleanup; repeated request IDs return the
         # recorded room even after its current run has changed.
         text = _visible(checked_message(text))
+        if source == "mcp" and not retry and work_mode is None and runtime_settings is None and execution_policy is None:
+            followup = await self._followup_from_outside(room_id, text, target, request_id,
+                                                         {"run_id": run_id, "revision": revision, "digest": digest})
+            if followup is not None:
+                return followup
         if self.store.run_request_seen(room_id,text,target,request_id,run_id=run_id,revision=revision,digest=digest,retry=retry,source=source,work_mode=work_mode,runtime_settings=runtime_settings,execution_policy=execution_policy):
             return self._snapshot(room_id)
         canonical = self.store.snapshot(room_id)["room"]["id"]
@@ -4731,6 +4737,24 @@ class RoomService(RoomPromptMixin):
                 self._retire_quota(canonical, member, "agent_quota_exhausted")
             self._wake(canonical)
             return self._snapshot(canonical)
+
+    async def _followup_from_outside(self, room_id, text, target, request_id, binding):
+        """A follow-up to a finished goal, sent through the local MCP entry, goes on as one typed in the app would.
+
+        The user started that goal and chose how the room works on its own. A
+        follow-up changes neither: it keeps the room's permission and members,
+        accepts nothing and starts no goal in a room that never had one. It
+        is recorded as coming from the entry, not from the user. Without this
+        the entry could only start a plain round, which a single partner out
+        of quota refuses outright.
+        """
+        if self.store.objective_action_seen(room_id, "followup-objective", request_id, [binding]):
+            return self._snapshot(room_id)
+        continuation = self._natural_continuation(self._snapshot(room_id), target=target)
+        if continuation is None or continuation["action"] != "followup-objective" or continuation["binding"] != binding:
+            return None
+        return await self.objective_action(room_id, "followup-objective", request_id, **binding, user_message=text,
+                                           _message_target=target, _message_source="mcp")
 
     def _fork_unavailable(self, snapshot, *, active=False):
         if not snapshot.get("team") or snapshot["room"]["mode"] not in {"python_artifacts", "python_sandbox"}:
