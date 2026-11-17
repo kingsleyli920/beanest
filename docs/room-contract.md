@@ -345,6 +345,10 @@ complete必须有具体result，文件任务还要有其声明路径的实际交
 
 适配器的唯一目录是 AgentRegistry，具体协议与接入验证见 [extensions.md](extensions.md)。UI 从状态描述和房间成员生成卡片与目标，不维护独立供应商名单。费用与用量在成员面板呈现，正常聊天不播报用量记录。
 
+本机 MCP 入口不能替用户做的事不变：不能新建自主目标、不能回答目标的提问、不能改权限、不能验收。有一件事它可以做：房间里用户开过的目标已经完成时，经 `room_continue` 发来的后续要求按界面里“接着做”的同一条路开下一轮（`followup-objective`），沿用房间现有的权限、成员和默认的自主方式，所以有伙伴额度用完时照常由其余伙伴接着做。这条消息和 `objective_followup_requested` 事件的 `sender` 记为 `mcp`，不冒充用户。从没开过目标的房间里，它仍然只开普通的一轮。原规则是“入口一律不得触发自主推进”，改的理由：用户让外部助手把自己的话转进房间是日常用法，而普通的一轮跑一遍就停下等用户，且任何一个伙伴额度用完就整轮被拒，转进已完成房间的话等于没人接。
+
+运行设置里的逐成员选项只针对伙伴本人。伙伴的并行会话沿用本人的选项，读设置时忽略为它存下的条目，也不再写入这种条目。
+
 stdio `room_mcp` 仅连接已有 `room_server`，不实例化第二个服务或数据库。私有0600发现文件 `connection.json` 形状为 `{url,token,instance_id}`，其中 token 只包含独立 MCP 凭据，绝不发布 Web token。客户端固定三字段，重启后旧连接不自动换实例；`/api/mcp/` 还校验 `X-LAC-Instance`。MCP 凭据只准该命名空间，Web 凭据也不准冒作 MCP；认证按实际 token 产生 principal，再检查路由一致性。创建、补充、显式续轮的来源固定为 `mcp`，不能自报 `user` 或某个 provider；来源是接入入口标记，不是外部客户端身份认证。这不防御已控制同用户进程或读取本机首页 bootstrap 的程序。
 
 MCP 共14项工具：`room_status`、`room_list`、`room_start`、`room_read`、`room_events`、`room_text`、`room_job`、`room_run`、`room_send`、`room_continue`、`room_export`、`room_cancel`、`project_list`、`partner_list`。`room_events`、`room_text`、`room_job`、`room_run` 只读，分别读取聊天消息原文、当前状态引用的完整原文、单次历史作业和单次历史运行；`project_list`、`partner_list` 目录只读，不执行健康检查；没有登记、伙伴管理或用户验收工具。`room_start` 支持 `participants/mode/work_mode/project_id/collaboration`（后者为严格boolean，默认false）；`room_continue` 接受与HTTP同名的run_id/revision/digest/retry及可选work_mode，供显式新目标，不自动重试未知动作。`room_export` 只读下载当前精确文件版本。start/send/continue 的 request_id 必需且稳定；响应未知只报告 `remote_state_unknown`，不自动重发。MCP连接限本机控制面，不用于公网或不可信多用户。

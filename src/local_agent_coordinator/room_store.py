@@ -4828,12 +4828,16 @@ class RoomStore:
 
     def objective_action(self, room_id, action, request_id, parameters, *, binding=None, policy=None, objective_id=None,
                          baseline=None, answer=None, user_message=None, request_identity=None, quota_recovered=(), runtime_change=None,
-                         message_target="all", scope_retry=None, retained_work=None, waiting=False):
+                         message_target="all", scope_retry=None, retained_work=None, waiting=False, message_source="user"):
         """User actions and automatic stages share one transactional ledger.
 
         No client supplies a continuation goal; it comes only from the frozen
         checkpoint and is checked against its run/artifact binding here.
         """
+        # Only a follow-up to a finished goal may come from outside the app: it grants nothing new.
+        if message_source != "user" and (message_source != "mcp" or action != "followup-objective"
+                                         or runtime_change is not None or policy is not None):
+            raise RoomError("user_execution_policy_required")
         with self._connection(write=True) as db:
             room = self._room(db, room_id)
             self._require_active(room)
@@ -4846,7 +4850,7 @@ class RoomStore:
             if team is None:
                 raise RoomError("objective_unavailable")
             if user_message is not None:
-                self._event(db, room_id, "message", sender="user", recipient=message_target, text=checked_message(user_message), job_id=None)
+                self._event(db, room_id, "message", sender=message_source, recipient=message_target, text=checked_message(user_message), job_id=None)
             if action in {"resume", "answer", "continue"} and request_identity is not None:
                 self._restore_quota_members(db, room_id, quota_recovered)
             if action in {"pause", "resume"}:
@@ -4956,7 +4960,7 @@ class RoomStore:
                                 "source_run_id": binding["run_id"], "user_request": user_message, "user_request_recipient": message_target}
                 db.execute("UPDATE objectives SET continuation_json=?,baseline_json=? WHERE id=?",
                            (json.dumps(continuation), json.dumps(baseline), current["id"]))
-                self._event(db, room_id, "objective_followup_requested", sender="user", objective_id=current["id"],
+                self._event(db, room_id, "objective_followup_requested", sender=message_source, objective_id=current["id"],
                             source_objective_id=previous["id"], source_run_id=binding["run_id"], old_calls_replayed=False)
             elif action == "continue":
                 value = self._team.objectives.snapshot(db, room_id)
