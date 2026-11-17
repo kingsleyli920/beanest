@@ -495,6 +495,8 @@ class RoomService(RoomPromptMixin):
         self._refusal_resets = {}
         self._quota_stop_audits = {}
         self._auto_continues = {}
+        self._call_inboxes = {}     # job id -> the running call that can be handed something
+        self._handed = set()        # what a running call was already handed, so it is handed once
         self._stop_kinds = {}
         self._recovery_displays = {}
         self._signature_paths = {}
@@ -4639,6 +4641,11 @@ class RoomService(RoomPromptMixin):
                     quota_recovered=quota_recovered, runtime_change=change)
                 for provider in quota_blocked:
                     self._retire_quota(canonical, provider, "agent_quota_exhausted")
+                if fresh:
+                    # A partner in the middle of a call hears it now, not when the call ends.
+                    partners = (set(self.store.partner_ids(canonical)) if target in {"all", "both"} else {target})
+                    self._hand_to_running_calls(canonical, partners, "Message from the user, sent while this call was running",
+                                                text, kind="user_message", author="user")
                 if fresh and (self.store.snapshot(canonical).get("objective") or {}).get("status") != "complete":
                     self._wake(canonical)
                 return self._snapshot(canonical)
@@ -6225,11 +6232,57 @@ class RoomService(RoomPromptMixin):
         except (OSError, ValueError):
             return await invoke({})
         watcher = asyncio.create_task(self._watch_progress_file(job, path))
+        team = job.get("team") or {}
+        if job.get("room_id") and job.get("provider"):
+            self._call_inboxes[job["id"]] = {"room": job["room_id"], "provider": job["provider"], "path": path,
+                                             "phase": team.get("job_phase"), "task_id": team.get("task_id")}
+            # Whatever arrived for this task's holder while nothing of it was running.
+            self._carry_requests_to_holders(job["room_id"])
         try:
             return await invoke({"progress_file": path})
         finally:
+            self._call_inboxes.pop(job["id"], None)
             watcher.cancel()
             job_progress.remove_progress_file(path)
+
+    def _hand_to_running_calls(self, room_id, partners, heading, text, *, kind, author, key=None, task_id=None):
+        """Append something to the inbox of each of these partners' running work calls. Never raises."""
+        delivered = []
+        try:
+            for job_id, call in list(self._call_inboxes.items()):
+                if (call["room"] != room_id or call["phase"] != "work" or partner_of(call["provider"]) not in partners
+                        or task_id is not None and call["task_id"] != task_id):
+                    continue
+                mark = (str(call["path"]), key) if key is not None else None
+                if mark in self._handed:
+                    continue
+                if job_progress.append_inbox(call["path"], heading, _visible(text)):
+                    if mark is not None:
+                        if len(self._handed) > 5000:
+                            self._handed.clear()
+                        self._handed.add(mark)
+                    self.store.record_call_inbox(job_id, kind, author, task_id=call["task_id"])
+                    delivered.append(job_id)
+        except Exception:
+            pass
+        return delivered
+
+    def _carry_requests_to_holders(self, room_id):
+        """A help request or block that names a file a working task holds goes to that task's own running call.
+
+        The partner asked may be answered by another of its sessions, which can
+        only advise; the session doing the task is the one that can change the file.
+        """
+        try:
+            for request in self.store.requests_on_held_files(room_id):
+                digest = hashlib.sha256(request["text"].encode()).hexdigest()
+                heading = (f"Request from {partner_of(request['owner']) or 'a partner'} (task {request['task_id']}) about "
+                           f"{', '.join(request['paths'])}, which your task {request['holder_task_id']} holds")
+                self._hand_to_running_calls(room_id, {partner_of(request["holder"])}, heading, request["text"],
+                                            kind="held_file_request", author=partner_of(request["owner"]) or "system",
+                                            key=("request", request["task_id"], digest), task_id=request["holder_task_id"])
+        except Exception:
+            pass
 
     async def _watch_progress_file(self, job, path):
         throttle = job_progress.ProgressThrottle()
@@ -6496,6 +6549,7 @@ class RoomService(RoomPromptMixin):
                     retire_reason = NATIVE_PREFLIGHT_FAILED
                 else:
                     self._finish(job, result)
+                    self._carry_requests_to_holders(room_id)
             except asyncio.CancelledError as error:
                 # invoke owns process-group termination; the caller awaits this task before confirmation.
                 if native and invoked:

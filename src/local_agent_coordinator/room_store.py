@@ -5246,6 +5246,38 @@ class RoomStore:
                 self._event(db, job["room_id"], "partner_call_retry", sender=job["provider"], job_id=job_id,
                             attempt=attempt, code=code)
 
+    def requests_on_held_files(self, room_id):
+        """Help requests and blocks that name a file another task is working on right now.
+
+        The asker's text is matched against the exact paths the working task holds;
+        each match is something only that task's own session can do.
+        """
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT id,status,owner,write_paths_json,help_text,blocked_reason FROM shared_tasks WHERE room_id=? "
+                "AND run_id=(SELECT current_run_id FROM teams WHERE room_id=?)", (room_id, room_id)).fetchall()
+        holders = [(row["id"], row["owner"], [path for path in json.loads(row["write_paths_json"]) if len(path) >= 4])
+                   for row in rows if row["status"] == "working" and row["owner"]]
+        found = []
+        for row in rows:
+            text = row["help_text"] if row["status"] == "waiting_peer" else row["blocked_reason"] if row["status"] == "blocked" else None
+            if not isinstance(text, str) or len(text) < 20:
+                continue
+            for task_id, owner, paths in holders:
+                named = [path for path in paths if path in text]
+                if named and task_id != row["id"]:
+                    found.append({"task_id": row["id"], "owner": row["owner"], "text": text,
+                                  "holder_task_id": task_id, "holder": owner, "paths": named})
+        return found
+
+    def record_call_inbox(self, job_id, kind, author, task_id=None):
+        """Diagnosis and display: something was handed to a call while it was running."""
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT room_id,provider,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is not None and job["status"] == "working":
+                self._event(db, job["room_id"], "call_inbox_delivered", sender=author, recipient=job["provider"], job_id=job_id,
+                            inbox_kind=kind, **({"task_id": task_id} if task_id else {}))
+
     def last_job_words(self, job_id):
         """The last thing a call said in public, as its tool wrote it; None when it said nothing."""
         with self._connection() as db:

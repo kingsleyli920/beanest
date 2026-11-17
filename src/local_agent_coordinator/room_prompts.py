@@ -153,6 +153,16 @@ NATIVE_PROGRESS_INSTRUCTION = (
     "the command. ")
 
 
+NATIVE_INBOX_INSTRUCTION = (
+    " A call cannot be spoken to while it runs, so what reaches you meanwhile is appended to the file "
+    "\"$BEANEST_PROGRESS_FILE.inbox\": the user's new messages to you, and a partner's request about a file your task holds. "
+    "Read it when you start, after every command that ran for more than a few minutes, and once more before your final reply (for example "
+    "cat \"$BEANEST_PROGRESS_FILE.inbox\"); it does not exist until something arrives, and if the variable is not set, skip this. "
+    "An entry from the user is the user speaking to you now: act on it within this call when it concerns your work. "
+    "A partner's request is yours to weigh: make the change within your task's files when it is small and safe, and say "
+    "in your reply what you did about each entry. ")
+
+
 EXTERNAL_SOURCE_INSTRUCTION = (
     " context.external_source_changes lists commits that reached the delivery repository while no job of this room "
     "was running: the user or another agent did that work outside this room, so the task board, earlier results and "
@@ -851,6 +861,8 @@ class RoomPromptMixin:
             protocol += EXTERNAL_SOURCE_INSTRUCTION
         if job["mode"] == "native_project" and job["team"]["job_phase"] in {"work", "help"}:
             protocol += NATIVE_PROGRESS_INSTRUCTION
+            if job["team"]["job_phase"] == "work":
+                protocol += NATIVE_INBOX_INSTRUCTION
         if job.get("round_handoff"):
             context["round_handoff"] = job["round_handoff"]
             protocol += ROUND_HANDOFF_INSTRUCTION

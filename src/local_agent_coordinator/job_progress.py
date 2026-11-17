@@ -34,11 +34,39 @@ def create_progress_file(directory):
 
 
 def remove_progress_file(path):
-    """Delete the file; the command may already have removed or replaced it."""
+    """Delete the file and its inbox; the command may already have removed or replaced either."""
+    for name in (path, inbox_path(path)):
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+
+
+# The other direction: what reaches a partner while its call is running. The
+# host appends, the partner reads between steps. It sits beside the progress
+# file, so every tool that can reach one can reach the other.
+INBOX_SUFFIX = ".inbox"
+MAX_INBOX_ENTRY_CHARACTERS = 4000
+
+
+def inbox_path(progress_path):
+    return Path(str(progress_path) + INBOX_SUFFIX)
+
+
+def append_inbox(progress_path, heading, text):
+    """Append one entry for the running call to read; False when it could not be written."""
+    entry = f"## {_display_text(heading)}\n{text.strip()[:MAX_INBOX_ENTRY_CHARACTERS]}\n\n"
     try:
-        os.unlink(path)
+        descriptor = os.open(inbox_path(progress_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     except OSError:
-        pass
+        return False
+    try:
+        os.write(descriptor, entry.encode("utf-8"))
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def _display_text(line):
