@@ -6233,11 +6233,12 @@ class RoomService(RoomPromptMixin):
             return await invoke({})
         watcher = asyncio.create_task(self._watch_progress_file(job, path))
         team = job.get("team") or {}
-        self._call_inboxes[job["id"]] = {"room": job["room_id"], "provider": job["provider"], "path": path,
-                                         "phase": team.get("job_phase"), "task_id": team.get("task_id")}
-        try:
+        if job.get("room_id") and job.get("provider"):
+            self._call_inboxes[job["id"]] = {"room": job["room_id"], "provider": job["provider"], "path": path,
+                                             "phase": team.get("job_phase"), "task_id": team.get("task_id")}
             # Whatever arrived for this task's holder while nothing of it was running.
             self._carry_requests_to_holders(job["room_id"])
+        try:
             return await invoke({"progress_file": path})
         finally:
             self._call_inboxes.pop(job["id"], None)
