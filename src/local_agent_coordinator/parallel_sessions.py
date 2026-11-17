@@ -70,7 +70,12 @@ def fold(value):
     if isinstance(value, str):
         return fold_text(value)
     if isinstance(value, dict):
-        return {key: fold(item) for key, item in value.items() if not is_lane(key) and key != "parallel_sessions"}
+        result = {key: fold(item) for key, item in value.items() if not is_lane(key) and key != "parallel_sessions"}
+        # What a parallel session said or did still reads as its partner's, with the session's number
+        # beside it, so a reader can tell the partner's several pieces of work apart.
+        if is_lane(value.get("sender")):
+            result.setdefault("parallel_session", lane_number(value["sender"]))
+        return result
     if isinstance(value, (list, tuple)):
         plain = {item for item in value if isinstance(item, str) and not is_lane(item)}
         result, added = [], set()

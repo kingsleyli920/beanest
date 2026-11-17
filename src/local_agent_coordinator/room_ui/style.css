@@ -1928,3 +1928,6 @@ html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .t
   .composer-bottom > .composer-actions { flex: 1 1 100%; flex-wrap: wrap; overflow-x: visible; }
   .composer-bottom > .send-controls { margin-left: auto; }
 }
+/* Which of a partner's pieces of work is speaking: a quiet tag beside the name, tinted for a clone. */
+.event-session { padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.event-session.clone { background: var(--accent-soft); color: var(--accent); }

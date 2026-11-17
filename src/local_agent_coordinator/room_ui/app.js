@@ -5565,7 +5565,11 @@ function renderMemberPublicProgress(snapshot, member) {
   const tool = active && (active.latest_native_activity || [...events].reverse().find((event) => event.kind === 'native_tool_activity'
     && event.sender === member.id && event.job_id === active.id && ['started', 'running', 'completed', 'failed'].includes(event.state)));
   const scope = `${snapshot?.room.id || ''}:${active?.id || 'history'}`;
-  const liveness = partnerLiveness(active, tool, publicMessage);
+  // A call cut off by a network outage waits and then goes on in its own session; say so instead of "may be stuck".
+  const outage = active && [...events].reverse().find((event) => event.kind === 'partner_call_retry' && event.job_id === active.id
+    && ['connection_lost', 'connection_restored'].includes(event.code));
+  const liveness = outage?.code === 'connection_lost' ? { warning: true, text: t("连不上模型服务，网络恢复后用原来的会话接着做") }
+    : partnerLiveness(active, tool, publicMessage);
   const progressStatus = active && progressStatusLine(active, active.latest_progress_status || [...events].reverse().find((event) => event.kind === 'native_progress_status'
     && event.sender === member.id && event.job_id === active.id));
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), [scope, publicMessage, tool, liveness, progressStatus]]);

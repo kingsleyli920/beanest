@@ -35,7 +35,9 @@ from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
 from .team_store import _COMMAND_FIELDS, _paths as _task_paths
-from .native_outcome import FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, prompt_never_sent, reply_call_died
+from .native_outcome import (CONNECTION_LOST, FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, prompt_never_sent,
+                             reply_call_died, resumable_after_outage)
+from . import network_state
 from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission, model_choice
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
                            TASK_HANDOFF_INSTRUCTION, _BLOCK_PROTOCOL, _DIRECTED_CONTEXT_INSTRUCTION, _direct_updates, _excerpt,
@@ -68,6 +70,18 @@ _PREFLIGHT_RETRY_DELAY_SECONDS = 2
 # A provider still rate limiting after the tool's own retries gets one more
 # try after this pause; then its task goes to the other partners.
 _RATE_LIMIT_RETRY_DELAY_SECONDS = 30
+# A call cut off because the model service could not be reached goes on in its
+# own session once the network is back, this many times per call. The first
+# look comes after the first pause; a call that fails again waits longer.
+_CONNECTION_RETRIES = 6
+_CONNECTION_BACKOFF_SECONDS = (15, 30, 60, 120, 300, 600)
+_CONNECTION_POLL_SECONDS = 10
+# What a call resumed after an outage is told, ahead of its unchanged prompt.
+CONNECTION_RESTORED_NOTICE = (
+    "NOTICE FROM THE HOST: the connection to the model service dropped and this call ended before you finished. "
+    "The connection is back and this is the same session. Go on with the same task from where you stopped: "
+    "look at what your last steps actually completed before repeating any of them. "
+    "The task, its rules and the reply you owe are unchanged; they follow once more for reference.\n\n")
 
 
 def rate_limited_cleanly(result):
@@ -438,6 +452,7 @@ class RoomService(RoomPromptMixin):
         # registries always own their adapters, so two invocation sources cannot mix.
         self.invoke = invoke
         self.native_invoke = native_invoke or native_adapters.invoke_native
+        self.route_available = network_state.route_available  # replaced in tests
         self.store = RoomStore(state_path, max_calls=max_calls, room_timeout=room_timeout, clock=clock,
                                team_max_calls=team_max_calls, team_timeout=team_timeout,
                                agents={item["id"]: item["name"] for item in self.registry.describe()},
@@ -4326,6 +4341,32 @@ class RoomService(RoomPromptMixin):
         return [{**record, "owned_cwds": sorted(candidates), "created_before": self.clock()}
                 for record in self.store.native_session_cleanup_records(room_id)]
 
+    def _connection_lost(self, job, result):
+        """Did this call end because the model service could not be reached, with its session intact?
+
+        Either this machine has no network right now, or the call's own last
+        words carry one of the system's network errors. Answered without
+        yielding: between a call's return and its handling nothing else may
+        run, or a cancellation would land on a finished call as if it were live.
+        """
+        if not resumable_after_outage(job["session_id"], result):
+            return False
+        if not self.route_available():
+            return True
+        return network_state.names_network_error(self.store.last_job_words(job["id"]))
+
+    async def _wait_for_connection(self, job, attempt):
+        """Pause, then wait until this machine has a network again. Nothing runs and nothing is spent meanwhile."""
+        delay = _CONNECTION_BACKOFF_SECONDS[min(attempt, len(_CONNECTION_BACKOFF_SECONDS)) - 1]
+        while True:
+            await asyncio.sleep(delay)
+            remaining = seconds_available(job["deadline"], self.clock())
+            if remaining is not None and remaining <= 0:
+                raise RoomError("deadline_exceeded")
+            if self.route_available():
+                return
+            delay = _CONNECTION_POLL_SECONDS
+
     def _retain_native_session_identity(self, job, observation, session_id=None):
         """Use returned identity or this invocation's exact receipt, never latest."""
         if (observation.get("never_started") is True and observation.get("cleanup_confirmed") is True
@@ -6334,6 +6375,7 @@ class RoomService(RoomPromptMixin):
                         operation = spec.invoke(prompt, cwd, session_id=job["session_id"], timeout=timeout, **runtime_kwargs)
                     return self._with_account_home(spec.adapter, home, operation, endpoint)
                 attempts = 0
+                outages, outage_work = 0, None
                 while True:
                     operation = begin_call()
                     # Native transport owns its deadline and process-group cleanup.
@@ -6357,6 +6399,29 @@ class RoomService(RoomPromptMixin):
                     else:
                         if endpoint is not None:
                             self._record_api_call(provider, result, runtime_kwargs)
+                        if outage_work is not None and isinstance(result.get("native_execution"), dict):
+                            # One call to the reader: what the cut-off part did counts with the rest.
+                            observation = result["native_execution"]
+                            for key in ("tool_calls", "tool_results"):
+                                if type(observation.get(key)) is int and type(outage_work.get(key)) is int:
+                                    observation[key] += outage_work[key]
+                            if outage_work.get("side_effects_possible"):
+                                observation["side_effects_possible"] = True
+                        if native and outages < _CONNECTION_RETRIES and self._connection_lost(job, result):
+                            # The session is intact and nothing is running: wait for the
+                            # network and let the same call go on, instead of stopping the room.
+                            outages += 1
+                            invoked, cleanup_confirmed = False, True
+                            outage_work = result["native_execution"]
+                            self._retain_native_session_identity(job, outage_work, result["session_id"])
+                            self.store.record_call_retry(job["id"], outages, CONNECTION_LOST)
+                            await self._wait_for_connection(job, outages)
+                            timeout = seconds_available(job["deadline"], self.clock())
+                            job["session_id"] = result["session_id"]
+                            if outages == 1:
+                                prompt = CONNECTION_RESTORED_NOTICE + prompt
+                            self.store.record_call_retry(job["id"], outages, "connection_restored")
+                            continue
                         died = reply_call_died(job, result)
                         limited = rate_limited_cleanly(result)
                         if attempts >= _PREFLIGHT_RETRIES or not (died or limited or preflight_failed(job["session_id"], result=result)):
