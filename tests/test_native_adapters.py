@@ -1235,6 +1235,48 @@ time.sleep(60)
              patch.object(native, '_CLEANUP_SETTLE_SECONDS', 0.3):
             self.assertFalse(await native._cleanup(process, {999_999: 'Mon Jan  1 00:00:00 2026'}))
 
+    def test_a_recorded_pid_given_to_another_program_does_not_make_its_children_ours(self):
+        # Catches cleanup ending processes that have nothing to do with the call: over a long call the
+        # system reuses the PID of a child that exited, and whatever that unrelated program starts was
+        # recorded as ours (seen on a real machine: an installer's `sleep` was terminated).
+        launch, gone, bystander_child, live_child, grandchild, ours_again = 100, 4242, 4243, 500, 501, 600
+        owned = {launch: 'Mon Nov 16 14:29:00 2026', gone: 'Mon Nov 16 14:40:00 2026', live_child: 'Mon Nov 16 15:00:00 2026',
+                 ours_again: 'Mon Nov 16 14:35:00 2026'}
+        table = {launch: (1, launch, 'Mon Nov 16 14:29:00 2026', 'S'),
+                 gone: (1, gone, 'Mon Nov 16 16:32:00 2026', 'S'),             # the same number, another program
+                 bystander_child: (gone, gone, 'Mon Nov 16 16:32:05 2026', 'S'),
+                 live_child: (launch, 777, 'Mon Nov 16 15:00:00 2026', 'S'),   # still the process we recorded
+                 grandchild: (live_child, 777, 'Mon Nov 16 16:31:00 2026', 'S'),
+                 ours_again: (launch, launch, 'Mon Nov 16 16:30:00 2026', 'S')}  # the number came back to the launch
+        native._remember(launch, owned, table)
+        self.assertNotIn(bystander_child, owned)
+        self.assertEqual(owned[gone], 'Mon Nov 16 14:40:00 2026')
+        self.assertEqual(owned[grandchild], 'Mon Nov 16 16:31:00 2026')
+        # Without the new start time cleanup would skip it and leave it running.
+        self.assertEqual(owned[ours_again], 'Mon Nov 16 16:30:00 2026')
+
+    async def test_cleanup_leaves_the_children_of_a_reused_pid_running(self):
+        # The same defect on real processes: a bystander whose parent's PID is in the record with
+        # another start time must still be running after cleanup.
+        bystander = await asyncio.create_subprocess_exec(
+            sys.executable, '-c', 'import subprocess, sys; child = subprocess.Popen(["sleep", "30"]); print(child.pid, flush=True); child.wait()',
+            stdout=asyncio.subprocess.PIPE, start_new_session=True)
+        child = int((await bystander.stdout.readline()).decode())
+        process = await asyncio.create_subprocess_exec(sys.executable, '-c', 'pass', start_new_session=True)
+        await process.wait()
+        try:
+            self.assertTrue(await native._cleanup(process, {bystander.pid: 'Mon Jan  1 00:00:00 2024'}))
+            await asyncio.sleep(0.3)
+            os.kill(child, 0)  # raises ProcessLookupError when cleanup ended it
+            self.assertIsNone(bystander.returncode)
+        finally:
+            for pid in (child, bystander.pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            await bystander.wait()
+
     async def test_cleanup_inspection_failure_is_not_confirmed(self):
         with self.make_stub(codex_events()):
             with patch.object(native, '_processes', side_effect=RuntimeError('inspection unavailable')):
