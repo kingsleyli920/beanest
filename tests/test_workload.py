@@ -224,7 +224,9 @@ class WorkloadService(unittest.IsolatedAsyncioTestCase):
         phase, board, task = context["job"]["job_phase"], context["team"], context["task"]
         if phase in {"plan", "coordinate"}:
             commands = []
-            if not board["tasks"] and agent == board["plan_author"]:
+            # "third" runs on Claude's tool, so answer as the partner the prompt addresses: by the
+            # tool's name it would propose a plan it does not author and be refused.
+            if not board["tasks"] and context["self"] == board["plan_author"]:
                 for index, task_id in enumerate(self.task_ids):
                     commands += [native.proposal(task_id, paths=[f"{task_id}.py"], capability="python",
                                                  dependencies=self.task_ids[:index][-1:]), {"type": "claim", "task_id": task_id}]

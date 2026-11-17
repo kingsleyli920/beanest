@@ -14,6 +14,7 @@ from local_agent_coordinator.room_store import RoomError, RoomStore
 from tests import test_native_room_service as native
 from tests import test_task_pool as pool
 from test_team_store import proposal
+from wait_support import poll_async
 
 native_reply = native.native_reply
 
@@ -337,7 +338,12 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         self.user_replies.append(context["self"])
         if getattr(self, "answers_only", False):
             self.answering[context["self"]] = context.get("answering_now")
-            await asyncio.sleep(0.05)  # both replies overlap
+            # Replies overlap as real ones do: a reply takes far longer than starting the next call.
+            # Hold this one until everyone expected has started, instead of for a fixed moment a
+            # slow machine can outlast.
+            together = getattr(self, "answer_together", set())
+            await poll_async(lambda: together <= set(self.answering), timeout=5,
+                             describe=lambda _: f"answering so far: {self.answering}")
             return native_reply(context, [])
         self.plan.append(pool.plan("L2a", paths=["l2_side.py"]))
         return native_reply(context, [
@@ -410,23 +416,23 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         # with other work answers later and must not be named as the one to draft.
         self.plan = [pool.plan("L1"), pool.plan("L2", dependencies=["L1"]), pool.plan("D1", dependencies=["L1"])]
         self.user_replies, self.answering, self.answers_only = [], {}, True
+        self.answer_together = {"codex", "ember"}
         released = asyncio.Event()
 
         async def until():
             return released.is_set()
         self.holds["L1"] = until
         await self.create(["claude", "codex", "ember"])
-        for _ in range(300):
-            state = await self.state()
-            if ("claude", "L1") in self.works and not any(
-                    job["provider"] in {"codex", "ember"} and job["status"] in {"queued", "working"} for job in state["jobs"]):
-                break
-            await asyncio.sleep(0.01)
+        def others_free():
+            jobs = self.service.store.snapshot(self.room_id)["jobs"]
+            return ("claude", "L1") in self.works and not any(
+                job["provider"] in {"codex", "ember"} and job["status"] in {"queued", "working"} for job in jobs)
+        # Both waits fail by name when they run out: sending while a partner is still busy would
+        # leave that partner out of the answer and show up later as a wrong list.
+        await poll_async(others_free, timeout=5, describe=lambda _: "codex and ember never became free while claude held L1")
         await self.service.send_message(self.room_id, "Can any of this start earlier?", "all", str(uuid4()), source="user")
-        for _ in range(300):
-            if {"codex", "ember"} <= set(self.answering):
-                break
-            await asyncio.sleep(0.01)
+        await poll_async(lambda: {"codex", "ember"} <= set(self.answering), timeout=5,
+                         describe=lambda _: f"answering so far: {self.answering}")
         self.assertEqual({key: self.answering.get(key) for key in ("codex", "ember")},
                          {"codex": ["codex", "ember"], "ember": ["codex", "ember"]})
         released.set()
