@@ -35,7 +35,7 @@ def create_progress_file(directory):
 
 def remove_progress_file(path):
     """Delete the file and its inbox; the command may already have removed or replaced either."""
-    for name in (path, inbox_path(path)):
+    for name in (path, inbox_path(path), str(inbox_path(path)) + ".seen"):
         try:
             os.unlink(name)
         except OSError:
