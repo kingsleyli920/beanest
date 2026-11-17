@@ -734,7 +734,7 @@ for event in {events!r}:
     def test_claude_is_handed_its_inbox_after_every_tool_call(self):
         # Catches the hook being dropped, pointed at a missing script, limited to some tools, or left
         # without a time limit: a partner in a long call read its inbox once and then not again for two hours.
-        settings = json.loads(native.native_command('claude', permission='full_access')[2])
+        settings = json.loads(native._claude_settings())  # read directly: the command needs the CLI installed
         (group,) = settings['hooks']['PostToolUse']
         (hook,) = group['hooks']
         self.assertEqual((group['matcher'], hook['type'], hook['timeout']), ('*', 'command', 5))
