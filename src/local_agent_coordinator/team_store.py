@@ -3000,6 +3000,10 @@ class TeamStore:
             raise RoomError("budget_exhausted")
         desired = self.store._desired_runtime(self.store._room(db, room_id))
         limited = read_only(desired["work_mode"], desired["runtime_settings"])
+        # While the goal waits on a decision nothing is dispatched at all: a message that
+        # arrives then is kept and handed out when dispatch is possible again.
+        held = not self.objectives.can_dispatch(db, room_id)
+        waiting = []
         for provider in providers:
             if not calls_available(self._remaining(db, room_id)):
                 break
@@ -3011,7 +3015,35 @@ class TeamStore:
             # diff under the empty user-phase write scope.
             if retained and not limited:
                 continue
-            self._queue(db, room_id, provider, "user", text=text)
+            if not self._queue(db, room_id, provider, "user", text=text) and held:
+                waiting.append(provider)
+        if waiting:
+            self.store._event(db, room_id, "user_message_waiting", sender="system", recipients=waiting, text=text)
+
+    def hand_out_waiting_messages(self, db, room_id):
+        """Give partners the user's messages that arrived while nothing could be dispatched.
+
+        Each is handed out once, at the first moment dispatch is possible. A
+        partner busy with a call then is not sent a separate one: it reads the
+        message among the user's recent updates, as with any message sent
+        while it works.
+        """
+        rows = db.execute("SELECT seq,value_json FROM events WHERE room_id=? "
+                          "AND json_extract(value_json,'$.kind')='user_message_waiting' ORDER BY seq DESC LIMIT 20", (room_id,)).fetchall()
+        if not rows:
+            return
+        done = {json.loads(row[0]).get("waiting_seq") for row in db.execute(
+            "SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='user_message_handed_out' "
+            "ORDER BY seq DESC LIMIT 40", (room_id,))}
+        for row in reversed(rows):
+            if row["seq"] in done:
+                continue
+            if not calls_available(self._remaining(db, room_id)):
+                return  # Out of calls for now, as for a message sent at this moment; it keeps waiting.
+            event = json.loads(row["value_json"])
+            queued = [provider for provider in event.get("recipients", [])
+                      if self._queue(db, room_id, provider, "user", text=event["text"])]
+            self.store._event(db, room_id, "user_message_handed_out", sender="system", waiting_seq=row["seq"], recipients=queued)
 
     @staticmethod
     def artifact_hashes(files):
@@ -3110,6 +3142,7 @@ class TeamStore:
         if not self.objectives.can_dispatch(db, room_id):
             return False
         self.resume_deferred_redelivery(db, room_id)
+        self.hand_out_waiting_messages(db, room_id)
         if team["phase"] in {"checkpoint", "checkpoint_review"}:
             checkpoint = json.loads(objective["checkpoint_json"])
             if self.pending(db, room_id):
@@ -3164,7 +3197,8 @@ class TeamStore:
             waiting = [member for member in planning_members if not db.execute(
                 "SELECT planned FROM team_members WHERE room_id=? AND provider=?", (room_id, member)).fetchone()[0]]
             if waiting:
-                return self._stop_if_planning_blocked(db, room_id, waiting) or changed
+                return (self._stop_if_planning_blocked(db, room_id, waiting)
+                        or self._ask_refused_planners_again(db, room_id, waiting) or changed)
             if not db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?", (room_id,)).fetchone():
                 if objective is not None and json.loads(objective["retired_json"]):
                     return self._coordinate(db, room_id, planning_members)
@@ -3534,6 +3568,31 @@ class TeamStore:
             (room_id, self.team(db, room_id)["current_run_id"])).fetchone()
         self.stop(db, room_id, (row and row[0]) or "team_plan_stalled")
         return True
+
+    def _ask_refused_planners_again(self, db, room_id, providers):
+        """Give a planner a new call when the refusal that left it without one no longer applies.
+
+        A refused correction holds a member's planning only for the board it
+        answered. When the author's plan lands after that, the member is no
+        longer held and still has not planned, and nothing else would ask it:
+        the room would stay planning with no call queued.
+        """
+        team = self.team(db, room_id)
+        changed = False
+        for provider in providers:
+            if self._busy(db, room_id, provider) or not db.execute(
+                    "SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='native_response_blocked' "
+                    "AND json_extract(value_json,'$.run_id')=? AND json_extract(value_json,'$.provider')=? "
+                    "AND json_extract(value_json,'$.context.phase') IN ('plan','coordinate') LIMIT 1",
+                    (room_id, team["current_run_id"], provider)).fetchone():
+                continue
+            if self._queue(db, room_id, provider, "plan", text=(
+                    "Your earlier planning reply was refused and nothing from it was accepted. The shared board has changed "
+                    "since. Read the plan as it is now and propose or confirm it using the normal team commands.")):
+                self.store._event(db, room_id, "planner_asked_again", sender="system", provider=provider,
+                                  run_id=team["current_run_id"], revision=team["revision"])
+                changed = True
+        return changed
 
     def _coordinate(self, db, room_id, providers):
         """Ask the planners still needed to confirm the exact plan (or the author to write it).
