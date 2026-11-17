@@ -418,6 +418,17 @@ function eventNode(event, jobs, sourceMembers = null) {
     role.title = t("角色");
     heading.append(role);
   }
+  // Which of a partner's pieces of work is speaking, once it does several at once. Still the one partner:
+  // same name and avatar, with "main" or "clone n" beside it.
+  if (Number.isInteger(event.parallel_session) && event.parallel_session >= 2) {
+    const tag = element('span', t("分身 {p0}", { p0: event.parallel_session - 1 }), 'event-session clone');
+    tag.title = t("同一位伙伴同时在做的另一项任务");
+    heading.append(tag);
+  } else if (event.main_session === true) {
+    const tag = element('span', t("本体"), 'event-session');
+    tag.title = t("这位伙伴同时在做几项任务，这是它原本的那一路");
+    heading.append(tag);
+  }
   // A partner checking its own work addresses itself; "Kimi Code → Kimi Code" reads like a mistake.
   heading.append(event.recipient && event.recipient === event.sender ? element('span', t("自查"), 'event-recipient self-check')
     : element('span', `→ ${event.recipient ? recipientName : t("房间")}`, 'event-recipient'));
@@ -578,9 +589,14 @@ function renderEvents(snapshot, { preservePosition = false } = {}) {
   $('empty-room').hidden = !!snapshot;
   if (!snapshot) { renderFirstRun(); $('new-events').hidden = true; return; }
   const events = [...snapshot.events].filter((event) => Number.isSafeInteger(event.seq)).sort((a, b) => a.seq - b.seq);
+  // Partners with a clone speaking in this room: their own messages are marked "main" so the two tell apart.
+  const split = new Set(events.filter((event) => event.kind === 'message' && Number.isInteger(event.parallel_session) && event.parallel_session >= 2)
+    .map((event) => event.sender));
   let added = 0;
   for (const original of events) {
-    const event = checkpointQuestionEvent(original, snapshot);
+    const checked = checkpointQuestionEvent(original, snapshot);
+    const event = checked.kind === 'message' && split.has(checked.sender) && !Number.isInteger(checked.parallel_session)
+      ? { ...checked, main_session: true } : checked;
     const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), event]);
     const existing = state.eventNodes.get(event.seq);
     if (existing?.fingerprint === fingerprint) continue;

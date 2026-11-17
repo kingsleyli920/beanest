@@ -314,8 +314,23 @@ class Folding(unittest.TestCase):
                                                    "events": [{"sender": "claude~x3", "text": "by claude~x3"}]})
         ui_server._Handler._json(Response(), 200, {"text": "no session here: main~2"})
         self.assertEqual(sent, [(200, {"members": [{"id": "claude"}], "jobs": [{"provider": "claude"}],
-                                       "events": [{"sender": "claude", "text": "by claude"}]}),
+                                       "events": [{"sender": "claude", "text": "by claude", "parallel_session": 3}]}),
                                 (200, {"text": "no session here: main~2"})])
+
+    def test_what_a_parallel_session_said_carries_its_number_beside_the_partners_name(self):
+        # Catches the reader having no way to tell a partner's several pieces of work apart in the
+        # conversation, the partner's own messages being numbered too, and a number already recorded
+        # on the event (a taken task) being replaced.
+        folded = parallel_sessions.fold({"events": [
+            {"kind": "message", "sender": "claude", "recipient": "all", "text": "one"},
+            {"kind": "message", "sender": "claude~x2", "recipient": "all", "text": "two"},
+            {"kind": "message", "sender": "codex", "recipient": "claude~x4", "text": "three"},
+            {"kind": "task_taken", "sender": "system", "provider": "claude~x3", "parallel_session": 3}]})
+        self.assertEqual(folded, {"events": [
+            {"kind": "message", "sender": "claude", "recipient": "all", "text": "one"},
+            {"kind": "message", "sender": "claude", "recipient": "all", "text": "two", "parallel_session": 2},
+            {"kind": "message", "sender": "codex", "recipient": "claude", "text": "three"},
+            {"kind": "task_taken", "sender": "system", "provider": "claude", "parallel_session": 3}]})
 
     def test_ids(self):
         # Catches a session number outside the limit being minted, or a partner id read as a session.

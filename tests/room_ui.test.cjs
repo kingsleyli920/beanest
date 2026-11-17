@@ -12167,3 +12167,20 @@ test('task options use an even partner grid and nothing in the refresh is set be
   // Catches a narrow window cutting the project and more-options buttons off behind the send button again.
   assert.match(refresh, /@media \(max-width: 520px\) \{\n  \.composer-bottom \{ flex-wrap: wrap; row-gap: 6px; \}\n  \.composer-bottom > \.composer-actions \{ flex: 1 1 100%; flex-wrap: wrap; overflow-x: visible; \}/);
 });
+
+test('a partner working on several tasks at once has its messages marked main or clone', async () => {
+  // Catches the chat giving no way to tell which of a partner's pieces of work is speaking, a clone
+  // shown as a second partner, and "main" cluttering every room where nobody works in parallel.
+  const events = [message(1, 'claude', '我先看现场。'), { ...message(2, 'claude', '终局战我来做。'), parallel_session: 2 },
+    { ...message(3, 'claude', '我接着做第三项。'), parallel_session: 3 }, message(4, 'codex', '我来审。')];
+  const saved = snapshot({ agents: catalog.slice(0, 2), events });
+  const ui = await browser({ agents: catalog.slice(0, 2), rooms: [saved.room], saved });
+  const rows = ui.get('events').children.filter((node) => node.classList.contains('event'));
+  const tags = rows.map((row) => descendants(row).filter((node) => node.classList.contains('event-session')).map((node) => node.textContent));
+  assert.deepEqual(tags, [['本体'], ['分身 1'], ['分身 2'], []]);
+  const authors = rows.map((row) => descendants(row).find((node) => node.classList.contains('event-author')).textContent);
+  assert.deepEqual(authors.slice(0, 3), ['Claude Code', 'Claude Code', 'Claude Code'], 'a clone keeps its partner\'s name');
+  const plain = snapshot({ agents: catalog.slice(0, 2), events: [message(1, 'claude', '我先看现场。'), message(2, 'codex', '我来审。')] });
+  const quiet = await browser({ agents: catalog.slice(0, 2), rooms: [plain.room], saved: plain });
+  assert.equal(descendants(quiet.get('events')).filter((node) => node.classList.contains('event-session')).length, 0);
+});

@@ -1250,4 +1250,8 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "最多同时做": "Tasks at once",
   "能同时做的任务比空闲伙伴多时，它会同时做几项，不用排队等人。还是这一个伙伴，每多一项就多用一份同一个账号的额度；额度快用完或接近花费上限时不会多开。": "When more tasks can run side by side than there are free partners, this partner works on several at once instead of leaving them in line. It is still the one partner, and each extra task uses the same account's quota; it starts none when its quota is nearly used up or it is close to its spending limit.",
   "这项设置未确认保存，请重试。": "This setting was not confirmed. Please try again.",
+  "分身 {p0}": "Clone {p0}",
+  "本体": "Main",
+  "同一位伙伴同时在做的另一项任务": "The same partner, working on another task at the same time",
+  "这位伙伴同时在做几项任务，这是它原本的那一路": "This partner is working on several tasks at once; this is its first line of work",
 });
