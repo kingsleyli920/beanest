@@ -79,7 +79,9 @@ class ConfinedCallFailure(pool.PoolService):
         self.assertEqual(sorted(self.works), [("claude", "T1"), ("claude", "T1"), ("codex", "T2")])
         self.assertEqual({task["id"]: (task["status"], task["owner"]) for task in state["team"]["tasks"]},
                          {"T1": ("accepted", "claude"), "T2": ("accepted", "codex")})
-        self.assertEqual([(event["code"], event.get("confined")) for event in self.kinds(state, "warning")],
+        # Only this call's own warning: planning may leave unrelated ones, depending on who answered first.
+        self.assertEqual([(event["code"], event.get("confined")) for event in self.kinds(state, "warning")
+                          if event.get("job_id") == confined[0]["job_id"]],
                          [("cli_nonzero_exit", True)], "the page is told this failure asks nothing of the user")
         self.assertEqual(state["current_run"]["number"], 1, "no new run was started")
         self.assertEqual(len(self.kinds(state, "run_started")), 0)
