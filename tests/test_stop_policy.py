@@ -20,7 +20,7 @@ EXPECTED = {
     # objective_no_progress is the partners' to sort out; the host continues it after a pause.
     "auto": {"budget_exhausted", "deadline_exceeded", "objective_no_progress",
              "api_key_rejected", "cli_nonzero_exit", "empty_response", "execution_failed", "execution_repair_no_change",
-             "execution_version_stale", "invalid_agent_response", "invalid_project_files", "invalid_response_json",
+             "execution_version_stale", "invalid_agent_response", "invalid_objective_checkpoint", "invalid_project_files", "invalid_response_json",
              "invalid_target", "invalid_team_allocation", "invalid_team_commands","invalid_team_dependencies", "invalid_team_task", "invalid_text",
              "message_too_large", "native_auth_unconfirmed", "native_json_files_forbidden", "native_no_progress", "native_preflight_failed",
              "native_permission_required", "native_process_or_protocol_failure", "native_progress_unconfirmed",
