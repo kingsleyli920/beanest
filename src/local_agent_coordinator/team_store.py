@@ -46,6 +46,11 @@ _REJECTION_RULES = {
         "An adjust names one existing task at most once and gives its complete new dependencies (same rules) and "
         "write_paths; those write_paths may only drop paths the task already has, never add one. "),
     "invalid_team_commands": f"A response may carry at most {MAX_RESPONSE_COMMANDS} commands. ",
+    "invalid_objective_checkpoint": (
+        "A checkpoint response carries exactly one checkpoint command (one allocate may accompany it) and nothing else. "
+        "decision is continue, complete or needs_user. continue must give next_goal as non-empty text: the unfinished "
+        "work, in the command itself, not only in summary. needs_user must give question as text. summary is always text. "
+        "A checkpoint_review response carries exactly one checkpoint_review command. "),
 }
 
 
@@ -1928,6 +1933,7 @@ class TeamStore:
             if context["job_phase"] == "checkpoint":
                 if checkpoint["provider"] != job["provider"] or checkpoint["proposal"] is not None:
                     raise RoomError("objective_checkpoint_conflict")
+                self.objectives.checked_proposal(commands[0])
             elif (checkpoint["reviewer"] != job["provider"] or checkpoint["proposal"] is None
                   or commands[0]["proposal_digest"] != checkpoint["proposal_digest"]
                   or not isinstance(commands[0]["verdict"], str)
@@ -2577,8 +2583,14 @@ class TeamStore:
 
     def _check_allocation(self, db, context, command, members):
         shares = self._allocation_shares(command)
-        if (not shares or any(member not in members or type(value) is not int or not 0 <= value <= workload.MAX_PERCENT
-                              for member, value in shares.items())):
+        # A partner of the room that cannot work just now (out of quota, switched off) may be named:
+        # writing 0 beside it is how partners say "not this one", and nothing is handed to it either way.
+        # Only a name that is nobody in the room is a mistake.
+        run = db.execute("SELECT room_id FROM team_runs WHERE id=?", (context["run_id"],)).fetchone()
+        partners = set(self.store.partner_ids_in_transaction(db, run[0])) if run else set(members)
+        if (not shares or any(member not in partners or type(value) is not int or not 0 <= value <= workload.MAX_PERCENT
+                              for member, value in shares.items())
+                or not any(member in members for member in shares)):
             raise RoomError("invalid_team_allocation")
         checked_text(command["reason"], MAX_PARTNER_TEXT)
         merged = {**(self._allocation(db, context["run_id"]) or {}), **shares}
@@ -2590,8 +2602,9 @@ class TeamStore:
         room_id = job["room_id"]
         members = self.objectives.available_members(db, room_id)
         previous = self._allocation(db, context["run_id"]) or {}
+        # Shares written beside partners that cannot work just now are not kept: they have no part in this split.
         shares, limited = workload.clamp_allocation(members, self._user_limits(db, room_id, members),
-                                                    self._allocation_shares(command))
+            {member: value for member, value in self._allocation_shares(command).items() if member in members})
         current = {**previous, **shares}
         db.execute("UPDATE team_runs SET allocation_json=? WHERE id=?", (json.dumps(current, sort_keys=True), context["run_id"]))
         self.store._event(db, room_id, "workload_allocated", sender=job["provider"], job_id=job["id"], run_id=context["run_id"],

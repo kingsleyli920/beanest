@@ -1105,6 +1105,7 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "上一步的结果还没核对完，核对后才能撤": "The last step's result is not checked yet; you can withdraw once it is",
   "撤掉": "Withdraw",
   "同意": "Approve",
+  "伙伴有一次回复不合规则，已退回让它改，不用你处理。": "One reply from a partner broke a rule and was sent back for correction. Nothing for you to do.",
   "回复": "Reply",
   "伙伴的原话：{p0}": "In the partner's words: {p0}",
   "想补充的话（可不填）": "Anything to add (optional)",

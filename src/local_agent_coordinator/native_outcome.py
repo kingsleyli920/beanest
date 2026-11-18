@@ -23,6 +23,10 @@ REPLY_MISTAKES = frozenset({
     "team_capability_unavailable", "native_json_files_forbidden", "team_write_path_conflict",
     "team_plan_adjusted_meanwhile", "team_extend_path_held", "team_extend_path_owned",
     "invalid_team_allocation",
+    # A checkpoint whose own fields do not fit its decision (continue without a next goal,
+    # a question missing, more than the one checkpoint command): a slip in the reply, and
+    # stopping the goal for it only makes the same partner repeat it on the next continue.
+    "invalid_objective_checkpoint",
 })
 FORMAT_ERRORS = frozenset({
     "invalid_agent_response", "invalid_team_commands", "invalid_team_task",

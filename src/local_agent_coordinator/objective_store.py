@@ -239,24 +239,36 @@ class ObjectiveStore:
         db.execute("UPDATE teams SET phase='checkpoint' WHERE room_id=?", (room_id,))
         return True
 
+    @staticmethod
+    def checked_proposal(command):
+        """The checkpoint's own fields, checked before anything is applied.
+
+        A reply that breaks these is a slip the partner can correct: the
+        validation step calls this too, so the reply is sent back instead of
+        failing once it is already being applied.
+        """
+        decision = command.get("decision")
+        if not isinstance(decision, str) or decision not in {"continue", "complete", "needs_user"}:
+            raise RoomError("invalid_objective_checkpoint")
+        proposal = {key: command.get(key) for key in ("decision", "summary", "next_goal", "scope_reference", "question")}
+        for key in ("summary", "next_goal", "scope_reference", "question"):
+            value = proposal[key]
+            if value is not None:
+                checked_text(value, MAX_PARTNER_TEXT)
+        if (not isinstance(proposal["summary"], str)
+                or decision == "continue" and (not isinstance(proposal["next_goal"], str) or not proposal["next_goal"].strip())
+                or decision == "needs_user" and not isinstance(proposal["question"], str)):
+            raise RoomError("invalid_objective_checkpoint")
+        return proposal
+
     def propose(self, db, room_id, provider, command):
         objective = self.current(db, room_id)
         checkpoint = json.loads(objective["checkpoint_json"]) if objective and objective["checkpoint_json"] else None
         if (objective is None or checkpoint is None or checkpoint["proposal"] is not None
                 or checkpoint["provider"] != provider or objective["status"] not in {"checkpoint", "paused"}):
             raise RoomError("objective_checkpoint_conflict")
-        decision = command["decision"]
-        if not isinstance(decision, str) or decision not in {"continue", "complete", "needs_user"}:
-            raise RoomError("invalid_objective_checkpoint")
-        proposal = {key: command[key] for key in ("decision", "summary", "next_goal", "scope_reference", "question")}
-        for key in ("summary", "next_goal", "scope_reference", "question"):
-            value = proposal[key]
-            if value is not None:
-                checked_text(value, MAX_PARTNER_TEXT)
-        if (not isinstance(proposal["summary"], str)
-                or decision == "continue" and not isinstance(proposal["next_goal"], str)
-                or decision == "needs_user" and not isinstance(proposal["question"], str)):
-            raise RoomError("invalid_objective_checkpoint")
+        proposal = self.checked_proposal(command)
+        decision = proposal["decision"]
         reference, original = proposal["scope_reference"], objective["original_goal"]
         same_scope = (reference == objective_scope_reference(objective) if isinstance(reference, str)
                       and reference.startswith("beanest-objective:") else
