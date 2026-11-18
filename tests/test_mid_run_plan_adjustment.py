@@ -409,6 +409,38 @@ class MidRunService(unittest.IsolatedAsyncioTestCase):
         reply = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "user")
         self.assertIn("adjust{type,task_id,dependencies,write_paths}", reply["prompt"])
         self.assertNotIn("answering_now", reply["context"], "one partner answering alone has nobody to agree with")
+        self.assertNotIn("board_closed", reply["context"], "while work runs the board is open to this reply")
+
+    async def test_a_reply_written_at_the_checkpoint_is_told_the_board_cannot_change(self):
+        # Catches a reply that was never told the board is closed: every task is delivered and the team is at
+        # its checkpoint, so a propose in this reply comes back as team_plan_locked and the whole call is
+        # repeated, once per message, for work the checkpoint plans anyway.
+        self.plan = [pool.plan("L1")]
+        self.user_replies, self.answering, self.answers_only = [], {}, True
+        released = asyncio.Event()
+        ordinary = self.handler
+
+        async def handler(agent, context, cwd):
+            if context["job"]["job_phase"] == "checkpoint":
+                await asyncio.wait_for(released.wait(), 10)
+            return await ordinary(agent, context, cwd)
+        self.fake.handler = handler
+        await self.create(["claude", "codex"])
+        await poll_async(lambda: self.service.store.snapshot(self.room_id)["team"]["phase"] == "checkpoint", timeout=10,
+                         describe=lambda _: "the team never reached its checkpoint: "
+                                            + str(self.service.store.snapshot(self.room_id)["team"]["phase"]))
+        await self.service.send_message(self.room_id, "Also add a changelog entry.", "all", str(uuid4()), source="user")
+        await poll_async(lambda: bool(self.user_replies), timeout=10, describe=lambda _: "nobody answered the message")
+        reply = next(call for call in self.fake.calls if call["context"]["job"]["job_phase"] == "user")
+        self.assertIn("board_closed", reply["context"], "the reply was not told the board is closed")
+        closed = reply["context"]["board_closed"]
+        self.assertEqual(closed["team_phase"], "checkpoint")
+        self.assertIn("propose and adjust are rejected here as team_plan_locked", closed["instruction"])
+        self.assertIn("commands:[]", closed["instruction"])
+        released.set()
+        await self.settle()
+        kinds = [event["kind"] for event in (await self.state())["events"]]
+        self.assertNotIn("native_response_rejected", kinds)
 
     async def test_partners_answering_the_same_message_are_told_who_else_is_and_in_what_order(self):
         # Catches two free partners each drafting a plan change for one user message without knowing

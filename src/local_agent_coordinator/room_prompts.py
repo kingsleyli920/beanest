@@ -119,6 +119,16 @@ ALLOCATE_INSTRUCTION = (
     "current split still fits. ")
 
 
+# A message that arrives when the board is not in its working phase (every task delivered and the team at
+# its checkpoint, or still planning) is still answered, but that reply cannot change the board. Partners
+# used to try anyway: the propose was rejected as team_plan_locked and the whole call repeated, once per
+# message, for work the checkpoint was about to plan in any case.
+BOARD_CLOSED_INSTRUCTION = (
+    "team.phase is not working, so this reply cannot change the board: propose and adjust are rejected here as "
+    "team_plan_locked and the call is repeated. Send neither. Answer in message, with commands:[] unless you claim "
+    "your own blocked task because the message resolves it. Say plainly what work the message calls for. Nothing is "
+    "lost: the planning or checkpoint step that is running reads the user's messages, and the new tasks are planned "
+    "there.")
 WITHDRAWN_INSTRUCTION = (
     "The user withdrew these tasks. Do not do, redo, recreate or propose them again, in this round or a later one, "
     "and do not treat them as missing or unfinished work in a checkpoint, unless the user asks for them again in a "
@@ -536,6 +546,8 @@ class RoomPromptMixin:
                           if item["kind"] == "team_user" and item["status"] in {"queued", "working"}} - busy) | {job["provider"]}
             if len(answering) > 1:
                 context["answering_now"] = [member["id"] for member in snapshot["members"] if member["id"] in answering]
+            if team["phase"] != "working":
+                context["board_closed"] = {"team_phase": team["phase"], "instruction": BOARD_CLOSED_INSTRUCTION}
         if snapshot.get("objective"):
             context["current_stage_goal"] = job["goal"]
             if job["team"]["job_phase"] in {"checkpoint", "checkpoint_review"}:
