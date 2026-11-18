@@ -225,6 +225,10 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 上述commands是存储的逻辑形状。原生严格schema按当前作业阶段限制type，采用14字段的固定封闭对象，未使用的字段必须为null；服务只剥离这份确切传输形状，随后仍按逻辑命令的完整键集、权限和任务版本校验。Claude原生调用例外：同一房间各阶段发送字节相同的并集schema，否则每次换阶段续接都会让整段提示词缓存失效；命令类型、can_propose和review/checkpoint_review的reason、checkpoint的summary非空，改由服务按作业真实阶段校验，违反时仍返回invalid_team_commands。自定义适配器可继续返回精简逻辑形状，未知、缺失或非空的多余字段不会被静默丢弃。Claude 并集schema的命令对象多一个传输字段 `handoff`（可为null），不进入逻辑命令；只有 checkpoint 命令携带时才被服务读取，其他命令即使填了也直接忽略，不触发格式纠错。消息不能为空且最多100000字符（`MAX_PARTNER_TEXT`）；propose.id必须是非空稳定标识，claim等task_id须引用同一标识，例如T1；仅未使用字段为null。规划阶段按确切清单版本去重；同一状态无进展不会无限唤醒成员。这里只描述协议，真实模型效果须单独记录。
 
 
+### 就地答复等用户的任务
+
+伙伴把任务标成等用户决定（`user_decision`）或等用户授权（`permission_required`）时，房间里其余任务照常进行。原先这类任务要等到别的活都做完，才统一向用户提问；这期间任务卡只写着“要你同意”，没有可以按的地方。现在用户可以在任务卡上直接答复：`POST /api/rooms/{id}/answer-task {request_id, run_id, task_id, text}`，能力位 `task_answer_v1`。只有界面能调（MCP 入口返回 `user_task_answer_required`）；任务必须在当前轮、处于受阻且原因是上述两种，目标在运行中，否则返回 `task_answer_unavailable`。答复后只有这一项回到负责人手上（`assigned`，`assignment_epoch` 加一），用户的原话写进任务的 `help_result`，同时记一条用户消息和一条 `task_block_answered`（`task_id`、`cause`、`question`、`text`）。界面在卡片上显示伙伴请求授权的原话、一个输入框和“同意”或“回复”按钮；授权类不填话时发“同意，按原计划做。”，决定类必须写内容。目标已经停下来提问（`needs_user`）时仍走原来的回答框，卡片上不再重复给入口。
+
 ### 一个伙伴同时做几项任务
 
 就绪且没人领的任务多于空闲伙伴时，任务池把多出来的任务交给还有余量的伙伴，让它在另一个会话里同时做。对用户和其他伙伴来说这仍是同一个伙伴：同一个名字、账号、额度和工作量，不是新成员，不占成员名额，不出现在成员列表、发言人和任务负责人里。

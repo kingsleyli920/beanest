@@ -276,7 +276,7 @@ function savedOutbox(storage) {
   const main = entries.find((entry) => entry.request.body.request_id === hint?.request_id) || entries.find((entry) => !entry.request.detached && !entry.request.intervened);
   return { scope: index.scope, request: main?.request || null, sidelined_requests: entries.filter((entry) => entry !== main), deleted_rooms: index.deleted_rooms };
 }
-async function browser({ language = 'zh-CN', languageStorage = new Map(), agents = catalog, rooms = [], projects = [], partners, saved, storage = new Map(), token = 'fictional-test-connection', route, taskModes = ['text'], desktopBridge, selectSaved = true, now = Date.now, selection = '', executionPolicySupport = false, continuousObjectiveSupport = executionPolicySupport, nativeProjectSupport = false, naturalContinuationSupport = false, roomLifecycleSupport = false, roomNativeSessionCleanupSupport = false, messageReceiptsSupport = false, projectDeletionSupport = false, naturalRuntimeSupport = false, partnerLifecycleSupport = false, locationHash = '', idbFailure, pagingSupport = false, hostOutboxScope = null, mediaSupport = false, codeStatusSupport = false, memberInvitationSupport = false, taskWithdrawalSupport = false, requestIdStart = 0 } = {}) {
+async function browser({ language = 'zh-CN', languageStorage = new Map(), agents = catalog, rooms = [], projects = [], partners, saved, storage = new Map(), token = 'fictional-test-connection', route, taskModes = ['text'], desktopBridge, selectSaved = true, now = Date.now, selection = '', executionPolicySupport = false, continuousObjectiveSupport = executionPolicySupport, nativeProjectSupport = false, naturalContinuationSupport = false, roomLifecycleSupport = false, roomNativeSessionCleanupSupport = false, messageReceiptsSupport = false, projectDeletionSupport = false, naturalRuntimeSupport = false, partnerLifecycleSupport = false, locationHash = '', idbFailure, pagingSupport = false, hostOutboxScope = null, mediaSupport = false, codeStatusSupport = false, memberInvitationSupport = false, taskWithdrawalSupport = false, taskAnswerSupport = false, requestIdStart = 0 } = {}) {
   const document = createDocument();
   const location = { hash: locationHash, pathname: '/', search: '' };
   const history = { replaceState(_state, _title, url) { location.hash = url.includes('#') ? url.slice(url.indexOf('#')) : ''; } };
@@ -309,7 +309,7 @@ async function browser({ language = 'zh-CN', languageStorage = new Map(), agents
       requests.push(request);
       let value = route ? await route(request, document, options) : undefined;
       if (value === undefined) {
-        if (url === '/api/status') value = { app: 'local-agent-rooms', agents, task_modes: taskModes, ...(executionPolicySupport || nativeProjectSupport || naturalContinuationSupport || roomLifecycleSupport || roomNativeSessionCleanupSupport || messageReceiptsSupport || projectDeletionSupport || naturalRuntimeSupport || partnerLifecycleSupport || pagingSupport || hostOutboxScope || mediaSupport || codeStatusSupport || memberInvitationSupport || taskWithdrawalSupport ? { ...(hostOutboxScope ? { user_outbox_scope: hostOutboxScope } : {}), ...(pagingSupport ? { transport_limits: { max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608, event_page_default_limit: 100, event_page_default_bytes: 262144, event_page_max_limit: 500, event_page_max_bytes: 8388608 } } : {}), capabilities: { ...(taskWithdrawalSupport ? { task_withdrawal_v1: true } : {}), ...(memberInvitationSupport ? { room_member_invitation_v1: true } : {}), ...(codeStatusSupport ? { room_code_status_v1: true } : {}), ...(mediaSupport ? { room_media_v1: true } : {}), ...(hostOutboxScope ? { user_outbox_v1: true } : {}), ...(pagingSupport ? { room_paging_v1: true } : {}), ...(partnerLifecycleSupport ? { partner_lifecycle_operations: true } : {}), ...(naturalRuntimeSupport ? { natural_runtime_settings: true } : {}), ...(messageReceiptsSupport ? { message_receipts: true } : {}), ...(projectDeletionSupport ? { project_registration_deletion: true } : {}), ...(roomNativeSessionCleanupSupport ? { room_native_session_cleanup: true } : {}), ...(roomLifecycleSupport ? { room_lifecycle_operations: true } : {}), ...(executionPolicySupport ? { execution_policy: true } : {}), ...(continuousObjectiveSupport ? { continuous_objective: true } : {}), ...(nativeProjectSupport ? { native_project: true } : {}), ...(naturalContinuationSupport ? { natural_continuation: true } : {}) } } : {}) };
+        if (url === '/api/status') value = { app: 'local-agent-rooms', agents, task_modes: taskModes, ...(executionPolicySupport || nativeProjectSupport || naturalContinuationSupport || roomLifecycleSupport || roomNativeSessionCleanupSupport || messageReceiptsSupport || projectDeletionSupport || naturalRuntimeSupport || partnerLifecycleSupport || pagingSupport || hostOutboxScope || mediaSupport || codeStatusSupport || memberInvitationSupport || taskWithdrawalSupport || taskAnswerSupport ? { ...(hostOutboxScope ? { user_outbox_scope: hostOutboxScope } : {}), ...(pagingSupport ? { transport_limits: { max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608, event_page_default_limit: 100, event_page_default_bytes: 262144, event_page_max_limit: 500, event_page_max_bytes: 8388608 } } : {}), capabilities: { ...(taskWithdrawalSupport ? { task_withdrawal_v1: true } : {}), ...(taskAnswerSupport ? { task_answer_v1: true } : {}), ...(memberInvitationSupport ? { room_member_invitation_v1: true } : {}), ...(codeStatusSupport ? { room_code_status_v1: true } : {}), ...(mediaSupport ? { room_media_v1: true } : {}), ...(hostOutboxScope ? { user_outbox_v1: true } : {}), ...(pagingSupport ? { room_paging_v1: true } : {}), ...(partnerLifecycleSupport ? { partner_lifecycle_operations: true } : {}), ...(naturalRuntimeSupport ? { natural_runtime_settings: true } : {}), ...(messageReceiptsSupport ? { message_receipts: true } : {}), ...(projectDeletionSupport ? { project_registration_deletion: true } : {}), ...(roomNativeSessionCleanupSupport ? { room_native_session_cleanup: true } : {}), ...(roomLifecycleSupport ? { room_lifecycle_operations: true } : {}), ...(executionPolicySupport ? { execution_policy: true } : {}), ...(continuousObjectiveSupport ? { continuous_objective: true } : {}), ...(nativeProjectSupport ? { native_project: true } : {}), ...(naturalContinuationSupport ? { natural_continuation: true } : {}) } } : {}) };
         else if (['/api/rooms', '/api/rooms?view=compact'].includes(url) && options.method === 'GET') value = { rooms };
         else if (url === '/api/projects' && options.method === 'GET') value = { projects };
         else if (['/api/partners', '/api/partners?view=compact'].includes(url) && options.method === 'GET') value = { partners: partners || agents, supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }] };
@@ -11739,6 +11739,69 @@ test('withdrawing a task asks inside the page, lists what depends on it from the
   assert.match(ui.get('notice').textContent, /已撤掉「写说明」和依赖它的 1 项。/);
   await ui.click('tab-discussion');
   assert.match(ui.get('events').textContent, /你撤掉了 T2「写说明」，以及依赖它的 T3「补测试」/);
+});
+
+const answerControls = (ui) => descendants(ui.get('progress-pane')).filter((node) => node.tagName === 'BUTTON' && node.dataset.answerTask);
+function waitingFixture() {
+  const saved = withdrawalFixture();
+  saved.objective = { ...(saved.objective || {}), status: 'running', can_answer: false };
+  saved.team.tasks[1] = { ...saved.team.tasks[1], status: 'blocked', block_cause: 'permission_required', call_running: false,
+    blocked_reason: '需要一次不超过 0.25 美元的收费请求，是否允许？' };
+  saved.team.tasks[2] = { ...saved.team.tasks[2], status: 'blocked', block_cause: 'user_decision', call_running: false, blocked_reason: '用 A 方案还是 B 方案？' };
+  saved.collaboration.tasks = saved.team.tasks.map(({ id, title, owner, status }) => ({ id, title, owner, status, waiting_for: '', result: '' }));
+  return saved;
+}
+
+test('a task that waits for the user is answered on its own card while the room keeps working', async () => {
+  // Catches the card saying "needs your approval" with nothing to press, the partner's actual request being hidden
+  // behind a generic sentence, an empty decision being sent, and the answer going anywhere but that one task.
+  const saved = waitingFixture();
+  const after = structuredClone(saved);
+  after.team.tasks[1] = { ...after.team.tasks[1], status: 'assigned', block_cause: null, blocked_reason: null };
+  after.collaboration.tasks = after.team.tasks.map(({ id, title, owner, status }) => ({ id, title, owner, status, waiting_for: '', result: '' }));
+  const sent = [];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, taskWithdrawalSupport: true, taskAnswerSupport: true, route(request) {
+    if (!request.path.endsWith('/answer-task')) return undefined;
+    sent.push(request.body); Object.assign(saved, structuredClone(after)); return after;
+  } });
+  await ui.click('tab-progress');
+  const controls = answerControls(ui);
+  assert.deepEqual(controls.map((node) => [node.dataset.answerTask, node.textContent]), [['T2', '同意'], ['T3', '回复']]);
+  assert.match(ui.get('progress-pane').textContent, /伙伴的原话：需要一次不超过 0\.25 美元的收费请求，是否允许？/);
+  assert.match(ui.get('progress-pane').textContent, /只放行这一项，其他任务照常进行。/);
+
+  controls[1].fire('click'); await settle();
+  assert.equal(sent.length, 0, 'a decision with nothing written is not sent');
+  assert.match(ui.get('progress-pane').textContent, /先写下你的决定。/);
+
+  answerControls(ui)[0].fire('click'); await settle();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(Object.keys(sent[0]).sort(), ['request_id', 'run_id', 'task_id', 'text']);
+  assert.deepEqual([sent[0].run_id, sent[0].task_id, sent[0].text], [saved.current_run.id, 'T2', '同意，按原计划做。']);
+  assert.match(ui.get('notice').textContent, /已答复「写说明」，这一项接着做。/);
+  assert.deepEqual(answerControls(ui).map((node) => node.dataset.answerTask), ['T3'], 'the answered task offers nothing more');
+});
+
+test('an older service, or a goal that has already stopped to ask, shows no answer on the card', async () => {
+  // Catches an action the service cannot perform, and two places to answer the same question.
+  const saved = waitingFixture();
+  const old = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, taskWithdrawalSupport: true });
+  await old.click('tab-progress');
+  assert.deepEqual(answerControls(old), []);
+  const asking = waitingFixture();
+  asking.objective = { ...asking.objective, status: 'needs_user', can_answer: true };
+  const ui = await browser({ rooms: [asking.room], saved: asking, executionPolicySupport: true, taskWithdrawalSupport: true, taskAnswerSupport: true });
+  await ui.click('tab-progress');
+  assert.deepEqual(answerControls(ui), []);
+});
+
+test('a focused tab panel draws no ring around the whole panel', () => {
+  // Catches the coloured line under the tabs and above the composer: the keyboard-focus ring of the scrollable panel.
+  const css = fs.readFileSync(path.join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');
+  assert.match(css, /\[role="tabpanel"\]:focus-visible, \.timeline:focus-visible, \.task-materials-body:focus-visible \{ outline: none; \}/);
+  assert.ok(css.lastIndexOf('[role="tabpanel"]:focus-visible') > css.lastIndexOf('[tabindex]:focus-visible'), 'the later rule wins at equal weight');
+  const html = fs.readFileSync(path.join(__dirname, '../src/local_agent_coordinator/room_ui/index.html'), 'utf8');
+  assert.equal((html.match(/role="tabpanel"/g) || []).length >= 2, true);
 });
 
 test('a refused withdrawal keeps the dialog open with the service reason, and an older service shows no action', async () => {

@@ -13,7 +13,7 @@ from uuid import uuid4
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, read_only_capabilities
 from .execution_policy import task_settled, WITHDRAWN, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 from .objective_store import ObjectiveStore
-from .block_contract import PARTNER_BLOCK_CAUSES, BlockContractError, normalize_block_cause
+from .block_contract import PARTNER_BLOCK_CAUSES, USER_BLOCK_CAUSES, BlockContractError, normalize_block_cause
 from .room_contract import (COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_TASK_DEPENDENCIES, MAX_TASK_PATHS,
                             RoomError, checked_text, checked_message)
 
@@ -255,6 +255,36 @@ class TeamStore:
                    "artifact_revision=?,artifact_digest=? WHERE id=?", (self.store.clock(),revision,digest,run_id))
         self.store._event(db, room_id, "run_accepted", sender="user", run_id=run_id,
                           revision=revision, digest=digest)
+
+    def answer_blocked_task(self, db, room_id, run_id, task_id, text):
+        """The user answers one task that waits on their decision or permission; that task alone goes on.
+
+        Without this the task waits until nothing else in the room can run,
+        and only then is its question put to the user. The answer is the
+        user's own, said in the app: it is recorded as their message and
+        handed to the task's owner when the task resumes.
+        """
+        team = self.team(db, room_id)
+        if team is None or team["current_run_id"] != run_id:
+            raise RoomError("team_run_conflict")
+        task = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?", (room_id, run_id, task_id)).fetchone()
+        if task is None:
+            raise RoomError("team_task_not_found")
+        objective = self.objectives.current(db, room_id)
+        # A goal that has already stopped to ask is answered through its own question.
+        if (task["status"] != "blocked" or task["block_cause"] not in USER_BLOCK_CAUSES or team["phase"] in _TERMINAL
+                or objective is not None and objective["status"] not in {"running", "checkpoint"}):
+            raise RoomError("task_answer_unavailable")
+        answer = ("The user answered what this task was waiting for, in the app. Their words: " + text)
+        db.execute("UPDATE shared_tasks SET status=CASE WHEN owner IS NOT NULL THEN 'assigned' ELSE 'open' END,"
+                   "blocked_reason=NULL,block_cause=NULL,reviewer=NULL,help_to=NULL,help_text=NULL,help_result=?,"
+                   # A new attempt: what was refused or asked before no longer applies.
+                   "assignment_epoch=assignment_epoch+1,ownership_grant_json=NULL WHERE room_id=? AND run_id=? AND id=?",
+                   (answer, room_id, run_id, task_id))
+        recipient = partner_of(task["owner"]) if task["owner"] else "all"
+        self.store._event(db, room_id, "message", sender="user", recipient=recipient, text=text, job_id=None)
+        self.store._event(db, room_id, "task_block_answered", sender="user", run_id=run_id, task_id=task_id,
+                          title=task["title"], cause=task["block_cause"], question=task["blocked_reason"], text=text)
 
     def withdraw(self, db, room_id, run_id, task_id, *, include_dependents, withdrawal_id):
         """The user removes an unfinished task, and every unfinished task that needs it, from this round.

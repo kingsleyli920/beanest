@@ -75,7 +75,7 @@ function renderProgressPane() {
   const stLabel = cancelled ? t("已取消") : progressToneLabels.st;
   const earlier = earlierRunProgress(snapshot);
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), snapshot.room.id, tasks, objective?.stage, objective?.status, canAnswer,
-    state.taskWithdrawalSupported, lifecycleState(snapshot.room), snapshot.current_run?.id, state.connected,
+    state.taskWithdrawalSupported, state.taskAnswerSupported, state.taskAnswer, lifecycleState(snapshot.room), snapshot.current_run?.id, state.connected,
     snapshot.team?.phase, summary, resumes, cancelled, snapshot.members.map((member) => [member.id, member.name, member.avatar]),
     earlier && [earlier.key, earlier.state, earlier.tasks.length]]);
   if (pane.dataset.fingerprint === fingerprint) return;
@@ -127,7 +127,12 @@ function renderProgressPane() {
       row.append(name, who, element('span', progressChip(task, cancelled), `chip ${tone}`));
       const withdraw = taskWithdrawControl(snapshot, task);
       if (withdraw) { row.classList.toggle('has-action', true); row.append(...withdraw); }
-      if (task.status === 'blocked' && !taskQuotaHeld(task)) row.append(blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why'));
+      if (task.status === 'blocked' && !taskQuotaHeld(task)) {
+        const body = blockedTaskBody(task, canAnswer && taskNeedsUser(task), 'task-why');
+        const answer = canAnswer ? null : taskAnswerControl(snapshot, task);
+        if (answer) body.append(answer);
+        row.append(body);
+      }
       list.append(row);
     }
     nodes.push(list);
@@ -136,7 +141,58 @@ function renderProgressPane() {
   }
   const earlierNode = earlierRunNode(earlier);
   if (earlierNode) nodes.push(earlierNode);
+  // Redrawing must not take the answer the user is in the middle of typing out of their hands.
+  const typing = document.activeElement?.dataset?.answerTaskInput || null;
   pane.replaceChildren(...nodes);
+  if (typing) descendantsOf(pane).find((node) => node.dataset?.answerTaskInput === typing)?.focus({ preventScroll: true });
+}
+
+// A task that waits for the user's decision or permission is answered on its own card. Without this
+// the card only said "needs your approval": the question was put to the user once nothing else could run.
+function taskAnswerControl(snapshot, task) {
+  const objective = snapshot.objective;
+  if (!state.taskAnswerSupported || !taskNeedsUser(task) || !activeEntry(snapshot.room) || typeof task.id !== 'string'
+      || !uuidPattern.test(snapshot.current_run?.id || '') || (objective && !['running', 'checkpoint'].includes(objective.status))) return null;
+  const permission = task.block_cause === 'permission_required';
+  const box = element('div', '', 'task-answer');
+  const asked = typeof task.blocked_reason === 'string' ? task.blocked_reason.trim() : '';
+  // What is being approved is the partner's own request, so it is shown in full, not summarised.
+  if (permission && asked) box.append(element('p', t("伙伴的原话：{p0}", { p0: asked.length > 900 ? `${asked.slice(0, 900)}…` : asked }), 'task-answer-ask'));
+  const busy = state.taskAnswer?.taskId === task.id && state.taskAnswer.busy === true;
+  const input = element('input'); input.type = 'text'; input.maxLength = 2000; input.dataset.answerTaskInput = task.id;
+  input.placeholder = permission ? t("想补充的话（可不填）") : t("写下你的决定");
+  input.setAttribute('aria-label', t("答复「{p0}」", { p0: taskDisplayTitle(task.title) }));
+  input.value = state.taskAnswerDrafts?.[task.id] || ''; input.disabled = busy || !state.connected;
+  input.addEventListener('input', () => { state.taskAnswerDrafts = { ...(state.taskAnswerDrafts || {}), [task.id]: input.value }; });
+  const button = element('button', permission ? t("同意") : t("回复"), 'btn sm primary task-answer-submit'); button.type = 'button';
+  button.dataset.answerTask = task.id; button.disabled = busy || !state.connected;
+  const error = element('small', state.taskAnswer?.taskId === task.id ? state.taskAnswer.error || '' : '', 'task-answer-error');
+  error.hidden = !error.textContent;
+  const roomId = snapshot.room.id; const runId = snapshot.current_run.id;
+  const submit = () => void submitTaskAnswer(roomId, runId, task, permission, input.value);
+  button.addEventListener('click', submit);
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); submit(); } });
+  const line = element('div', '', 'task-answer-line'); line.append(input, button);
+  box.append(line, error, element('small', t("只放行这一项，其他任务照常进行。"), 'quick-note'));
+  return box;
+}
+async function submitTaskAnswer(roomId, runId, task, permission, typed) {
+  if (state.taskAnswer?.busy) return;
+  const text = (typed || '').trim() || (permission ? t("同意，按原计划做。") : '');
+  if (!text) { state.taskAnswer = { taskId: task.id, busy: false, error: t("先写下你的决定。") }; $('progress-pane').dataset.fingerprint = ''; renderProgressPane(); return; }
+  state.taskAnswer = { taskId: task.id, busy: true, error: '' }; $('progress-pane').dataset.fingerprint = ''; renderProgressPane();
+  try {
+    let result = await api(`${roomPath(roomId)}/answer-task${state.roomPagingSupported ? '?response=ack' : ''}`, 'POST',
+      { request_id: crypto.randomUUID(), run_id: runId, task_id: task.id, text });
+    if (result?.acknowledged === true && result.room_id === roomId) result = await readRoomSnapshot(roomId);
+    state.taskAnswer = null;
+    if (state.taskAnswerDrafts) delete state.taskAnswerDrafts[task.id];
+    if (state.selected === roomId && result?.room?.id === roomId) applySnapshot(result);
+    showNotice(t("已答复「{p0}」，这一项接着做。", { p0: taskDisplayTitle(task.title) }));
+  } catch (error) {
+    state.taskAnswer = { taskId: task.id, busy: false, error: error.uncertain ? t("结果还没确认，先看看最新进展；不会自动重试。") : error.message };
+  }
+  $('progress-pane').dataset.fingerprint = ''; renderProgressPane();
 }
 
 // The user may take an unfinished task out of the current round. A running call is never cut off:
@@ -626,6 +682,7 @@ function pagedRoom(snapshot) { return snapshot?.projection === 'room_state_v1'; 
 function configurePaging(status) {
   state.memberInvitationSupported = status?.capabilities?.room_member_invitation_v1 === true;
   state.taskWithdrawalSupported = status?.capabilities?.task_withdrawal_v1 === true;
+  state.taskAnswerSupported = status?.capabilities?.task_answer_v1 === true;
   state.mediaSupported = status?.capabilities?.room_media_v1 === true;
   state.codeStatusSupported = status?.capabilities?.room_code_status_v1 === true;
   state.hostOutboxSupported = status?.capabilities?.user_outbox_v1 === true && uuidPattern.test(status.user_outbox_scope || '');

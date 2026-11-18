@@ -27,7 +27,7 @@ from .partner_manager import PartnerError
 from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 
-ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task))?")
+ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task|answer-task))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload|parallel-limit|api-model)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
@@ -130,7 +130,7 @@ ERROR_STATUS = {
     "objective_reassessment_unavailable":409,
     "team_task_not_found":404, "task_already_withdrawn":409, "task_withdraw_finished":409,
     "task_withdraw_busy":409, "task_withdraw_dependents":409, "task_withdrawal_pending":409, "task_withdraw_unconfirmed":409,
-    "user_task_withdraw_required":403,
+    "user_task_withdraw_required":403, "task_answer_unavailable":409, "user_task_answer_required":403,
 }
 
 
@@ -776,6 +776,15 @@ class _RoomHandler(_Handler):
                 raise _HTTPError(400, "invalid_arguments")
             return await service.withdraw_task(match[1], body["request_id"], run_id=body["run_id"], task_id=body["task_id"],
                                                include_dependents=body.get("include_dependents", False))
+        if match and match[2] == "answer-task":
+            if mcp:
+                raise _HTTPError(403, "user_task_answer_required")
+            if (set(body) != {"request_id", "run_id", "task_id", "text"} or not self._text(body.get("request_id"), 512)
+                    or not isinstance(body.get("run_id"), str) or re.fullmatch(TASK_ID, body["run_id"]) is None
+                    or not isinstance(body.get("task_id"), str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", body["task_id"]) is None
+                    or not self._message_text(body.get("text"))):
+                raise _HTTPError(400, "invalid_arguments")
+            return await service.answer_task(match[1], body["request_id"], run_id=body["run_id"], task_id=body["task_id"], text=body["text"])
         raise _HTTPError(404, "route_not_found")
 
 
