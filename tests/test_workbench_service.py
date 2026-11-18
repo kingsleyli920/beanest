@@ -435,6 +435,11 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
         prior = await self.service.read_room(room_id)
         old_session = next(item['session_id'] for item in prior['members'] if item['id'] == 'clover')
         await self.service.set_partner_enabled('clover', False)
+        # The request waits only a moment for the operation; until it has finished, a new goal is
+        # refused as partner_disabled instead. Both refuse; this case is about the finished state.
+        await poll_async(lambda: [operation['status'] for operation in self.service.store.partner_operations()
+                                  if operation['provider'] == 'clover'][-1],
+                         lambda status: status == 'completed', timeout=5)
         with self.assertRaises(RoomError) as error:
             await self.service.create_room('A new goal.', 'clover', 'disabled-new',
                                            participants=['clover', 'sprout'])

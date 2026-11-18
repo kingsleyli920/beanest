@@ -33,6 +33,9 @@ class FencedACPFixture(SetupFixture):
         self.peer = NativeTransport()
         self.peer.handler = self.reply
         self.service.native_invoke = self.invoke
+        # The scripted ACP tool answers every new session with one fixed id, so it stands for a
+        # partner that runs one session at a time; a second session would read as a changed identity.
+        self.service.store.parallel_limits = lambda: {}
         code, value = self.request("POST", "/api/partners/discover", {})
         if code != 200:
             raise AssertionError(value)
