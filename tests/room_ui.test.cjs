@@ -11795,6 +11795,22 @@ test('an older service, or a goal that has already stopped to ask, shows no answ
   assert.deepEqual(answerControls(ui), []);
 });
 
+test('a reply sent back for correction is a quiet line in the discussion, not a notice to check the round', async () => {
+  // Catches the yellow "本轮结果需要核对。" left in the discussion for a slip the service had already handed back.
+  const saved = withdrawalFixture();
+  saved.events = [...saved.events, { seq: 90, kind: 'warning', sender: 'system', code: 'invalid_team_allocation', run_id: saved.current_run.id, created_at: 1090 },
+    { seq: 91, kind: 'warning', sender: 'system', code: 'native_cleanup_unconfirmed', run_id: saved.current_run.id, created_at: 1091 }];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  await ui.click('tab-discussion');
+  const rows = descendants(ui.get('events')).filter((node) => node.tagName === 'LI' && ['90', '91'].includes(node.dataset.seq));
+  assert.equal(rows.length, 2);
+  const [corrected, real] = rows;
+  assert.match(corrected.textContent, /伙伴有一次回复不合规则，已退回让它改，不用你处理。/);
+  assert.doesNotMatch(corrected.textContent, /本轮结果需要核对/);
+  assert.equal(corrected.className.includes('warning'), false, 'no warning tone for a slip already handed back');
+  assert.equal(real.className.includes('warning'), true, 'a warning the user should see keeps its tone');
+});
+
 test('a focused tab panel draws no ring around the whole panel', () => {
   // Catches the coloured line under the tabs and above the composer: the keyboard-focus ring of the scrollable panel.
   const css = fs.readFileSync(path.join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');
