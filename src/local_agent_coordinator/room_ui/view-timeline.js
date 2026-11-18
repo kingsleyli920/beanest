@@ -362,7 +362,7 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'artifact') return t("{p0} 关联文件版本 {p1}，未执行代码或测试。", { p0: displayName(event.sender), p1: event.revision });
   // A reply the service sent back for correction needs nothing from the user; the fallback text for an
   // unlabelled code ("this round's result needs checking") told them the opposite.
-  if (event.kind === 'warning') return replyCorrectedCodes.has(event.code) ? t("伙伴有一次回复不合规则，已退回让它改，不用你处理。") : executionMessage(event.code);
+  if (event.kind === 'warning') return quietCorrection(event) ? t("伙伴有一次回复不合规则，已退回让它改，不用你处理。") : executionMessage(event.code);
   if (event.kind === 'job_claimed') return ['review', 'team_review'].includes(jobKind(event, jobs))
     ? t("{p0} 开始处理审核任务", { p0: displayName(event.sender) }) : t("{p0} 开始处理任务", { p0: displayName(event.sender) });
   if (event.kind === 'job_finished') return `${displayName(event.sender)}${interfaceColon()}${statusLabels[statusClass(event.status)]}${event.error ? `${interfaceStop()}${executionMessage(event.error)}` : ''}`;
@@ -380,8 +380,14 @@ function progressText(event, jobs, archive = false) {
   return `${eventLabels[event.kind] || t("进展")}${interfaceColon()}${statusLabels[statusClass(event.status)]}`;
 }
 
+// A reply mistake the service corrects by itself, with no wording of its own: codes that have their own
+// sentence (a path conflict, a claim conflict) keep it and their warning tone.
+function quietCorrection(event) {
+  return event.kind === 'warning' && replyCorrectedCodes.has(event.code)
+    && !Object.hasOwn(executionLabels, event.code) && !Object.hasOwn(errorLabels, event.code);
+}
 function progressNode(event, jobs, archive = false) {
-  const item = element('li', '', archive ? 'activity-record' : `event progress${(event.kind === 'warning' && event.code !== 'team_plan_changed' && !replyCorrectedCodes.has(event.code)) || event.cancellation_confirmed === false ? ' warning' : ''}`);
+  const item = element('li', '', archive ? 'activity-record' : `event progress${(event.kind === 'warning' && event.code !== 'team_plan_changed' && !quietCorrection(event)) || event.cancellation_confirmed === false ? ' warning' : ''}`);
   item.dataset.seq = String(event.seq);
   const line = element('div', '', 'progress-line');
   line.append(element('span', archive ? `#${event.seq}` : '·', 'progress-marker'), element('span', progressText(event, jobs, archive), 'progress-text'));
