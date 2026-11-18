@@ -1937,3 +1937,6 @@ html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .t
 /* Which of a partner's pieces of work is speaking: a quiet tag beside the name, tinted for a clone. */
 .event-session { padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--muted); font-size: 11.5px; white-space: nowrap; }
 .event-session.clone { background: var(--accent-soft); color: var(--accent); }
+/* The tab panels are focusable so the keyboard can scroll them. A ring around the whole panel drew a
+   coloured line under the tabs and above the composer that read as decoration, not as focus. */
+[role="tabpanel"]:focus-visible, .timeline:focus-visible, .task-materials-body:focus-visible { outline: none; }

@@ -11795,6 +11795,15 @@ test('an older service, or a goal that has already stopped to ask, shows no answ
   assert.deepEqual(answerControls(ui), []);
 });
 
+test('a focused tab panel draws no ring around the whole panel', () => {
+  // Catches the coloured line under the tabs and above the composer: the keyboard-focus ring of the scrollable panel.
+  const css = fs.readFileSync(path.join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');
+  assert.match(css, /\[role="tabpanel"\]:focus-visible, \.timeline:focus-visible, \.task-materials-body:focus-visible \{ outline: none; \}/);
+  assert.ok(css.lastIndexOf('[role="tabpanel"]:focus-visible') > css.lastIndexOf('[tabindex]:focus-visible'), 'the later rule wins at equal weight');
+  const html = fs.readFileSync(path.join(__dirname, '../src/local_agent_coordinator/room_ui/index.html'), 'utf8');
+  assert.equal((html.match(/role="tabpanel"/g) || []).length >= 2, true);
+});
+
 test('a refused withdrawal keeps the dialog open with the service reason, and an older service shows no action', async () => {
   // Catches a busy/finished refusal closing the dialog silently, and buttons offered by a service that cannot withdraw.
   const saved = withdrawalFixture();
