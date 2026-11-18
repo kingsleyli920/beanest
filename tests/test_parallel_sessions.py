@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from local_agent_coordinator import parallel_sessions, room_service, ui_server
+from local_agent_coordinator import parallel_sessions, room_service, team_store, ui_server
 from local_agent_coordinator.agent_registry import default_registry
 from local_agent_coordinator.partner_manager import PartnerError, PartnerManager
 from local_agent_coordinator.room_store import RoomError
@@ -256,8 +256,11 @@ class ParallelSessions(pool.PoolService):
                 return {**result, "status": "failed", "failure_code": "cli_nonzero_exit", "text": ""}
             return result
         self.service.native_invoke = invoke
-        await self.create(["claude", "codex", "third", "ember"])
-        await self.settle()
+        # The whole round stops when a task's call has died too often to be done again in place;
+        # allowing none puts this single death there.
+        with patch.object(team_store, "CONFINED_CALL_LIMIT", 0):
+            await self.create(["claude", "codex", "third", "ember"])
+            await self.settle()
         stopped = self.service._snapshot(self.room_id)
         self.assertEqual((stopped["team"]["stop_reason"], stopped["stop_kind"]), ("cli_nonzero_exit", "auto"))
         with patch.object(room_service, "_AUTO_CONTINUE_DELAY_SECONDS", 0):
@@ -267,6 +270,39 @@ class ParallelSessions(pool.PoolService):
         await self.settle()
         state = await self.state()
         self.assertEqual(state["objective"]["status"], "complete")
+        self.assertEqual({task["id"]: (task["status"], task["owner"]) for task in state["team"]["tasks"]},
+                         {"T1": ("accepted", "claude"), "T2": ("accepted", "codex"), "T3": ("accepted", "third"),
+                          "T4": ("accepted", "ember"), "T5": ("accepted", "ember~x2"), "T6": ("accepted", "codex~x2")})
+
+    async def test_a_dead_call_in_a_parallel_session_is_done_again_by_that_session(self):
+        # Catches one session's dead call stopping the round and cancelling the five other calls,
+        # and its task going to another session while the one that started it holds its files.
+        self.plan = [plan(f"T{number}") for number in range(1, 7)]
+        async def until_t5_was_handed_out_again():
+            return len(self.works) >= 6 and sum(1 for _, task_id in self.works if task_id == "T5") >= 2
+        for task in self.plan:
+            self.holds[task["id"]] = until_t5_was_handed_out_again
+        self.holds["T5"] = self.started(6)
+        died = []
+        inner = self.service.native_invoke
+        async def invoke(agent, prompt, cwd, **options):
+            result = await inner(agent, prompt, cwd, **options)
+            if '"job_phase": "work"' in prompt and '"id": "T5"' in prompt.split('"task":', 1)[1][:200] and not died:
+                died.append(True)
+                return {**result, "status": "failed", "failure_code": "cli_nonzero_exit", "text": ""}
+            return result
+        self.service.native_invoke = invoke
+        await self.create(["claude", "codex", "third", "ember"])
+        await self.settle()
+        state = await self.state()
+        self.assertEqual(state["objective"]["status"], "complete", state["team"])
+        confined = [event for event in state["events"] if event["kind"] == "call_failure_confined"]
+        self.assertEqual([(event["provider"], event["task_id"], len(event["running_job_ids"])) for event in confined],
+                         [("ember~x2", "T5", 5)])
+        self.assertEqual([event for event in state["events"] if event["kind"] == "objective_stopped"], [])
+        self.assertEqual([job["error"] for job in state["jobs"] if job["error"]], ["cli_nonzero_exit"])
+        self.assertEqual(sorted(self.works), [("claude", "T1"), ("codex", "T2"), ("codex", "T6"), ("ember", "T4"),
+                                              ("ember", "T5"), ("ember", "T5"), ("third", "T3")])
         self.assertEqual({task["id"]: (task["status"], task["owner"]) for task in state["team"]["tasks"]},
                          {"T1": ("accepted", "claude"), "T2": ("accepted", "codex"), "T3": ("accepted", "third"),
                           "T4": ("accepted", "ember"), "T5": ("accepted", "ember~x2"), "T6": ("accepted", "codex~x2")})

@@ -11811,6 +11811,27 @@ test('a reply sent back for correction is a quiet line in the discussion, not a 
   assert.equal(real.className.includes('warning'), true, 'a warning the user should see keeps its tone');
 });
 
+test('a call that failed and was handed out again is a quiet line naming the partner, not a notice to go and check', async () => {
+  // Catches the yellow "本地 CLI 未正常完成，请在伙伴与额度中核对异常。" left in the discussion for a failure the
+  // service confined to its own step, and the same quiet wording swallowing a failure that did stop the room.
+  const saved = withdrawalFixture();
+  const job = { id: '00000000-0000-4000-8000-0000000000c1', provider: 'codex', kind: 'team_work', status: 'failed', error: 'cli_nonzero_exit' };
+  saved.jobs = [...(saved.jobs || []), job];
+  saved.events = [...saved.events,
+    { seq: 90, kind: 'warning', sender: 'system', job_id: job.id, code: 'cli_nonzero_exit', confined: true, run_id: saved.current_run.id, created_at: 1090 },
+    { seq: 91, kind: 'warning', sender: 'system', job_id: job.id, code: 'cli_nonzero_exit', run_id: saved.current_run.id, created_at: 1091 }];
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true });
+  await ui.click('tab-discussion');
+  const rows = descendants(ui.get('events')).filter((node) => node.tagName === 'LI' && ['90', '91'].includes(node.dataset.seq));
+  assert.equal(rows.length, 2);
+  const [confined, stopped] = rows;
+  assert.match(confined.textContent, /Codex有一次调用中途出错结束了，这一步已重新派出，其他伙伴没受影响，不用你处理。/);
+  assert.doesNotMatch(confined.textContent, /本地 CLI 未正常完成/);
+  assert.equal(confined.className.includes('warning'), false, 'no warning tone for a failure already handled');
+  assert.match(stopped.textContent, /本地 CLI 未正常完成，请在伙伴与额度中核对异常。/);
+  assert.equal(stopped.className.includes('warning'), true, 'the same failure, when it stopped the room, keeps its tone');
+});
+
 test('a focused tab panel draws no ring around the whole panel', () => {
   // Catches the coloured line under the tabs and above the composer: the keyboard-focus ring of the scrollable panel.
   const css = fs.readFileSync(path.join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');

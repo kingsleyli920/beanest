@@ -70,6 +70,37 @@ def resumable_after_outage(session_id, result):
             and session_id in (None, result["session_id"]))
 
 
+# A native call whose process or provider gave up mid-call, in a room where
+# other calls are still running. Stopping the room would cancel those calls for
+# a failure that is not theirs, so the failure is confined to its own task: the
+# task goes back as it was before the call and is handed out again, in the same
+# run. Protocol faults are left out: their recovery doubts the session itself.
+CONFINED_CALL_FAILURES = frozenset({"cli_nonzero_exit", "native_provider_error", "unknown_provider_error"})
+# Only calls bound to one task, which the board hands out again by itself.
+CONFINED_CALL_PHASES = frozenset({"work", "review", "help"})
+# How many times one task's call may fail this way, for the same assignment and
+# result, before the room stops as it always did; the stop's own continuation
+# pauses longer each time.
+CONFINED_CALL_LIMIT = 2
+
+
+def confinable_failure(job, result, code):
+    """Whether a failed native call's own facts allow confining it to its task.
+
+    Everything the host already knows about how the call ended: a failure code
+    that says nothing against the session, nothing left running, the session it
+    resumed, and every tool it started returned. What it left in its private
+    tree and whether other calls are running are checked by the caller.
+    """
+    team = job.get("team") or {}
+    observation = result.get("native_execution") if isinstance(result, dict) else None
+    return (job.get("mode") == "native_project" and code in CONFINED_CALL_FAILURES
+            and team.get("job_phase") in CONFINED_CALL_PHASES and bool(team.get("task_id"))
+            and resumable_after_outage(job.get("session_id"), result)
+            and all(type(observation.get(key)) is int and observation[key] >= 0 for key in ("tool_calls", "tool_results"))
+            and observation["tool_calls"] == observation["tool_results"])
+
+
 # A call that ended before its prompt could reach the model. The partner is
 # retried, then leaves the objective; nothing here is an unknown outcome.
 NATIVE_PREFLIGHT_FAILED = "native_preflight_failed"

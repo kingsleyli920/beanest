@@ -25,7 +25,8 @@ _TERMINAL = {"unknown", "interrupted", "cancelled", "stopped"}
 _QUEUED_WORK_AFTER_SECONDS = 300
 _REPLAN_CAUSES_SQL = "(" + ",".join("'" + cause + "'" for cause in sorted(PARTNER_BLOCK_CAUSES)) + ")"
 from .stop_policy import continues_automatically
-from .native_outcome import CALL_DIED, FORMAT_ERRORS, NATIVE_METADATA_ERROR, NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES
+from .native_outcome import (CALL_DIED, CONFINED_CALL_LIMIT, CONFINED_CALL_PHASES, FORMAT_ERRORS, NATIVE_METADATA_ERROR,
+                             NATIVE_PREFLIGHT_FAILED, REPLY_MISTAKES)
 from . import parallel_sessions, roles, workload
 from .parallel_sessions import is_lane, partner_of
 from .round_handoff import (ROTATION_MIN_CONTEXT_TOKENS, TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS, TASK_ROTATION_MIN_CONTEXT_TOKENS,
@@ -1118,8 +1119,22 @@ class TeamStore:
                     "coordinate": "Inspect the current shared plan and confirm it. Tasks are not claimed: the host hands each ready task to a free member.",
                     "checkpoint": "Assess the immutable original objective against the delivered evidence. Return exactly one checkpoint command. Continue only unfinished original acceptance work; quote its exact scope_reference. If complete, stop and optionally suggest a separate new goal. Ask a concrete question if a decision is needed.",
                     "checkpoint_review": "Check the bound checkpoint proposal against the original objective and delivered evidence. Return exactly one checkpoint_review with the exact proposal_digest. Reject scope expansion or an unsupported completion claim."}[phase]
+        confined = None
+        if task is not None and phase in CONFINED_CALL_PHASES and not correction_of and not capacity_correction_of:
+            # Only when the call before this one, for this very step, is the one that failed.
+            previous = db.execute("SELECT job_id FROM team_jobs WHERE room_id=? AND run_id=? AND task_id=? AND phase=? "
+                                  "ORDER BY rowid DESC LIMIT 1", (room_id, team["current_run_id"], task["id"], phase)).fetchone()
+            confined = previous and db.execute(
+                "SELECT json_extract(value_json,'$.code') FROM events WHERE room_id=? "
+                "AND json_extract(value_json,'$.kind')='call_failure_confined' AND json_extract(value_json,'$.job_id')=?",
+                (room_id, previous[0])).fetchone()
         if task is not None:
             text += f" Task {task['id']}: {task['title']}."
+            if confined:
+                text += (" The call before this one for this step ended before it replied (" + str(confined[0]) + "); the host "
+                         "accepted nothing from it. " + ("Whatever it wrote is still in your working copy: check what "
+                         "is there before you go on, then finish the task and submit a result."
+                         if phase == "work" else "Do this step again."))
             if phase == "review" and task["review_kind"] == "self_check":
                 text = "Self-check your exact result. This is not an independent peer review. " + text
             if task["repair_execution_id"]:
@@ -2231,10 +2246,77 @@ class TeamStore:
                           files=metadata["files"], repairs=repairs)
         return repairs
 
+    def _confined_failures(self, db, room_id, context):
+        """This step's failed calls that were confined so far, for the same assignment and result."""
+        return [json.loads(row[0]) for row in db.execute(
+            "SELECT value_json FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='call_failure_confined' "
+            "AND json_extract(value_json,'$.run_id')=? AND json_extract(value_json,'$.task_id')=? "
+            "AND json_extract(value_json,'$.phase')=? AND json_extract(value_json,'$.assignment_epoch')=? "
+            "AND json_extract(value_json,'$.result_version')=? ORDER BY seq",
+            (room_id, context["run_id"], context["task_id"], context["job_phase"], context["assignment_epoch"],
+             context["result_version"]))]
+
+    def confines_failure(self, db, job, context):
+        """Whether a failed call can be confined to its own task while the room keeps running.
+
+        The caller has already established that nothing of the call is left
+        running, that its session is the one it resumed and that its private
+        tree holds nothing its next call cannot account for. This adds what
+        only the board knows: another call is running right now (otherwise nobody
+        is cut off by the usual stop, which keeps its dedicated recoveries),
+        the task is still exactly the one the call was given, and it has not
+        just failed the same way over and over.
+        """
+        room_id, provider = job["room_id"], job["provider"]
+        room, team = self.store._room(db, room_id), self.team(db, room_id)
+        if (context is None or team is None or room["mode"] != "native_project" or room["stop_requested"]
+                or team["phase"] != "working" or context["run_id"] != team["current_run_id"]
+                or context["task_id"] is None or context["job_phase"] not in CONFINED_CALL_PHASES
+                or any(context[key] for key in ("format_attempt", "correction_of", "capacity_correction_of", "repair_execution_id"))
+                or self.store._native_inspection_observation(db, room_id, job["id"])
+                or db.execute("SELECT 1 FROM events WHERE room_id=? AND json_extract(value_json,'$.kind')='partner_handoff_inspection' "
+                              "AND json_extract(value_json,'$.job_id')=? LIMIT 1", (room_id, job["id"])).fetchone()
+                or not db.execute("SELECT 1 FROM jobs WHERE room_id=? AND status='working' AND id!=? LIMIT 1",
+                                  (room_id, job["id"])).fetchone()):
+            return False
+        task = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?",
+                          (room_id, context["run_id"], context["task_id"])).fetchone()
+        if (task is None or task["assignment_epoch"] != context["assignment_epoch"]
+                or task["result_version"] != context["result_version"]):
+            return False
+        phase = context["job_phase"]
+        held = (task["status"] == "working" and task["owner"] == provider and self.objectives.session_available(db, room_id, provider)
+                if phase == "work" else
+                task["status"] == "review" if phase == "review" else
+                task["status"] == "waiting_peer" and task["help_to"] == provider)
+        return bool(held) and len(self._confined_failures(db, room_id, context)) < CONFINED_CALL_LIMIT
+
+    def _confine_failure(self, db, job, context, error):
+        """Put a failed call's task back as it was before the call; the board hands it out again.
+
+        A review or a help request never left its waiting state. A work call
+        took its task from assigned to working, and whatever it wrote stays in
+        the owner's private tree for the next call.
+        """
+        room_id = job["room_id"]
+        if context["job_phase"] == "work":
+            db.execute("UPDATE shared_tasks SET status='assigned' WHERE room_id=? AND run_id=? AND id=? AND status='working'",
+                       (room_id, context["run_id"], context["task_id"]))
+        running = [row[0] for row in db.execute("SELECT id FROM jobs WHERE room_id=? AND status='working' AND id!=? ORDER BY rowid",
+                                                (room_id, job["id"]))]
+        self.store._event(db, room_id, "call_failure_confined", sender="system", job_id=job["id"], provider=job["provider"],
+                          run_id=context["run_id"], task_id=context["task_id"], phase=context["job_phase"],
+                          assignment_epoch=context["assignment_epoch"], result_version=context["result_version"], code=error,
+                          attempt=len(self._confined_failures(db, room_id, context)) + 1, running_job_ids=running,
+                          old_commands_accepted=False)
+
     def finish(self, db, job, commands, *, message, artifact_revision, artifact_digest, artifact_files, error, uncertain,
-               native_repair=None, local_rejection=False, usage=None):
+               native_repair=None, local_rejection=False, usage=None, confined=False):
         room_id, provider = job["room_id"], job["provider"]
         context = self.job_context(db, job["id"])
+        if confined:
+            self._confine_failure(db, job, context, error)
+            return
         if error or uncertain:
             if context["task_id"]:
                 # The host is blocking this task on its own call's failure. A cause an earlier

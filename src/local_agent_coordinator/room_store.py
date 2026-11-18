@@ -5818,7 +5818,12 @@ class RoomStore:
                    state="done", action=None, error=None, uncertain=False, identity_uncertain=None, artifact_revision=None,
                    team_commands=None, artifact_digest=None, artifact_files=None, correct_format=False,
                    capacity_rejection=None, inspection_observation=None, native_rejection=None,
-                   native_partial_inspection=None, native_repair=None, native_question=None, rejection_evidence=None):
+                   native_partial_inspection=None, native_repair=None, native_question=None, rejection_evidence=None,
+                   confine=False):
+        """confine: the caller audited this failed native call (nothing left running, its own session,
+        a private tree holding nothing its next call cannot account for) and asks that only its task
+        be set back, while the other calls of the room go on. The board has the last word; see
+        confines_failure."""
         with self._connection(write=True) as db:
             job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if job is None or job["status"] != "working":
@@ -5888,10 +5893,15 @@ class RoomStore:
                 if (room["mode"] == "native_project" and error not in {"session_identity_changed", "session_identity_unknown"}
                         and self.native_job_identity_confirmed(db, job, session_id)):
                     identity_uncertain = False
+            confined = bool(confine and is_team and error and uncertain and not identity_uncertain
+                            and self._team.confines_failure(db, job, team_context))
+            if confined:
+                # Audited like a stop that left its tree clean: an ordinary failed call, not an unknown outcome.
+                uncertain = False
             if uncertain:
                 status, member_status = "unknown", "unknown"
             elif error:
-                status, member_status = "failed", "failed"
+                status, member_status = "failed", "idle" if confined else "failed"
             else:
                 status = "completed"
                 member_status = "needs_user" if state == "needs_user" else "idle"
@@ -5975,7 +5985,9 @@ class RoomStore:
                 self._event(db, room_id, "capacity_correction_finished", sender=provider,
                             job_id=job_id, correction_of=team_context["capacity_correction_of"], status=status, error=error)
             if error:
-                self._event(db, room_id, "warning", sender="system", job_id=job_id, code=error)
+                # A confined failure asks nothing of the user; the page words and colours it accordingly.
+                self._event(db, room_id, "warning", sender="system", job_id=job_id, code=error,
+                            **({"confined": True} if confined else {}))
                 if job["reply_to"]:
                     db.execute("UPDATE members SET status='needs_user' WHERE room_id=? AND provider=? "
                                "AND status='waiting_peer'", (room_id, job["reply_to"]))
@@ -5998,7 +6010,7 @@ class RoomStore:
             if is_team:
                 self._team.finish(db, job, team_commands, message=message, artifact_revision=artifact_revision,
                                   artifact_digest=artifact_digest, artifact_files=artifact_files, error=error, uncertain=uncertain,
-                                  native_repair=native_repair, usage=usage,
+                                  native_repair=native_repair, usage=usage, confined=confined,
                                   local_rejection=(room["mode"] == "native_project" and correct_format
                                       and error in FORMAT_ERRORS and not uncertain and artifact_revision is None
                                       and self.completed_native_execution(db, job_id) is not None
