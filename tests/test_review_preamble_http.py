@@ -15,9 +15,6 @@ LABEL_PREFIX = '审阅完成，按[检查项]核对；嵌套标签[条目[门禁
 class ReviewPreambleFixture(FencedACPFixture):
     def __init__(self, case):
         super().__init__()
-        # The scripted ACP tool answers every new session with one fixed id, so it stands for a
-        # partner that runs one session at a time.
-        self.service.store.parallel_limits = lambda: {}
         self.case = case
         self.injected = None
         self.review_calls = []
