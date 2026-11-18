@@ -38,7 +38,9 @@ class NextRoundAfterParallelSessions(parallel.ParallelSessions):
         await self.finished()
         with self.service.store._connection() as db:
             members = [row[0] for row in db.execute("SELECT provider FROM members WHERE room_id=? ORDER BY rowid", (self.room_id,))]
-        self.assertEqual(len(members), 3, "two partners and one parallel session")
+        # At least the session that took the third task; a review may have used one too.
+        self.assertEqual(members[:2], ["claude", "codex"])
+        self.assertTrue(len(members) >= 3 and all("~x" in member for member in members[2:]), members)
         self.holds.clear()
         self.plan = [pool.plan("U1")]
         second = await self.next_round("Add the next small part.", "user")

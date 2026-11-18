@@ -3501,10 +3501,15 @@ class TeamStore:
         behind that call, and so does everything that depends on it. The
         partner still never reviews its own work, and the same rules decide
         whether it may run one more session (its limit, its quota, its share).
+        Only while the partner's own session is on a task: a reply, a review
+        or a plan ends soon enough to wait for, and a session of its own would
+        cost more than it saves.
         """
         room = self._parallel_room(db, room_id, list(reviewers))
         for partner in reviewers:
-            if partner not in room:
+            if partner not in room or not db.execute(
+                    "SELECT 1 FROM jobs j JOIN team_jobs t ON t.job_id=j.id WHERE j.room_id=? AND j.provider=? "
+                    "AND t.phase='work' AND j.status IN ('queued','working') LIMIT 1", (room_id, partner)).fetchone():
                 continue
             lane, _ = self._lane_for(db, room_id, partner, task, {}, room[partner][0])
             if lane is not None and self._queue(db, room_id, lane, "review", task=self.task(db, room_id, task["id"])):
