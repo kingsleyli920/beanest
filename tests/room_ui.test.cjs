@@ -2752,6 +2752,11 @@ test('provider quota displays observed account windows separately from task Toke
   const footer = ui.get('provider-account-codex'); footer.open = true;
   const meters = descendants(footer).filter((node) => node.tagName === 'PROGRESS');
   assert.deepEqual(meters.map((node) => node.value), [72, 0], 'observed zero is distinguishable from unknown');
+  // Catches the bare "72%" on the partner card, which a user read as "72% used": the bar and the number are what is left.
+  const cardValues = descendants(ui.get('member-quota-codex')).filter((node) => node.className === 'quota-value').map((node) => node.textContent);
+  assert.equal(cardValues.length, 2);
+  assert.match(cardValues[0], /^剩 72%$/);
+  assert.match(cardValues[1], /^剩 0% · .+ 重置$/);
   assert.match(footer.textContent, /账号共享额度，未按单模型拆分/);
   assert.match(footer.textContent, /额度来源：Codex 原生额度查询/);
   assert.match(footer.textContent, /与Codex 审核共用本机 Codex 登录/);
