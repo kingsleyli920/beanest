@@ -146,11 +146,6 @@ function renderProgressPane() {
   pane.replaceChildren(...nodes);
   if (typing) descendantsOf(pane).find((node) => node.dataset?.answerTaskInput === typing)?.focus({ preventScroll: true });
 }
-function descendantsOf(node) {
-  const found = [];
-  for (const child of node.children || []) { found.push(child, ...descendantsOf(child)); }
-  return found;
-}
 
 // A task that waits for the user's decision or permission is answered on its own card. Without this
 // the card only said "needs your approval": the question was put to the user once nothing else could run.
