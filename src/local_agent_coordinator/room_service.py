@@ -35,8 +35,8 @@ from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
 from .collaboration_view import collaboration_view
 from .team_store import _COMMAND_FIELDS, _paths as _task_paths
-from .native_outcome import (CONNECTION_LOST, FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, preflight_failed, prompt_never_sent,
-                             reply_call_died, resumable_after_outage)
+from .native_outcome import (CONNECTION_LOST, FORMAT_ERRORS, NATIVE_PREFLIGHT_FAILED, confinable_failure, preflight_failed,
+                             prompt_never_sent, reply_call_died, resumable_after_outage)
 from . import network_state
 from .runtime_settings import PERMISSIONS, RuntimeSettingsError, normalized_settings, configuration_update, validate_choices, read_only, native_permission, model_choice
 from .room_prompts import (RoomPromptMixin, EXTERNAL_SOURCE_INSTRUCTION, NATIVE_PROGRESS_INSTRUCTION, ROUND_HANDOFF_INSTRUCTION,
@@ -6173,6 +6173,42 @@ class RoomService(RoomPromptMixin):
             return False
         return self._tree_unchanged(job)
 
+    def _failure_confined(self, job, result, code):
+        """Did this failed call leave only what its own task may hold?
+
+        Then, while other calls are running, the room need not stop for it:
+        the store puts the task back and hands it out again. A review or a
+        help answer must have changed nothing. A work call may leave what its
+        next call accounts for by the ordinary rules: unfinished edits in its
+        own task's files, and new changes to files no other unfinished task
+        holds, which a successful call would have added to the task. What was
+        already changed when the call began is not its doing. A change to a
+        file another unfinished task holds keeps the usual stop.
+        """
+        if (not confinable_failure(job, result, code) or job.get("native_readonly_discussion")
+                or job.get("native_partial_inspection") or job.get("partner_handoff_inspection")
+                # Nobody else at work: skip the audit, the store keeps the usual stop anyway.
+                or not any(room == job["room_id"] and provider != job["provider"] and not worker.done()
+                           for (room, provider), worker in self._workers.items())):
+            return False
+        writes = job["team"]["job_phase"] == "work" and not read_only(job.get("work_mode"), job.get("runtime_settings"))
+        task = next((item for item in self.store.snapshot(job["room_id"])["team"]["tasks"]
+                     if item["id"] == job["team"]["task_id"]), None)
+        if task is None or writes and task["owner"] != job["provider"]:
+            return False
+        try:
+            state = self.store.native_workspace(job["room_id"], job["provider"])
+            if state is None:
+                return False
+            collected = self._audited_native_changes(job, state, task["write_paths"] if writes else [], [])
+        except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError, OSError, ValueError):
+            return False
+        accounted = {name for name, digest in (job.get("native_leftover") or {}).items()
+                     if self._private_digest(state, name) == digest}
+        if writes:
+            accounted.update(self._free_changed_paths(job, task, collected))
+        return all(item["path"] in accounted for item in collected["blocked"])
+
     def _tree_unchanged(self, job, own_paths=()):
         """No change in the provider's private tree beyond retained work and
         the failed task's own write paths."""
@@ -6869,7 +6905,8 @@ class RoomService(RoomPromptMixin):
             # The session was confirmed above; outside a native project the
             # failure leaves the outcome open, not who the partner is.
             self.store.finish_job(job["id"], session_id=identity, message=text, usage=usage,
-                                  error=code, uncertain=True, **({"identity_uncertain": False} if job.get("team") and not native else {}))
+                                  error=code, uncertain=True, confine=native and self._failure_confined(job, result, code),
+                                  **({"identity_uncertain": False} if job.get("team") and not native else {}))
             return
         parsed = None
         try:

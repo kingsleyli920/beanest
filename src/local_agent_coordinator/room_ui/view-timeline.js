@@ -362,6 +362,12 @@ function progressText(event, jobs, archive = false) {
   if (event.kind === 'artifact') return t("{p0} 关联文件版本 {p1}，未执行代码或测试。", { p0: displayName(event.sender), p1: event.revision });
   // A reply the service sent back for correction needs nothing from the user; the fallback text for an
   // unlabelled code ("this round's result needs checking") told them the opposite.
+  // A call that ended with an error while others were running: the service handed its step out again and
+  // stopped nobody, so the line says that instead of sending the user to check the partner.
+  if (event.kind === 'warning' && event.confined === true) {
+    const provider = jobs.find((job) => job.id === event.job_id)?.provider;
+    return t("{p0}有一次调用中途出错结束了，这一步已重新派出，其他伙伴没受影响，不用你处理。", { p0: provider ? displayName(provider) : t("伙伴") });
+  }
   if (event.kind === 'warning') return quietCorrection(event) ? t("伙伴有一次回复不合规则，已退回让它改，不用你处理。") : executionMessage(event.code);
   if (event.kind === 'job_claimed') return ['review', 'team_review'].includes(jobKind(event, jobs))
     ? t("{p0} 开始处理审核任务", { p0: displayName(event.sender) }) : t("{p0} 开始处理任务", { p0: displayName(event.sender) });
@@ -386,8 +392,12 @@ function quietCorrection(event) {
   return event.kind === 'warning' && replyCorrectedCodes.has(event.code)
     && !Object.hasOwn(executionLabels, event.code) && !Object.hasOwn(errorLabels, event.code);
 }
+// Warnings the service has already dealt with: no warning tone.
+function handledWarning(event) {
+  return event.kind === 'warning' && (event.confined === true || quietCorrection(event));
+}
 function progressNode(event, jobs, archive = false) {
-  const item = element('li', '', archive ? 'activity-record' : `event progress${(event.kind === 'warning' && event.code !== 'team_plan_changed' && !quietCorrection(event)) || event.cancellation_confirmed === false ? ' warning' : ''}`);
+  const item = element('li', '', archive ? 'activity-record' : `event progress${(event.kind === 'warning' && event.code !== 'team_plan_changed' && !handledWarning(event)) || event.cancellation_confirmed === false ? ' warning' : ''}`);
   item.dataset.seq = String(event.seq);
   const line = element('div', '', 'progress-line');
   line.append(element('span', archive ? `#${event.seq}` : '·', 'progress-marker'), element('span', progressText(event, jobs, archive), 'progress-text'));
