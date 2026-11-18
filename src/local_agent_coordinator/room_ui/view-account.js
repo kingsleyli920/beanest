@@ -82,10 +82,11 @@ function renderMemberQuota(id) {
     }
     meter.setAttribute('aria-label', t("{p0}额度剩余 {p1}%", { p0: label, p1: remaining }));
     const reset = Number.isFinite(window.resets_at) && remaining < 20 ? t(" · {p0} 重置", { p0: timeLabel(window.resets_at, true) }) : '';
-    const value = element('span', `${stale ? t("上次 ") : ''}${remaining}%${reset}`, 'quota-value');
+    // The bar and the number are what is left, and say so: "100%" alone reads as "used up" to many.
+    const value = element('span', `${stale ? t("上次 ") : ''}${t("剩 {p0}%", { p0: remaining })}${reset}`, 'quota-value');
     if (Number.isFinite(window.resets_at)) value.title = t("重置：{p0}", { p0: timeLabel(window.resets_at, true) });
     const name = element('span', label);
-    const full = ({ 'kimi:monthTotal': t("Kimi Code · 月度总额度"), 'kimi:monthCode': t("Kimi Code · 月度代码额度") })[window.name];
+    const full = ({ 'kimi:monthTotal': t("Kimi 账号本月的总额度；任何一条额度见底，Kimi 都会停下"), 'kimi:monthCode': t("Kimi 账号本月专给写代码用的额度；它还有剩，不代表总额度还有剩") })[window.name];
     if (full) name.title = full;
     row.append(name, meter, value);
     return row;
