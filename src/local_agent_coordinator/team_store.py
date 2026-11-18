@@ -3250,6 +3250,8 @@ class TeamStore:
                         db.execute("UPDATE shared_tasks SET reviewer=? WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? AND id=?", (provider, room_id, task["id"]))
                         changed = True
                         break
+                else:
+                    changed = (not self_check and self._review_in_parallel(db, room_id, task, spared or order)) or changed
             elif task["status"] == "waiting_peer":
                 changed = self._queue(db, room_id, task["help_to"], "help", task=task) or changed
             elif task["status"] == "assigned":
@@ -3490,6 +3492,28 @@ class TeamStore:
                        (room_id, lane, row["name"], row["adapter"], row["bean_style"]))
             return lane, False
         return None, False
+
+    def _review_in_parallel(self, db, room_id, task, reviewers):
+        """Hand a review nobody free could take to a parallel session of a partner allowed to review it.
+
+        A review reads a delivered result; it needs nothing from the call its
+        reviewer is in the middle of. Left to wait, a finished result sits
+        behind that call, and so does everything that depends on it. The
+        partner still never reviews its own work, and the same rules decide
+        whether it may run one more session (its limit, its quota, its share).
+        """
+        room = self._parallel_room(db, room_id, list(reviewers))
+        for partner in reviewers:
+            if partner not in room:
+                continue
+            lane, _ = self._lane_for(db, room_id, partner, task, {}, room[partner][0])
+            if lane is not None and self._queue(db, room_id, lane, "review", task=self.task(db, room_id, task["id"])):
+                db.execute("UPDATE shared_tasks SET reviewer=? WHERE room_id=? AND run_id=? AND id=?",
+                           (lane, room_id, task["run_id"], task["id"]))
+                self.store._event(db, room_id, "review_taken_in_parallel", sender="system", run_id=task["run_id"],
+                                  task_id=task["id"], reviewer=lane, parallel_session=parallel_sessions.lane_number(lane))
+                return True
+        return False
 
     def _take_in_parallel(self, db, room_id, members, ready, by_id):
         """Hand ready tasks no free partner took to partners that can work on one more at once.
