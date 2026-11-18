@@ -1536,6 +1536,12 @@ h1 { max-width: none; margin-top: 3px; color: var(--ink); font-size: 19px; line-
 .task-row.has-action { grid-template-columns: 22px minmax(0, 1fr) auto auto auto; }
 .task-row.has-action .task-why { grid-column: 2 / span 4; }
 .task-withdraw { padding: 3px 9px; white-space: nowrap; }
+.task-answer { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.task-answer-ask { margin: 0; padding: 7px 10px; border-left: 3px solid var(--ask-line); background: var(--ask-bg); color: var(--ink2); border-radius: 0 8px 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-answer-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.task-answer-line input { flex: 1 1 220px; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12.5px; }
+.task-answer-line input:disabled { opacity: .6; }
+.task-answer-error { color: var(--bad); font-size: 12px; }
 .task-withdraw:disabled { cursor: not-allowed; opacity: .55; }
 .task-withdraw-note { grid-column: 2 / -1; color: var(--muted); font-size: 12px; }
 .task-row.tone-wd .task-name { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }

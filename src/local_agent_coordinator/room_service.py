@@ -2236,7 +2236,7 @@ class RoomService(RoomPromptMixin):
         self._available()
         self._sync_partners()
         execution = await self._execution_ready()
-        return {"app": "local-agent-rooms", "capabilities": {"text_only": True, "tools": False, "execution_policy": True, "continuous_objective": True, "native_project": True, "natural_continuation": True, "natural_runtime_settings": True, "room_lifecycle_operations": True, "room_native_session_cleanup": True, "message_receipts": True, "project_registration_deletion": True, "partner_lifecycle_operations": True, "room_paging_v1": True, "user_outbox_v1": True, "room_media_v1": True, "room_code_status_v1": True, "room_member_invitation_v1": True, "task_withdrawal_v1": True},
+        return {"app": "local-agent-rooms", "capabilities": {"text_only": True, "tools": False, "execution_policy": True, "continuous_objective": True, "native_project": True, "natural_continuation": True, "natural_runtime_settings": True, "room_lifecycle_operations": True, "room_native_session_cleanup": True, "message_receipts": True, "project_registration_deletion": True, "partner_lifecycle_operations": True, "room_paging_v1": True, "user_outbox_v1": True, "room_media_v1": True, "room_code_status_v1": True, "room_member_invitation_v1": True, "task_withdrawal_v1": True, "task_answer_v1": True},
                 "user_outbox_scope": self.user_outbox_scope,
                 "transport_limits": room_projection.transport_limits(),
                 "autonomous_work_active": self.store.autonomous_work_active(),
@@ -4838,6 +4838,19 @@ class RoomService(RoomPromptMixin):
             self.store.withdraw_task(room_id, request_id, run_id=run_id, task_id=task_id,
                                      include_dependents=include_dependents)
             self._finish_withdrawals(room_id)
+            self._wake(room_id)
+            return self._snapshot(room_id)
+
+    async def answer_task(self, room_id, request_id, *, run_id, task_id, text, source="user"):
+        """The user answers a task that waits on their decision or permission; the rest of the room is not held up."""
+        self._available()
+        if source != "user":
+            raise RoomError("user_task_answer_required")
+        text = _visible(checked_message(text))
+        self._require_active_room(room_id)
+        async with self._run_controls.setdefault(room_id, asyncio.Lock()):
+            self._require_active_room(room_id)
+            self.store.answer_task(room_id, request_id, run_id=run_id, task_id=task_id, text=text)
             self._wake(room_id)
             return self._snapshot(room_id)
 

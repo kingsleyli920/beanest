@@ -4696,6 +4696,21 @@ class RoomStore:
             self._settle(db, room_id)
             return result
 
+    def answer_task(self, room_id, request_id, *, run_id, task_id, text):
+        """Record the user's answer to one waiting task once per request; a repeated request changes nothing."""
+        text = checked_message(text)
+        parameters = ["answer_task", room_id, run_id, task_id, text]
+        with self._connection(write=True) as db:
+            self._require_active(self._room(db, room_id))
+            key, fingerprint, previous = self._request(db, request_id, parameters)
+            if previous is not None:
+                return False
+            self._team.answer_blocked_task(db, room_id, checked_id(run_id), task_id, text)
+            self._remember_request(db, key, fingerprint, room_id)
+            db.execute("UPDATE rooms SET blocked_reason=NULL WHERE id=? AND blocked_reason='needs_user'", (room_id,))
+            self._settle(db, room_id)
+            return True
+
     @staticmethod
     def _withdrawals(db, room_id):
         return [json.loads(row[0]) for row in db.execute(
