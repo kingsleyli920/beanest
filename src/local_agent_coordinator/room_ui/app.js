@@ -509,6 +509,12 @@ function nowSummary(snapshot) {
     const canAnswer = objective?.can_answer === true;
     const blockAuto = Object.hasOwn(snapshot, 'stop_kind') ? snapshot.stop_kind === 'auto'
       : taskBlockContinuesAutomatically(snapshot, tasks.filter((task) => task.status === 'blocked'));
+    const retries = Number(snapshot.auto_continue?.repeats) || 0;
+    const retryAt = Number(snapshot.auto_continue?.next_at);
+    if (next?.origin === 'task_block' && !blocked.length && blockAuto && retries > 0) return { tone: 'go', autoContinue: true,
+      label: label(t("稍后自动再试")), canAnswer, title: t("又停在同一处，豆窝稍后自动再试"),
+      text: retryAt > 0 ? t("已经自动继续过 {p0} 次，下次大约在 {p1}。不用你操作；想换个做法可以直接在下面说。", { p0: retries, p1: timeLabel(retryAt) })
+        : t("已经自动继续过 {p0} 次，稍后会再试。不用你操作；想换个做法可以直接在下面说。", { p0: retries }) };
     if (next?.origin === 'task_block' && !blocked.length) return blockAuto
       ? { tone: 'go', autoContinue: true, label: label(t("马上自动继续")), canAnswer,
         title: t("有几项要重新安排，豆窝会自动接着做"), text: t("几秒后自动继续，不用你操作。想补充要求可以直接在下面说。") }

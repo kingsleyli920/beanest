@@ -113,6 +113,21 @@ class InternalReplanStoreTests(unittest.TestCase):
         self.store.reconcile_team(room)
         self.assertEqual(len(self.store.snapshot(room)['jobs']), count)
 
+    def test_a_planner_with_no_call_of_its_own_is_asked_instead_of_left_waiting(self):
+        # Catches the real loop: planning waited for a member that had never been given a planning call, nothing
+        # ran, the host turned that into a question to the user, the automatic continue reopened it, every minute.
+        room = self.planning()
+        with self.store._connection(write=True) as db:
+            for row in db.execute("SELECT id FROM jobs WHERE room_id=? AND provider='codex' AND status IN ('queued','working')",
+                                  (room,)).fetchall():
+                db.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (row[0],))
+            db.execute("UPDATE team_members SET planned=0 WHERE room_id=? AND provider='codex'", (room,))
+        self.store.reconcile_team(room)
+        asked = [job for job in self.store.snapshot(room)['jobs'] if job['provider'] == 'codex' and job['status'] == 'queued']
+        self.assertEqual([job['kind'] for job in asked], ['team_plan'])
+        self.assertTrue(any(event['kind'] == 'planner_asked' and event['provider'] == 'codex'
+                            for event in self.store.snapshot(room)['events']))
+
     def test_completed_call_without_confirmed_cleanup_cannot_change_plan_revision(self):
         room = self.plan(dependency=True)
         before = self.store.snapshot(room)['team']['revision']

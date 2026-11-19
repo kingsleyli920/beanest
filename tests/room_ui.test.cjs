@@ -10292,6 +10292,19 @@ test('current bound task block shows one actionable literal question with its st
   assert.match(ui.get('collaboration-outcome').textContent, /继续时沿用当前权限设置/);
   assert.equal(ui.posts().length, 0);
 });
+test('a task block that keeps coming back says when the next automatic try is, not "in a few seconds"', async () => {
+  // Catches the real 九烛 room: the automatic continue had backed off to an hour, and the banner still promised a few seconds.
+  const saved = currentTaskBlockFixture();
+  saved.objective.next_step.question = '[0%] 核对并修复技能提示字号表现';
+  saved.team.tasks = [{ id: 'U2', title: '[0%] 核对并修复技能提示字号表现', owner: 'codex', status: 'blocked',
+    blocked_reason: '已消费协助结果：仅取得源码分析', block_cause: 'coordination_required' }];
+  saved.collaboration.tasks = saved.team.tasks;
+  saved.auto_continue = { repeats: 10, next_at: Date.now() / 1000 + 3600 };
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
+  assert.match(ui.get('now-label').textContent, /稍后自动再试/);
+  assert.match(ui.get('now-card').textContent, /已经自动继续过 10 次，下次大约在/);
+  assert.doesNotMatch(ui.get('now-card').textContent, /几秒后自动继续|马上自动继续/);
+});
 test('reply-mistake blocks read as automatic replanning, while only a permission block offers a choice that fills the draft', async () => {
   // Catches internal correction codes being offered to the user as decisions, and choices that send without review.
   const saved = currentTaskBlockFixture();
