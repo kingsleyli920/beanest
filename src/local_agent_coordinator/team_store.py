@@ -3325,7 +3325,8 @@ class TeamStore:
                 "SELECT planned FROM team_members WHERE room_id=? AND provider=?", (room_id, member)).fetchone()[0]]
             if waiting:
                 return (self._stop_if_planning_blocked(db, room_id, waiting)
-                        or self._ask_refused_planners_again(db, room_id, waiting) or changed)
+                        or self._ask_refused_planners_again(db, room_id, waiting)
+                        or self._ask_unasked_planners(db, room_id, waiting) or changed)
             if not db.execute("SELECT 1 FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?", (room_id,)).fetchone():
                 if objective is not None and json.loads(objective["retired_json"]):
                     return self._coordinate(db, room_id, planning_members)
@@ -3746,6 +3747,29 @@ class TeamStore:
                     "Your earlier planning reply was refused and nothing from it was accepted. The shared board has changed "
                     "since. Read the plan as it is now and propose or confirm it using the normal team commands.")):
                 self.store._event(db, room_id, "planner_asked_again", sender="system", provider=provider,
+                                  run_id=team["current_run_id"], revision=team["revision"])
+                changed = True
+        return changed
+
+    def _ask_unasked_planners(self, db, room_id, providers):
+        """Give a planner its planning call when nothing ever queued one.
+
+        Planning waits for every needed member to plan. A member that joined
+        the planners late (a reserve lifted, a peer retired, a replan started
+        while it was busy) can be needed with no call of its own, and nothing
+        else asks it: the room stays planning with nothing running, and the
+        host then mistakes that for a question to the user.
+        """
+        team = self.team(db, room_id)
+        changed = False
+        for provider in providers:
+            if (self._busy(db, room_id, provider) or self.response_blocked(db, room_id, provider, "plan")
+                    or self.response_blocked(db, room_id, provider, "coordinate")):
+                continue
+            if self._queue(db, room_id, provider, "plan", text=(
+                    "The team is planning at revision " + str(team["revision"]) + " and still needs your input. "
+                    "Read the shared board as it is now and propose or confirm it using the normal team commands.")):
+                self.store._event(db, room_id, "planner_asked", sender="system", provider=provider,
                                   run_id=team["current_run_id"], revision=team["revision"])
                 changed = True
         return changed
