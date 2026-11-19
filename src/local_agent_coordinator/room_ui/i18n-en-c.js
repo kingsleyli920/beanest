@@ -1270,4 +1270,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "本体": "Main",
   "同一位伙伴同时在做的另一项任务": "The same partner, working on another task at the same time",
   "这位伙伴同时在做几项任务，这是它原本的那一路": "This partner is working on several tasks at once; this is its first line of work",
+  "展开 {p0} 项": "Show {p0}",
+  "展开": "Show",
 });

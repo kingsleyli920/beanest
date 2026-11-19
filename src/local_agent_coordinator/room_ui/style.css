@@ -1436,7 +1436,16 @@ h1 { max-width: none; margin-top: 3px; color: var(--ink); font-size: 19px; line-
 .now-text { margin: 0; color: var(--ink2); font-size: 13px; overflow-wrap: anywhere; }
 .now-text:empty { display: none; }
 .now-detail { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
-.now-detail:empty { display: none; }
+.now-detail:empty, .now-detail[hidden] { display: none; }
+/* A long question list scrolls inside the card; the board and the composer below stay visible. */
+.now-detail { flex: 0 1 auto; min-height: 0; max-height: min(30dvh, 360px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* On a short window the card gives way before the composer: only the question list shrinks. */
+.now-card { min-height: 0; }
+.now-card > .now-body { align-self: stretch; min-height: 0; }
+.now-body > :not(.now-detail) { flex-shrink: 0; }
+.now-fold { align-self: flex-start; margin-top: 4px; padding: 2px 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.now-fold:hover { color: var(--ink); text-decoration: underline; }
+.now-fold[hidden] { display: none; }
 .now-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 8px; align-items: center; }
 .now-actions .btn.danger { margin-left: auto; }
 .now-actions:empty { display: none; }

@@ -10292,6 +10292,28 @@ test('current bound task block shows one actionable literal question with its st
   assert.match(ui.get('collaboration-outcome').textContent, /继续时沿用当前权限设置/);
   assert.equal(ui.posts().length, 0);
 });
+test('a long list of decisions in the now card can be folded away and stays scrollable inside the card', async () => {
+  // Catches the real 九烛 room: seven long decision cards (one with its technical details open) filled the window,
+  // pushed the board and the send button out of view, and nothing could fold them.
+  const saved = currentTaskBlockFixture();
+  const long = '主创这轮明确说了「claude这次不要参与了」，独立审查也算参与。'.repeat(6);
+  saved.team.tasks = ['E1', 'E3', 'E4', 'G2', 'P2', 'R1', 'U1'].map((id) => (
+    { id, title: `[0%] 任务 ${id}`, owner: 'codex', status: 'blocked', block_cause: 'user_decision', blocked_reason: long }));
+  saved.collaboration.tasks = saved.team.tasks;
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true });
+  const fold = ui.get('now-fold'); const detail = ui.get('now-detail');
+  assert.equal(fold.hidden, false); assert.equal(fold.textContent, '收起'); assert.equal(detail.hidden, false);
+  assert.equal(fold.getAttribute('aria-expanded'), 'true');
+  fold.click(); await ui.poll();
+  assert.equal(detail.hidden, true); assert.equal(fold.textContent, '展开 7 项'); assert.equal(fold.getAttribute('aria-expanded'), 'false');
+  assert.match(ui.get('now-title').textContent, /伙伴需要你定个方向/, 'the headline stays when folded');
+  ui.get('now-fold').click(); await ui.poll();
+  assert.equal(detail.hidden, false); assert.equal(ui.get('now-fold').textContent, '收起');
+  // The list scrolls inside a capped card rather than growing the card past the window.
+  const css = require('fs').readFileSync(require('path').join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');
+  assert.match(css, /\.now-detail \{[^}]*max-height: min\(30dvh, 360px\)[^}]*overflow-y: auto/);
+  assert.match(css, /\.now-card \{ min-height: 0; \}/);
+});
 test('a task block that keeps coming back says when the next automatic try is, not "in a few seconds"', async () => {
   // Catches the real 九烛 room: the automatic continue had backed off to an hour, and the banner still promised a few seconds.
   const saved = currentTaskBlockFixture();
