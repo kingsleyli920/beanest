@@ -332,7 +332,7 @@ const state = {
   deliveryLimit: 256, deliveryScope: '',
   drafts: new Map(), roomNodes: new Map(), eventNodes: new Map(), progressNodes: new Map(),
   renderedRoom: null, jobsFingerprint: '', collaborationFingerprint: '', unseen: 0,
-  roomTabs: new Map(), deliveryPending: 0, earlierRuns: new Map(),
+  roomTabs: new Map(), nowFolded: new Set(), deliveryPending: 0, earlierRuns: new Map(),
 };
 $('task-mode').value = 'text';
 
@@ -634,7 +634,8 @@ function renderNowCard() {
   if (stop && summary.tone === 'go' && !summary.autoContinue) actions.push(nowAction('cancel-room', t("停止任务"), 'btn ghost danger'));
   else if (stop) delete stop.dataset.mirrored;
   const fingerprint = JSON.stringify([window.BeanestI18n.getLocale(), summary.tone, summary.label, summary.title, summary.text, summary.question,
-    (summary.blocked || []).map((task) => [task.id, task.title, task.blocked_reason, task.block_cause]), summary.canAnswer, $('message').disabled, actions]);
+    (summary.blocked || []).map((task) => [task.id, task.title, task.blocked_reason, task.block_cause]), summary.canAnswer, $('message').disabled, actions,
+    state.nowFolded.has(snapshot.room.id)]);
   card.hidden = false;
   if (card.dataset.fingerprint === fingerprint) return;
   card.dataset.fingerprint = fingerprint;
@@ -653,6 +654,21 @@ function renderNowCard() {
   }
   if (blocked.length > 3) detail.append(element('p', t("另有 {p0} 项，见“进展”。", { p0: blocked.length - 3 }), 'now-text'));
   if (blockedPrimary?.caption) detail.append(element('p', t("“{p0}”暂时用不了：{p1}", { p0: blockedPrimary.label, p1: blockedPrimary.caption }), 'now-blocked'));
+  // Long questions scroll inside the card (style.css caps it), and the user can fold them away
+  // so the progress board and the composer stay in reach.
+  const room = snapshot.room.id; const folded = state.nowFolded.has(room);
+  const fold = $('now-fold'); fold.hidden = !blocked.length && !summary.question;
+  fold.textContent = folded ? (blocked.length ? t("展开 {p0} 项", { p0: blocked.length }) : t("展开")) : t("收起");
+  fold.setAttribute('aria-expanded', String(!folded));
+  if (!fold.dataset.bound) {
+    fold.dataset.bound = '1';
+    fold.addEventListener('click', () => {
+      const current = state.snapshot?.room.id; if (!current) return;
+      if (state.nowFolded.has(current)) state.nowFolded.delete(current); else state.nowFolded.add(current);
+      renderNowCard();
+    });
+  }
+  detail.hidden = folded;
   $('now-actions').replaceChildren(...actions.map((action) => {
     const button = element('button', action.label, action.className); button.type = 'button';
     button.disabled = !!action.disabled; button.dataset.mirror = action.id; if (action.title) button.title = action.title;
