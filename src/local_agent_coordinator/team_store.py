@@ -1562,7 +1562,9 @@ class TeamStore:
                                  "A started task nobody is working on right now (open, assigned, blocked or waiting for a "
                                  "peer, with no call running) may only give files away: repeat its dependencies "
                                  "unchanged and list fewer write_paths. A task being worked on, under review or accepted "
-                                 "cannot be adjusted. Omit those commands now."),
+                                 "cannot be adjusted. Outside the working phase (planning, or the checkpoint once every "
+                                 "task is delivered) a reply to the user changes nothing on the board: say in message "
+                                 "what work is needed and the step that is running plans it. Omit those commands now."),
             "team_plan_adjusted_meanwhile": (" Another partner changed the unstarted part of the board after this call began. "
                                              "Read the current board and context.plan_adjustments, and send only the changes "
                                              "the user asked for that are still missing; do not repeat a split already made."),

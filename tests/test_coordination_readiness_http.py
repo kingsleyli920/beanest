@@ -98,7 +98,10 @@ class CoordinationReadinessHTTPTests(unittest.TestCase):
         fixture = ReadinessFixture(repair=repair)
         self.addCleanup(fixture.close)
         fixture.create()
-        held = fixture.wait(lambda value: fixture.confirmation_held.is_set())
+        # The author's held confirmation starts alongside the peers' own confirmations, not after them:
+        # wait for those replies to be recorded too, or a slow machine reads the board between the two.
+        held = fixture.wait(lambda value: fixture.confirmation_held.is_set() and all(
+            item['plan_ready'] for item in value['team']['members'] if item['id'] in {'claude', 'codex'}))
         team = held['team']
         self.assertEqual(team['phase'], 'planning')
         # Nobody owns a task while planning; the pool hands them out once the plan is confirmed.
