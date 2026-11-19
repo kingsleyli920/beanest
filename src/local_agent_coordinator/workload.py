@@ -69,6 +69,10 @@ def targets(members, limits=None, allocation=None):
     allocation (evenly without one), no member above the user's ceiling.
     """
     members, limits = list(members), limits or {}
+    if not members:
+        # Nobody is available: every call ended unknown or the partners retired. There is no round
+        # to split, and the room must still be readable so the user can see that and continue.
+        return {}
     ceilings = {member: limits[member][1] for member in members if _kind(limits, member) == "percent"}
     fixed = level_percents(members, limits)
     if not allocation and not ceilings:

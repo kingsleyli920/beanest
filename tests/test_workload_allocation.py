@@ -78,6 +78,12 @@ class Targets(unittest.TestCase):
         # Catches a room where nobody may take work once every stored share is 0.
         self.assertEqual(workload.targets(["a", "b"], None, {"a": 0, "b": 0}), {"a": (2, "default"), "b": (2, "default")})
 
+    def test_a_split_with_nobody_available_is_empty_instead_of_an_error(self):
+        # Catches a division by zero once every member is unavailable while a split is recorded: the
+        # room could then not be read at all, so the user could neither see it nor continue it.
+        self.assertEqual(workload.targets([], None, {"a": 60, "b": 40}), {})
+        self.assertEqual(workload.targets([], {"a": ("percent", 30)}, None), {})
+
     def test_clamping_reports_what_the_user_setting_changed(self):
         # Catches a share above the user's ceiling being stored as asked, or cut without a record.
         limits = {"a": ("percent", 30), "c": ("level", "low")}
@@ -281,6 +287,21 @@ class AllocationService(unittest.IsolatedAsyncioTestCase):
                           "reason": "Codex carries the build; Claude checks it.", "limited": []})
         self.assertEqual(self.split(state), {"claude": (10, "partners"), "codex": (90, "partners")})
         self.assertTrue(state["workload"]["configured"])
+
+    async def test_a_room_whose_partners_all_became_unavailable_can_still_be_read(self):
+        # Catches the real stop of 2026-11-18: one call ended with its session unknown, the others
+        # were cut off with it, and with a split recorded for the round the room page failed on
+        # every read. A room nobody can work in must still open, so the user can continue it.
+        self.plan = [plan("T1")]
+        self.extra[("claude", "plan")] = [{"type": "allocate", "shares": {"claude": 30, "codex": 70}, "reason": "Codex builds."}]
+        await self.create(["claude", "codex"])
+        state = await self.finished()
+        self.assertEqual(self.split(state), {"claude": (30, "partners"), "codex": (70, "partners")})
+        with self.service.store._connection(write=True) as db:
+            db.execute("UPDATE members SET identity_uncertain=1 WHERE room_id=?", (self.room_id,))
+        state = await self.state()
+        self.assertEqual([member["id"] for member in state["members"]], ["claude", "codex"])
+        self.assertEqual(state["room"]["id"], self.room_id)
 
     async def test_partners_are_given_the_split_as_facts_and_told_it_is_theirs(self):
         # Catches the split reaching the scheduler but not the partners, who then cannot judge or re-split it.
