@@ -509,7 +509,7 @@ class TeamStore:
         return new_id
 
     def carry_unfinished(self, db, room_id, source_run_id, target_run_id, *, source_room_id=None, recovery_errors=(),
-                         recovery_task_errors=None):
+                         recovery_task_errors=None, quota_back=None):
         """Carry a frozen board, not old calls or previous ownership grants."""
         resumable = {"budget_exhausted", "objective_calls_exhausted", "objective_deadline_exceeded",
                      "objective_stage_limit", "deadline_exceeded", "cancelled", "service_shutdown",
@@ -571,13 +571,28 @@ class TeamStore:
         db.execute("UPDATE team_members SET planned=?,plan_ready_revision=? WHERE room_id=?",
                    (1 if tasks else 0, 0 if tasks else -1, room_id))
         objective = self.objectives.current(db, room_id)
-        if text_failure and text_failure.get("review_only"):
-            previous = db.execute("SELECT o.retired_json FROM objectives o JOIN team_runs r ON r.objective_id=o.id "
-                                  "WHERE r.id=? AND r.room_id=?", (source_run_id, room_id)).fetchone()
-            if previous:
+        previous = db.execute("SELECT o.retired_json FROM objectives o JOIN team_runs r ON r.objective_id=o.id "
+                              "WHERE r.id=? AND r.room_id=?", (source_run_id, room_id)).fetchone()
+        if previous and objective is not None and source_room_id is None:
+            earlier = json.loads(previous[0] or "{}")
+            if text_failure and text_failure.get("review_only"):
                 # Retrying an unstarted host review does not restore an exhausted
                 # source; normal fresh-availability recovery remains authoritative.
-                db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (previous[0], objective["id"]))
+                kept = earlier
+            elif quota_back is not None:
+                # A recovery keeps a partner that ran out of quota out of the run that
+                # picks the work up, unless the caller knows its quota is back: the pool
+                # would otherwise hand it a task the moment the run starts, only for the
+                # quota check to take it back. A partner whose quota returns later is
+                # restored by the ordinary availability refresh.
+                kept = {provider: entry for provider, entry in earlier.items()
+                        if entry.get("reason") in {"agent_quota_exhausted", "subscription_limit_reached"}
+                        and partner_of(provider) not in set(quota_back)}
+            else:
+                kept = {}
+            if kept:
+                retired = {**kept, **json.loads(objective["retired_json"] or "{}")}
+                db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (json.dumps(retired), objective["id"]))
         continuation = {"source_run_id": source_run_id, "preserved_task_ids": [task["id"] for task in tasks],
                         "scope": "unfinished_work_only", "old_calls_replayed": False}
         # What kept coming back the same in the run that stopped: facts for

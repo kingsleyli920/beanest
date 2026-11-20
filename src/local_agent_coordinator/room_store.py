@@ -3674,7 +3674,7 @@ class RoomStore:
                        metadata_correction=None, partial_works=(), receiver_workspaces=None,
                        quota_blocked=(), ownership_files=(), user_message=None, request_identity=None, runtime_change=None,
                        help_repair=None, message_target="all", directed_followup=False, recovery_source="user",
-                       quota_returned=(), generic=False):
+                       quota_returned=(), generic=False, quota_back=None):
         if recovery_source not in {"user", "system"}:
             raise RoomError("invalid_request")
         with self._connection(write=True) as db:
@@ -3981,7 +3981,7 @@ class RoomStore:
             for source_run, error in hint_sources:
                 task_errors.update(self._revision_hint_recovery_tasks(db, room_id, source_run, error=error))
             self._team.carry_unfinished(db, room_id, board_run, new_id, recovery_errors=errors,
-                                        recovery_task_errors=task_errors)
+                                        recovery_task_errors=task_errors, quota_back=quota_back)
             if unconfirmed_restart:
                 # The facts the next partners judge for themselves.
                 objective = self._team.objectives.current(db, room_id)

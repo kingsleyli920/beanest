@@ -2371,6 +2371,21 @@ class RoomService(RoomPromptMixin):
                 availability_members, snapshot["objective"]["execution_policy"])
             if quota_failure:
                 quota_blocked = sorted(set(quota_blocked) | {quota_failure["provider"]})
+            # The run this recovery starts keeps an out-of-quota partner out, unless its quota
+            # is known to be back: the partner directory says so, or, with no directory, the
+            # availability check now lets it through.
+            out_of_quota = [provider for provider, entry in retired.items() if partner_of(provider) == provider
+                            and entry.get("reason") in {"agent_quota_exhausted", "subscription_limit_reached"}]
+            if self.partner_manager is not None:
+                quota_back = sorted(set(self._recovered_quota_members(snapshot)) | set(quota_returned or ()))
+            else:
+                quota_back = []
+                for provider in out_of_quota:
+                    try:
+                        await self._guard_availability([provider])
+                    except RoomError:
+                        continue
+                    quota_back.append(provider)
             runtime_change = None
             if _runtime_update:
                 snapshot = self._snapshot(room_id)
@@ -2481,7 +2496,7 @@ class RoomService(RoomPromptMixin):
                                           quota_blocked=quota_blocked, ownership_files=ownership_files, user_message=user_message,
                                           request_identity=_request_identity, runtime_change=runtime_change, message_target=_message_target,
                                           directed_followup=directed_followup, recovery_source=source, generic=generic,
-                                          quota_returned=quota_returned)
+                                          quota_returned=quota_returned, quota_back=quota_back)
             except BaseException:
                 for provider, prepared in receiver_workspaces.items():
                     self._discard_partial_receiver(room_id, provider, prepared)

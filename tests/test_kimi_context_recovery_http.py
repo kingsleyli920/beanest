@@ -332,6 +332,36 @@ class KimiContextRecoveryHTTPTests(unittest.TestCase):
             final = fixture.settled()
         self.assertEqual(final['objective']['status'], 'complete', final['team'])
 
+    def test_a_partner_out_of_quota_stays_out_of_the_run_that_continues_the_work(self):
+        # Catches the real 九烛 room: Continue started a fresh run, the fresh run forgot that Kimi had run out of
+        # quota, the pool handed Kimi a task at once, and only the next quota check took it back (and announced
+        # "Kimi took ..." in the chat).
+        from unittest.mock import patch
+        fixture = self.fixture('compaction_quota')
+        stopped = fixture.stopped_context_run()
+        with fixture.service.store._connection(write=True) as db:
+            db.execute("UPDATE objectives SET retired_json=? WHERE id=?", (json.dumps({'kimi': {
+                'reason': 'agent_quota_exhausted', 'at': 1.0, 'cleanup_confirmed': True}}), stopped['objective']['id']))
+        original = fixture.partners.get
+        def get(provider):
+            value = original(provider)
+            if provider == 'kimi':
+                value = {**value, 'availability': {**value['availability'], 'state': 'blocked',
+                         'selectable': False, 'reason': 'quota_exhausted'}}
+            return value
+        before = {job['id'] for job in stopped['jobs']}
+        fixture.t3_calls.append({'job_id': None})
+        with patch.object(fixture.partners, 'get', side_effect=get):
+            code, value = fixture.continue_http(fixture.read())
+            self.assertEqual(code, 200, value)
+            final = fixture.settled()
+        self.assertNotEqual(final['current_run']['id'], stopped['current_run']['id'])
+        self.assertEqual([job['kind'] for job in final['jobs'] if job['id'] not in before and job['provider'] == 'kimi'], [],
+                         'the fresh run gives no work to a partner known to be out of quota')
+        self.assertFalse(any(event['kind'] == 'task_taken' and event.get('provider') == 'kimi' for event in final['events']))
+        self.assertIn('kimi', final['objective']['retired_partners'])
+        self.assertEqual(final['objective']['status'], 'complete', final['team'])
+
     def test_other_auth403_is_not_a_context_recovery_authority(self):
         # Catches any other 403 being attested as a context-limit failure (a
         # handoff that tells the partners why the old session ended), and the
