@@ -40,6 +40,11 @@ class FakeElement {
     this.disabled = false;
     this.scrollHeight = 1000;
     this.clientHeight = 600;
+    // CSSOM custom properties only: the CSP forbids style attributes, not element.style.
+    const props = new Map();
+    this.style = { setProperty: (name, value) => props.set(name, String(value)), removeProperty: (name) => props.delete(name),
+      getPropertyValue: (name) => props.get(name) ?? '' };
+    this.rectHeight = 0;
     this.scrollTop = 400;
     this._text = '';
     this.classList = {
@@ -127,6 +132,8 @@ class FakeElement {
     for (const listener of this.listeners.get(name) || []) listener(event);
   }
 
+  getBoundingClientRect() { return { top: 0, bottom: this.rectHeight, height: this.rectHeight, left: 0, right: 0, width: 0 }; }
+  setPointerCapture() {}
   focus() { this.focused = true; if (this.ownerDocument) this.ownerDocument.activeElement = this; }
   click() {
     if (this.tagName === 'A' && this.download && this.href) this.ownerDocument.downloads.push({ filename: this.download, blob: this.ownerDocument.blobs.get(this.href) });
@@ -288,7 +295,7 @@ async function browser({ language = 'zh-CN', languageStorage = new Map(), agents
   let timeoutId = 0;
   let nextId = requestIdStart;
   const context = vm.createContext({
-    navigator: { language }, localStorage: { getItem: key => languageStorage.get(key) ?? null, setItem: (key, value) => languageStorage.set(key, value) },
+    navigator: { language }, localStorage: { getItem: key => languageStorage.get(key) ?? null, setItem: (key, value) => languageStorage.set(key, value), removeItem: key => languageStorage.delete(key) },
     document, window: { location, history, addEventListener(type, callback) { if (!windowEvents.has(type)) windowEvents.set(type, []); windowEvents.get(type).push(callback); }, getSelection: () => ({ toString: () => selection }), ...(desktopBridge ? { beanestDesktop: desktopBridge } : {}) }, console, TextEncoder, AbortController, Blob, atob,
     Date: class extends Date { static now() { return now(); } },
     URL: { createObjectURL: (blob) => { const key = `blob:fictional-${document.blobs.size}`; document.blobs.set(key, blob); return key; }, revokeObjectURL: (url) => document.blobs.delete(url) },
@@ -10311,8 +10318,43 @@ test('a long list of decisions in the now card can be folded away and stays scro
   assert.equal(detail.hidden, false); assert.equal(ui.get('now-fold').textContent, '收起');
   // The list scrolls inside a capped card rather than growing the card past the window.
   const css = require('fs').readFileSync(require('path').join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');
-  assert.match(css, /\.now-detail \{[^}]*max-height: min\(30dvh, 360px\)[^}]*overflow-y: auto/);
+  assert.match(css, /\.now-detail \{[^}]*max-height: var\(--now-detail-max, min\(30dvh, 360px\)\)[^}]*overflow-y: auto/);
   assert.match(css, /\.now-card \{ min-height: 0; \}/);
+});
+test('the bar under the now card resizes its list by drag or keys, remembers the size, and resets on double-click', async () => {
+  // Catches the user's ask in the 九烛 room: the line between the decision card and the board below could not be moved.
+  const saved = currentTaskBlockFixture();
+  saved.team.tasks = ['E1', 'E3', 'E4'].map((id) => ({ id, title: `[0%] 任务 ${id}`, owner: 'codex', status: 'blocked', block_cause: 'user_decision',
+    blocked_reason: '要么让 Claude 接手，要么等 Codex 额度恢复。'.repeat(8) }));
+  saved.collaboration.tasks = saved.team.tasks;
+  const languageStorage = new Map();
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, languageStorage });
+  const bar = ui.get('now-resize'); const card = ui.get('now-card');
+  assert.equal(bar.hidden, false); assert.equal(bar.getAttribute('role'), 'separator');
+  assert.equal(card.style.getPropertyValue('--now-detail-max'), '', 'the stylesheet default applies until the user drags');
+  ui.get('now-detail').rectHeight = 200;
+  bar.fire('pointerdown', { button: 0, clientY: 300, pointerId: 7 });
+  bar.fire('pointermove', { clientY: 380, pointerId: 7 });
+  assert.equal(card.style.getPropertyValue('--now-detail-max'), '280px');
+  bar.fire('pointerup', { clientY: 420, pointerId: 7 });
+  assert.equal(card.style.getPropertyValue('--now-detail-max'), '320px');
+  assert.equal(languageStorage.get('beanest:now-detail-height'), '320', 'the size is remembered');
+  bar.fire('pointerdown', { button: 0, clientY: 300, pointerId: 8 }); ui.get('now-detail').rectHeight = 320;
+  bar.fire('pointerup', { clientY: -900, pointerId: 8 });
+  assert.equal(card.style.getPropertyValue('--now-detail-max'), '48px', 'never smaller than a line or two');
+  bar.fire('keydown', { key: 'ArrowDown' });
+  assert.equal(card.style.getPropertyValue('--now-detail-max'), '72px');
+  bar.fire('dblclick');
+  assert.equal(card.style.getPropertyValue('--now-detail-max'), '');
+  assert.equal(languageStorage.has('beanest:now-detail-height'), false);
+  // A remembered size comes back after a reload, and the bar goes away while the list is folded.
+  languageStorage.set('beanest:now-detail-height', '260');
+  const again = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, naturalContinuationSupport: true, languageStorage });
+  assert.equal(again.get('now-card').style.getPropertyValue('--now-detail-max'), '260px');
+  again.get('now-fold').click(); await again.poll();
+  assert.equal(again.get('now-resize').hidden, true);
+  const css = require('fs').readFileSync(require('path').join(__dirname, '../src/local_agent_coordinator/room_ui/style.css'), 'utf8');
+  assert.match(css, /max-height: var\(--now-detail-max, min\(30dvh, 360px\)\)/);
 });
 test('a task block that keeps coming back says when the next automatic try is, not "in a few seconds"', async () => {
   // Catches the real 九烛 room: the automatic continue had backed off to an hour, and the banner still promised a few seconds.

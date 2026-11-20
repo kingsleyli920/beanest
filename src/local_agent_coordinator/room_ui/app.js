@@ -615,7 +615,7 @@ function nowAction(id, label, className) {
 function renderNowCard() {
   const card = $('now-card'); const snapshot = state.snapshot;
   $('conversation').classList.toggle('answering', currentObjective(snapshot)?.status === 'needs_user' && currentObjective(snapshot)?.can_answer === true && !$('message').disabled);
-  if (!snapshot || state.selected !== snapshot.room.id || state.reader) { card.hidden = true; return; }
+  if (!snapshot || state.selected !== snapshot.room.id || state.reader) { card.hidden = true; $('now-resize').hidden = true; return; }
   const summary = nowSummary(snapshot);
   const actions = [];
   // Primary first, then secondary, the destructive stop last.
@@ -669,6 +669,9 @@ function renderNowCard() {
     });
   }
   detail.hidden = folded;
+  // The bar under the card drags the line between the card's list and the board below.
+  $('now-resize').hidden = folded || !detail.children.length;
+  applyNowDetailHeight(readNowDetailHeight());
   $('now-actions').replaceChildren(...actions.map((action) => {
     const button = element('button', action.label, action.className); button.type = 'button';
     button.disabled = !!action.disabled; button.dataset.mirror = action.id; if (action.title) button.title = action.title;
@@ -680,6 +683,54 @@ function renderNowCard() {
     return button;
   }));
 }
+
+const nowDetailHeightKey = 'beanest:now-detail-height';
+const NOW_DETAIL_MIN = 48;
+const NOW_RESIZE_STEP = 24;
+function readNowDetailHeight() {
+  try { const value = Number(localStorage.getItem(nowDetailHeightKey)); return Number.isFinite(value) && value >= NOW_DETAIL_MIN ? value : null; } catch (_) { return null; }
+}
+function nowDetailLimit() {
+  return Math.max(NOW_DETAIL_MIN, Math.round((window.innerHeight || 800) * 0.75));
+}
+// null puts back the default cap from style.css; a height is clamped to the window and remembered.
+function applyNowDetailHeight(height, remember = false) {
+  const card = $('now-card'); const bar = $('now-resize');
+  const value = height === null ? null : Math.min(nowDetailLimit(), Math.max(NOW_DETAIL_MIN, Math.round(height)));
+  if (value === null) card.style.removeProperty('--now-detail-max'); else card.style.setProperty('--now-detail-max', `${value}px`);
+  const shown = value ?? Math.round($('now-detail').getBoundingClientRect().height);
+  bar.setAttribute('aria-valuemin', String(NOW_DETAIL_MIN)); bar.setAttribute('aria-valuemax', String(nowDetailLimit()));
+  bar.setAttribute('aria-valuenow', String(shown || NOW_DETAIL_MIN));
+  if (!remember) return;
+  try { if (value === null) localStorage.removeItem(nowDetailHeightKey); else localStorage.setItem(nowDetailHeightKey, String(value)); } catch (_) { /* The size then lasts until the page reloads. */ }
+}
+(() => {
+  const bar = $('now-resize'); let drag = null;
+  bar.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    drag = { y: event.clientY, height: $('now-detail').getBoundingClientRect().height, pointer: event.pointerId };
+    bar.setPointerCapture?.(event.pointerId); bar.classList.toggle('dragging', true);
+  });
+  bar.addEventListener('pointermove', (event) => {
+    if (!drag || event.pointerId !== drag.pointer) return;
+    applyNowDetailHeight(drag.height + event.clientY - drag.y);
+  });
+  const end = (event) => {
+    if (!drag || event.pointerId !== drag.pointer) return;
+    applyNowDetailHeight(drag.height + event.clientY - drag.y, true);
+    drag = null; bar.classList.toggle('dragging', false);
+  };
+  bar.addEventListener('pointerup', end); bar.addEventListener('pointercancel', end);
+  bar.addEventListener('dblclick', () => applyNowDetailHeight(null, true));
+  bar.addEventListener('keydown', (event) => {
+    const current = readNowDetailHeight() ?? $('now-detail').getBoundingClientRect().height;
+    const next = { ArrowUp: current - NOW_RESIZE_STEP, ArrowDown: current + NOW_RESIZE_STEP, Home: NOW_DETAIL_MIN, End: nowDetailLimit() }[event.key];
+    if (event.key === 'Escape' || event.key === 'Enter') { event.preventDefault(); applyNowDetailHeight(null, true); return; }
+    if (next === undefined) return;
+    event.preventDefault(); applyNowDetailHeight(next, true);
+  });
+})();
 
 function currentRoomTab() {
   if (!state.snapshot || state.selected !== state.snapshot.room.id) return null;

@@ -1272,4 +1272,5 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "这位伙伴同时在做几项任务，这是它原本的那一路": "This partner is working on several tasks at once; this is its first line of work",
   "展开 {p0} 项": "Show {p0}",
   "展开": "Show",
+  "拖动调整上下两块的高度，双击恢复": "Drag to resize the two panes; double-click to reset",
 });

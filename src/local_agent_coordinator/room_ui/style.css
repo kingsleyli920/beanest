@@ -1438,7 +1438,7 @@ h1 { max-width: none; margin-top: 3px; color: var(--ink); font-size: 19px; line-
 .now-detail { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .now-detail:empty, .now-detail[hidden] { display: none; }
 /* A long question list scrolls inside the card; the board and the composer below stay visible. */
-.now-detail { flex: 0 1 auto; min-height: 0; max-height: min(30dvh, 360px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.now-detail { flex: 0 1 auto; min-height: 0; max-height: var(--now-detail-max, min(30dvh, 360px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 /* On a short window the card gives way before the composer: only the question list shrinks. */
 .now-card { min-height: 0; }
 .now-card > .now-body { align-self: stretch; min-height: 0; }
@@ -1489,7 +1489,15 @@ h1 { max-width: none; margin-top: 3px; color: var(--ink); font-size: 19px; line-
 .conversation[data-tab="progress"] #timeline, .conversation[data-tab="delivery"] #timeline,
 .conversation[data-tab="progress"] #new-events, .conversation[data-tab="delivery"] #new-events { display: none; }
 .timeline { padding: 16px 24px; }
-.conversation:not([data-tab]) .now-card, .conversation[data-tab="reader"] .now-card { display: none; }
+.conversation:not([data-tab]) .now-card, .conversation[data-tab="reader"] .now-card,
+.conversation:not([data-tab]) .now-resize, .conversation[data-tab="reader"] .now-resize { display: none; }
+/* The drag bar between the now card and the board: a wide hit area around a short visible grip. */
+.now-resize { position: relative; flex: none; height: 12px; margin: 0 24px -4px; cursor: row-resize; touch-action: none; }
+.now-resize[hidden] { display: none; }
+.now-resize::after { content: ""; position: absolute; top: 4px; left: 50%; width: 44px; height: 4px; margin-left: -22px; border-radius: 2px; background: var(--line); transition: background .15s; }
+.now-resize:hover::after, .now-resize.dragging::after { background: var(--muted); }
+.now-resize:focus-visible { outline: none; }
+.now-resize:focus-visible::after { background: var(--ink); box-shadow: 0 0 0 3px var(--paper); }
 
 .stage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; color: var(--muted); font-size: 12.5px; }
 .stage-head b { color: var(--ink); font-size: 13.5px; }
