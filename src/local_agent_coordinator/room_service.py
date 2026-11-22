@@ -4842,6 +4842,26 @@ class RoomService(RoomPromptMixin):
             self.store.accept_run(room_id,request_id,run_id=run_id,revision=revision,digest=digest)
             return self._snapshot(room_id)
 
+    async def interrupt_tool(self, room_id, job_id, *, source="user"):
+        """End the command a partner is waiting on; the partner's call carries on.
+
+        What Esc or Ctrl+C does in the CLI: the partner gets the command's
+        failure back, goes on, and reads what the user sent meanwhile.
+        """
+        self._available()
+        if source != "user":
+            raise RoomError("user_tool_interrupt_required")
+        self._require_active_room(room_id)
+        pid = self.store.native_call_process(room_id, job_id)
+        if pid is None:
+            raise RoomError("tool_interrupt_unavailable")
+        try:
+            commands = await asyncio.to_thread(native_adapters.interrupt_tools, pid)
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            raise RoomError("tool_interrupt_unavailable") from None
+        self.store.record_tool_interrupted(job_id, reason="user", commands=commands)
+        return self._snapshot(room_id)
+
     async def withdraw_task(self, room_id, request_id, *, run_id, task_id, include_dependents=False, source="user"):
         """The user takes an unfinished task (and what needs it) out of the current round."""
         self._available()
@@ -6396,6 +6416,10 @@ class RoomService(RoomPromptMixin):
                 "original_characters": original if type(original) is int and original >= len(event["text"]) else len(event["text"])})
         elif event.get("type") == "native_tool":
             self.store.record_native_activity(job["id"], event)
+        elif event.get("type") == "native_tool_interrupted":
+            idle = event.get("idle_seconds")
+            self.store.record_tool_interrupted(job["id"], reason="idle", commands=1,
+                                               idle_seconds=idle if type(idle) is int and idle >= 0 else None)
 
     async def _work(self, room_id, provider):
         while not self._closed:

@@ -1273,4 +1273,10 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "展开 {p0} 项": "Show {p0}",
   "展开": "Show",
   "拖动调整上下两块的高度，双击恢复": "Drag to resize the two panes; double-click to reset",
+  "中断这条命令": "Stop this command",
+  "只结束伙伴正在等的这条命令，伙伴会接着做并读到你的消息": "Ends only the command the partner is waiting on; the partner carries on and reads your messages",
+  "{p0} 的一条命令已运行 {p1}": "A command from {p0} has run for {p1}",
+  "已中断那条命令，伙伴会接着做。": "Stopped that command; the partner carries on.",
+  "这条命令已经结束，或这次调用已不在运行。": "That command has already ended, or the call is no longer running.",
+  "中断命令要你本人在界面里操作。": "Only you can stop a command, from the interface.",
 });
