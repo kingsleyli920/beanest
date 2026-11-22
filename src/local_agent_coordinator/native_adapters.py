@@ -37,6 +37,16 @@ def _claude_tool_name_valid(name):
 
 _MAX_LINE = 32 * 1024 * 1024
 _CLEANUP_SETTLE_SECONDS = 10
+# A command a partner runs is ended when its whole process tree has used less
+# than STUCK_TOOL_CPU_SECONDS of CPU for STUCK_TOOL_IDLE_SECONDS: it is waiting
+# on something that will not come (a named pipe, a prompt, a lock). The partner
+# itself keeps running and gets the command's failure back. Busy commands, long
+# test runs included, are never touched. Module level so tests can shorten them.
+STUCK_TOOL_IDLE_SECONDS = 1800
+STUCK_TOOL_CPU_SECONDS = 2.0
+STUCK_TOOL_POLL_SECONDS = 30
+# Children a CLI starts in its first seconds are its own servers (MCP), not commands.
+_TOOL_START_GRACE_SECONDS = 5
 _MAX_RECEIPT = 64 * 1024 * 1024
 # Written once when a receipt reaches _MAX_RECEIPT. The receipt is evidence for
 # a later audit, not a budget on the work: recording stops, the call does not.
@@ -813,6 +823,124 @@ def _processes():
     return result
 
 
+def _cpu_seconds(text):
+    """ps cumulative CPU time: [[dd-]hh:]mm:ss[.ss]."""
+    days, _, rest = text.rpartition('-')
+    parts = rest.split(':')
+    try:
+        seconds = sum(float(value) * 60 ** index for index, value in enumerate(reversed(parts)))
+        return seconds + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return None
+
+
+def _process_details():
+    """pid -> (ppid, start epoch, cumulative CPU seconds, command) for every process."""
+    completed = subprocess.run(['ps', '-axo', 'pid=,ppid=,lstart=,time=,command='],
+                               capture_output=True, timeout=10, check=False,
+                               env={**adapters._environment(), 'LC_ALL': 'C'})
+    if completed.returncode:
+        raise RuntimeError('native_process_inspection_failed')
+    result = {}
+    for line in completed.stdout.decode('utf-8', 'replace').splitlines():
+        parts = line.split(None, 8)
+        if len(parts) < 8:
+            continue
+        try:
+            pid, parent = int(parts[0]), int(parts[1])
+            birth = time.mktime(time.strptime(' '.join(parts[2:7]), '%a %b %d %H:%M:%S %Y'))
+        except (ValueError, OverflowError):
+            continue
+        cpu = _cpu_seconds(parts[7])
+        if cpu is not None:
+            result[pid] = (parent, birth, cpu, parts[8] if len(parts) > 8 else '')
+    return result
+
+
+def _tool_trees(cli_pid, table):
+    """Each command the CLI is running now: its root process and every process under it.
+
+    A command is a child the CLI started after its first seconds that is not one
+    of its MCP servers. Codex and Claude Code both run commands as children.
+    """
+    cli = table.get(cli_pid)
+    if cli is None:
+        return {}
+    children = {}
+    for pid, row in table.items():
+        children.setdefault(row[0], []).append(pid)
+    trees = {}
+    for root in children.get(cli_pid, ()):
+        parent, birth, _cpu, command = table[root]
+        if birth < cli[1] + _TOOL_START_GRACE_SECONDS or 'mcp' in command.lower():
+            continue
+        members, pending = set(), [root]
+        while pending:
+            pid = pending.pop()
+            if pid not in members:
+                members.add(pid)
+                pending.extend(children.get(pid, ()))
+        trees[(root, birth)] = members
+    return trees
+
+
+def _end_tree(members, table):
+    """Stop one command's processes, checking each is still the one seen."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        current = _process_details()
+        alive = [pid for pid in members if pid in current and current[pid][1] == table[pid][1]]
+        if not alive:
+            return True
+        for pid in alive:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(2)
+    current = _process_details()
+    return not any(pid in current and current[pid][1] == table[pid][1] for pid in members)
+
+
+def interrupt_tools(cli_pid):
+    """End every command a native call is running now; the call itself carries on.
+
+    Returns how many commands were stopped. The user's way out of a command the
+    partner is waiting on, as Esc or Ctrl+C would be in the CLI.
+    """
+    table = _process_details()
+    trees = _tool_trees(cli_pid, table)
+    for members in trees.values():
+        _end_tree(members, table)
+    return len(trees)
+
+
+class _StuckTools:
+    """Watch the commands of one call and end any that has stopped using CPU."""
+
+    def __init__(self, cli_pid, clock=time.monotonic):
+        self.cli_pid, self.clock, self.windows = cli_pid, clock, {}
+
+    def check(self):
+        """End the idle commands; return (idle seconds, command count) for each ended."""
+        table = _process_details()
+        trees = _tool_trees(self.cli_pid, table)
+        now, ended = self.clock(), []
+        for key in list(self.windows):
+            if key not in trees:
+                del self.windows[key]
+        for key, members in trees.items():
+            cpu = sum(table[pid][2] for pid in members)
+            start = self.windows.get(key)
+            if start is None or cpu - start[1] >= STUCK_TOOL_CPU_SECONDS:
+                self.windows[key] = (now, cpu)
+                continue
+            if now - start[0] >= STUCK_TOOL_IDLE_SECONDS:
+                _end_tree(members, table)
+                del self.windows[key]
+                ended.append(round(now - start[0]))
+        return ended
+
+
 def end_orphaned(pid, launched_at):
     """End what a launch this host no longer runs left behind; True while any of it is alive.
 
@@ -1490,8 +1618,24 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                 _remember(process.pid, owned, await asyncio.to_thread(_processes))
                 await asyncio.sleep(0.1)
 
+        async def watch_tools():
+            watch = _StuckTools(process.pid)
+            while process.returncode is None:
+                await asyncio.sleep(STUCK_TOOL_POLL_SECONDS)
+                try:
+                    ended = await asyncio.to_thread(watch.check)
+                except (OSError, subprocess.SubprocessError, RuntimeError):
+                    continue  # inspection failed this time; look again later
+                for idle in ended:
+                    event = {'type': 'native_tool_interrupted', 'reason': 'idle', 'idle_seconds': idle}
+                    if stream.callback is not None:
+                        returned = stream.callback(dict(event))
+                        if inspect.isawaitable(returned):
+                            await returned
+
         tasks = [asyncio.create_task(stdout()), asyncio.create_task(stderr()), asyncio.create_task(write())]
         tracker = asyncio.create_task(track())
+        watcher = asyncio.create_task(watch_tools())
         async def collect():
             await asyncio.gather(*tasks)
             return await process.wait()
@@ -1512,7 +1656,8 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                       'failure_code': stream.failure or 'native_process_or_protocol_failure'}
         finally:
             tracker.cancel()
-            await asyncio.gather(tracker, return_exceptions=True)
+            watcher.cancel()
+            await asyncio.gather(tracker, watcher, return_exceptions=True)
     except asyncio.CancelledError as error:
         cancelled_error = error
         raise

@@ -1173,6 +1173,12 @@ input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
 
 .work-indicator { flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin: 3px 24px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .work-indicator[hidden] { display: none; }
+.work-indicator:has(#interrupt-tool:not([hidden])) { flex-wrap: wrap; row-gap: 2px; }
+#work-indicator-text, .work-interrupt { white-space: nowrap; }
+.work-indicator-tool { min-width: 0; color: var(--muted); }
+.work-indicator-tool::before { content: "·"; margin-right: 8px; }
+.work-interrupt { flex: none; padding: 1px 10px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface); color: var(--ink2); font-size: 12px; }
+.work-interrupt:hover:not(:disabled) { border-color: var(--muted); color: var(--ink); }
 .work-dots { display: inline-flex; gap: 3px; }
 .work-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: .55; }
 .work-indicator.is-working .work-dots i { animation: work-dot 1.2s ease-in-out infinite; }

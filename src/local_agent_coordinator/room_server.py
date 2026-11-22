@@ -27,7 +27,7 @@ from .partner_manager import PartnerError
 from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 
-ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task|answer-task))?")
+ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task|answer-task|interrupt-tool))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload|parallel-limit|api-model)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
@@ -40,6 +40,7 @@ ERROR_STATUS = {
     "invalid_api_prices":400, "invalid_api_models":400, "invalid_api_peak_windows":400, "invalid_api_caps":400,
     "invalid_api_timezone":400,
     "native_login_unsupported":400, "native_install_unsupported":400, "invalid_workload_level":400,
+    "tool_interrupt_unavailable":409, "user_tool_interrupt_required":403,
     "invalid_parallel_limit":400, "parallel_sessions_unsupported":409, "login_operation_changed":409, "user_native_login_required":403,
     "invalid_delivery_repository":409, "delivery_repository_unavailable":409, "user_delivery_repository_required":403,
     "invalid_code_workspace":400, "user_code_status_required":403,
@@ -765,6 +766,12 @@ class _RoomHandler(_Handler):
             if body:
                 raise _HTTPError(400, "invalid_arguments")
             return await service.cancel_room(match[1])
+        if match and match[2] == "interrupt-tool":
+            if mcp:
+                raise _HTTPError(403, "user_tool_interrupt_required")
+            if set(body) != {"job_id"} or not isinstance(body.get("job_id"), str) or re.fullmatch(TASK_ID, body["job_id"]) is None:
+                raise _HTTPError(400, "invalid_arguments")
+            return await service.interrupt_tool(match[1], body["job_id"])
         if match and match[2] == "withdraw-task":
             if mcp:
                 raise _HTTPError(403, "user_task_withdraw_required")

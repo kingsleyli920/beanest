@@ -251,6 +251,7 @@ const errorLabels = localizedLabels({
   task_already_withdrawn: '这一项已经撤掉了。',
   task_withdraw_finished: '这一项已经做完，不能再撤。',
   task_withdraw_busy: '伙伴正在处理，这一步结束后才能撤。',
+  tool_interrupt_unavailable: '这条命令已经结束，或这次调用已不在运行。', user_tool_interrupt_required: '中断命令要你本人在界面里操作。',
   task_withdraw_dependents: '还有任务要用到它，需要一起撤掉。',
   task_withdraw_unconfirmed: '上一步的结果还没核对完，先点“继续推进”让豆窝核对，之后再撤。',
   task_withdrawal_pending: '撤掉的改动还在从项目里移除，稍后再导出。',
@@ -332,7 +333,7 @@ const state = {
   deliveryLimit: 256, deliveryScope: '',
   drafts: new Map(), roomNodes: new Map(), eventNodes: new Map(), progressNodes: new Map(),
   renderedRoom: null, jobsFingerprint: '', collaborationFingerprint: '', unseen: 0,
-  roomTabs: new Map(), nowFolded: new Set(), deliveryPending: 0, earlierRuns: new Map(),
+  roomTabs: new Map(), nowFolded: new Set(), interruptingTool: null, deliveryPending: 0, earlierRuns: new Map(),
 };
 $('task-mode').value = 'text';
 
@@ -6261,7 +6262,41 @@ function renderWorkIndicator(snapshot) {
   // Polling may update timing elsewhere, but only a real phase/name transition
   // changes this polite live region. The animated dots carry no spoken content.
   if (text.textContent !== value) text.textContent = value;
+  // A command that has run for a while can be ended here, as Esc would in the CLI:
+  // the partner gets its failure back, goes on, and reads what the user sent.
+  const events = snapshot?.events || [];
+  const longTool = working.map((job) => {
+    const tool = job.latest_native_activity || [...events].reverse().find((event) => event.kind === 'native_tool_activity' && event.job_id === job.id);
+    if (!['started', 'running'].includes(tool?.state)) return null;
+    const elapsed = Number.isFinite(tool.elapsed_time_seconds) ? tool.elapsed_time_seconds : Date.now() / 1000 - tool.created_at;
+    return elapsed >= INTERRUPTIBLE_TOOL_SECONDS ? { job, elapsed } : null;
+  }).find(Boolean);
+  const toolLine = $('work-indicator-tool'); const interrupt = $('interrupt-tool');
+  toolLine.hidden = interrupt.hidden = !longTool;
+  if (longTool) {
+    const label = t("{p0} 的一条命令已运行 {p1}", { p0: displayName(longTool.job.provider), p1: livenessMinutes(longTool.elapsed) });
+    if (toolLine.textContent !== label) toolLine.textContent = label;
+    interrupt.dataset.job = longTool.job.id; interrupt.dataset.room = snapshot.room.id;
+    interrupt.disabled = state.interruptingTool === longTool.job.id;
+  }
 }
+const INTERRUPTIBLE_TOOL_SECONDS = 120;
+async function interruptTool() {
+  const button = $('interrupt-tool'); const jobId = button.dataset.job; const roomId = button.dataset.room;
+  if (!jobId || !roomId || state.interruptingTool) return;
+  state.interruptingTool = jobId; button.disabled = true;
+  try {
+    const result = await api(`${roomPath(roomId)}/interrupt-tool`, 'POST', { job_id: jobId });
+    if (state.selected === roomId && result?.room?.id === roomId) applySnapshot(result);
+    showNotice(t("已中断那条命令，伙伴会接着做。"));
+  } catch (error) {
+    showActionError(error.uncertain ? t("结果还没确认，先看看最新进展；不会自动重试。") : error.message, roomId, 'interrupt-tool');
+  } finally {
+    state.interruptingTool = null;
+    if (state.snapshot) renderWorkIndicator(state.snapshot);
+  }
+}
+$('interrupt-tool').addEventListener('click', () => void interruptTool());
 function renderControls() {
   renderActionError();
   const room = state.snapshot?.room;

@@ -12254,6 +12254,32 @@ test('the sidebar quota hint keeps the four tightest meters when there are more 
   assert.deepEqual(few.get('nav-quota').children.map((meter) => meter.value), [92, 31, 64], 'up to four partners keep their own order');
 });
 
+test('a command that has run for a while can be stopped from the working line, and the call carries on', async () => {
+  // Catches the real 九烛 room: Claude Code waited 27 hours on one command, the user's messages went unread, and
+  // nothing on screen said a command was stuck or offered a way to end it.
+  const saved = activeActivitySnapshot();
+  saved.jobs[0].latest_native_activity = { kind: 'native_tool_activity', sender: 'claude', job_id: jobId, state: 'running',
+    tool_kind: 'Bash', heartbeat: true, elapsed_time_seconds: 99235, created_at: Date.now() / 1000 };
+  let answered = null;
+  const ui = await browser({ rooms: [saved.room], saved, route: (request) => {
+    if (request.method === 'POST' && request.path.endsWith('/interrupt-tool')) { answered = request; return saved; }
+    return undefined;
+  } });
+  assert.equal(ui.get('work-indicator-text').textContent, 'Claude Code 正在处理');
+  assert.equal(ui.get('work-indicator-tool').hidden, false);
+  assert.equal(ui.get('work-indicator-tool').textContent, 'Claude Code 的一条命令已运行 27 小时 33 分钟');
+  const button = ui.get('interrupt-tool'); assert.equal(button.hidden, false); assert.equal(button.disabled, false);
+  button.click(); await ui.poll();
+  assert.equal(answered.path, `/api/rooms/${saved.room.id}/interrupt-tool`);
+  assert.deepEqual(answered.body, { job_id: jobId }, 'only the call on screen');
+  // A command that has only just started offers nothing to stop.
+  saved.jobs[0].latest_native_activity = { ...saved.jobs[0].latest_native_activity, elapsed_time_seconds: 40 };
+  const fresh = await browser({ rooms: [saved.room], saved });
+  assert.equal(fresh.get('interrupt-tool').hidden, true); assert.equal(fresh.get('work-indicator-tool').hidden, true);
+  const english = await browser({ language: 'en', rooms: [saved.room], saved: { ...saved, jobs: [{ ...saved.jobs[0],
+    latest_native_activity: { ...saved.jobs[0].latest_native_activity, elapsed_time_seconds: 600 } }, saved.jobs[1]] } });
+  assert.equal(english.get('work-indicator-tool').textContent, 'A command from Claude Code has run for 10 min');
+});
 test('a partner working on several tasks at once stays one row that says how many, and its open card lists each', async () => {
   // Catches: a parallel session drawn as a second partner, the row naming only one of the tasks, the list
   // left on screen after the rush, or a queued piece shown as already running.

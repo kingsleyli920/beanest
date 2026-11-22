@@ -1855,6 +1855,27 @@ class RoomStore:
                 self._event(db, job["room_id"], "native_process_started", sender="system", job_id=job_id,
                             provider=job["provider"], pid=pid)
 
+    def native_call_process(self, room_id, job_id):
+        """The process of a native call still working in this room, or None."""
+        with self._connection() as db:
+            job = db.execute("SELECT status FROM jobs WHERE id=? AND room_id=?", (job_id, room_id)).fetchone()
+            if job is None or job["status"] != "working":
+                return None
+            row = db.execute("SELECT json_extract(value_json,'$.pid') FROM events WHERE room_id=? "
+                             "AND json_extract(value_json,'$.kind')='native_process_started' "
+                             "AND json_extract(value_json,'$.job_id')=? ORDER BY seq DESC LIMIT 1", (room_id, job_id)).fetchone()
+        return row[0] if row and type(row[0]) is int and row[0] > 1 else None
+
+    def record_tool_interrupted(self, job_id, *, reason, commands, idle_seconds=None):
+        """Note that a waiting command was ended, by the idle watch or by the user."""
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT room_id,provider,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None or job["status"] != "working":
+                return
+            self._event(db, job["room_id"], "native_tool_interrupted", sender="user" if reason == "user" else "system",
+                        job_id=job_id, provider=job["provider"], reason=reason, commands=commands,
+                        idle_seconds=idle_seconds)
+
     def record_job_cleanup(self, job_id, *, confirmed):
         with self._connection(write=True) as db:
             job = db.execute("SELECT room_id,provider FROM jobs WHERE id=?", (job_id,)).fetchone()
