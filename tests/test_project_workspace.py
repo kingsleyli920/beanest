@@ -253,12 +253,12 @@ class ProjectWorkspaceTests(unittest.TestCase):
                     "claude", "stale", 1, [file(previous=original["sha256"])], allow_disjoint=True))
                 self.assertEqual(workspace.snapshot(), before)
 
-    def test_disjoint_merge_enforces_combined_capacity_without_partial_publication(self):
+    def test_disjoint_merge_has_no_combined_size_cap(self):
+        # Catches the old 64 KiB combined cap refusing a peer's disjoint file.
         self.workspace.apply("claude", "first", 0, [file("left.py", "x" * 32769)])
-        self.assertCode("project_limit_exceeded", lambda: self.workspace.apply(
-            "codex", "too-large", 0, [file("right.py", "x" * 32768)], allow_disjoint=True))
-        self.assertEqual(self.workspace.snapshot()["revision"], 1)
-        self.assertEqual([item["path"] for item in self.workspace.snapshot()["files"]], ["left.py"])
+        merged = self.workspace.apply("codex", "large", 0, [file("right.py", "x" * 200000)], allow_disjoint=True)
+        self.assertEqual(merged["revision"], 2)
+        self.assertEqual([item["path"] for item in self.workspace.snapshot()["files"]], ["left.py", "right.py"])
 
     def test_concurrent_initialization_creates_one_recognized_empty_workspace(self):
         room = str(uuid4())
@@ -439,16 +439,17 @@ class ProjectWorkspaceTests(unittest.TestCase):
         for change in invalid:
             self.assertCode("invalid_project_files", lambda change=change: self.workspace.apply("claude", "bad", 0, [change]))
         self.assertCode("invalid_project_files", lambda: self.workspace.apply("claude", "duplicates", 0, [file(), file("Main.py")]))
-        self.assertCode("invalid_project_files", lambda: self.workspace.apply("claude", "too-many", 0,
-                                                                             [file(f"f{n}.py") for n in range(17)]))
-        self.assertCode("project_limit_exceeded", lambda: self.workspace.apply("claude", "bytes", 0, [file(content="x" * 65537)]))
+        self.assertCode("invalid_project_files", lambda: self.workspace.apply("claude", "empty", 0, []))
         self.assertCode("invalid_project_request", lambda: self.workspace.apply("service", "bad", 0, [file()]))
         self.assertEqual(self.workspace.snapshot(), {"revision": 0, "files": []})
-        changes = [file(f"f{n}.py", "x" * 4096) for n in range(16)]
-        applied = self.workspace.apply("claude", "full", 0, changes)
-        self.assertEqual(len(applied["files"]), 16)
-        self.assertCode("project_limit_exceeded", lambda: self.workspace.apply("claude", "overflow", 1, [file("extra.py")]))
-        self.assertEqual(self.workspace.snapshot()["revision"], 1)
+        # Catches the old 16-file / 64 KiB / 64-character module-name caps refusing a Python proposal.
+        changes = [file(f"f{n}.py", "x" * 4096) for n in range(30)]
+        changes.append(file("a_" + "very_long_module_name_" * 4 + ".py", "y" * 100000))
+        applied = self.workspace.apply("claude", "many", 0, changes)
+        self.assertEqual(len(applied["files"]), 31)
+        extra = self.workspace.apply("claude", "extra", 1, [file("extra.py")])
+        self.assertEqual(len(extra["files"]), 32)
+        self.assertEqual(self.workspace.snapshot()["revision"], 2)
 
     def python_seed(self):
         source_room = str(uuid4())
@@ -523,24 +524,18 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 allowed_owners=["claude", "codex"]))
         self.assertEqual(self.workspace.snapshot(), {"revision": 0, "files": []})
 
-    def test_python_seed_file_and_byte_limits_do_not_publish_partial_imports(self):
+    def test_python_seed_has_no_file_count_or_byte_cap(self):
+        # Catches the old 16-file / 64 KiB caps refusing to inherit a larger Python snapshot.
         source_room = str(uuid4())
 
         def captured(path, content):
             return {"path": path, "content": content, "owner": "claude",
                     "sha256": hashlib.sha256(content.encode()).hexdigest()}
 
-        for files, code in (([captured(f"f{n}.py", "") for n in range(17)], "invalid_project_files"),
-                            ([captured("a.py", "x" * 65537)], "project_limit_exceeded"),
-                            ([captured("a.py", "x" * 32768), captured("b.py", "x" * 32769)],
-                             "project_limit_exceeded")):
-            self.assertCode(code, lambda: self.workspace.seed_python(
-                {"revision": 1, "files": files}, source_room_id=source_room, allowed_owners=["claude"]))
-            self.assertEqual(self.workspace.snapshot(), {"revision": 0, "files": []})
-        full = [captured(f"f{n}.py", "x" * 4096) for n in range(16)]
+        full = [captured(f"f{n}.py", "x" * 4096) for n in range(24)] + [captured("big.py", "x" * 65537)]
         result = self.workspace.seed_python({"revision": 10, "files": full},
                                             source_room_id=source_room, allowed_owners=["claude"])
-        self.assertEqual(len(result["files"]), 16)
+        self.assertEqual(len(result["files"]), 25)
         self.assertEqual(result["revision"], 1)
 
     def test_python_seed_conflicts_on_changed_source_revision_content_or_owner(self):
@@ -811,15 +806,16 @@ class TextProjectWorkspaceTests(unittest.TestCase):
         self.assertCode("project_revision_conflict", lambda: self.workspace.seed(self.capture, "claude"))
         self.assertCode("invalid_project_request", lambda: ProjectWorkspace(self.root, str(uuid4())).seed(self.capture, "codex"))
 
-    def test_text_mode_rejects_hidden_binary_sensitive_and_oversized_proposals(self):
+    def test_text_mode_rejects_hidden_binary_and_sensitive_proposals_but_not_large_ones(self):
         self.workspace.seed(self.capture, "codex")
         for path in ["../file.ts", "/file.ts", ".env", ".git/config", "secret.json", "picture.png", "src//x.ts"]:
             self.assertCode("invalid_project_files", lambda: self.workspace.apply("codex", "bad", 1, [file(path)]))
         self.assertCode("project_sensitive_content", lambda: self.workspace.apply(
             "codex", "secret", 1, [file("data.txt", "api_key = 'private-value'")]))
-        self.assertCode("project_limit_exceeded", lambda: self.workspace.apply(
-            "codex", "large", 1, [file("data.txt", "x" * 16385)]))
         self.assertEqual(self.workspace.snapshot()["revision"], 1)
+        # Catches the old 16 KiB per-file text cap refusing a large document.
+        large = self.workspace.apply("codex", "large", 1, [file("data.txt", "x" * 16385)])
+        self.assertEqual(large["revision"], 2)
 
     def test_snapshot_kind_and_baseline_hash_corruption_are_not_adopted(self):
         self.workspace.seed(self.capture, "codex")

@@ -1,15 +1,14 @@
-"""Bounded literal replacements, expanded before ordinary artifact validation.
+"""Literal replacements, expanded before ordinary artifact validation.
 
 This pure transform grants no write authority. The caller must still enforce
-task scope, owner, cancellation, file limits, secret checks and workspace CAS.
+task scope, owner, cancellation, secret checks and workspace CAS. Beanest sets
+no count or size limit of its own on a batch of edits.
 """
 from __future__ import annotations
 
 import re
 
 
-MAX_EDITS = 16
-MAX_EDIT_BYTES = 32 * 1024
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _FIELDS = {"path", "base_sha256", "old_text", "new_text"}
 
@@ -27,10 +26,10 @@ def expand_edits(snapshot, edits):
     Reverse application preserves those positions; edits never match text
     introduced by an earlier edit in the same response.
     """
-    if not isinstance(edits, list) or not 1 <= len(edits) <= MAX_EDITS:
+    if not isinstance(edits, list) or not edits:
         raise ProjectEditError("invalid_project_edits")
     indexed = {file["path"]: file for file in snapshot["files"]}
-    groups, size = {}, 0
+    groups = {}
     for edit in edits:
         if (not isinstance(edit, dict) or set(edit) != _FIELDS
                 or any(not isinstance(edit[key], str) for key in _FIELDS)
@@ -39,11 +38,10 @@ def expand_edits(snapshot, edits):
                 or "\0" in edit["old_text"] or "\0" in edit["new_text"]):
             raise ProjectEditError("invalid_project_edits")
         try:
-            size += len(edit["old_text"].encode("utf-8")) + len(edit["new_text"].encode("utf-8"))
+            edit["old_text"].encode("utf-8")
+            edit["new_text"].encode("utf-8")
         except UnicodeError:
             raise ProjectEditError("invalid_project_edits") from None
-        if size > MAX_EDIT_BYTES:
-            raise ProjectEditError("project_edit_limit")
         file = indexed.get(edit["path"])
         if file is None or file["sha256"] != edit["base_sha256"]:
             raise ProjectEditError("project_edit_conflict")

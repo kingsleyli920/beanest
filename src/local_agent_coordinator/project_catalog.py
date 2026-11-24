@@ -20,17 +20,12 @@ import time
 from uuid import UUID, uuid4
 
 
-MAX_PROJECT_FILES = 12
-MAX_TEXT_FILE_BYTES = 16 * 1024
-MAX_TEXT_BYTES = 48 * 1024
-MAX_CATALOG_BYTES = 1024 * 1024
-MAX_PROJECTS = 100
 FORMAT = "beanest-project-catalog-v1"
 LIFECYCLE_STATES = frozenset({"active", "archived", "removed"})
 _LIFECYCLE_ACTIONS = {"archive": "archived", "restore": "active", "remove": "removed"}
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-_SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}\Z")
+_SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _EXTENSIONS = frozenset({
     ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".md", ".txt", ".yaml", ".yml",
@@ -70,8 +65,7 @@ def source_hash(files: list[dict]) -> str:
 
 
 def validate_text_path(value) -> str:
-    if (not isinstance(value, str) or not value or len(value) > 240 or "\\" in value
-            or value.startswith("/") or len(value.split("/")) > 8):
+    if not isinstance(value, str) or not value or "\\" in value or value.startswith("/"):
         raise ProjectCatalogError("invalid_project_files")
     parts = value.split("/")
     for part in parts:
@@ -93,11 +87,17 @@ def validate_text_content(content) -> bytes:
         raw = content.encode("utf-8")
     except UnicodeError:
         raise ProjectCatalogError("invalid_project_files") from None
-    if len(raw) > MAX_TEXT_FILE_BYTES:
-        raise ProjectCatalogError("project_limit_exceeded")
     if _SECRET.search(content):
         raise ProjectCatalogError("project_sensitive_content")
     return raw
+
+
+def _read_all(descriptor) -> bytes:
+    """Read a regular file to its end; one os.read may return fewer bytes than asked."""
+    chunks = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _absolute_path(value) -> Path:
@@ -115,7 +115,7 @@ def _absolute_path(value) -> Path:
 
 
 def _file_list(files) -> list[str]:
-    if not isinstance(files, list) or not 1 <= len(files) <= MAX_PROJECT_FILES:
+    if not isinstance(files, list) or not files:
         raise ProjectCatalogError("invalid_project_files")
     values = [validate_text_path(item) for item in files]
     if len({item.casefold() for item in values}) != len(values):
@@ -216,19 +216,14 @@ class ProjectCatalog:
             raise ProjectCatalogError("project_catalog_corrupt") from None
         try:
             _private(descriptor)
-            if os.fstat(descriptor).st_size > MAX_CATALOG_BYTES:
-                raise ProjectCatalogError("project_catalog_corrupt")
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = None
-                raw = stream.read(MAX_CATALOG_BYTES + 1)
-            if len(raw) > MAX_CATALOG_BYTES:
-                raise ValueError
+                raw = stream.read()
             def reject(_value):
                 raise ValueError
             value = json.loads(raw, object_pairs_hook=_unique, parse_constant=reject)
             if (not isinstance(value, dict) or set(value) != {"format", "projects"}
-                    or value["format"] != FORMAT or not isinstance(value["projects"], list)
-                    or len(value["projects"]) > MAX_PROJECTS):
+                    or value["format"] != FORMAT or not isinstance(value["projects"], list)):
                 raise ValueError
             seen = set()
             for item in value["projects"]:
@@ -275,8 +270,6 @@ class ProjectCatalog:
 
     def _write(self, directory, projects):
         raw = canonical_json({"format": FORMAT, "projects": projects})
-        if len(raw) > MAX_CATALOG_BYTES:
-            raise ProjectCatalogError("project_limit_exceeded")
         temporary = ".catalog-" + str(uuid4())
         created = attempted = False
         try:
@@ -310,7 +303,7 @@ class ProjectCatalog:
         root = None
         try:
             root = _open_absolute(Path(metadata["path"]))
-            files, total = [], 0
+            files = []
             for name in metadata["files"]:
                 descriptor = os.dup(root)
                 try:
@@ -324,9 +317,7 @@ class ProjectCatalog:
                         before = os.fstat(file_descriptor)
                         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                             raise ProjectCatalogError("project_unsafe_path")
-                        if before.st_size > MAX_TEXT_FILE_BYTES:
-                            raise ProjectCatalogError("project_limit_exceeded")
-                        raw = os.read(file_descriptor, MAX_TEXT_FILE_BYTES + 1)
+                        raw = _read_all(file_descriptor)
                         after = os.fstat(file_descriptor)
                         attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
                         if any(getattr(before, key) != getattr(after, key) for key in attributes) or len(raw) != after.st_size:
@@ -336,9 +327,6 @@ class ProjectCatalog:
                         except UnicodeError:
                             raise ProjectCatalogError("invalid_project_files") from None
                         validate_text_content(content)
-                        total += len(raw)
-                        if total > MAX_TEXT_BYTES:
-                            raise ProjectCatalogError("project_limit_exceeded")
                         files.append({"path": name, "content": content, "sha256": hashlib.sha256(raw).hexdigest()})
                     finally:
                         os.close(file_descriptor)
@@ -358,8 +346,6 @@ class ProjectCatalog:
         self._capture(metadata)
         with self._locked() as directory:
             projects = self._load(directory)
-            if len(projects) >= MAX_PROJECTS:
-                raise ProjectCatalogError("project_limit_exceeded")
             projects.append(metadata)
             self._write(directory, projects)
         return metadata
@@ -380,8 +366,6 @@ class ProjectCatalog:
                 os.close(descriptor)
         with self._locked() as directory:
             projects = self._load(directory)
-            if len(projects) >= MAX_PROJECTS:
-                raise ProjectCatalogError("project_limit_exceeded")
             projects.append(metadata)
             self._write(directory, projects)
         return metadata

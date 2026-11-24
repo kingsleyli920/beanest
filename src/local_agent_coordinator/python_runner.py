@@ -24,10 +24,10 @@ from uuid import UUID, uuid4
 from urllib.parse import urlsplit
 
 
-MAX_FILES = 16
-MAX_SOURCE = 64 * 1024
+# How much of a run's stdout+stderr the result carries. Past it the run keeps
+# going to its real end; only the extra text is left out and marked truncated.
 MAX_OUTPUT = 32 * 1024
-_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.py\Z")
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
 _DIGEST = re.compile(r"docker\.io/library/python@sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[0-9a-f]{64}\Z")
 _LABEL = "local-agent-coordinator.python-runner"
@@ -48,24 +48,20 @@ def fail():
 try:
     if sys.platform != "linux" or os.getuid() == 0:
         fail()
-    payload = sys.stdin.buffer.read(524289)
-    if len(payload) > 524288:
-        fail()
-    snapshot = json.loads(payload)
+    snapshot = json.loads(sys.stdin.buffer.read())
     files = snapshot["files"]
-    if not isinstance(files, list) or not 1 <= len(files) <= 16:
+    if not isinstance(files, list) or not files:
         fail()
     os.chdir("/work")
-    total, seen = 0, set()
+    seen = set()
     for file in files:
         path, content = file["path"], file["content"]
-        if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.py", path)
+        if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.py", path)
                 or path in seen or not isinstance(content, str) or "\0" in content):
             fail()
         seen.add(path)
         data = content.encode("utf-8")
-        total += len(data)
-        if total > 65536 or hashlib.sha256(data).hexdigest() != file["sha256"]:
+        if hashlib.sha256(data).hexdigest() != file["sha256"]:
             fail()
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as stream:
@@ -179,8 +175,12 @@ async def _reap(process):
         await asyncio.sleep(.01)
 
 
-async def _exec(command, *, data=None, timeout=8, limit=8192):
-    """Bound both pipes and own the CLI process group, including on cancellation."""
+async def _exec(command, *, data=None, timeout=8, limit=8192, keep_running=False):
+    """Bound both pipes and own the CLI process group, including on cancellation.
+
+    keep_running: past the limit, drop the extra output and let the process
+    finish instead of ending it; the result then says truncated.
+    """
     launch = asyncio.create_task(asyncio.create_subprocess_exec(
         *command, stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -196,13 +196,17 @@ async def _exec(command, *, data=None, timeout=8, limit=8192):
             raise _CommandError("cli_cleanup_unconfirmed", cancelled=True) from None
         raise
     output = {"stdout": bytearray(), "stderr": bytearray()}
+    dropped = False
 
     async def read(name):
+        nonlocal dropped
         while chunk := await getattr(process, name).read(4096):
-            capacity = limit - sum(map(len, output.values()))
+            capacity = max(0, limit - sum(map(len, output.values())))
             output[name].extend(chunk[:capacity])
             if len(chunk) > capacity:
-                raise _OutputLimit
+                if not keep_running:
+                    raise _OutputLimit
+                dropped = True
 
     async def feed():
         if data is not None:
@@ -240,7 +244,7 @@ async def _exec(command, *, data=None, timeout=8, limit=8192):
         raise _CommandError("cli_cleanup_unconfirmed", cancelled=cancelled) from reap_error
     if cancelled:
         raise asyncio.CancelledError
-    return {"code": process.returncode, "reason": reason,
+    return {"code": process.returncode, "reason": reason, "truncated": dropped or reason == "output_limit",
             **{name: value.decode("utf-8", errors="replace") for name, value in output.items()}}
 
 
@@ -290,9 +294,9 @@ def _local_endpoint(endpoint):
 def _snapshot(snapshot):
     if (not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int
             or snapshot["revision"] < 0 or not isinstance(snapshot.get("files"), list)
-            or not 1 <= len(snapshot["files"]) <= MAX_FILES):
+            or not snapshot["files"]):
         raise _RunnerError("invalid_snapshot")
-    files, paths, total = [], set(), 0
+    files, paths = [], set()
     for item in snapshot["files"]:
         if not isinstance(item, dict):
             raise _RunnerError("invalid_snapshot")
@@ -304,9 +308,8 @@ def _snapshot(snapshot):
             raw = content.encode("utf-8")
         except UnicodeError:
             raise _RunnerError("invalid_snapshot") from None
-        total += len(raw)
         digest = hashlib.sha256(raw).hexdigest()
-        if total > MAX_SOURCE or item.get("sha256") != digest:
+        if item.get("sha256") != digest:
             raise _RunnerError("invalid_snapshot")
         paths.add(path)
         files.append({"path": path, "content": content, "sha256": digest})
@@ -550,9 +553,10 @@ class PythonRunner:
                         record["phase"] = "running"
                         self._save(record)
                         execution = await self._command(settings, ["start", "--attach", "--interactive", container_id],
-                                                        data=data, timeout=timeout, limit=MAX_OUTPUT)
+                                                        data=data, timeout=timeout, limit=MAX_OUTPUT,
+                                                        keep_running=True)
                         result.update(stdout=execution["stdout"], stderr=execution["stderr"],
-                                      truncated=execution["reason"] == "output_limit")
+                                      truncated=execution["truncated"])
                         if execution["reason"]:
                             result.update(status=execution["reason"], reason=execution["reason"])
                         else:

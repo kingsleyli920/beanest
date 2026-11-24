@@ -94,10 +94,11 @@ class ArtifactPhaseTests(unittest.IsolatedAsyncioTestCase):
         observed = await self.settle(second["room"]["id"])
         self.assertEqual(self.calls[calls_before]["project"]["files"], previous["project"]["files"])
         self.assertEqual(self.calls[calls_before]["proposal_base_revision"], 1)
-        self.assertEqual(self.calls[calls_before]["current_project_capacity"], {
-            "source_bytes": 14, "source_byte_limit": 65536,
-            "file_count": 1, "file_limit": 16, "unit": "UTF-8 bytes",
+        # Catches the prompt telling a partner about a byte or file-count limit that no longer exists.
+        self.assertEqual(self.calls[calls_before]["current_project_size"], {
+            "source_bytes": 14, "file_count": 1, "unit": "UTF-8 bytes",
         })
+        self.assertNotIn("current_project_capacity", self.calls[calls_before])
         self.assertEqual(observed["snapshot"]["project"]["files"], previous["project"]["files"])
         old_ids = {member["session_id"] for member in previous["members"]}
         self.assertTrue(old_ids.isdisjoint(member["session_id"] for member in observed["snapshot"]["members"]))

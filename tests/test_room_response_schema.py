@@ -169,7 +169,7 @@ class RoomResponseSchemaTests(unittest.TestCase):
         self.assertEqual(set(schema["properties"]), {"message", "actions", "state", "base_revision", "files"})
         self.assertEqual(schema["properties"]["base_revision"], {"type": "integer", "minimum": 0})
         files = schema["properties"]["files"]
-        self.assertEqual(files["maxItems"], 16)
+        self.assertNotIn("maxItems", files)  # no per-reply file-count limit
         self.assertEqual(set(files["items"]["properties"]), {"path", "previous_sha256", "content"})
         self.assertEqual(files["items"]["properties"]["previous_sha256"]["type"], ["string", "null"])
         self.assertEqual(files["items"]["properties"]["path"], {"type": "string"})

@@ -57,13 +57,22 @@ class LiteralEditTests(unittest.TestCase):
         self.assert_code("project_edit_conflict", {"files": [source]}, [edit(source, "missing", "x")])
         self.assert_code("project_edit_conflict", {"files": [source]}, [{**edit(source, "abc", "x"), "base_sha256": "0" * 64}])
 
-    def test_closed_shapes_count_and_utf8_byte_limit_are_enforced(self):
+    def test_closed_shapes_are_enforced(self):
         source = file("a.py", "one")
-        for invalid in ([], [edit(source, "one", "two")] * 17, [edit(source, "", "x")],
+        for invalid in ([], [edit(source, "", "x")],
                         [edit(source, "one", "one")], [{**edit(source, "one", "two"), "extra": True}],
                         [edit(source, "one", None)], [edit(source, "one", "\0")]):
             self.assert_code("invalid_project_edits", {"files": [source]}, invalid)
-        self.assert_code("project_edit_limit", {"files": [source]}, [edit(source, "one", "界" * 11000)])
+
+    def test_thirty_edits_and_large_replacement_text_are_accepted(self):
+        # Catches the old 16-edit and 32 KiB combined-text caps refusing a real batch of edits.
+        source = file("a.py", "".join(f"line{number:02d}\n" for number in range(30)))
+        edits = [edit(source, f"line{number:02d}\n", f"LINE{number:02d}\n") for number in range(29)]
+        edits.append(edit(source, "line29\n", "界" * 11000 + "\n"))
+        files = expand_edits({"files": [source]}, edits)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["content"],
+                         "".join(f"LINE{number:02d}\n" for number in range(29)) + "界" * 11000 + "\n")
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "JSON Schema validator available with MCP extra")
     def test_schema_requires_nullable_edits_for_native_team_project_only_and_parser_keeps_custom_compatibility(self):
@@ -89,6 +98,7 @@ class LiteralEditTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "invalid_project_edits")
 
     def test_edit_errors_have_natural_delivery_reasons(self):
+        # project_edit_limit can no longer happen, but older records still carry it.
         for code in ("invalid_project_edits", "project_edit_conflict", "project_edit_ambiguous", "project_edit_overlap", "project_edit_limit"):
             value = views.snapshot(phase="stopped", status="blocked")
             value["team"]["stop_reason"] = code
@@ -186,7 +196,8 @@ class TeamEditPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.rejected_edit(lambda context: self.edited_reply(context, "short", "abcdefghijklmnop"),
                                  "artifact_sensitive_content", source=source)
 
-    async def test_small_edit_cannot_expand_existing_project_past_64kib(self):
+    async def test_small_edit_grows_existing_project_past_64kib(self):
+        # Catches the old 64 KiB project cap refusing a small literal edit to a large file.
         scenario = self.scenario(1)
         content = "VALUE = 1\n#" + "x" * 64900 + "\n"
         scenario.contents["main"] = content
@@ -199,8 +210,19 @@ class TeamEditPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         source = await self.service.read_room(created["room"]["id"])
         self.assertEqual(source["team"]["phase"], "ready_for_user")
-        await self.rejected_edit(lambda context: self.edited_reply(context, "1", "2" * 2000),
-                                 "project_limit_exceeded", source=source)
+        grown = "VALUE = " + "2" * 2000 + "\n#" + "x" * 64900 + "\n"
+        second = self.scenario(2)
+        second.contents["main"] = grown
+        async def edit_main(agent, context, attempt):
+            if agent == "claude":
+                return self.edited_reply(context, "1", "2" * 2000)
+        second.work = edit_main
+        await self.next_run(source, 2)
+        await self.settle()
+        final = await self.service.read_room(source["room"]["id"])
+        self.assertEqual(final["team"]["phase"], "ready_for_user")
+        self.assertEqual({item["path"]: item["content"] for item in final["project"]["files"]},
+                         {"main.py": grown, "checks.py": "EXPECTED = 2\n"})
 
     async def test_custom_review_response_cannot_bypass_nonwork_edit_restriction(self):
         source = await self.create()

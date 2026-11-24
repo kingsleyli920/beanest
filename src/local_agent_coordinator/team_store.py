@@ -1080,7 +1080,7 @@ class TeamStore:
         return any(json.loads(row[0]).get("context") == expected for row in rows)
 
     def _queue(self, db, room_id, provider, phase, *, task=None, text=None, correction_of=None,
-               capacity_correction_of=None, partner_inspection=False):
+               partner_inspection=False):
         if phase != "user" and not correction_of and self.response_blocked(db, room_id, provider, phase, task):
             return False
         if phase == "work" and text is None and task is not None:
@@ -1134,7 +1134,7 @@ class TeamStore:
                     "checkpoint": "Assess the immutable original objective against the delivered evidence. Return exactly one checkpoint command. Continue only unfinished original acceptance work; quote its exact scope_reference. If complete, stop and optionally suggest a separate new goal. Ask a concrete question if a decision is needed.",
                     "checkpoint_review": "Check the bound checkpoint proposal against the original objective and delivered evidence. Return exactly one checkpoint_review with the exact proposal_digest. Reject scope expansion or an unsupported completion claim."}[phase]
         confined = None
-        if task is not None and phase in CONFINED_CALL_PHASES and not correction_of and not capacity_correction_of:
+        if task is not None and phase in CONFINED_CALL_PHASES and not correction_of:
             # Only when the call before this one, for this very step, is the one that failed.
             previous = db.execute("SELECT job_id FROM team_jobs WHERE room_id=? AND run_id=? AND task_id=? AND phase=? "
                                   "ORDER BY rowid DESC LIMIT 1", (room_id, team["current_run_id"], task["id"], phase)).fetchone()
@@ -1157,7 +1157,7 @@ class TeamStore:
             if phase == "help":
                 text += " Help request: " + task["help_text"]
         job_id = self.store._enqueue(db, room_id, provider, "team_" + phase, text,
-                                     parent_id=correction_of or capacity_correction_of, sender="system", paused_continuation=deferred_resume)
+                                     parent_id=correction_of, sender="system", paused_continuation=deferred_resume)
         db.execute("INSERT INTO team_jobs(job_id,room_id,phase,task_id,plan_revision,result_version,run_id) "
                    "VALUES (?,?,?,?,?,?,?)", (job_id, room_id, phase, task["id"] if task else None,
                                           team["revision"], task["result_version"] if task else 0, team["current_run_id"]))
@@ -1169,10 +1169,6 @@ class TeamStore:
         if correction_of:
             db.execute("UPDATE team_jobs SET format_attempt=1,correction_of=? WHERE job_id=?",
                        (correction_of, job_id))
-        if capacity_correction_of:
-            prior = self.job_context(db, capacity_correction_of)
-            db.execute("UPDATE team_jobs SET capacity_correction_of=?,format_attempt=? WHERE job_id=?",
-                       (capacity_correction_of, prior["format_attempt"], job_id))
         if partial_inspection is not None:
             self.store._event(db, room_id, "native_partial_work_queued", sender="system", job_id=job_id,
                               inspection_job_id=partial_inspection["job_id"], task_id=task["id"],
@@ -1495,44 +1491,6 @@ class TeamStore:
         if context["job_phase"] == "work":
             db.execute("UPDATE shared_tasks SET status='assigned' WHERE room_id=? AND run_id=? AND id=?",
                        (job["room_id"], context["run_id"], context["task_id"]))
-
-    def correct_capacity(self, db, job, observation):
-        """One fresh owner call after a host-proven, uncommitted byte refusal."""
-        context = self.job_context(db, job["id"])
-        team = self.team(db, job["room_id"])
-        room = self.store._room(db, job["room_id"])
-        if (context["job_phase"] != "work" or not context["task_id"] or room["stop_requested"]
-                or team["phase"] in _TERMINAL or context["run_id"] != team["current_run_id"]
-                or deadline_reached(room["deadline"], self.store.clock()) or not calls_available(self._remaining(db, job["room_id"]), 2)):
-            return False
-        task = self.task(db, job["room_id"], context["task_id"])
-        if (task["capacity_attempts"] or task["status"] != "working" or task["owner"] != job["provider"]
-                or task["result_version"] != context["result_version"]
-                or task["repair_execution_id"] != context["repair_execution_id"]):
-            return False
-        text = ("The host refused your entire previous file proposal before committing any file because the "
-                "merged project's actual UTF-8 bytes exceeded its unchanged limit. This is ONE capacity correction, "
-                "not format repair or permission to remove required behavior. See capacity_observation. "
-                "Revise only your original owned task paths, preserving required behavior and readable code. "
-                "Submit a new proposal for independent review; the rejected edits/files were NOT saved.")
-        try:
-            queued = self._queue(db, job["room_id"], job["provider"], "work", task=task, text=text,
-                                 capacity_correction_of=job["id"])
-        except RoomError as failure:
-            if failure.code not in {"budget_exhausted", "deadline_exceeded", "session_identity_unknown"}:
-                raise
-            return False
-        if not queued:
-            return False
-        db.execute("UPDATE shared_tasks SET status='assigned',capacity_attempts=1,capacity_rejection_json=? "
-                   "WHERE room_id=? AND run_id=? AND id=?",
-                   (json.dumps({**observation, "job_id": job["id"]}, ensure_ascii=True),
-                    job["room_id"], context["run_id"], task["id"]))
-        db.execute("UPDATE members SET status='queued' WHERE room_id=? AND provider=?",
-                   (job["room_id"], job["provider"]))
-        self.store._event(db, job["room_id"], "capacity_correction_queued", sender="system", job_id=job["id"],
-                          task_id=task["id"], **{key: value for key, value in observation.items() if key != "proposal"})
-        return True
 
     def _queue_format_correction(self, db, job, context, task, error, native_rejection=None, *, rejection_evidence=None):
         if error == NATIVE_METADATA_ERROR:

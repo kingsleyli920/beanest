@@ -91,7 +91,7 @@ async function chooseProjectFiles(dialog, window, stillTrusted, locale = 'zh-CN'
   });
   authorize();
   if (selected?.canceled === true) return { cancelled: true };
-  if (!Array.isArray(selected?.filePaths) || selected.filePaths.length < 1 || selected.filePaths.length > 12) {
+  if (!Array.isArray(selected?.filePaths) || selected.filePaths.length < 1) {
     throw selectionError('invalid_project_selection');
   }
   const files = selected.filePaths.map((filename) => relativeSelection(directory, filename));

@@ -263,18 +263,18 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay['jobs'][0]['status'], 'cancelled')
         self.assertEqual(len(self.fake.calls), 0)
 
-    async def test_project_registration_rejects_bytes_limit_and_source_symlink_without_models(self):
+    async def test_project_registration_takes_a_large_file_but_rejects_a_source_symlink_without_models(self):
         source, _ = await self.fixture_project()
+        # Catches the old 16 KiB per-file cap refusing to register a large document.
         (source / 'huge.md').write_text('界' * 6000)
-        with self.assertRaises(ProjectCatalogError) as error:
-            await self.service.register_project('Too many bytes', str(source), ['huge.md'])
-        self.assertEqual(error.exception.code, 'project_limit_exceeded')
+        registered = await self.service.register_project('Large file', str(source), ['huge.md'])
+        self.assertEqual(registered['project']['files'], ['huge.md'])
         (source / 'link.md').symlink_to(source / 'README.md')
         with self.assertRaises(ProjectCatalogError) as error:
             await self.service.register_project('No links', str(source), ['link.md'])
         self.assertEqual(error.exception.code, 'project_unsafe_path')
         self.assertEqual(len(self.fake.calls), 0)
-        self.assertEqual(len((await self.service.list_projects())['projects']), 1)
+        self.assertEqual(len((await self.service.list_projects())['projects']), 2)
 
     async def test_project_response_strict_json_rejects_duplicate_or_extra_keys_before_writes(self):
         source, project = await self.fixture_project()

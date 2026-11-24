@@ -126,7 +126,8 @@ class TeamPhaseSchemaTests(unittest.TestCase):
                                                team_phase="help", can_propose=False)
         self.assertEqual(legacy, ignored_team_options)
         self.assertEqual(legacy["properties"]["message"], {"type": "string"})
-        self.assertEqual(legacy["properties"]["files"]["maxItems"], 16)
+        # Catches the schema telling a provider it may return at most 16 files.
+        self.assertNotIn("maxItems", legacy["properties"]["files"])
 
     def test_phase_and_permission_contexts_are_strict_and_help_has_no_empty_anyof(self):
         valid = {"project": False, "member_ids": MEMBERS, "provider": "claude", "collaboration": True}

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from local_agent_coordinator.python_runner import PythonRunner, _exec, _prepare, _sync_directory
+from local_agent_coordinator.python_runner import BOOTSTRAP, PythonRunner, _exec, _prepare, _sync_directory
 
 
 DIGEST = "docker.io/library/python@sha256:" + "a" * 64
@@ -22,8 +22,8 @@ def snapshot(source="import unittest\nclass Example(unittest.TestCase):\n    pas
             "content": source, "sha256": hashlib.sha256(source.encode()).hexdigest()}]}
 
 
-def reply(stdout="", *, code=0, stderr="", reason=None):
-    return {"code": code, "reason": reason, "stdout": stdout, "stderr": stderr}
+def reply(stdout="", *, code=0, stderr="", reason=None, truncated=False):
+    return {"code": code, "reason": reason, "truncated": truncated, "stdout": stdout, "stderr": stderr}
 
 
 class FakeDockerRunner(PythonRunner):
@@ -130,15 +130,35 @@ class PythonRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await self.runner.ready())["reason"], reason)
         self.assertEqual(self.runner.calls, [])
 
-    async def test_snapshot_paths_hashes_and_size_are_checked_before_docker(self):
-        invalid = [snapshot(), snapshot(), snapshot("x" * (65536 + 1))]
+    async def test_snapshot_paths_and_hashes_are_checked_before_docker(self):
+        invalid = [snapshot(), snapshot(), {"revision": 7, "files": []}]
         invalid[0]["files"][0]["path"] = "../escape.py"
         invalid[1]["files"][0]["sha256"] = "0" * 64
         for value in invalid:
-            with self.subTest(path=value["files"][0]["path"]):
+            with self.subTest(files=[item["path"] for item in value["files"]]):
                 result = await self.runner.run(value)
                 self.assertEqual(result["reason"], "invalid_snapshot")
         self.assertEqual(self.runner.calls, [])
+
+    async def test_twenty_file_snapshot_of_200_kib_reaches_the_sandbox(self):
+        # Catches the old 16-file / 64 KiB source caps refusing a sandbox run before Docker.
+        files = []
+        for number in range(20):
+            content = f"VALUE_{number} = 1\n#" + "x" * 10240 + "\n"
+            files.append({"path": f"module_{number:02d}.py", "owner": "fake", "content": content,
+                          "sha256": hashlib.sha256(content.encode()).hexdigest()})
+        result = await self.runner.run({"revision": 3, "files": files})
+        self.assertEqual(result["status"], "completed")
+        start = next(kwargs for args, kwargs in self.runner.calls if args[0] == "start")
+        sent = json.loads(start["data"])["files"]
+        self.assertEqual(len(sent), 20)
+        self.assertEqual(sum(len(item["content"].encode()) for item in sent), 205090)  # 10 x 10254 + 10 x 10255
+
+    def test_container_bootstrap_sets_no_file_count_or_source_size_cap(self):
+        # Catches the in-container bootstrap re-imposing the 16-file, 64 KiB or 512 KiB input caps.
+        compile(BOOTSTRAP, "bootstrap", "exec")
+        for cap in ("<= 16", "65536", "524288", "524289", "{0,63}"):
+            self.assertNotIn(cap, BOOTSTRAP)
 
     async def test_completed_is_untrusted_and_creation_has_all_constraints(self):
         value = snapshot()
@@ -248,6 +268,14 @@ class PythonRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runner.exists)
         self.assertTrue(self.runner.cancellation_confirmed(run_id))
         self.assertTrue((await self.runner.ready())["available"])
+
+    async def test_test_run_past_the_output_size_finishes_with_its_real_exit_code(self):
+        # Catches a sandbox run being killed (status output_limit) just because it printed a lot.
+        result = await _exec([sys.executable, "-B", "-c",
+            "import os,sys;os.write(1,b'x'*100000);os.write(2,b'y'*5000);sys.exit(3)"],
+            timeout=10, limit=1024, keep_running=True)
+        self.assertEqual((result["reason"], result["code"], result["truncated"]), (None, 3, True))
+        self.assertEqual(len(result["stdout"]) + len(result["stderr"]), 1024)
 
     async def test_cli_output_and_timeout_are_bounded(self):
         result = await _exec([sys.executable, "-B", "-c",

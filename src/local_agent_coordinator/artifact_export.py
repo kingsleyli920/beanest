@@ -12,8 +12,6 @@ from .folder_workspace import FORMAT as FOLDER_FORMAT, validate_folder_path
 from .project_workspace import ProjectWorkspaceError
 
 
-MAX_FILES = 16
-MAX_BYTES = 64 * 1024
 MANIFEST_NAME = ".beanest-export.json"
 
 
@@ -38,13 +36,12 @@ def export_project(project: dict, *, expected_revision: int, binaries=None) -> d
         raise ArtifactExportError("project_revision_conflict")
     files = project.get("files")
     folder = project.get("format") == FOLDER_FORMAT
-    # A folder download holds whatever the partners changed, however large.
-    file_limit, byte_limit = (None, None) if folder else (MAX_FILES, MAX_BYTES)
+    # A download holds whatever the partners wrote or changed, however large or many.
     deleted = project.get("deleted_files", []) if folder else []
     if (not isinstance(files, list) or not isinstance(deleted, list)
-            or not 1 <= len(files) + len(deleted) or file_limit is not None and len(files) > file_limit):
+            or not 1 <= len(files) + len(deleted)):
         raise ArtifactExportError("project_export_unavailable")
-    prepared, seen, size = [], set(), 0
+    prepared, seen = [], set()
     for file in files:
         if not isinstance(file, dict):
             raise ArtifactExportError("project_export_corrupt")
@@ -63,9 +60,6 @@ def export_project(project: dict, *, expected_revision: int, binaries=None) -> d
         if path.casefold() in seen or path.casefold() == MANIFEST_NAME.casefold():
             raise ArtifactExportError("project_export_corrupt")
         seen.add(path.casefold())
-        size += len(content)
-        if byte_limit is not None and size > byte_limit:
-            raise ArtifactExportError("project_limit_exceeded")
         digest = hashlib.sha256(content).hexdigest()
         if digest != file.get("sha256"):
             raise ArtifactExportError("project_export_corrupt")

@@ -12,7 +12,7 @@ import json
 from . import parallel_sessions
 from .execution_policy import seconds_available, task_settled
 from .folder_protocol import FOLDER_INSTRUCTION
-from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, project_digest as _project_digest
+from .project_workspace import project_digest as _project_digest
 from .room_contract import RoomError
 from .room_store import PROJECT_MODES, RoomStore
 from .roles import prompt_role
@@ -401,7 +401,7 @@ class RoomPromptMixin:
             review_revision = (parent_messages[0].get("artifact_revision", current["revision"])
                 if job["kind"] in {"review", "help"} and parent_messages else current["revision"])
             job["artifact_inspected_revision"] = review_revision
-            # Include one complete version, never several full 64KiB snapshots.
+            # Include one complete version, never several full snapshots.
             # Metadata describes the current write base without implying that an
             # older draft was reviewed as the latest version.
             context["project"] = current if review_revision == current["revision"] else project.snapshot(revision=review_revision)
@@ -414,11 +414,9 @@ class RoomPromptMixin:
             context["proposal_base_revision"] = current["revision"]
             context["current_project_files"] = [{key: file[key] for key in ("path", "sha256", "owner")}
                                                for file in current["files"]]
-            context["current_project_capacity"] = {
+            context["current_project_size"] = {
                 "source_bytes": sum(len(file["content"].encode("utf-8")) for file in current["files"]),
-                "source_byte_limit": project.max_bytes,
-                "file_count": len(current["files"]), "file_limit": PROJECT_FILE_LIMIT,
-                "unit": "UTF-8 bytes",
+                "file_count": len(current["files"]), "unit": "UTF-8 bytes",
             }
             if job["kind"] in {"review", "help"}:
                 context["artifact_comparison"] = self._review_comparison(
@@ -561,8 +559,6 @@ class RoomPromptMixin:
         origin = next((event for event in snapshot["events"] if event["kind"] == "artifact_forked"), None)
         if origin:
             context["forked_from"] = {**origin["source"], "checks_inherited": False, "sessions_inherited": False}
-        if task and task.get("capacity_rejection") and job["team"]["job_phase"] == "work":
-            context["capacity_observation"] = task["capacity_rejection"]
         repair_id = job["team"].get("repair_execution_id")
         if repair_id:
             observation = next((execution for execution in snapshot["executions"]
@@ -607,10 +603,9 @@ class RoomPromptMixin:
             context.update(project={key: value for key, value in inspected.items() if key != "changes"},
                            proposal_base_revision=current["revision"],
                            current_project_files=current_files,
-                           current_project_capacity={"source_bytes": sum(file["source_bytes"] for file in current_files),
+                           current_project_size={"source_bytes": sum(file["source_bytes"] for file in current_files),
                                "source_bytes_by_owner": source_bytes_by_owner,
-                               "source_byte_limit": project.max_bytes, "file_count": len(current["files"]),
-                               "file_limit": PROJECT_FILE_LIMIT, "unit": "UTF-8 bytes"})
+                               "file_count": len(current["files"]), "unit": "UTF-8 bytes"})
             if isinstance(context["project"].get("source"),dict):
                 context["project"]["source"] = {key: value for key, value in context["project"]["source"].items() if key != "path"}
             project_instruction = (
@@ -621,7 +616,7 @@ class RoomPromptMixin:
                 "Each old_text must be nonempty and match EXACTLY ONCE in that file at proposal_base_revision, "
                 "including whitespace and newlines; base_sha256 must equal that file's recorded SHA. "
                 "old_text and new_text must differ; no change should use edits:null and files:[]. "
-                "Use literal text, never regex/diff syntax. At most 16 edits, old/new combined at most 32KiB UTF-8. "
+                "Use literal text, never regex/diff syntax. "
                 "Multiple edits use the same original snapshot and must not overlap; no sequential matching. "
                 "Only a work job may change files, only its task.write_paths plus files its extend adds; a file another partner wrote and finished is handed to your task by the host. "
                 "All plan/coordinate/review/help/user jobs must return files:[] and edits:null or []; "
@@ -630,9 +625,10 @@ class RoomPromptMixin:
                 "when resumed. complete must reference concrete delivered work and all declared paths must exist. "
                 "Different files can safely merge at the coordinator; a changed same file is refused, never retried. "
                 "Review the exact task result_version/result_revision/result_files, not a version guessed in prose. "
-                "current_project_files.source_bytes and current_project_capacity are host-measured UTF-8 capacity "
-                "observations of proposal_base_revision, including source_bytes_by_owner grouped by actual owner. "
-                "When reviewing an older project revision, these capacity observations still describe the current "
+                "current_project_files.source_bytes and current_project_size are host-measured UTF-8 sizes "
+                "of proposal_base_revision, including source_bytes_by_owner grouped by actual owner; they are "
+                "observations, not limits: Beanest sets no file-count or byte limit on the project or a proposal. "
+                "When reviewing an older project revision, these sizes still describe the current "
                 "proposal base, not that older reviewed revision. "
                 "An imported project's original directory is never written or executed. "
                 "New Python modes only accept top-level .py files; project_files retains exactly the selected paths. "

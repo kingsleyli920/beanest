@@ -5815,7 +5815,7 @@ class RoomStore:
     def finish_job(self, job_id, *, session_id=None, message="", usage=None,
                    state="done", action=None, error=None, uncertain=False, identity_uncertain=None, artifact_revision=None,
                    team_commands=None, artifact_digest=None, artifact_files=None, correct_format=False,
-                   capacity_rejection=None, inspection_observation=None, native_rejection=None,
+                   inspection_observation=None, native_rejection=None,
                    native_partial_inspection=None, native_repair=None, native_question=None, rejection_evidence=None,
                    confine=False):
         """confine: the caller audited this failed native call (nothing left running, its own session,
@@ -5979,6 +5979,7 @@ class RoomStore:
             if is_team and team_context["correction_of"]:
                 self._event(db, room_id, "format_correction_finished", sender=provider,
                             job_id=job_id, correction_of=team_context["correction_of"], status=status, error=error)
+            # Only a job queued before the file caps were removed can carry this.
             if is_team and team_context["capacity_correction_of"]:
                 self._event(db, room_id, "capacity_correction_finished", sender=provider,
                             job_id=job_id, correction_of=team_context["capacity_correction_of"], status=status, error=error)
@@ -5998,11 +5999,6 @@ class RoomStore:
                                 assignment_epoch=team_context["assignment_epoch"], result_version=team_context["result_version"],
                                 observation=native_rejection, canonical_imported=False)
                 if self._team.correct_format(db, job, error, native_rejection, rejection_evidence=rejection_evidence):
-                    self._settle(db, room_id)
-                    return
-            if (is_team and capacity_rejection is not None and error == "project_limit_exceeded"
-                    and not uncertain and artifact_revision is None):
-                if self._team.correct_capacity(db, job, capacity_rejection):
                     self._settle(db, room_id)
                     return
             if is_team:

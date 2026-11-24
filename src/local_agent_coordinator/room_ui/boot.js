@@ -180,7 +180,7 @@ $('choose-project-files').addEventListener('click', async () => {
     const labels = {
       project_selection_unavailable: t("暂时无法打开文件选择，请重试或展开手动填写。"),
       project_selection_outside_directory: t("请只选择同一项目目录中的文件。原表单未改变。"),
-      invalid_project_selection: t("文件选择不符合当前范围，请选择最多 12 个项目内文本文件。"),
+      invalid_project_selection: t("这次选择用不了，请选择项目文件夹里的文本文件。"),
     };
     $('project-picker-note').textContent = labels[error?.message] || t("文件选择未完成，原表单仍保留。");
   } finally { state.projectChoosing = false; renderManagementControls(); }
