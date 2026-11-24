@@ -4253,6 +4253,33 @@ class RoomStore:
                 and (event.get("kind") == "message" and event.get("sender") in {"user", "mcp"}
                      or event.get("kind") == "objective_decision" and event.get("sender") == "user")]
 
+    def objective_user_requests(self, room_id):
+        """Everything the user has said to the current goal since it began, oldest first.
+
+        Each automatic continue and each follow-up opens a new objective under
+        the same original goal, and one carried only the request just before
+        it: the user's earlier decisions (which branch, whether to package)
+        dropped out while the original goal's older limits stayed in view.
+        """
+        with self._connection() as db:
+            objective = self._team.objectives.current(db, room_id)
+            if objective is None:
+                return []
+            started = db.execute("SELECT min(created_at) FROM objectives WHERE room_id=? AND original_goal=?",
+                                 (room_id, objective["original_goal"])).fetchone()[0]
+            requests = []
+            for row in db.execute("SELECT value_json FROM events WHERE room_id=? "
+                                  "AND json_extract(value_json,'$.kind') IN ('message','objective_decision') "
+                                  "AND json_extract(value_json,'$.created_at')>=? ORDER BY seq", (room_id, started)):
+                event = json.loads(row["value_json"])
+                if not self.direct_user_updates([event]):
+                    continue
+                text = event["text"].strip()
+                if requests and requests[-1]["text"] == text:
+                    continue
+                requests.append({"at": event["created_at"], "recipient": event.get("recipient"), "text": text})
+            return requests
+
     def _latest_direct_user_seq(self, db, room_id, *, provider=None):
         for row in db.execute("SELECT seq,value_json FROM events WHERE room_id=? ORDER BY seq DESC", (room_id,)):
             event = json.loads(row["value_json"])

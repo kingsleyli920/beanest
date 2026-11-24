@@ -549,6 +549,7 @@ class RoomPromptMixin:
             if team["phase"] != "working":
                 context["board_closed"] = {"team_phase": team["phase"], "instruction": BOARD_CLOSED_INSTRUCTION}
         if snapshot.get("objective"):
+            context["objective_user_requests"] = self.store.objective_user_requests(job["room_id"])
             context["current_stage_goal"] = job["goal"]
             if job["team"]["job_phase"] in {"checkpoint", "checkpoint_review"}:
                 context["goal"] = snapshot["objective"]["original_goal"]
@@ -751,6 +752,10 @@ class RoomPromptMixin:
                                 "Only unfinished acceptance work inside that original goal may continue automatically. ")
             protocol += (" This run belongs to context.objective.original_goal, without artificial call, stage or duration limits. "
                          + goal_instruction +
+                         "context.objective_user_requests is everything the user has said to this goal since it began, "
+                         "oldest first. Each still applies unless a later one changes it. Where they disagree with each "
+                         "other or with original_goal (which branch to push, whether to package, what is in scope), the "
+                         "most recent one wins. Requests already carried out need no repeating. " +
                          "Do not invent new work to keep busy. All selected available peers may own work; "
                          "when only you remain, you take the required parts and use the explicitly marked self_check. "
                          "host_authorized_transfer_paths are exact host grants allowing this task to change those retired-owner files; "
