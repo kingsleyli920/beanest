@@ -22,21 +22,17 @@ import time
 from uuid import UUID, uuid4
 
 from .agent_registry import safe_member_id
-from .project_catalog import (MAX_TEXT_BYTES, ProjectCatalogError, source_hash,
-                              validate_text_path, validate_text_content)
+from .project_catalog import ProjectCatalogError, source_hash, validate_text_path, validate_text_content
 
 
 FORMAT = "local-agent-toy-project-v1"
 TEXT_FORMAT = "beanest-text-project-v1"
 NEW_TEXT_FORMAT = "beanest-text-artifacts-v1"
-MAX_FILES = 16
-MAX_BYTES = 64 * 1024
-MAX_METADATA = 1024 * 1024
 # How long one call waits for another to finish with the shared project. Two partners starting
 # in the same second each copy a large project under this lock; five seconds made the second one
 # fail, which stopped the whole team. Only a holder that never lets go should end the wait.
 LOCK_SECONDS = 300
-_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.py\Z")
+_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
@@ -106,8 +102,6 @@ def _path_and_content(path, content, *, kind="python") -> bytes:
         raw = content.encode("utf-8")
     except UnicodeError:
         raise ProjectWorkspaceError("invalid_project_files") from None
-    if len(raw) > MAX_BYTES:
-        raise ProjectWorkspaceError("project_limit_exceeded")
     return raw
 
 
@@ -138,7 +132,6 @@ class ProjectWorkspace:
         self.kind = kind
         self.allow_new_text_files = allow_new_text_files
         self.format = NEW_TEXT_FORMAT if allow_new_text_files else TEXT_FORMAT if kind == "text" else FORMAT
-        self.max_bytes = MAX_TEXT_BYTES if kind == "text" else MAX_BYTES
         if not self.root.is_absolute() or ".." in self.root.parts:
             raise ProjectWorkspaceError("invalid_project_root")
         if self.room_id is None:
@@ -275,14 +268,9 @@ class ProjectWorkspace:
             descriptor = os.open(filename, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                                  | getattr(os, "O_NONBLOCK", 0), dir_fd=directory)
             _private(descriptor)
-            if os.fstat(descriptor).st_size > MAX_METADATA:
-                raise ProjectWorkspaceError("project_corrupt")
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = None
-                raw = stream.read(MAX_METADATA + 1)
-            if len(raw) > MAX_METADATA:
-                raise ProjectWorkspaceError("project_corrupt")
-            return raw
+                return stream.read()
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -336,9 +324,9 @@ class ProjectWorkspace:
                 or value["format"] != self.format or value.get("kind", "python") != self.kind
                 or value["room_id"] != self.room_id
                 or type(value["revision"]) is not int or value["revision"] != revision
-                or not isinstance(value["files"], list) or len(value["files"]) > MAX_FILES):
+                or not isinstance(value["files"], list)):
             raise ProjectWorkspaceError("project_corrupt")
-        seen, size = set(), 0
+        seen = set()
         for item in value["files"]:
             if not isinstance(item, dict) or set(item) != {"path", "sha256", "owner", "content"}:
                 raise ProjectWorkspaceError("project_corrupt")
@@ -350,9 +338,6 @@ class ProjectWorkspace:
                     or item["sha256"] != _digest(content)):
                 raise ProjectWorkspaceError("project_corrupt")
             seen.add(item["path"].casefold())
-            size += len(content)
-        if size > self.max_bytes:
-            raise ProjectWorkspaceError("project_corrupt")
         result = {"revision": revision, "files": value["files"]}
         if self.kind == "text":
             source = value["source"]
@@ -398,8 +383,6 @@ class ProjectWorkspace:
                   "proposal_id": proposal_id, "fingerprint": fingerprint}
         updated = {**manifest, "revision": number, "commits": [*manifest["commits"], commit]}
         encoded = _json(updated)
-        if len(encoded) > MAX_METADATA:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         published = attempted_publish = revision_written = temporary_written = False
         try:
             self._write_new(revisions, identifier + ".json", raw)
@@ -449,7 +432,7 @@ class ProjectWorkspace:
                 or not isinstance(source["path"], str)
                 or not Path(source["path"]).is_absolute() or ".." in Path(source["path"]).parts
                 or "\0" in source["path"] or source["path"] == Path(source["path"]).anchor
-                or not isinstance(source["files"], list) or not 1 <= len(source["files"]) <= 12):
+                or not isinstance(source["files"], list) or not source["files"]):
             raise ProjectWorkspaceError("invalid_project_files")
         try:
             validate_text_content(source["name"])
@@ -512,17 +495,14 @@ class ProjectWorkspace:
         source["files"] = [{"path": item.get("path"), "sha256": item.get("sha256")}
                            for item in capture["files"] if isinstance(item, dict)]
         self._validate_source(source)
-        files, total = [], 0
+        files = []
         for item in capture["files"]:
             if not isinstance(item, dict) or set(item) != {"path", "sha256", "content"}:
                 raise ProjectWorkspaceError("invalid_project_files")
             raw = _path_and_content(item["path"], item["content"], kind="text")
             if _digest(raw) != item["sha256"]:
                 raise ProjectWorkspaceError("invalid_project_files")
-            total += len(raw)
             files.append({**item, "owner": owner})
-        if total > self.max_bytes:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         files.sort(key=lambda item: item["path"])
         source["files"].sort(key=lambda item: item["path"])
         fingerprint = _digest(_json({"source": source, "owner": owner}))
@@ -598,9 +578,9 @@ class ProjectWorkspace:
                 or not isinstance(snapshot, dict) or set(snapshot) != {"revision", "files"}
                 or type(snapshot["revision"]) is not int or snapshot["revision"] < 1):
             raise ProjectWorkspaceError("invalid_project_request")
-        if not isinstance(snapshot["files"], list) or not 1 <= len(snapshot["files"]) <= MAX_FILES:
+        if not isinstance(snapshot["files"], list) or not snapshot["files"]:
             raise ProjectWorkspaceError("invalid_project_files")
-        prepared, seen, total = [], set(), 0
+        prepared, seen = [], set()
         for item in snapshot["files"]:
             if not isinstance(item, dict) or set(item) != {"path", "sha256", "owner", "content"}:
                 raise ProjectWorkspaceError("invalid_project_files")
@@ -611,10 +591,7 @@ class ProjectWorkspace:
                     or item["sha256"] != _digest(raw)):
                 raise ProjectWorkspaceError("invalid_project_files")
             seen.add(item["path"].casefold())
-            total += len(raw)
             prepared.append(dict(item))
-        if total > self.max_bytes:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         prepared.sort(key=lambda item: item["path"])
         proposal_id = "python-import:" + source_room_id
         try:
@@ -723,23 +700,20 @@ class ProjectWorkspace:
         if (not safe_member_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
                 or type(base_revision) is not int or base_revision < 0 or type(allow_disjoint) is not bool):
             raise ProjectWorkspaceError("invalid_project_request")
-        if not isinstance(files, list) or not 1 <= len(files) <= MAX_FILES:
+        if not isinstance(files, list) or not files:
             raise ProjectWorkspaceError("invalid_project_files")
-        prepared, seen, total = [], set(), 0
+        prepared, seen = [], set()
         for item in files:
             if not isinstance(item, dict) or set(item) != {"path", "previous_sha256", "content"}:
                 raise ProjectWorkspaceError("invalid_project_files")
-            raw = _path_and_content(item["path"], item["content"], kind=self.kind)
+            _path_and_content(item["path"], item["content"], kind=self.kind)
             if item["path"].casefold() in seen:
                 raise ProjectWorkspaceError("invalid_project_files")
             seen.add(item["path"].casefold())
             previous = item["previous_sha256"]
             if previous is not None and (not isinstance(previous, str) or not _HASH.fullmatch(previous)):
                 raise ProjectWorkspaceError("invalid_project_files")
-            total += len(raw)
             prepared.append(dict(item))
-        if total > self.max_bytes:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         prepared.sort(key=lambda item: item["path"])
         parameters = {"provider": provider, "base_revision": base_revision, "files": prepared}
         # Keep legacy fingerprints stable; opting in is distinct proposal semantics.
@@ -782,8 +756,6 @@ class ProjectWorkspace:
                 merged[item["path"]] = {"path": item["path"], "owner": provider,
                                          "sha256": _digest(item["content"].encode("utf-8")),
                                          "content": item["content"]}
-            if len(merged) > MAX_FILES or sum(len(item["content"].encode("utf-8")) for item in merged.values()) > self.max_bytes:
-                raise ProjectWorkspaceError("project_limit_exceeded")
             result = self._publish(room, revisions, manifest, sorted(merged.values(), key=lambda item: item["path"]),
                                    proposal_id, fingerprint, source=current.get("source"))
             return {**self._decorate(result, revisions, self._manifest(room)), "replayed": False}

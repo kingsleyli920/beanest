@@ -66,7 +66,7 @@ Snapshot 的 `member_invitation` 提供 `supported/can_invite/reason/candidates`
 
 UI日常入口为“新任务”，默认选择Claude Code、Codex两种工具；写需求后点击“开始任务”。输入区只保留短文本框和一行操作；“伙伴”“项目”“···”按需打开任务选项浮层，底部每位伙伴的模型与effort入口、短额度入口相邻显示。模型浮层只展示点中的伙伴，统一权限另设入口。选2–8位时新建请求带`collaboration:true`；未带推进策略的单成员保持原直接答复协议，显式策略下则有任务板及自检。恢复旧待确认请求时不补字段、不改变原请求语义；带新策略的待确认请求遇到无capability服务时保留且拒绝重发，不删除字段冒充旧请求。“工具与状态”查看监控，“本次工具”查看当前成员。输入区不提供团队总时长、调用次数或逐段暂停设置，代码与测试选项按需展开。同聊顶部显示任务、负责人和等待项，末尾显示交付、具体停止原因、尚未完成项和下一步；不增加手动转交按钮。历史标题和日期仅改变展示，不改原目标或记录。同工具额外profile放在“更多会话（高级）”，仅勾选者参与；“新建独立会话”不增加新工具、账号或订阅，复用同一adapter和登录。ID、默认名称和角标可由UI生成；提交结果未知时保留同一ID和表单，仅GET核对，不能自动再POST。
 
-桌面preload提供默认无参数`chooseProjectFolder()`与高级旧入口`chooseProjectFiles()`：固定IPC核对主窗口、主frame和同源，限制一个在途选择；前者只返回用户选定目录，后者返回目录及1–12个文件元数据，均不扫描或读取正文。成功只填表，点击“添加项目”后才调用登记API；取消保留表单。Web不具备该桥，保留手动填写。
+桌面preload提供默认无参数`chooseProjectFolder()`与高级旧入口`chooseProjectFiles()`：固定IPC核对主窗口、主frame和同源，限制一个在途选择；前者只返回用户选定目录，后者返回目录及所选文件（个数不限）的元数据，均不扫描或读取正文。成功只填表，点击“添加项目”后才调用登记API；取消保留表单。Web不具备该桥，保留手动填写。
 
 生产默认服务在启动时做一次支持CLI安装位置检测，仅使用可信适配器的固定resolver，不执行CLI或读取配置/聊天/凭据。`GET /api/partners`另含`discovery:{state,observed_at,tools:[{adapter,name,installed}],scope:"supported_cli_locations"}`，每profile带`installation:{state:"found|missing|unknown"}`；不暴露安装路径。该快照与health认证检查独立，GET不重扫，显式 `/api/partners/discover` 可刷新观察。新房间只能选已启用且安装可用的伙伴；连接器还须通过协议 ready 检查。已有builtin身份复用，不重复生成profile、不改已保存配置或重新启用手动停用者。旧房间身份和处理路径不变；显式注入测试registry/manager可保持原有未启用检测行为。
 
@@ -381,17 +381,17 @@ MCP 共14项工具：`room_status`、`room_list`、`room_start`、`room_read`、
 
 `mode:"python_artifacts"`只保存本工具新建目录中的文件提案，不接受现有项目路径。旧协议使用一位首写者，不能以 `all` / `both` 同时开写，随后通过请求/反馈队列互审；共享任务协议先确认分工，再由成员按各自write_paths提交与互审。CLI工具仍关闭，不执行文件、测试、shell、依赖安装或网络请求，不能写“测试已通过”。
 
-模型响应在基础三字段外必须有 `base_revision` 和 `files`。每个文件为 `{path,previous_sha256,content}`；新文件的 previous_sha256 为 null，修改须匹配原 hash。只接受顶层 ASCII Python 文件名，最多16个文件、正文合计64KiB；每个路径由实际首提交者负责，共享任务还须符合已确认的write_paths。其他伙伴提出建议或提交自己范围内的新文件，不能覆盖。context只提供一份完整受审版本，以及当前版本号/文件hash/owner；审查旧版本时明确标识，不能把未看过的新内容写成已审。
+模型响应在基础三字段外必须有 `base_revision` 和 `files`。每个文件为 `{path,previous_sha256,content}`；新文件的 previous_sha256 为 null，修改须匹配原 hash。只接受顶层 ASCII Python 文件名，文件个数和正文大小都不设限；每个路径由实际首提交者负责，共享任务还须符合已确认的write_paths。其他伙伴提出建议或提交自己范围内的新文件，不能覆盖。context只提供一份完整受审版本，以及当前版本号/文件hash/owner；审查旧版本时明确标识，不能把未看过的新内容写成已审。
 
 共享任务项目响应另支持 `edits:[{path,base_sha256,old_text,new_text}]`，原生严格schema要求该字段，未使用时为null或空数组；custom adapter可省略，旧协议形状不变。已有文件的小改动优先使用edits，新文件仍通过files提交；两者不能同时非空，非work阶段不得编辑。每批最多16项，old/new正文合计最多32KiB UTF-8。old_text非空且与new_text不同，必须在job的不可变base_revision原文中精确唯一匹配，包括空白和换行；base_sha256须匹配原文件，不能使用正则、模糊匹配或依次匹配前一项生成的文本。同文件各区间不重叠，宿主按原始位置逆序替换；new_text可空，只清空对应文字，不删除文件。
 
-宿主先将整批edits展开为普通完整文件提案，再复用原有任务范围、owner、身份/取消、完整文件敏感内容扫描、该Python模式的64KiB项目上限和原子CAS提交。任一项无效均不发布该批文件；并行不同文件仍可合并，同路径变化及ABA仍拒绝。`invalid_project_edits/project_edit_conflict/project_edit_ambiguous/project_edit_overlap/project_edit_limit` 不加入格式纠正白名单，不自动重试。精确文件正文、SHA、结果版本、互审、执行和导出继续使用真实完整文件；edits不裁切输入上下文，不增权限、调用上限或超时。
+宿主先将整批edits展开为普通完整文件提案，再复用原有任务范围、owner、身份/取消、完整文件敏感内容扫描和原子CAS提交；edits条数和正文大小不设限。任一项无效均不发布该批文件；并行不同文件仍可合并，同路径变化及ABA仍拒绝。`invalid_project_edits/project_edit_conflict/project_edit_ambiguous/project_edit_overlap`（以及旧记录里的`project_edit_limit`）不加入格式纠正白名单，不自动重试。精确文件正文、SHA、结果版本、互审、执行和导出继续使用真实完整文件；edits不裁切输入上下文，不增权限、调用上限或超时。
 
-仅非folder旧工作区模式的可信completed、身份确认、无工具work提案，在范围/owner/完整敏感内容检查通过，且工作区明确因合并项目UTF-8字节超限而整批拒收、确认未提交任何文件时，允许同task一次容量修正。宿主核对受影响路径从不可变base到当前的CAS链，反馈当前/拟写总字节、原上限和超额值（包括其他成员已提交的不同文件）；文件数、CAS、权限、未知或提交不确定等失败不触发。`capacity_attempts`、原failed job、用量、拒收proposal及`capacity_correction_of`持久保留，原owner按原scope重写一次后仍须互审；已运行peer不因此取消。须剩余原调用/时间额度并至少可安排修正与审核两次，格式纠正已用标记不重置。第二次超限正常停止，不扩大64KiB，不把容量问题加入FORMAT_ERRORS，不重放原拒收提案；提示中的`capacity_observation`是宿主容量事实，不授权删除必要行为。
+文件工作区不设文件个数或字节上限，所以没有“容量修正”这一步；旧版本留下的`capacity_correction_*`事件、`capacity_attempts`和`capacity_correction_of`只作为历史记录保留。
 
-非folder旧工作区模式的context另含 `current_project_capacity:{source_bytes,source_byte_limit,file_count,file_limit,unit:"UTF-8 bytes"}`。它来自当前工作区头版本：source_bytes是所有文件正文编码为UTF-8后的实际字节之和，file_count是实际文件数，限额来自该工作区配置；不是字符数、JSON转义后的长度或模型估算。该元数据描述当前提案基线容量，不表示旧审查版本已被重新核对。这里的source_byte_limit是底层工作区限额；任务另有更低容量目标时，仍须单独检查，不能据此将任务上限放宽到64KiB。
+非folder旧工作区模式的context另含 `current_project_size:{source_bytes,file_count,unit:"UTF-8 bytes"}`（共享任务模式另含source_bytes_by_owner）。它来自当前工作区头版本：source_bytes是所有文件正文编码为UTF-8后的实际字节之和，file_count是实际文件数；不是字符数、JSON转义后的长度或模型估算，也不是上限。该元数据描述当前提案基线，不表示旧审查版本已被重新核对。
 
-非folder共享任务的 `current_project_files` 各项另含 `source_bytes`，`current_project_capacity` 另含 `source_bytes_by_owner:{owner:bytes}`，均由宿主按实际文件正文与负责人测量。两者绑定 `proposal_base_revision` 的当前头版本；审核旧 `result_revision` 时，容量观察仍描述当前提案基线，不混作旧版本容量。它们仅补充提示上下文，不改变文件SHA、公开快照或导出形状。
+非folder共享任务的 `current_project_files` 各项另含 `source_bytes`，`current_project_size` 另含 `source_bytes_by_owner:{owner:bytes}`，均由宿主按实际文件正文与负责人测量。两者绑定 `proposal_base_revision` 的当前头版本；审核旧 `result_revision` 时，容量观察仍描述当前提案基线，不混作旧版本容量。它们仅补充提示上下文，不改变文件SHA、公开快照或导出形状。
 
 非folder共享任务提示超过128KiB传输限制时，先将旧轮goal变为240字符的明确节选，保留其轮次、状态与版本证明；仍超限才让任务板的重复当前result引用完整 `task.result`，并仅保留最近两条聊天的240字符节选。`context_compaction` 标明已用压缩，节选带 `truncated/omitted_characters`。当前用户目标、完整当前task及依赖结果、精确受审文件正文/SHA和权限不裁切；这些必需材料仍超限则拒绝 `context_too_large`，不扩大限制、自动重试或增加调用。
 
@@ -417,7 +417,7 @@ SVG预览只接受当前版本的精确 `.svg` 路径并核原文SHA，返回 `c
 
 ## 已有项目的高级指定文件改稿
 
-`mode:"project_files"`使用已登记的`project_id`；旧协议选一位首写者，共享任务协议按已确认任务的路径分工。该登记路径仅接收用户给定的绝对目录及 1–12 个相对文件名，不递归扫描；每个文件最多16KiB，总计48KiB。路径为有限深度的安全 ASCII 相对路径，正文为 UTF-8 文本，支持白名单的源码、标记及文档类型；拒绝路径穿越、各层符号链接、硬链接、隐藏或凭据文件、二进制及明显敏感内容。私有登记只保存元数据，0600文件及0700目录配合锁与原子替换；损坏或登记文件缺失时停止，不静默清空。
+`mode:"project_files"`使用已登记的`project_id`；旧协议选一位首写者，共享任务协议按已确认任务的路径分工。该登记路径仅接收用户给定的绝对目录及相对文件名，不递归扫描；文件个数、单个大小和总量都不设限。路径为安全 ASCII 相对路径，正文为 UTF-8 文本，支持白名单的源码、标记及文档类型；拒绝路径穿越、各层符号链接、硬链接、隐藏或凭据文件、二进制及明显敏感内容。私有登记只保存元数据，0600文件及0700目录配合锁与原子替换；损坏或登记文件缺失时停止，不静默清空。
 
 登记时只验证选定文件；每个新房间创建时重新捕获，保存内容 hash 与整组 source_hash。原目录只读，捕获内容作为房间的数据提案，没有目录挂载、原地编辑、shell、依赖安装、项目测试或自动合入。文件正文会进入所选供应商上下文；source.path 元数据不传给房间模型，正文不做通用路径脱敏。
 

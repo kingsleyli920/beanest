@@ -2289,13 +2289,14 @@ test('folder download accepts a verified large ZIP with a Unicode path while leg
   assert.match(old.get('export-note').textContent, /版本不一致/);
 });
 
-test('project size errors describe folder limits without reintroducing the advanced file quota', async () => {
+test('an old project size error is neutral and names no file limit', async () => {
+  // Catches the page still quoting "12 个 / 16 KiB / 48 KiB" or a processing limit Beanest no longer has.
   const project = { id: '33333333-3333-4333-8333-333333333333', name: '项目', path: '/fictional/whole', files: [], selection_kind: 'folder' };
   const ui = await browser({ projects: [project], route: (request) => request.method === 'POST' && request.path === '/api/rooms' ? { error: 'project_limit_exceeded' } : undefined });
   ui.get('project-picker').value = project.id; ui.get('project-picker').fire('change');
   ui.type('修改文件'); await ui.submit();
-  assert.match(ui.get('action-error').textContent, /项目或这批修改超过本机处理上限.*已有成果保留/);
-  assert.doesNotMatch(ui.get('action-error').textContent, /12 个|16 KiB|48 KiB/);
+  assert.equal(ui.get('action-error').textContent, '这批内容没有保存，已有成果保留。');
+  assert.doesNotMatch(ui.get('action-error').textContent, /12 个|16 KiB|48 KiB|上限/);
 });
 
 
@@ -4998,12 +4999,12 @@ test('native read-only permissions describe provider-specific read commands with
   assert.match(ui.get('scope-description').textContent, /暂不运行项目、安装依赖或自动合入/); assert.equal(ui.posts().length, 0);
 });
 
-test('a native room stopped by a size limit is told about folder limits, not the 12-file selection', async () => {
-  // The 九烛 room showed "最多 12 个，每个 16 KiB" while its real limit was the shared folder copy.
+test('a native room stopped long ago by a size limit is described without naming any limit', async () => {
+  // The 九烛 room showed "最多 12 个，每个 16 KiB"; Beanest no longer has that limit or a folder one.
   const saved = restartSnapshot(); saved.room.mode = 'native_project'; saved.objective.stop_reason = 'project_limit_exceeded';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true });
-  assert.match(ui.get('collaboration-outcome').textContent, /项目或这批修改超过本机处理上限/);
-  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /12 个|16 KiB|48 KiB/);
+  assert.match(ui.get('collaboration-outcome').textContent, /这批内容没有保存，已有成果保留。/);
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /12 个|16 KiB|48 KiB|上限/);
 });
 
 test('native progress safeguards and unsupported participants display concrete reasons instead of raw error codes', async () => {
@@ -11301,12 +11302,15 @@ test('explicit file lists get a message about their actual problem', async () =>
     ui.get('project-form').fire('submit'); await settle();
     return ui.get('manager-notice').textContent;
   };
-  assert.equal(await submit(Array.from({ length: 13 }, (_, index) => `n${index}.md`)), '最多 12 个文件，现在填了 13 个。');
   assert.equal(await submit(['/Users/me/a.md']), '请写相对项目文件夹的路径，例如 src/main.py，不要写完整路径：/Users/me/a.md');
   assert.equal(await submit(['src/../a.md']), '路径里不能有 ..、. 或空的一段，文件要在项目文件夹里面：src/../a.md');
   assert.equal(await submit(['a.md', 'A.md']), '这个文件填了两次：A.md');
   assert.equal(await submit(['logo.png']), 'logo.png 不是能处理的文本文件。只能选源码、文档、配置这类文本文件。');
   assert.equal(ui.posts().length, 0, 'nothing is sent for a list the service would reject');
+  // Catches the page refusing more than 12 files before the service sees them; Beanest sets no file-count limit.
+  await submit(Array.from({ length: 40 }, (_, index) => `n${index}.md`));
+  const registered = ui.posts().find((request) => request.path === '/api/projects');
+  assert.equal(registered.body.files.length, 40);
   const missing = await browser({ route(request) { if (request.path === '/api/projects' && request.method === 'POST') return { error: 'project_file_unavailable' }; } });
   await missing.click('open-projects');
   missing.get('project-name').value = '虚构项目'; missing.get('project-path').value = '/fictional/missing';

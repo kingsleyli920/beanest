@@ -214,7 +214,8 @@ const errorLabels = localizedLabels({
   project_sensitive_content: '选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。',
   project_binary_file: '这是二进制文件（例如图片），不能按文本阅读；下载已修改文件可以拿到原样字节。',
   project_diff_too_large: '文件很大，这里不逐行对比；改动已经保存，下载已修改文件可以拿到全文。',
-  project_limit_exceeded: '选定文件超出当前范围：最多 12 个，每个 16 KiB，总计 48 KiB。',
+  // Beanest no longer caps file count or size; this code only appears in older records.
+  project_limit_exceeded: '这批内容没有保存，已有成果保留。',
   project_capture_limit: '项目超出当前隔离副本的容量范围，尚未开始处理；请缩小项目目录后重试。',
   project_source_changed: '项目来源在准备过程中发生变化，未接受本次快照；请确认文件稳定后重试。',
   invalid_project_inspection: '伙伴的文件查找请求不符合当前范围，未读取额外内容。',
@@ -3395,7 +3396,6 @@ const projectTextExtensions = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.js
   '.properties', '.csv', '.rst', '.cmake', '.svg']);
 function explicitFilesProblem(files) {
   if (!files.length) return t("请至少填写一个文件路径，每行一个。");
-  if (files.length > 12) return t("最多 12 个文件，现在填了 {p0} 个。", { p0: files.length });
   const absolute = files.find((file) => file.startsWith('/') || file.startsWith('~') || /^[A-Za-z]:[\\/]/.test(file));
   if (absolute) return t("请写相对项目文件夹的路径，例如 src/main.py，不要写完整路径：{p0}", { p0: absolute });
   const outside = files.find((file) => file.includes('\\') || file.split('/').some((part) => !part || part === '.' || part === '..'));
@@ -3422,15 +3422,7 @@ function broadFolderWarning(path) {
   if (/^\/(?:Users|home|Volumes\/[^/]+)?$/.test(clean)) return t("这是整块磁盘或系统文件夹，范围太大。建议只选项目所在的文件夹。确定要登记，就再点一次“添加项目”。");
   return '';
 }
-// A native room shares the same folder copy, so its limits are folder limits,
-// not the 12-file selection that a small file project allows.
-function folderLimits(mode) { return mode === 'project_folder' || mode === 'native_project'; }
-function projectLimitMessage(folder) {
-  return folder ? t("项目或这批修改超过本机处理上限；未保存这批修改，已有成果保留。") : errorLabels.project_limit_exceeded;
-}
-
 function executionMessage(code) {
-  if (code === 'project_limit_exceeded' && folderLimits(state.snapshot?.room.mode)) return projectLimitMessage(true);
   return Object.hasOwn(executionLabels, code) ? executionLabels[code] : Object.hasOwn(errorLabels, code) ? errorLabels[code] : t("本轮结果需要核对。");
 }
 
@@ -3504,11 +3496,8 @@ async function api(path, method = 'GET', body) {
     if (!result || typeof result !== 'object') throw new RequestError(t("本地服务返回了无法识别的记录。"), { uncertain: method !== 'GET' });
     if (!response.ok || result.error) {
       const code = typeof result.error === 'string' ? result.error : '';
-      const folder = path === workspaceApi.projects ? body?.selection_kind === 'folder'
-        : folderLimits(body?.mode || state.snapshot?.room.mode || state.mode);
-      const message = code === 'project_limit_exceeded' ? projectLimitMessage(folder)
-        // Registering a folder that is missing or unreadable is about the folder, not "selected files".
-        : code === 'project_file_unavailable' && path === workspaceApi.projects && body?.selection_kind === 'folder' ? t("找不到这个文件夹，或者没有权限读取。请核对路径。")
+      // Registering a folder that is missing or unreadable is about the folder, not "selected files".
+      const message = code === 'project_file_unavailable' && path === workspaceApi.projects && body?.selection_kind === 'folder' ? t("找不到这个文件夹，或者没有权限读取。请核对路径。")
         : errorLabels[code];
       throw new RequestError(message || t("请求未完成，请核对本地服务与任务状态。"), {
         code, uncertain: method !== 'GET' && !workspaceRejections.has(code)

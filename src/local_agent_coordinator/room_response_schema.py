@@ -220,7 +220,8 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
     if project:
         properties.update({
             "base_revision": {"type": "integer", "minimum": 0},
-            "files": {"type": "array", "maxItems": 0 if collaboration and team_phase not in (None, "work") else 16,
+            # A phase that may not write gets maxItems 0; a work phase gets no count limit.
+            "files": {"type": "array", **({"maxItems": 0} if collaboration and team_phase not in (None, "work") else {}),
                       "items": _object({
                 "path": {"type": "string"},
                 "previous_sha256": {"type": ["string", "null"]},
@@ -229,7 +230,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
         })
         if collaboration or folder:
             properties["edits"] = {"type": ["array", "null"],
-                "maxItems": 16 if team_phase in (None, "work") else 0,
+                **({} if team_phase in (None, "work") else {"maxItems": 0}),
                 "items": _object({
                     "path": {"type": "string"},
                     "base_sha256": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},

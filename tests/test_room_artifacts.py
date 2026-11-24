@@ -73,7 +73,6 @@ class ArtifactProtocolTests(unittest.TestCase):
             json.dumps({**valid, "command": "/bin/sh"}),
             json.dumps({**valid, "base_revision": True}),
             json.dumps({**valid, "files": {}}),
-            json.dumps({**valid, "files": [None] * 17}),
             json.dumps(valid)[:-1] + ', "base_revision": 1}',
         ]
         for raw in invalid:
@@ -83,6 +82,18 @@ class ArtifactProtocolTests(unittest.TestCase):
         self.assertEqual(_response(json.dumps(valid), "claude", project=True)["files"], [])
         with self.assertRaises(RoomError):
             _response(json.dumps(valid), "claude", project=False)
+
+    def test_reply_with_30_files_or_30_edits_is_parsed_in_full(self):
+        # Catches the old 16-files and 16-edits per reply caps (invalid_project_files / invalid_project_edits).
+        files = [{"path": f"module_{number:02d}.py", "previous_sha256": None, "content": f"VALUE = {number}\n"}
+                 for number in range(30)]
+        reply = {"message": "Thirty new modules.", "state": "done", "actions": [], "base_revision": 0, "files": files}
+        self.assertEqual(len(_response(json.dumps(reply), "claude", ("claude", "codex"), project=True)["files"]), 30)
+        edits = [{"path": "main.py", "base_sha256": "a" * 64, "old_text": f"line{number}", "new_text": f"LINE{number}"}
+                 for number in range(30)]
+        team_reply = {"message": "Thirty edits.", "state": "done", "commands": [], "base_revision": 0, "files": [], "edits": edits}
+        parsed = _response(json.dumps(team_reply), "claude", ("claude", "codex"), team=True, project=True)
+        self.assertEqual(len(parsed["edits"]), 30)
 
 
 class RoomArtifactTests(unittest.IsolatedAsyncioTestCase):

@@ -60,10 +60,12 @@ class TeamProjectCapacityTests(unittest.IsolatedAsyncioTestCase):
         files = {file["path"]: file for file in context["current_project_files"]}
         self.assertEqual({path: file["source_bytes"] for path, file in files.items()},
                          {"alpha.py": 10, "alpha_extra.py": 5, "beta.py": 8})
-        self.assertEqual(context["current_project_capacity"]["source_bytes_by_owner"], {"claude": 15, "codex": 8})
-        self.assertEqual(context["current_project_capacity"]["source_bytes"], 23)
-        self.assertEqual(context["current_project_capacity"]["file_count"], 3)
-        self.assertEqual(context["current_project_capacity"]["unit"], "UTF-8 bytes")
+        self.assertEqual(context["current_project_size"]["source_bytes_by_owner"], {"claude": 15, "codex": 8})
+        self.assertEqual(context["current_project_size"]["source_bytes"], 23)
+        self.assertEqual(context["current_project_size"]["file_count"], 3)
+        self.assertEqual(context["current_project_size"]["unit"], "UTF-8 bytes")
+        # Catches a byte or file-count limit field coming back into the partner prompt.
+        self.assertEqual(set(context["current_project_size"]), {"source_bytes", "source_bytes_by_owner", "file_count", "unit"})
         self.assertEqual(files["alpha.py"]["sha256"], hashlib.sha256("# 汉🙂\n".encode()).hexdigest())
 
     def test_empty_planning_capacity_has_no_invented_owner_allocation(self):
@@ -71,8 +73,8 @@ class TeamProjectCapacityTests(unittest.IsolatedAsyncioTestCase):
         context = self.context(job)
         self.assertEqual(context["proposal_base_revision"], 0)
         self.assertEqual(context["current_project_files"], [])
-        self.assertEqual(context["current_project_capacity"]["source_bytes"], 0)
-        self.assertEqual(context["current_project_capacity"]["source_bytes_by_owner"], {})
+        self.assertEqual(context["current_project_size"]["source_bytes"], 0)
+        self.assertEqual(context["current_project_size"]["source_bytes_by_owner"], {})
 
     def test_utf8_capacity_aggregates_multiple_files_for_each_actual_owner(self):
         alpha, beta = self.plan()

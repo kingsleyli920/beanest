@@ -19,7 +19,7 @@ const COPY = {
     cleanupUnknown: '后台服务的停止状态尚未确认。请检查豆窝的活动进程，确认结束后再试。',
     stopUnknown: '豆窝的后台任务尚未确认停止', stopDetail: '请检查豆窝的活动进程。关闭窗口不代表后台任务已经结束。',
     folderTitle: '选择项目文件夹', folderButton: '选择此文件夹', folderDetail: '选择完整项目；伙伴会按任务需要查找文件，修改保存在隔离副本。',
-    filesTitle: '选择本次项目文件', filesButton: '使用所选文件', filesDetail: '请选择此文件夹里的 1–12 个具体文件。登记时会检查文本格式，选择后还需点击“添加项目”确认。',
+    filesTitle: '选择本次项目文件', filesButton: '使用所选文件', filesDetail: '请选择此文件夹里的具体文件，选几个都行。登记时会检查文本格式，选择后还需点击“添加项目”确认。',
     buildFailed: '豆窝桌面程序构建失败。请检查 Node.js 和 Electron 是否已正确安装。',
   },
   en: {
@@ -34,7 +34,7 @@ const COPY = {
     cleanupUnknown: 'The background service has not confirmed that it stopped. Check Beanest’s active processes and confirm they have ended before trying again.',
     stopUnknown: 'Beanest’s background tasks have not confirmed that they stopped', stopDetail: 'Check Beanest’s active processes. Closing the window does not mean background tasks have ended.',
     folderTitle: 'Choose a Project Folder', folderButton: 'Choose This Folder', folderDetail: 'Choose the complete project. Partners inspect files as needed and keep changes in isolated copies.',
-    filesTitle: 'Choose Project Files', filesButton: 'Use Selected Files', filesDetail: 'Choose 1–12 specific files inside this folder. Text formats are checked during registration. Click Add Project after choosing to confirm.',
+    filesTitle: 'Choose Project Files', filesButton: 'Use Selected Files', filesDetail: 'Choose any number of specific files inside this folder. Text formats are checked during registration. Click Add Project after choosing to confirm.',
     buildFailed: 'The Beanest desktop build failed. Check that Node.js and Electron are installed correctly.',
   },
 };

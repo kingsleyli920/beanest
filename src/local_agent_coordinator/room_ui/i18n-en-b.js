@@ -99,7 +99,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "本地服务已连接": "Local service connected",
   "本地服务未连接": "Local service disconnected",
   "来源待确认": "Source needs confirmation",
-  "项目或这批修改超过本机处理上限；未保存这批修改，已有成果保留。": "The project or these changes exceed local processing limits. These changes were not saved; existing results are preserved.",
   "本轮结果需要核对。": "This round's result needs checking.",
   "时间未知": "Time unknown",
   "未命名任务": "Untitled task",

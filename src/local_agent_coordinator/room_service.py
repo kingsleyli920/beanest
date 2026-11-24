@@ -26,7 +26,7 @@ from .execution_policy import seconds_available, deadline_reached, task_settled
 from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
 from .room_contract import MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_ROOM_MEMBERS, MAX_TASK_PATHS
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
-from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
+from .project_workspace import ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
 from .project_catalog import ProjectCatalog, ProjectCatalogError
 from .project_edits import ProjectEditError, expand_edits
 from .folder_workspace import FolderWorkspace
@@ -378,7 +378,7 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
         result["commands"] = redact(commands)
     if project:
         if (type(value["base_revision"]) is not int or value["base_revision"] < 0
-                or not isinstance(value["files"], list) or len(value["files"]) > 16):
+                or not isinstance(value["files"], list)):
             raise RoomError("invalid_project_files")
         result.update(base_revision=value["base_revision"], files=value["files"])
         if native:
@@ -395,7 +395,7 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
             result["resolved_conflicts"] = resolved
         if team or folder:
             edits = value.get("edits")
-            if edits is not None and (not isinstance(edits, list) or len(edits) > 16):
+            if edits is not None and not isinstance(edits, list):
                 raise RoomError("invalid_project_edits")
             if edits and value["files"]:
                 raise RoomError("invalid_project_edits")
@@ -7042,7 +7042,6 @@ class RoomService(RoomPromptMixin):
                                   native_rejection=job.get("native_submission_rejection"), rejection_evidence=rejection_evidence)
             return
         artifact_revision = artifact_digest = artifact_files = None
-        capacity_rejection = None
         if job.get("mode") in PROJECT_MODES:
             try:
                 if parsed["base_revision"] != job.get("artifact_base_revision"):
@@ -7061,16 +7060,9 @@ class RoomService(RoomPromptMixin):
                     # fail its task. Text proposed in a reply is still checked.
                     if not native and any(_SECRET.search(str(item.get("content", ""))) for item in parsed["files"] if isinstance(item, dict)):
                         raise RoomError("artifact_sensitive_content")
-                    project = self._project(job["room_id"])
-                    before = project.snapshot() if job.get("team") else None
-                    try:
-                        committed = project.apply(job["provider"], job["id"], parsed["base_revision"], parsed["files"],
-                            **({"allow_disjoint": True, "ownership_grants": self.store.ownership_grant(job["id"])} if job.get("team") else {}),
-                            **({"native": True} if native else {}))
-                    except ProjectWorkspaceError as error:
-                        if error.code == "project_limit_exceeded" and job.get("team") and job["mode"] not in {"project_folder", "native_project"}:
-                            capacity_rejection = self._capacity_rejection(job, parsed, project, before)
-                        raise
+                    committed = self._project(job["room_id"]).apply(job["provider"], job["id"], parsed["base_revision"], parsed["files"],
+                        **({"allow_disjoint": True, "ownership_grants": self.store.ownership_grant(job["id"])} if job.get("team") else {}),
+                        **({"native": True} if native else {}))
                     artifact_revision = committed["revision"]
                 if native:
                     state = self.store.native_workspace(job["room_id"], job["provider"])
@@ -7105,8 +7097,7 @@ class RoomService(RoomPromptMixin):
             except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError) as error:
                 self.store.finish_job(job["id"], session_id=identity, usage=usage,
                     message=parsed["message"], error=error.code,
-                    uncertain=error.code in {"project_commit_unconfirmed", "session_identity_changed"},
-                    capacity_rejection=capacity_rejection)
+                    uncertain=error.code in {"project_commit_unconfirmed", "session_identity_changed"})
                 return
         if job.get("team") and artifact_digest is None:
             completed = next((command for command in parsed["commands"] if command["type"] == "complete"), None)
@@ -7205,47 +7196,6 @@ class RoomService(RoomPromptMixin):
             observation["purpose"] = purpose
         self.store.finish_project_inspection(job["id"], session_id=identity, message=parsed["message"], usage=usage,
                                              observation=observation)
-
-    def _capacity_rejection(self, job, parsed, project, before):
-        """Describe only a known uncommitted byte refusal, never a CAS failure.
-
-        apply may reject a too-large input before reaching its CAS checks. For
-        this recovery gate, verify every affected path across the immutable
-        revision chain too. Other members' disjoint committed files still count.
-        """
-        if job["team"]["job_phase"] != "work":
-            return None
-        try:
-            current = project.snapshot()
-            if current != before:
-                return None
-            base = project.snapshot(revision=parsed["base_revision"])
-            original = {file["path"]: file for file in base["files"]}
-            merged = {file["path"]: file for file in current["files"]}
-            paths = {file["path"] for file in parsed["files"]}
-            for file in parsed["files"]:
-                old = original.get(file["path"])
-                if (file["previous_sha256"] != (old["sha256"] if old else None)
-                        or (old and old["owner"] != job["provider"])
-                        or any(path.casefold() == file["path"].casefold() and path != file["path"] for path in merged)):
-                    return None
-            for revision in range(base["revision"] + 1, current["revision"] + 1):
-                intervening = {file["path"]: file for file in project.snapshot(revision=revision)["files"]}
-                if any(intervening.get(path) != original.get(path) for path in paths):
-                    return None
-            merged.update({file["path"]: file for file in parsed["files"]})
-            if len(merged) > PROJECT_FILE_LIMIT:
-                return None
-            proposed_bytes = sum(len(file["content"].encode("utf-8")) for file in merged.values())
-            if proposed_bytes <= project.max_bytes:
-                return None
-            return {"current_revision": current["revision"], "current_digest": _project_digest(current),
-                    "current_bytes": sum(len(file["content"].encode("utf-8")) for file in current["files"]),
-                    "proposed_bytes": proposed_bytes, "byte_limit": project.max_bytes,
-                    "excess_bytes": proposed_bytes - project.max_bytes, "unit": "UTF-8 bytes",
-                    "proposal": {"base_revision": parsed["base_revision"], "files": parsed["files"]}}
-        except (ProjectWorkspaceError, UnicodeError):
-            return None
 
     @staticmethod
     def _team_worker_cleanup_unknown(snapshot):
