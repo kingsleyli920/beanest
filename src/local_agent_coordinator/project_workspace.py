@@ -523,7 +523,7 @@ class ProjectWorkspace:
         ownership in the isolated snapshot, never the selected source files.
         """
         if (self.kind != "text" or not isinstance(mapping, dict) or not mapping
-                or not isinstance(allowed_owners, (list, tuple)) or not 1 <= len(allowed_owners) <= 8
+                or not isinstance(allowed_owners, (list, tuple)) or not allowed_owners
                 or any(not safe_member_id(owner) for owner in allowed_owners)
                 or len(set(allowed_owners)) != len(allowed_owners)):
             raise ProjectWorkspaceError("invalid_project_request")
@@ -572,7 +572,7 @@ class ProjectWorkspace:
         if (self.kind != "python" or not isinstance(source_room_id, str)
                 or _uuid(source_room_id) != source_room_id or source_room_id == self.room_id
                 or not isinstance(allowed_owners, (list, tuple))
-                or not 1 <= len(allowed_owners) <= 8
+                or not allowed_owners
                 or any(not safe_member_id(owner) for owner in allowed_owners)
                 or len(set(allowed_owners)) != len(allowed_owners)
                 or not isinstance(snapshot, dict) or set(snapshot) != {"revision", "files"}

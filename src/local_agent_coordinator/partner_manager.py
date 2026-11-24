@@ -384,7 +384,7 @@ class PartnerManager:
                                                                   _PROFILE_KEYS | {"api_model"})
                         or item.get("workload_level", workload.DEFAULT_LEVEL) not in workload.LEVELS
                         or type(item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT)) is not int
-                        or not parallel_sessions.MIN_LIMIT <= item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT) <= parallel_sessions.MAX_LIMIT
+                        or item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT) < parallel_sessions.MIN_LIMIT
                         or not safe_agent_id(item["id"]) or item["id"] in seen
                         or not isinstance(item["bean_style"], str) or item["bean_style"] not in BEAN_STYLE_IDS
                         or not isinstance(item["lifecycle_state"], str)
@@ -1079,7 +1079,7 @@ class PartnerManager:
             target = next((item for item in data["profiles"] if item["id"] == partner_id), None)
             if target is None:
                 raise PartnerError("unknown_partner")
-            if self._parallel_limit({**target, "parallel_limit": parallel_sessions.MAX_LIMIT}) == parallel_sessions.MIN_LIMIT:
+            if self._parallel_limit({**target, "parallel_limit": parallel_sessions.MIN_LIMIT + 1}) == parallel_sessions.MIN_LIMIT:
                 raise PartnerError("parallel_sessions_unsupported")
             target["parallel_limit"] = limit
             self._save(data)

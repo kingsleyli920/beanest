@@ -138,8 +138,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["snapshot"]["revision"], execution["revision"])
         self.assertEqual(execution["revision"], saved["project"]["revision"])
         self.assertEqual(snapshot_digest(call["snapshot"]), execution["snapshot_sha256"])
-        self.assertGreater(call["timeout"], 0)
-        self.assertLessEqual(call["timeout"], 15)
+        self.assertIsNone(call["timeout"], "no timer of Beanest's own; the room set no deadline")
         self.assertEqual(execution["result"]["report_trust"], "untrusted")
         self.assertEqual(execution["status"], "completed")
         self.assertNotIn("passed", {execution["status"], saved["room"]["status"]})
@@ -168,9 +167,10 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         saved = await self.service.read_room(created["room"]["id"])
         result = saved["executions"][0]["result"]
-        self.assertTrue(result["truncated"])
-        self.assertLessEqual(len(result["stdout"]), 8000)
-        self.assertLessEqual(len(result["stderr"]), 8000)
+        # Catches the program's output being cut (it was 8,000 characters each) with no way to get the rest.
+        self.assertFalse(result["truncated"])
+        self.assertTrue(result["stdout"].endswith("x" * 9000))
+        self.assertTrue(result["stderr"].endswith("e" * 9000))
         self.assertIn("[redacted]", result["stdout"])
         self.assertIn("[redacted]", result["stderr"])
         self.assertIn('"passed": true', result["stdout"])

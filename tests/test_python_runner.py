@@ -175,9 +175,12 @@ class PythonRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runner.cancellation_confirmed(run_id))
         create = next(args for args, _ in self.runner.calls if args[0] == "create")
         for flag in ("--pull=never", "--network=none", "--read-only", "--user=65534:65534",
-                     "--cap-drop=ALL", "--security-opt=no-new-privileges=true", "--pids-limit=32",
-                     "--memory=256m", "--memory-swap=256m", "--cpus=1", "--log-driver=none"):
+                     "--cap-drop=ALL", "--security-opt=no-new-privileges=true", "--log-driver=none"):
             self.assertIn(flag, create)
+        # Catches a resource cap of Beanest's own on the program (processes, memory, CPU, files, disk).
+        self.assertFalse(any(arg.startswith(("--pids-limit", "--memory", "--cpus", "--ulimit")) or "size=" in arg
+                             for arg in create))
+        self.assertNotIn("RLIMIT_FSIZE", create[-1])
         self.assertFalse(any(arg.startswith(("--volume", "--mount", "--privileged", "--env")) for arg in create))
         self.assertNotIn("seccomp=unconfined", " ".join(create))
         start = next(kwargs for args, kwargs in self.runner.calls if args[0] == "start")

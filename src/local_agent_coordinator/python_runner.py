@@ -26,7 +26,6 @@ from urllib.parse import urlsplit
 
 # How much of a run's stdout+stderr the result carries. Past it the run keeps
 # going to its real end; only the extra text is left out and marked truncated.
-MAX_OUTPUT = 32 * 1024
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
 _DIGEST = re.compile(r"docker\.io/library/python@sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -67,7 +66,6 @@ try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
     machine = platform.machine().lower()
     if machine == "aarch64":
         arch = 0xc00000b7
@@ -201,6 +199,9 @@ async def _exec(command, *, data=None, timeout=8, limit=8192, keep_running=False
     async def read(name):
         nonlocal dropped
         while chunk := await getattr(process, name).read(4096):
+            if limit is None:
+                output[name].extend(chunk)
+                continue
             capacity = max(0, limit - sum(map(len, output.values())))
             output[name].extend(chunk[:capacity])
             if len(chunk) > capacity:
@@ -505,13 +506,14 @@ class PythonRunner:
             return {"cleanup_confirmed": False,
                     "reason": error.code if isinstance(error, _RunnerError) else "invalid_configuration"}
 
-    async def run(self, snapshot: dict, timeout=15, *, run_id=None):
+    async def run(self, snapshot: dict, timeout=None, *, run_id=None):
         result = {"status": "failed", "reason": None, "exit_code": None, "stdout": "", "stderr": "",
                   "truncated": False, "cleanup_confirmed": True, "tests_trusted": False}
         try:
             data = _snapshot(snapshot)
-            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                    or not math.isfinite(timeout) or not 0 < timeout <= 60):
+            # None: the run has no timer of Beanest's own; only a deadline the user set applies.
+            if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                    or not math.isfinite(timeout) or timeout <= 0):
                 raise _RunnerError("invalid_timeout")
             run_id = str(uuid4()) if run_id is None else run_id
             if not isinstance(run_id, str) or str(UUID(run_id)) != run_id:
@@ -538,10 +540,11 @@ class PythonRunner:
                         "create", "--pull=never", "--interactive", "--name", record["name"],
                         "--label", _LABEL + "=" + run_id, "--network=none", "--read-only",
                         "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges=true",
-                        "--pids-limit=32", "--memory=256m", "--memory-swap=256m", "--cpus=1",
-                        "--ulimit=nofile=64:64", "--ulimit=fsize=1048576:1048576", "--log-driver=none",
-                        "--tmpfs=/work:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=65534,gid=65534",
-                        "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=65534,gid=65534",
+                        # Isolation stays (no network, read-only image, no privileges);
+                        # no memory, process, file-size or disk cap of Beanest's own.
+                        "--log-driver=none",
+                        "--tmpfs=/work:rw,noexec,nosuid,nodev,mode=0700,uid=65534,gid=65534",
+                        "--tmpfs=/tmp:rw,noexec,nosuid,nodev,mode=0700,uid=65534,gid=65534",
                         "--workdir=/work", settings["image_digest"], "python", "-I", "-S", "-B", "-u", "-c", BOOTSTRAP,
                     ], timeout=15)
                     container_id = created["stdout"].strip()
@@ -553,7 +556,7 @@ class PythonRunner:
                         record["phase"] = "running"
                         self._save(record)
                         execution = await self._command(settings, ["start", "--attach", "--interactive", container_id],
-                                                        data=data, timeout=timeout, limit=MAX_OUTPUT,
+                                                        data=data, timeout=timeout, limit=None,
                                                         keep_running=True)
                         result.update(stdout=execution["stdout"], stderr=execution["stderr"],
                                       truncated=execution["truncated"])

@@ -480,6 +480,13 @@ class ProjectWorkspaceTests(unittest.TestCase):
         manifest = json.loads((self.root / self.room / "manifest.json").read_text())
         self.assertEqual(manifest["commits"][1]["proposal_id"], "python-import:" + source_room)
 
+    def test_python_seed_accepts_a_room_of_any_size(self):
+        # Catches an owner cap of Beanest's own (it was 8): rooms now hold any number of members.
+        source_room, snapshot = self.python_seed()
+        owners = ["claude", "codex"] + ["p" + str(n) for n in range(10)]
+        seeded = self.workspace.seed_python(snapshot, source_room_id=source_room, allowed_owners=owners)
+        self.assertEqual(seeded["revision"], 1)
+
     def test_python_seed_rejects_invalid_source_schema_and_owner_allowlist_before_writing(self):
         source_room, snapshot = self.python_seed()
         invalid_sources = [None, uuid4(), self.room, "not-a-uuid",
@@ -488,8 +495,7 @@ class ProjectWorkspaceTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertCode("invalid_project_request", lambda: self.workspace.seed_python(
                     snapshot, source_room_id=source, allowed_owners=["claude", "codex"]))
-        for owners in ([], "claude", ["claude", "claude"], ["service"], [["claude"]],
-                       ["p" + str(n) for n in range(9)]):
+        for owners in ([], "claude", ["claude", "claude"], ["service"], [["claude"]]):
             with self.subTest(owners=owners):
                 self.assertCode("invalid_project_request", lambda: self.workspace.seed_python(
                     snapshot, source_room_id=source_room, allowed_owners=owners))

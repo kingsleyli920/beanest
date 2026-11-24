@@ -5686,10 +5686,9 @@ class RoomService(RoomPromptMixin):
             reason = "runner_reported_failure"
         return {"status": result["status"],
                 "exit_code": result.get("exit_code") if type(result.get("exit_code")) is int else None,
-                "stdout": _visible(result.get("stdout", "")[:8000]) if isinstance(result.get("stdout", ""), str) else "",
-                "stderr": _visible(result.get("stderr", "")[:8000]) if isinstance(result.get("stderr", ""), str) else "",
-                "truncated": result.get("truncated") is True or any(
-                    isinstance(result.get(key), str) and len(result[key]) > 8000 for key in ("stdout", "stderr")),
+                "stdout": _visible(result.get("stdout", "")) if isinstance(result.get("stdout", ""), str) else "",
+                "stderr": _visible(result.get("stderr", "")) if isinstance(result.get("stderr", ""), str) else "",
+                "truncated": result.get("truncated") is True,
                 "cleanup_confirmed": result.get("cleanup_confirmed") is True,
                 "reason": reason,
                 "report_trust": "untrusted"}
@@ -5702,8 +5701,9 @@ class RoomService(RoomPromptMixin):
                 if not self.store.claim_execution(run_id):
                     return
                 remaining = seconds_available(reservation["deadline"], self.clock())
-                timeout = min(15, remaining) if remaining is not None else 15
-                if timeout <= 0:
+                # No timer of Beanest's own; only the user's deadline applies.
+                timeout = remaining
+                if timeout is not None and timeout <= 0:
                     result = {"status": "timed_out", "reason": "deadline_exceeded", "cleanup_confirmed": True}
                 else:
                     invoked = True

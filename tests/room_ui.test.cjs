@@ -12338,23 +12338,24 @@ test('a partner working on several tasks at once stays one row that says how man
 
 test('how many tasks a partner may work on at once is set on its account card, and only where the tool can', async () => {
   // Catches: the limit never reaching the server or sent as text, the control offered for a tool the host
-  // runs through the user's own command, or a choice outside 1 to 8.
+  // runs through the user's own command, or an upper bound of Beanest's own (it was 8).
   const saved = snapshot({ agents: catalog.slice(0, 2) });
   const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, parallel_limit: 3, account: claudeUsageAccount([]) },
     { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, parallel_limit: 1, connection_state: 'configured' }];
   const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
-    route(request) { if (request.path === '/api/partners/claude/parallel-limit') return { partners: [{ ...partners[0], parallel_limit: 6 }, partners[1]], supported_adapters: [] }; } });
+    route(request) { if (request.path === '/api/partners/claude/parallel-limit') return { partners: [{ ...partners[0], parallel_limit: request.body.limit }, partners[1]], supported_adapters: [] }; } });
   const control = (id) => descendants(ui.get(`provider-account-${id}`)).find((node) => node.dataset?.focusKey === 'account-parallel');
   const select = control('claude');
   assert.equal(select.value, '3');
-  assert.deepEqual(select.children.map((option) => [option.value, option.textContent]),
-    [['1', '1 项（不同时做）'], ['2', '2 项'], ['3', '3 项'], ['4', '4 项'], ['5', '5 项'], ['6', '6 项'], ['7', '7 项'], ['8', '8 项']]);
+  assert.equal(select.type, 'number'); assert.equal(select.min, '1'); assert.equal(select.max, undefined);
   assert.equal(select.getAttribute('aria-label'), 'Claude Code最多同时做几项任务');
   assert.equal(control('codex') === undefined, true, 'a tool reached through the user\'s own command keeps to one task');
-  select.value = '6'; select.fire('change'); await settle();
+  for (const bad of ['0', '2.5', '']) { control('claude').value = bad; control('claude').fire('change'); await settle(); }
+  assert.equal(control('claude').value, '3', 'a value that is not a whole number from 1 up goes back, unsent');
+  control('claude').value = '12'; control('claude').fire('change'); await settle();
   assert.deepEqual(ui.posts().filter((post) => post.path.endsWith('/parallel-limit')).map((post) => [post.path, post.body]),
-    [['/api/partners/claude/parallel-limit', { limit: 6 }]]);
-  assert.equal(control('claude').value, '6');
+    [['/api/partners/claude/parallel-limit', { limit: 12 }]]);
+  assert.equal(control('claude').value, '12');
 });
 
 // Catches a row action that hides for everyone: it may disappear only where a pointer can hover, and
