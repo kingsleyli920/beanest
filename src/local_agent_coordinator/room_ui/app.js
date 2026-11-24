@@ -3421,12 +3421,15 @@ function broadFolderWarning(path) {
   if (/^\/(?:Users|home|Volumes\/[^/]+)?$/.test(clean)) return t("这是整块磁盘或系统文件夹，范围太大。建议只选项目所在的文件夹。确定要登记，就再点一次“添加项目”。");
   return '';
 }
+// A native room shares the same folder copy, so its limits are folder limits,
+// not the 12-file selection that a small file project allows.
+function folderLimits(mode) { return mode === 'project_folder' || mode === 'native_project'; }
 function projectLimitMessage(folder) {
   return folder ? t("项目或这批修改超过本机处理上限；未保存这批修改，已有成果保留。") : errorLabels.project_limit_exceeded;
 }
 
 function executionMessage(code) {
-  if (code === 'project_limit_exceeded' && state.snapshot?.room.mode === 'project_folder') return projectLimitMessage(true);
+  if (code === 'project_limit_exceeded' && folderLimits(state.snapshot?.room.mode)) return projectLimitMessage(true);
   return Object.hasOwn(executionLabels, code) ? executionLabels[code] : Object.hasOwn(errorLabels, code) ? errorLabels[code] : t("本轮结果需要核对。");
 }
 
@@ -3501,7 +3504,7 @@ async function api(path, method = 'GET', body) {
     if (!response.ok || result.error) {
       const code = typeof result.error === 'string' ? result.error : '';
       const folder = path === workspaceApi.projects ? body?.selection_kind === 'folder'
-        : (body?.mode || state.snapshot?.room.mode || state.mode) === 'project_folder';
+        : folderLimits(body?.mode || state.snapshot?.room.mode || state.mode);
       const message = code === 'project_limit_exceeded' ? projectLimitMessage(folder)
         // Registering a folder that is missing or unreadable is about the folder, not "selected files".
         : code === 'project_file_unavailable' && path === workspaceApi.projects && body?.selection_kind === 'folder' ? t("找不到这个文件夹，或者没有权限读取。请核对路径。")

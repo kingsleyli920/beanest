@@ -40,6 +40,9 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_CHANGE_BYTES = 256 * 1024 * 1024
 # A real task on a large project changes dozens of files, and a long room adds
 # up over many rounds; these bounds only stop a runaway, never ordinary work.
+# Every snapshot holds the text of each changed file, so only text counts toward
+# the room-long total. Binary files (recordings, screenshots, builds) are never
+# loaded with a snapshot; a long room's evidence must not stop its partners.
 MAX_CHANGED_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_CHANGE_FILES = 1000
 MAX_INDEX_BYTES = 512 * 1024 * 1024
@@ -59,6 +62,10 @@ _EXCLUDED_DIRS = frozenset({
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # (index sha256, revision) pairs whose decoded bytes passed every check.
 _VALIDATED_INDEXES = set()
+
+
+def _changed_text_bytes(files):
+    return sum(item["bytes"] for item in files if item["changed"] and item["text"])
 
 
 def _path(value, *, root=False):
@@ -219,7 +226,7 @@ class FolderWorkspace(ProjectWorkspace):
             total += item["bytes"]
             seen.add(item["path"].casefold())
         if (total > MAX_SOURCE_BYTES
-                or sum(item["bytes"] for item in value["files"] if item["changed"]) > MAX_CHANGED_TOTAL_BYTES):
+                or _changed_text_bytes(value["files"]) > MAX_CHANGED_TOTAL_BYTES):
             raise ProjectWorkspaceError("project_storage_corrupt")
         # Captured source files a proposal removed. Only written when nonempty,
         # so indexes and digests without deletions are byte-for-byte unchanged.
@@ -1210,7 +1217,7 @@ class FolderWorkspace(ProjectWorkspace):
                 deleted.pop(path, None)
             if len(merged) > MAX_SOURCE_FILES or sum(item["bytes"] for item in merged.values()) > MAX_SOURCE_BYTES:
                 raise ProjectWorkspaceError("project_limit_exceeded")
-            if sum(item["bytes"] for item in merged.values() if item["changed"]) > MAX_CHANGED_TOTAL_BYTES:
+            if _changed_text_bytes(merged.values()) > MAX_CHANGED_TOTAL_BYTES:
                 raise ProjectWorkspaceError("project_limit_exceeded")
             blobs = _open_directory("blobs", parent=room)
             try:

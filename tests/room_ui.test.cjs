@@ -4998,6 +4998,14 @@ test('native read-only permissions describe provider-specific read commands with
   assert.match(ui.get('scope-description').textContent, /暂不运行项目、安装依赖或自动合入/); assert.equal(ui.posts().length, 0);
 });
 
+test('a native room stopped by a size limit is told about folder limits, not the 12-file selection', async () => {
+  // The 九烛 room showed "最多 12 个，每个 16 KiB" while its real limit was the shared folder copy.
+  const saved = restartSnapshot(); saved.room.mode = 'native_project'; saved.objective.stop_reason = 'project_limit_exceeded';
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true });
+  assert.match(ui.get('collaboration-outcome').textContent, /项目或这批修改超过本机处理上限/);
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /12 个|16 KiB|48 KiB/);
+});
+
 test('native progress safeguards and unsupported participants display concrete reasons instead of raw error codes', async () => {
   const saved = restartSnapshot(); saved.room.mode = 'native_project'; saved.objective.stop_reason = 'native_no_progress';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true });

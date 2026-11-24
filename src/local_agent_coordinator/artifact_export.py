@@ -8,12 +8,15 @@ import json
 import zipfile
 
 from .project_catalog import ProjectCatalogError, validate_text_path
-from .folder_workspace import FORMAT as FOLDER_FORMAT, MAX_CHANGED_TOTAL_BYTES, MAX_SOURCE_FILES, validate_folder_path
+from .folder_workspace import FORMAT as FOLDER_FORMAT, MAX_SOURCE_FILES, validate_folder_path
 from .project_workspace import ProjectWorkspaceError
 
 
 MAX_FILES = 16
 MAX_BYTES = 64 * 1024
+# The archive is built in memory from every changed file, binary ones included.
+# Only this download is bounded; partners keep submitting past it.
+MAX_FOLDER_EXPORT_BYTES = 1024 * 1024 * 1024
 MANIFEST_NAME = ".beanest-export.json"
 
 
@@ -38,7 +41,7 @@ def export_project(project: dict, *, expected_revision: int, binaries=None) -> d
         raise ArtifactExportError("project_revision_conflict")
     files = project.get("files")
     folder = project.get("format") == FOLDER_FORMAT
-    file_limit, byte_limit = (MAX_SOURCE_FILES, MAX_CHANGED_TOTAL_BYTES) if folder else (MAX_FILES, MAX_BYTES)
+    file_limit, byte_limit = (MAX_SOURCE_FILES, MAX_FOLDER_EXPORT_BYTES) if folder else (MAX_FILES, MAX_BYTES)
     deleted = project.get("deleted_files", []) if folder else []
     if (not isinstance(files, list) or not isinstance(deleted, list)
             or not 1 <= len(files) + len(deleted) or len(files) > file_limit):

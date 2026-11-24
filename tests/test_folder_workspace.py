@@ -341,6 +341,34 @@ class FolderWorkspaceTests(unittest.TestCase):
                 [{"path": "new.txt", "previous_sha256": None, "content": "four"}]))
         self.assertEqual(self.workspace.snapshot(), {key: value for key, value in changed.items() if key != "replayed"})
 
+    def test_a_long_rooms_binary_evidence_never_stops_further_work(self):
+        # The 九烛 room stopped for good once 245 MiB of recordings, screenshots
+        # and reports had been submitted over a week: every later result was
+        # refused and auto-continue resubmitted it forever. Binary files are not
+        # held in a snapshot, so only changed text counts toward the room total.
+        import base64
+        from local_agent_coordinator import artifact_export
+        (self.source / "readme.txt").write_text("hello\n")
+        seed = self.seed()
+        clip = bytes(range(256)) * 64  # 16 KiB of binary evidence
+        with patch("local_agent_coordinator.folder_workspace.MAX_CHANGED_TOTAL_BYTES", 1024):
+            recorded = self.workspace.apply("codex", "clip", seed["revision"], [
+                {"path": "artifacts/clip.mp4", "previous_sha256": None, "content_base64": base64.b64encode(clip).decode()}])
+            later = self.workspace.apply("codex", "report", recorded["revision"],
+                                         [{"path": "artifacts/report.txt", "previous_sha256": None, "content": "done\n"}])
+            reopened = FolderWorkspace(self.root, self.room_id)
+            self.assertEqual(reopened.snapshot()["revision"], later["revision"], "a stored room past the old total still opens")
+            self.assertCode("project_limit_exceeded", lambda: self.workspace.apply("codex", "text", later["revision"],
+                [{"path": "notes.txt", "previous_sha256": None, "content": "x" * 2048}]))
+        current = self.workspace.snapshot()
+        binaries = self.workspace.raw_files_for_paths(["artifacts/clip.mp4"], revision=current["revision"])
+        self.assertEqual(artifact_export.export_project(current, expected_revision=current["revision"], binaries=binaries)["revision"],
+                         current["revision"])
+        with patch.object(artifact_export, "MAX_FOLDER_EXPORT_BYTES", len(clip)):
+            with self.assertRaises(artifact_export.ArtifactExportError) as caught:
+                artifact_export.export_project(current, expected_revision=current["revision"], binaries=binaries)
+            self.assertEqual(caught.exception.code, "project_limit_exceeded", "only the in-memory download is bounded")
+
     def test_export_manifest_root_name_is_readable_in_baseline_but_cannot_be_modified_or_created(self):
         (self.source / ".beanest-export.json").write_text("baseline manifest")
         seed = self.seed()
