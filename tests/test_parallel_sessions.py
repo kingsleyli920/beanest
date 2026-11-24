@@ -330,14 +330,14 @@ class Folding(unittest.TestCase):
                  "tasks": [{"id": "T5", "owner": "claude~x2", "reviewer": "codex"}],
                  "retired": {"claude~x3": {"reason": "agent_quota_exhausted"}, "codex": {"reason": "x"}},
                  "holders": ["codex", "claude~x2", "claude~x3"], "both": ["claude", "claude~x2"],
-                 "text": "T5 (owner claude~x2, now working on T9) and HEAD~2, main~x9, a~x2b",
+                 "text": "T5 (owner claude~x2, now working on T9) and HEAD~2, main~x01, a~x2b",
                  "parallel_sessions": [{"id": "claude~x2"}]}
         self.assertEqual(parallel_sessions.fold(value), {
             "members": [{"id": "claude", "name": "Claude Code"}],
             "tasks": [{"id": "T5", "owner": "claude", "reviewer": "codex"}],
             "retired": {"codex": {"reason": "x"}},
             "holders": ["codex", "claude"], "both": ["claude"],
-            "text": "T5 (owner claude, now working on T9) and HEAD~2, main~x9, a~x2b"})
+            "text": "T5 (owner claude, now working on T9) and HEAD~2, main~x01, a~x2b"})
 
     def test_every_http_response_is_folded_before_it_is_sent(self):
         # Catches the one place every response leaves through sending a session's id to the page or a client.
@@ -369,13 +369,16 @@ class Folding(unittest.TestCase):
             {"kind": "task_taken", "sender": "system", "provider": "claude", "parallel_session": 3}]})
 
     def test_ids(self):
-        # Catches a session number outside the limit being minted, or a partner id read as a session.
-        self.assertEqual((parallel_sessions.lane_id("claude", 1), parallel_sessions.lane_id("claude", 8)), ("claude", "claude~x8"))
-        self.assertRaises(ValueError, parallel_sessions.lane_id, "claude", 9)
-        self.assertEqual([parallel_sessions.partner_of(value) for value in ("claude~x2", "claude", "claude~x9", "claude-x2", None)],
-                         ["claude", "claude", "claude~x9", "claude-x2", None])
-        self.assertEqual([parallel_sessions.is_lane(value) for value in ("claude~x2", "claude", "claude~x1", "Claude~x2")],
-                         [True, False, False, False])
+        # Catches an upper bound on session numbers (it was 8), a session 0, or a partner id read as a session.
+        self.assertEqual((parallel_sessions.lane_id("claude", 1), parallel_sessions.lane_id("claude", 8),
+                          parallel_sessions.lane_id("claude", 12)), ("claude", "claude~x8", "claude~x12"))
+        self.assertRaises(ValueError, parallel_sessions.lane_id, "claude", 0)
+        self.assertEqual([parallel_sessions.partner_of(value) for value in ("claude~x2", "claude", "claude~x9", "claude~x12", "claude~x01", "claude-x2", None)],
+                         ["claude", "claude", "claude", "claude", "claude~x01", "claude-x2", None])
+        self.assertEqual([parallel_sessions.lane_number(value) for value in ("claude~x12", "claude~x100")], [12, 100])
+        self.assertEqual(parallel_sessions.fold_text("claude~x12 said hi"), "claude said hi")
+        self.assertEqual([parallel_sessions.is_lane(value) for value in ("claude~x2", "claude", "claude~x1", "Claude~x2", "claude~x0")],
+                         [True, False, False, False, False])
 
 
 async def _unused(*_args, **_kwargs):
@@ -398,9 +401,11 @@ class PartnerLimit(unittest.TestCase):
         self.assertEqual(reloaded.set_parallel_limit("claude", 1)["parallel_limit"], 1)
         self.assertEqual(json.loads((self.root / "profiles.json").read_text())["profiles"][0]["parallel_limit"], 1)
 
-    def test_only_one_to_eight_is_accepted(self):
-        # Catches a limit that would start no session at all, more than the host can name, or a non-number.
-        for value in (0, 9, -1, "3", 3.0, True, None):
+    def test_any_whole_number_from_one_up_is_accepted(self):
+        # Catches a limit that would start no session at all, a non-number, or an upper bound of Beanest's own (it was 8).
+        self.assertEqual(self.manager.set_parallel_limit("claude", 20)["parallel_limit"], 20)
+        self.assertEqual(self.manager.set_parallel_limit("claude", 3)["parallel_limit"], 3)
+        for value in (0, -1, "3", 3.0, True, None):
             with self.subTest(value=value), self.assertRaisesRegex(PartnerError, "invalid_parallel_limit"):
                 self.manager.set_parallel_limit("claude", value)
         self.assertEqual(self.manager.parallel_limits()["claude"], 3)
@@ -434,7 +439,9 @@ class PartnerLimitHTTP(unittest.TestCase):
         code, value = fixture.request("POST", "/api/partners/kimi/parallel-limit", {"limit": 5})
         self.assertEqual(code, 200)
         self.assertEqual(next(item for item in value["partners"] if item["id"] == "kimi")["parallel_limit"], 5)
-        for body in ({"limit": 0}, {"limit": 9}, {"limit": "5"}, {}, {"limit": 2, "level": "high"}):
+        self.assertEqual(fixture.request("POST", "/api/partners/kimi/parallel-limit", {"limit": 9})[0], 200)
+        self.assertEqual(fixture.request("POST", "/api/partners/kimi/parallel-limit", {"limit": 5})[0], 200)
+        for body in ({"limit": 0}, {"limit": "5"}, {}, {"limit": 2, "level": "high"}):
             with self.subTest(body=body):
                 self.assertEqual(fixture.request("POST", "/api/partners/kimi/parallel-limit", body)[0], 400)
         self.assertEqual(fixture.request("POST", "/api/partners/absent/parallel-limit", {"limit": 2})[0], 404)

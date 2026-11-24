@@ -49,8 +49,9 @@ test('only the active top-level local renderer may open a chooser', () => {
   assert.equal(trustedProjectSender(event, null, url), false);
 });
 
-test('choosing directory and 1..12 explicit files returns metadata without reading or listing files', async (t) => {
-  const { directory, files } = await filesFixture(t, 12);
+// Catches the picker refusing a real selection of more than 12 files (Beanest sets no file-count limit).
+test('choosing directory and 40 explicit files returns metadata without reading or listing files', async (t) => {
+  const { directory, files } = await filesFixture(t, 40);
   const dialog = dialogs(directory, files);
   t.mock.method(fs, 'readFile', () => { throw new Error('picker must not read content'); });
   t.mock.method(fs, 'readdir', () => { throw new Error('picker must not scan directories'); });
@@ -73,8 +74,8 @@ test('cancelling either dialog returns only cancelled without a selection', asyn
   assert.equal(second.calls.length, 2);
 });
 
-test('rejects outside, duplicate, unsafe, empty and oversized selections', async (t) => {
-  const { parent, directory, files } = await filesFixture(t, 13);
+test('rejects outside, duplicate, unsafe and empty selections', async (t) => {
+  const { parent, directory, files } = await filesFixture(t);
   const outside = path.join(parent, 'outside.js');
   await fs.writeFile(outside, 'outside');
   const cases = [
@@ -82,7 +83,6 @@ test('rejects outside, duplicate, unsafe, empty and oversized selections', async
     [[files[0], files[0]], 'invalid_project_selection'],
     [[path.join(directory, '.env')], 'project_selection_unsafe_path'],
     [[], 'invalid_project_selection'],
-    [files, 'invalid_project_selection'],
   ];
   for (const [selection, code] of cases) {
     await assert.rejects(chooseProjectFiles(dialogs(directory, selection), {}, () => true), { message: code });

@@ -156,7 +156,9 @@ class ACPConnection:
     async def _read(self):
         failure = "native_protocol_invalid"
         try:
-            while raw := await self.process.stdout.readline():
+            # A line of any length is read whole; readline() would fail past
+            # the stream's buffer limit and end the call.
+            async for raw in adapters.read_lines(self.process.stdout):
                 row = adapters._strict_json(raw)
                 if not isinstance(row, dict) or row.get("jsonrpc") != "2.0":
                     raise ACPError(failure)
@@ -265,7 +267,7 @@ async def start(cwd, *, on_update=None, permission="plan", progress_file=None, s
     process = await asyncio.create_subprocess_exec(
         *prefix, adapters.find_kimi(), "acp", cwd=cwd, env=environment,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=adapters.MAX_OUTPUT + 1)
+        stderr=asyncio.subprocess.PIPE, start_new_session=True)
     connection = ACPConnection(process, on_update=on_update, permission=permission, sandboxed=sandboxed)
     return process, connection
 
@@ -348,8 +350,8 @@ def completed_turn(path, initial):
             raise ACPError("native_turn_unconfirmed")
         stream.seek(offset)
         started, ended, prompts = [], [], 0
-        while raw := stream.readline(adapters.MAX_OUTPUT + 1):
-            if len(raw) > adapters.MAX_OUTPUT or not raw.endswith(b"\n"):
+        while raw := stream.readline():
+            if not raw.endswith(b"\n"):
                 raise ACPError("native_turn_unconfirmed")
             row = adapters._strict_json(raw)
             if not isinstance(row, dict):
@@ -391,8 +393,8 @@ def failed_turn_diagnostic(path, initial):
                 return None
             stream.seek(offset)
             prompts, ends, compacting = 0, [], False
-            while raw := stream.readline(adapters.MAX_OUTPUT + 1):
-                if len(raw) > adapters.MAX_OUTPUT or not raw.endswith(b"\n"):
+            while raw := stream.readline():
+                if not raw.endswith(b"\n"):
                     return None
                 row = adapters._strict_json(raw)
                 if not isinstance(row, dict):
@@ -455,8 +457,8 @@ def turn_usage(path, initial):
                 return None
             stream.seek(offset)
             sources = ([], {}, {})
-            while raw := stream.readline(adapters.MAX_OUTPUT + 1):
-                if len(raw) > adapters.MAX_OUTPUT or not raw.endswith(b"\n"):
+            while raw := stream.readline():
+                if not raw.endswith(b"\n"):
                     return None
                 row = adapters._strict_json(raw)
                 if not isinstance(row, dict):
@@ -578,7 +580,7 @@ def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, mod
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024 * 1024:
+        if not stat.S_ISREG(info.st_mode):
             return None
         offset, prompts, failed, request, started = None, 0, None, None, False
         turn, prompt_sha256, started_turns = None, None, []
@@ -586,10 +588,10 @@ def _failed_turn_recovery_proof(cwd, session_id, *, claimed_at, finished_at, mod
         digest = hashlib.sha256()
         while True:
             position = stream.tell()
-            raw = stream.readline(adapters.MAX_OUTPUT + 1)
+            raw = stream.readline()
             if not raw:
                 break
-            if len(raw) > adapters.MAX_OUTPUT or not raw.endswith(b"\n"):
+            if not raw.endswith(b"\n"):
                 return None
             try:
                 row = adapters._strict_json(raw)
@@ -731,8 +733,7 @@ class TurnUpdates:
             question = params.get("question", "Kimi Code 请求确认一项原生操作。")
             options = params.get("options", [])
             text = question + ("\n" + " / ".join(options) if options else "")
-            if len(text.encode("utf-8")) <= adapters.MAX_TEXT:
-                self.question = text
+            self.question = text
             return
         if not self.active:
             return  # session/load's replay is not a new tool invocation.
@@ -800,8 +801,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
                         response_schema=None, runtime_settings=None, on_activity=None,
                         receipt_dir=None, progress_file=None, sandbox=False, on_process=None):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
-    from .message_capacity import MAX_PROMPT_BYTES
-    if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
+    if (not isinstance(prompt, str) or not prompt
             or not isinstance(permission, str) or permission not in {"plan", "full_access", "read_only", "workspace_write"}):
         raise ValueError("invalid_prompt")
     if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
@@ -829,8 +829,6 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         if len(schema.encode("utf-8")) > 64 * 1024:
             raise ValueError("invalid_response_schema")
         prompt += "\nReturn your final answer as one JSON object matching this schema, without Markdown fences:\n" + schema
-    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-        raise ValueError("invalid_prompt")
     process, connection, owned = None, None, {}
     updates = TurnUpdates(on_activity)
     result = {"session_id": session_id, "text": "", "status": "failed", "usage": None, "events": []}

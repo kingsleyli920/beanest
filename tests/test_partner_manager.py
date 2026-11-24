@@ -119,6 +119,14 @@ class PartnerManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(PartnerError, 'invalid_partner_storage'):
             self.manager.registry()
 
+    def test_three_hundred_registered_partners_are_kept_and_reload(self):
+        # Catches the old MAX_PROFILES = 256 cap (partner_limit_reached).
+        for index in range(300):
+            self.manager.add(id=f'bean_{index:03d}', name=f'豆豆 {index:03d}', adapter='codex')
+        restored = PartnerManager(self.root, self.base)
+        identifiers = {item['id'] for item in restored.profiles()}
+        self.assertTrue({'bean_000', 'bean_255', 'bean_256', 'bean_299'} <= identifiers)
+
     def test_separate_instances_merge_locked_updates(self):
         other = PartnerManager(self.root, self.base)
         self.manager.add(id='bean', name='Bean', adapter='claude')

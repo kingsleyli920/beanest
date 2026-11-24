@@ -46,7 +46,6 @@ def remove_progress_file(path):
 # host appends, the partner reads between steps. It sits beside the progress
 # file, so every tool that can reach one can reach the other.
 INBOX_SUFFIX = ".inbox"
-MAX_INBOX_ENTRY_CHARACTERS = 4000
 
 
 def inbox_path(progress_path):
@@ -54,14 +53,20 @@ def inbox_path(progress_path):
 
 
 def append_inbox(progress_path, heading, text):
-    """Append one entry for the running call to read; False when it could not be written."""
-    entry = f"## {_display_text(heading)}\n{text.strip()[:MAX_INBOX_ENTRY_CHARACTERS]}\n\n"
+    """Append one whole entry for the running call to read; False when it could not be written.
+
+    The entry is never cut: the call marks what it read as delivered, so a cut
+    would drop the rest of the user's words without anyone knowing.
+    """
+    entry = f"## {_display_text(heading)}\n{text.strip()}\n\n"
     try:
         descriptor = os.open(inbox_path(progress_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     except OSError:
         return False
     try:
-        os.write(descriptor, entry.encode("utf-8"))
+        data = entry.encode("utf-8")
+        while data:  # one write() may take only part of a long entry
+            data = data[os.write(descriptor, data):]
         return True
     except OSError:
         return False

@@ -67,7 +67,7 @@ class RoomStoreTests(unittest.TestCase):
 
     def test_obsolete_queue_budget_does_not_block_new_user_or_peer_work(self):
         self.store.close()
-        self.store = RoomStore(self.path, max_calls=2, clock=lambda: self.now)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         room_id = self.room("both")
         self.assertTrue(self.store.send_message(room_id, "More", "claude", "extra"))
         self.assertEqual(len(self.store.snapshot(room_id)["jobs"]), 3)
@@ -139,7 +139,7 @@ class RoomStoreTests(unittest.TestCase):
 
     def test_same_target_request_and_feedback_are_not_blocked_by_obsolete_slots(self):
         self.store.close()
-        self.store = RoomStore(self.path, max_calls=3, clock=lambda: self.now)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         room_id, _author, reviewer = self.review_chain()
         self.store.finish_job(reviewer["id"], message="Found an issue",
                               action={"to": "claude", "kind": "help", "text": "Fix this specific issue"})
@@ -161,7 +161,7 @@ class RoomStoreTests(unittest.TestCase):
 
     def test_obsolete_two_call_cap_does_not_drop_an_answer_or_review_request(self):
         self.store.close()
-        self.store = RoomStore(self.path, max_calls=2, clock=lambda: self.now)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         for action in (None, {"to": "claude", "kind": "review", "text": "Review my new tests"}):
             with self.subTest(action=action):
                 room_id, _author, reviewer = self.review_chain()
@@ -177,7 +177,7 @@ class RoomStoreTests(unittest.TestCase):
 
     def test_return_does_not_override_requester_already_queued_or_working(self):
         self.store.close()
-        self.store = RoomStore(self.path, max_calls=3, clock=lambda: self.now)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         for status in ("queued", "working"):
             with self.subTest(status=status):
                 room_id, _author, reviewer = self.review_chain()

@@ -31,8 +31,6 @@ from .native_setup import NATIVE_ADAPTERS, NativeInstall, NativeLogin, native_ad
 TRUSTED_ADAPTERS = {item.id: item.provider for item in NATIVE_ADAPTERS}
 CONNECTOR_TEMPLATES = (("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("local_json", "兼容本机 CLI"))
 CONNECTOR_ADAPTERS = frozenset(item[0] for item in CONNECTOR_TEMPLATES)
-MAX_PROFILES = 256
-MAX_CONFIG_BYTES = 1024 * 1024
 _DEFAULT_BEAN_STYLE = object()
 _DEFAULT_CONNECTION = object()
 
@@ -339,7 +337,7 @@ class PartnerManager:
             raise PartnerError("unsafe_partner_storage") from None
         try:
             info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CONFIG_BYTES or info.st_mode & 0o077:
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
                 raise PartnerError("unsafe_partner_storage")
             with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
                 descriptor = -1
@@ -371,7 +369,6 @@ class PartnerManager:
             if (not isinstance(data, dict) or set(data) != {"schema", "profiles", "checks", "ignored_builtin_ids", "retired_profile_ids"}
                     or type(data["schema"]) is not int or data["schema"] != 1
                     or not isinstance(data["profiles"], list)
-                    or not 0 <= len(data["profiles"]) <= MAX_PROFILES
                     or not isinstance(data["checks"], dict)):
                 raise ValueError
             ignored, retired = data["ignored_builtin_ids"], data["retired_profile_ids"]
@@ -387,7 +384,7 @@ class PartnerManager:
                                                                   _PROFILE_KEYS | {"api_model"})
                         or item.get("workload_level", workload.DEFAULT_LEVEL) not in workload.LEVELS
                         or type(item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT)) is not int
-                        or not parallel_sessions.MIN_LIMIT <= item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT) <= parallel_sessions.MAX_LIMIT
+                        or item.get("parallel_limit", parallel_sessions.DEFAULT_LIMIT) < parallel_sessions.MIN_LIMIT
                         or not safe_agent_id(item["id"]) or item["id"] in seen
                         or not isinstance(item["bean_style"], str) or item["bean_style"] not in BEAN_STYLE_IDS
                         or not isinstance(item["lifecycle_state"], str)
@@ -980,8 +977,6 @@ class PartnerManager:
                     if same:
                         return self._describe(original, data)
                     raise PartnerError("partner_identity_conflict")
-            if len(data["profiles"]) >= MAX_PROFILES:
-                raise PartnerError("partner_limit_reached")
             data["profiles"].append(item)
             self._save(data)
             return self._describe(item, data)
@@ -1019,8 +1014,6 @@ class PartnerManager:
                     if all(original.get(key) == item[key] for key in ("name", "adapter", "avatar", "bean_style", "api_model")):
                         return self._describe(original, data)
                     raise PartnerError("partner_identity_conflict")
-            if len(data["profiles"]) >= MAX_PROFILES:
-                raise PartnerError("partner_limit_reached")
             self._ensure_home(id)
             data["profiles"].append(item)
             self._save(data)
@@ -1086,7 +1079,7 @@ class PartnerManager:
             target = next((item for item in data["profiles"] if item["id"] == partner_id), None)
             if target is None:
                 raise PartnerError("unknown_partner")
-            if self._parallel_limit({**target, "parallel_limit": parallel_sessions.MAX_LIMIT}) == parallel_sessions.MIN_LIMIT:
+            if self._parallel_limit({**target, "parallel_limit": parallel_sessions.MIN_LIMIT + 1}) == parallel_sessions.MIN_LIMIT:
                 raise PartnerError("parallel_sessions_unsupported")
             target["parallel_limit"] = limit
             self._save(data)
@@ -1214,8 +1207,6 @@ class PartnerManager:
             for item in data["profiles"]:
                 if item["id"] == partner_id:
                     return self._describe(item, data)
-            if len(data["profiles"]) >= MAX_PROFILES:
-                raise PartnerError("partner_limit_reached")
             item = next(item for item in self._initial()["profiles"] if item["id"] == partner_id)
             data["profiles"].append(item)
             data["ignored_builtin_ids"] = [identifier for identifier in data["ignored_builtin_ids"] if identifier != partner_id]

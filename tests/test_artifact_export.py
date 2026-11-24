@@ -52,12 +52,22 @@ class ArtifactExportTests(unittest.TestCase):
         with self.assertRaises(ArtifactExportError):
             export_project(source, expected_revision=4)
 
-    def test_empty_duplicate_or_oversized_archive_is_refused(self):
+    def test_empty_or_duplicate_archive_is_refused(self):
         source = fixture()
         for files in ([], [source["files"][0], source["files"][0]]):
             with self.subTest(files=len(files)), self.assertRaises(ArtifactExportError):
                 export_project({**source, "files": files}, expected_revision=4)
-        content = "x" * 65537
-        source["files"][0].update(content=content, sha256=hashlib.sha256(content.encode()).hexdigest())
-        with self.assertRaises(ArtifactExportError):
-            export_project(source, expected_revision=4)
+
+    def test_forty_text_files_of_2_mib_download_in_full(self):
+        # Catches the old 16-file / 64 KiB download cap refusing a large text_artifacts room.
+        source = fixture()
+        files = []
+        for number in range(40):
+            content = "页" * 17476 + "\n"  # 52429 UTF-8 bytes
+            files.append({"path": f"book/chapter{number:02d}.md", "owner": "codex", "content": content,
+                          "sha256": hashlib.sha256(content.encode()).hexdigest()})
+        exported = export_project({**source, "files": files}, expected_revision=4)
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(exported["content_base64"], validate=True))) as archive:
+            names = [name for name in archive.namelist() if not name.endswith(".beanest-export.json")]
+            self.assertEqual(len(names), 40)
+            self.assertEqual(sum(len(archive.read(name)) for name in names), 2097160)

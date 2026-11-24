@@ -6,15 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 
-from local_agent_coordinator import adapters, room_prompts
-from local_agent_coordinator.room_service import RoomError, RoomService
+from local_agent_coordinator import room_prompts
+from local_agent_coordinator.room_service import RoomService
 
 
 class TeamContextBudgetTests(unittest.TestCase):
     def setUp(self):
         # Exercise compaction under an explicitly small input budget. The
         # production prompt budget is independent of the response-size cap.
-        budget = patch.object(room_prompts, 'MAX_PROMPT_BYTES', 128 * 1024)
+        budget = patch.object(room_prompts, 'COMPACT_PROMPT_BYTES', 128 * 1024)
         budget.start()
         self.addCleanup(budget.stop)
         self.deliverable = "交付🙂" * 1000
@@ -87,7 +87,7 @@ class TeamContextBudgetTests(unittest.TestCase):
 
     def test_small_prompt_keeps_existing_context_shape(self):
         prompt = self.prompt()
-        self.assertLess(len(prompt.encode()), adapters.MAX_TEXT)
+        self.assertLess(len(prompt.encode()), 4 * 1024 * 1024)
         context = self.context(prompt)
         self.assertNotIn("context_compaction", context)
         self.assert_authoritative_content(context)
@@ -98,7 +98,7 @@ class TeamContextBudgetTests(unittest.TestCase):
         self.snapshot["runs"] = previous + self.snapshot["runs"]
         original = copy.deepcopy((self.snapshot, self.project))
         prompt = self.prompt()
-        self.assertLess(len(prompt.encode()), adapters.MAX_TEXT)
+        self.assertLess(len(prompt.encode()), 4 * 1024 * 1024)
         context = self.context(prompt)
         # Old goals are bounded before any overflow handling is needed.
         self.assertNotIn("context_compaction", context)
@@ -128,7 +128,7 @@ class TeamContextBudgetTests(unittest.TestCase):
         self.snapshot["events"] = [{"kind": "message", "sender": "claude", "text": "🙂" * 1500} for _ in range(12)]
         original = copy.deepcopy(self.snapshot)
         prompt = self.prompt()
-        self.assertLess(len(prompt.encode()), adapters.MAX_TEXT)
+        self.assertLess(len(prompt.encode()), 4 * 1024 * 1024)
         context = self.context(prompt)
         self.assertEqual(context["team"]["tasks"][0]["result"], {"reference": "task.result"})
         self.assertEqual(context["context_compaction"]["recent_message_limit"], 2)
@@ -137,15 +137,15 @@ class TeamContextBudgetTests(unittest.TestCase):
         self.assert_authoritative_content(context)
         self.assertEqual(self.snapshot, original)
 
-    def test_indispensable_escaped_file_bytes_still_fail_closed(self):
+    def test_indispensable_file_bytes_past_the_compaction_size_are_sent_whole(self):
+        # Catches the old context_too_large refusal of a prompt that history trimming cannot shrink.
         content = "\\" * 64000
         self.project["files"] = [{"path": "literal.py", "owner": "claude", "content": content,
                                   "sha256": hashlib.sha256(content.encode()).hexdigest()}]
         original = copy.deepcopy(self.project)
-        self.assertLess(len(content.encode()), 65536)
-        with self.assertRaises(RoomError) as raised:
-            self.prompt()
-        self.assertEqual(raised.exception.code, "context_too_large")
+        prompt = self.prompt()
+        self.assertGreater(len(prompt.encode()), 128 * 1024)
+        self.assertIn(json.dumps(content, ensure_ascii=False), prompt)
         self.assertEqual(self.project, original)
 
     def test_large_source_plan_keeps_bound_current_work_and_explicit_handoff_truncation(self):
@@ -163,7 +163,7 @@ class TeamContextBudgetTests(unittest.TestCase):
         original = copy.deepcopy((self.snapshot, self.project, tasks))
         # The current protocol plus exact source-plan envelope is larger than
         # the old response cap. Give this input fixture its own bounded budget.
-        with patch.object(room_prompts, 'MAX_PROMPT_BYTES', 192 * 1024):
+        with patch.object(room_prompts, 'COMPACT_PROMPT_BYTES', 192 * 1024):
             prompt = self.prompt()
         self.assertLess(len(prompt.encode()), 192 * 1024)
         context = self.context(prompt)

@@ -128,14 +128,16 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(profiles[actor]['monitor']['session_count'], 1)
             self.assertEqual(profiles[actor]['monitor']['latest_usage']['values']['input_tokens'], len(actor))
 
-    async def test_large_directory_requires_explicit_selection_before_dispatch(self):
+    async def test_large_directory_joins_whole_and_only_the_target_is_dispatched(self):
+        # Catches a member cap refusing a room when more than 32 partners are registered and none was picked.
         for number in range(30):
             self.manager.add(id=f'extra_{number}', name=f'Extra {number}', adapter='codex')
-        with self.assertRaises(RoomError) as error:
-            await self.service.create_room('No implicit large group.', 'claude', 'too-many-defaults')
-        self.assertEqual(error.exception.code, 'invalid_participants')
-        self.assertEqual(self.fake.calls, [])
-        self.assertEqual((await self.service.list_rooms())['rooms'], [])
+        everyone = await self.service.create_room('The whole directory.', 'clover', 'all-defaults')
+        await self.settle()
+        self.assertEqual(len(everyone['members']), len(self.service.store.agents))
+        self.assertGreater(len(everyone['members']), 32)
+        self.assertEqual([call['actor'] for call in self.fake.calls], ['clover'])
+        self.fake.calls.clear()
 
         room = await self.service.create_room('Only these two.', 'clover', 'explicit-small-group',
                                               participants=['clover', 'sprout'])
@@ -261,18 +263,18 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay['jobs'][0]['status'], 'cancelled')
         self.assertEqual(len(self.fake.calls), 0)
 
-    async def test_project_registration_rejects_bytes_limit_and_source_symlink_without_models(self):
+    async def test_project_registration_takes_a_large_file_but_rejects_a_source_symlink_without_models(self):
         source, _ = await self.fixture_project()
+        # Catches the old 16 KiB per-file cap refusing to register a large document.
         (source / 'huge.md').write_text('界' * 6000)
-        with self.assertRaises(ProjectCatalogError) as error:
-            await self.service.register_project('Too many bytes', str(source), ['huge.md'])
-        self.assertEqual(error.exception.code, 'project_limit_exceeded')
+        registered = await self.service.register_project('Large file', str(source), ['huge.md'])
+        self.assertEqual(registered['project']['files'], ['huge.md'])
         (source / 'link.md').symlink_to(source / 'README.md')
         with self.assertRaises(ProjectCatalogError) as error:
             await self.service.register_project('No links', str(source), ['link.md'])
         self.assertEqual(error.exception.code, 'project_unsafe_path')
         self.assertEqual(len(self.fake.calls), 0)
-        self.assertEqual(len((await self.service.list_projects())['projects']), 1)
+        self.assertEqual(len((await self.service.list_projects())['projects']), 2)
 
     async def test_project_response_strict_json_rejects_duplicate_or_extra_keys_before_writes(self):
         source, project = await self.fixture_project()

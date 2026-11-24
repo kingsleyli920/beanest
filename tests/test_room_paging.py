@@ -11,13 +11,15 @@ import unittest
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from local_agent_coordinator.message_capacity import MAX_MESSAGE_UTF8_BYTES, MAX_PROMPT_BYTES
 from local_agent_coordinator.objective_store import objective_scope_reference
 from local_agent_coordinator.room_server import create_room_server
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError, RoomStore
 import test_native_room_service as native
 import test_objective_delivery_lineage as lineage
+
+
+ONE_MIB = 1024 * 1024
 
 
 def sha(text):
@@ -91,18 +93,19 @@ class RoomPagingHTTPTests(unittest.TestCase):
         code, status, _ = self.request("GET", "/api/status")
         self.assertEqual(code, 200)
         self.assertTrue(status["capabilities"]["room_paging_v1"])
-        self.assertEqual(status["transport_limits"]["max_message_utf8_bytes"], MAX_MESSAGE_UTF8_BYTES)
+        self.assertIsNone(status["transport_limits"]["max_message_utf8_bytes"])
+        self.assertIsNone(status["transport_limits"]["max_request_utf8_bytes"])
         # Control escaping makes the real JSON body much larger than raw text.
         prefix = "e\u0301完整原文\x01"
-        goal = prefix + "\x01" * (MAX_MESSAGE_UTF8_BYTES - len(prefix.encode()))
-        self.assertEqual(len(goal.encode()), MAX_MESSAGE_UTF8_BYTES)
+        goal = prefix + "\x01" * (ONE_MIB - len(prefix.encode()))
+        self.assertEqual(len(goal.encode()), ONE_MIB)
         room, body = self.create(goal)
         self.assertTrue(self.started.wait(3))
         _, prompt, context = self.calls[0]
         self.assertEqual(full(context, context["goal"]), goal)
         self.assertEqual(full(context, context["job"]["text"]), goal)
         self.assertEqual(sum(value["text"] == goal for value in context["full_texts"].values()), 1)
-        self.assertLess(len(prompt.encode()), MAX_PROMPT_BYTES)
+        self.assertLess(len(prompt.encode()), 16 * ONE_MIB)
         code, state, size = self.request("GET", f"/api/rooms/{room}/state")
         self.assertEqual(code, 200, state)
         self.assertLess(size, 2 * 1024 * 1024)
@@ -124,9 +127,10 @@ class RoomPagingHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/api/rooms?response=ack", body)[1]["room_id"], room)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.request("POST", "/api/rooms?response=ack", body | {"goal": "Changed text."})[0], 409)
-        rejected = body | {"request_id": "too-large", "goal": goal + "x"}
-        self.assertEqual(self.request("POST", "/api/rooms?response=ack", rejected)[0], 413)
-        self.assertEqual(len(self.service.store.list_rooms()["rooms"]), 1)
+        # One byte past the old 1 MiB limit is a room like any other.
+        longer = body | {"request_id": "longer", "goal": goal + "x"}
+        self.assertEqual(self.request("POST", "/api/rooms?response=ack", longer)[0], 200)
+        self.assertEqual(len(self.service.store.list_rooms()["rooms"]), 2)
         # Metadata retains its existing independent bound.
         self.assertEqual(self.request("POST", "/api/rooms?response=ack", body | {"goal": "short", "request_id": "x" * 513})[0], 400)
         code, cancelled, size = self.request("POST", f"/api/rooms/{room}/cancel?response=ack", {})
@@ -138,7 +142,7 @@ class RoomPagingHTTPTests(unittest.TestCase):
     def test_message_and_receipt_preserve_one_mib_current_followup_and_idempotence(self):
         room, _ = self.create()
         self.assertTrue(self.started.wait(3))
-        text = "e\u0301" + "y" * (MAX_MESSAGE_UTF8_BYTES - 3)
+        text = "e\u0301" + "y" * (ONE_MIB - 3)
         body = {"text": text, "target": "codex", "request_id": "long-followup"}
         route = f"/api/rooms/{room}/messages"
         code, ack, _ = self.request("POST", route + "?response=ack", body)
@@ -239,6 +243,62 @@ class RoomPagingHTTPTests(unittest.TestCase):
                          "Historic original request 0." + "h" * 20000)
 
 
+    def test_two_mib_user_message_reaches_the_partner_whole_over_http(self):
+        # Catches the old 1 MiB message_too_large / 8 MiB body_too_large refusals of a long user message.
+        room, _ = self.create()
+        self.assertTrue(self.started.wait(3))
+        text = "豆" * 700000
+        body = {"text": text, "target": "codex", "request_id": "two-mib"}
+        code, ack, _ = self.request("POST", f"/api/rooms/{room}/messages?response=ack", body)
+        self.assertEqual(code, 200, ack)
+        deadline = time.monotonic() + 5
+        while len(self.calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        context = self.calls[1][2]
+        self.assertEqual(len(full(context, context["job"]["text"]).encode()), 2100000)
+        self.assertEqual(full(context, context["job"]["text"]), text)
+        message = next(event for event in self.service.store.snapshot(room)["events"]
+                       if event["kind"] == "job_created" and event.get("text") == text)
+        code, page, size = self.request("GET", f"/api/rooms/{room}/events?after_seq={message['seq'] - 1}&limit=1")
+        self.assertEqual(code, 200, page)
+        self.assertEqual(page["events"][0]["text"], text)
+
+    def test_one_event_past_the_old_8_mib_page_limit_is_read_back_whole(self):
+        # Catches the old event_too_large refusal that made a long message unreadable in the timeline.
+        room, _ = self.create()
+        self.assertTrue(self.started.wait(3))
+        text = "豆" * 1500000  # 4.5 MB of UTF-8, 9 MB as escaped JSON on the wire
+        with self.service.store._connection(write=True) as db:
+            self.service.store._event(db, room, "message", sender="claude", recipient="all", text=text)
+        seq = self.service.store.snapshot(room)["events"][-1]["seq"]
+        code, page, size = self.request("GET", f"/api/rooms/{room}/events?after_seq={seq - 1}&limit=1")
+        self.assertEqual(code, 200, page)
+        self.assertGreater(size, 9000000)
+        self.assertEqual(page["events"][0]["text"], text)
+        self.assertTrue(page["oversize"])
+        code, original, _ = self.request("GET", text_route(room, {"kind": "event_text", "seq": seq, "sha256": sha(text)}))
+        self.assertEqual(code, 200, original)
+        self.assertEqual(len(original["text"]), 1500000)
+
+    def test_room_state_past_the_old_2_mib_limit_opens_over_http(self):
+        # Catches the old room_state_too_large (HTTP 413) that left a long room impossible to open.
+        room, _ = self.create()
+        self.assertTrue(self.started.wait(3))
+        with self.service.store._connection(write=True) as db:
+            for index in range(2500):
+                db.execute("INSERT INTO jobs VALUES (?,?,?,'help','queued',?,NULL,NULL,NULL,?)",
+                           (str(uuid4()), room, "codex", f"Queued request {index:04d}. " + "q" * 1200, time.time()))
+        try:
+            code, state, size = self.request("GET", f"/api/rooms/{room}/state")
+        finally:
+            with self.service.store._connection(write=True) as db:  # so teardown does not run 2500 synthetic calls
+                db.execute("UPDATE jobs SET status='cancelled' WHERE room_id=? AND status='queued'", (room,))
+        self.assertEqual(code, 200, state)
+        self.assertGreater(size, 3 * ONE_MIB)
+        self.assertEqual(state["job_count"], 2501)
+        self.assertEqual(sum(job["status"] == "queued" for job in state["jobs"]), 2500)
+
+
 class LongNativeGoalTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = native.NativeRoomServiceTests.asyncSetUp
     asyncTearDown = native.NativeRoomServiceTests.asyncTearDown
@@ -253,8 +313,8 @@ class LongNativeGoalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_long_goal_finishes_real_private_tree_lifecycle_with_short_host_scope_anchor(self):
         prefix = "Update the value and preserve notes. e\u0301"
-        self.goal = prefix + "g" * (MAX_MESSAGE_UTF8_BYTES - len(prefix.encode()))
-        self.assertLessEqual(len(self.goal.encode()), MAX_MESSAGE_UTF8_BYTES)
+        self.goal = prefix + "g" * (ONE_MIB - len(prefix.encode()))
+        self.assertLessEqual(len(self.goal.encode()), ONE_MIB)
         created = await self.service.create_room(self.goal, "claude", str(uuid4()), mode="native_project",
             project_id=self.registration["project"]["id"], participants=["claude", "codex"], work_mode="build",
             runtime_settings={"permission": "full_access", "members": {}}, execution_policy={"mode": "autonomous"})
@@ -265,7 +325,7 @@ class LongNativeGoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["objective"]["original_goal"], self.goal)
         self.assertTrue(final["objective"]["delivery"]["verified"])
         for call in self.fake.calls:
-            self.assertLess(len(call["prompt"].encode()), MAX_PROMPT_BYTES)
+            self.assertLess(len(call["prompt"].encode()), 16 * ONE_MIB)
             self.assertEqual(sum(value["text"] == self.goal for value in call["context"]["full_texts"].values()), 1)
         checkpoint = next(call["context"] for call in self.fake.calls if call["context"]["job"]["job_phase"] == "checkpoint")
         self.assertEqual(checkpoint["objective"]["scope_reference"],

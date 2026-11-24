@@ -17,7 +17,7 @@ import stat
 import subprocess
 from uuid import uuid4
 
-from .folder_workspace import MAX_FILE_BYTES, _excluded
+from .folder_workspace import _excluded
 
 
 class NativeWorkspaceError(ValueError):
@@ -366,7 +366,7 @@ def prepare_retained_workspace(destination, canonical_export, canonical_manifest
                 raw = content.encode("utf-8")
             except UnicodeError as error:
                 raise NativeWorkspaceError("invalid_native_retained_files") from error
-            if (len(raw) > MAX_FILE_BYTES or len(raw) != item["bytes"]
+            if (len(raw) != item["bytes"]
                     or hashlib.sha256(raw).hexdigest() != item["sha256"]
                     or any(ord(char) < 32 and char not in "\r\n\t" for char in content)):
                 raise NativeWorkspaceError("invalid_native_retained_files")
@@ -415,7 +415,7 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
     deletion {deleted: True, sha256: None}; "executable" is present when the
     mode changed, or a new or previously unknown file is executable. Only real
     coordination rules block: a path this task does not own, an unresolved
-    conflict, and an over-limit file. Paths the shared copy never holds (build
+    conflict. Size never blocks: git and the partner set no limit. Paths the shared copy never holds (build
     and cache folders, credentials such as .env or keys) stay private and are
     reported under "generated", never imported and never a failure.
     """
@@ -472,10 +472,6 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
         previous = before["sha256"] if before else None
         if sha is None:
             candidates.append({"path": name, "previous_sha256": previous, "sha256": None, "bytes": 0, "deleted": True})
-            continue
-        size = path.stat().st_size
-        if size > MAX_FILE_BYTES:
-            blocked.append({"path": name, "reason": "native_change_too_large"})
             continue
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != sha:

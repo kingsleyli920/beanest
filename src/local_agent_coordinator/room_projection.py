@@ -4,10 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .message_capacity import MAX_MESSAGE_UTF8_BYTES, MAX_JSON_BODY_BYTES
-
-STATE_MAX_BYTES = 2 * 1024 * 1024
 EVENT_DEFAULT_BYTES = 256 * 1024
+# The largest page a caller may ask for. A page is cut at this size, never an
+# event: one event bigger than the page is still returned whole, alone.
+EVENT_MAX_BYTES = 8 * 1024 * 1024
 EVENT_DEFAULT_LIMIT = 100
 EVENT_MAX_LIMIT = 500
 TEXT_PREVIEW_CHARACTERS = 240
@@ -19,8 +19,9 @@ def wire_bytes(value):
 
 
 def transport_limits():
-    return {"max_message_utf8_bytes": MAX_MESSAGE_UTF8_BYTES, "max_request_utf8_bytes": MAX_JSON_BODY_BYTES,
-            "event_page_default_bytes": EVENT_DEFAULT_BYTES, "event_page_max_bytes": MAX_JSON_BODY_BYTES,
+    # None: no message or request size limit at all.
+    return {"max_message_utf8_bytes": None, "max_request_utf8_bytes": None,
+            "event_page_default_bytes": EVENT_DEFAULT_BYTES, "event_page_max_bytes": EVENT_MAX_BYTES,
             "event_page_default_limit": EVENT_DEFAULT_LIMIT, "event_page_max_limit": EVENT_MAX_LIMIT}
 
 

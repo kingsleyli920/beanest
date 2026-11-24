@@ -24,10 +24,9 @@ from uuid import UUID, uuid4
 from urllib.parse import urlsplit
 
 
-MAX_FILES = 16
-MAX_SOURCE = 64 * 1024
-MAX_OUTPUT = 32 * 1024
-_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.py\Z")
+# How much of a run's stdout+stderr the result carries. Past it the run keeps
+# going to its real end; only the extra text is left out and marked truncated.
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
 _DIGEST = re.compile(r"docker\.io/library/python@sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[0-9a-f]{64}\Z")
 _LABEL = "local-agent-coordinator.python-runner"
@@ -48,30 +47,25 @@ def fail():
 try:
     if sys.platform != "linux" or os.getuid() == 0:
         fail()
-    payload = sys.stdin.buffer.read(524289)
-    if len(payload) > 524288:
-        fail()
-    snapshot = json.loads(payload)
+    snapshot = json.loads(sys.stdin.buffer.read())
     files = snapshot["files"]
-    if not isinstance(files, list) or not 1 <= len(files) <= 16:
+    if not isinstance(files, list) or not files:
         fail()
     os.chdir("/work")
-    total, seen = 0, set()
+    seen = set()
     for file in files:
         path, content = file["path"], file["content"]
-        if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.py", path)
+        if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.py", path)
                 or path in seen or not isinstance(content, str) or "\0" in content):
             fail()
         seen.add(path)
         data = content.encode("utf-8")
-        total += len(data)
-        if total > 65536 or hashlib.sha256(data).hexdigest() != file["sha256"]:
+        if hashlib.sha256(data).hexdigest() != file["sha256"]:
             fail()
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
     machine = platform.machine().lower()
     if machine == "aarch64":
         arch = 0xc00000b7
@@ -179,8 +173,12 @@ async def _reap(process):
         await asyncio.sleep(.01)
 
 
-async def _exec(command, *, data=None, timeout=8, limit=8192):
-    """Bound both pipes and own the CLI process group, including on cancellation."""
+async def _exec(command, *, data=None, timeout=8, limit=8192, keep_running=False):
+    """Bound both pipes and own the CLI process group, including on cancellation.
+
+    keep_running: past the limit, drop the extra output and let the process
+    finish instead of ending it; the result then says truncated.
+    """
     launch = asyncio.create_task(asyncio.create_subprocess_exec(
         *command, stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -196,13 +194,20 @@ async def _exec(command, *, data=None, timeout=8, limit=8192):
             raise _CommandError("cli_cleanup_unconfirmed", cancelled=True) from None
         raise
     output = {"stdout": bytearray(), "stderr": bytearray()}
+    dropped = False
 
     async def read(name):
+        nonlocal dropped
         while chunk := await getattr(process, name).read(4096):
-            capacity = limit - sum(map(len, output.values()))
+            if limit is None:
+                output[name].extend(chunk)
+                continue
+            capacity = max(0, limit - sum(map(len, output.values())))
             output[name].extend(chunk[:capacity])
             if len(chunk) > capacity:
-                raise _OutputLimit
+                if not keep_running:
+                    raise _OutputLimit
+                dropped = True
 
     async def feed():
         if data is not None:
@@ -240,7 +245,7 @@ async def _exec(command, *, data=None, timeout=8, limit=8192):
         raise _CommandError("cli_cleanup_unconfirmed", cancelled=cancelled) from reap_error
     if cancelled:
         raise asyncio.CancelledError
-    return {"code": process.returncode, "reason": reason,
+    return {"code": process.returncode, "reason": reason, "truncated": dropped or reason == "output_limit",
             **{name: value.decode("utf-8", errors="replace") for name, value in output.items()}}
 
 
@@ -290,9 +295,9 @@ def _local_endpoint(endpoint):
 def _snapshot(snapshot):
     if (not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int
             or snapshot["revision"] < 0 or not isinstance(snapshot.get("files"), list)
-            or not 1 <= len(snapshot["files"]) <= MAX_FILES):
+            or not snapshot["files"]):
         raise _RunnerError("invalid_snapshot")
-    files, paths, total = [], set(), 0
+    files, paths = [], set()
     for item in snapshot["files"]:
         if not isinstance(item, dict):
             raise _RunnerError("invalid_snapshot")
@@ -304,9 +309,8 @@ def _snapshot(snapshot):
             raw = content.encode("utf-8")
         except UnicodeError:
             raise _RunnerError("invalid_snapshot") from None
-        total += len(raw)
         digest = hashlib.sha256(raw).hexdigest()
-        if total > MAX_SOURCE or item.get("sha256") != digest:
+        if item.get("sha256") != digest:
             raise _RunnerError("invalid_snapshot")
         paths.add(path)
         files.append({"path": path, "content": content, "sha256": digest})
@@ -502,13 +506,14 @@ class PythonRunner:
             return {"cleanup_confirmed": False,
                     "reason": error.code if isinstance(error, _RunnerError) else "invalid_configuration"}
 
-    async def run(self, snapshot: dict, timeout=15, *, run_id=None):
+    async def run(self, snapshot: dict, timeout=None, *, run_id=None):
         result = {"status": "failed", "reason": None, "exit_code": None, "stdout": "", "stderr": "",
                   "truncated": False, "cleanup_confirmed": True, "tests_trusted": False}
         try:
             data = _snapshot(snapshot)
-            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                    or not math.isfinite(timeout) or not 0 < timeout <= 60):
+            # None: the run has no timer of Beanest's own; only a deadline the user set applies.
+            if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                    or not math.isfinite(timeout) or timeout <= 0):
                 raise _RunnerError("invalid_timeout")
             run_id = str(uuid4()) if run_id is None else run_id
             if not isinstance(run_id, str) or str(UUID(run_id)) != run_id:
@@ -535,10 +540,11 @@ class PythonRunner:
                         "create", "--pull=never", "--interactive", "--name", record["name"],
                         "--label", _LABEL + "=" + run_id, "--network=none", "--read-only",
                         "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges=true",
-                        "--pids-limit=32", "--memory=256m", "--memory-swap=256m", "--cpus=1",
-                        "--ulimit=nofile=64:64", "--ulimit=fsize=1048576:1048576", "--log-driver=none",
-                        "--tmpfs=/work:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=65534,gid=65534",
-                        "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=65534,gid=65534",
+                        # Isolation stays (no network, read-only image, no privileges);
+                        # no memory, process, file-size or disk cap of Beanest's own.
+                        "--log-driver=none",
+                        "--tmpfs=/work:rw,noexec,nosuid,nodev,mode=0700,uid=65534,gid=65534",
+                        "--tmpfs=/tmp:rw,noexec,nosuid,nodev,mode=0700,uid=65534,gid=65534",
                         "--workdir=/work", settings["image_digest"], "python", "-I", "-S", "-B", "-u", "-c", BOOTSTRAP,
                     ], timeout=15)
                     container_id = created["stdout"].strip()
@@ -550,9 +556,10 @@ class PythonRunner:
                         record["phase"] = "running"
                         self._save(record)
                         execution = await self._command(settings, ["start", "--attach", "--interactive", container_id],
-                                                        data=data, timeout=timeout, limit=MAX_OUTPUT)
+                                                        data=data, timeout=timeout, limit=None,
+                                                        keep_running=True)
                         result.update(stdout=execution["stdout"], stderr=execution["stderr"],
-                                      truncated=execution["reason"] == "output_limit")
+                                      truncated=execution["truncated"])
                         if execution["reason"]:
                             result.update(status=execution["reason"], reason=execution["reason"])
                         else:

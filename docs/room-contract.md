@@ -27,7 +27,7 @@ JSON 响应采用以下形状；新服务的错误仅返回受控 code，不返�
 - `POST /api/rooms/<uuid>/delivery-repository` 仅用户 Web 路径允许，MCP 拒绝；正文严格只有 `workspace_id`，不能提交任意目录。宿主重新发现候选，排除内部 native baseline，并核对 Git 根、common-dir 与 device/inode 后持久到 `room_delivery_repositories`。普通同房后续 run 保留选择，其他房间不自动继承；读取不写绑定。目录暂不可读与实际 Git 身份改变分别标明，不能悄悄改选。保存不发送模型工作；保存中或结果未知时，界面不能沿用旧目标派发同步，读回确认只用 GET、不自动重发 POST。
 - `POST /api/rooms`，`{goal,target,request_id,mode?,work_mode?,participants?,project_id?,collaboration?,runtime_settings?,execution_policy?}`；mode 默认 `text`，另有 `python_artifacts`、`text_artifacts`、`project_folder`、`project_files` 和 runner ready 才提供的 `python_sandbox`。`work_mode` 与成果类型独立，见下节。`participants` 为 1–8 个不重复的新房可用伙伴 ID；生产默认需已启用且最近发现安装可用；连接器另需协议ready。省略时兼容已有调用者的可用目录；目录超过8位时拒绝并要求显式选择，UI总是传显式子集。target 必须为本间成员 ID 或 `all`（兼容旧 `both`）。`collaboration:true`要求2–8位成员，target的首位接收者只担任初始清单整理人，全部成员参加规划、确认和认领；未带推进策略且collaboration省略或false时保持旧协议，旧协议的文件模式须选一位首写者。显式推进策略下单成员也使用任务板并明确自检。`project_folder`与`project_files`必须带对应类型的已登记`project_id`，其他模式不能带它。已有项目的UI默认选择folder，API省略mode仍为text。用户提交才创建并启动 → room snapshot。
 - `GET /api/rooms/<uuid>` → room snapshot。
-- `POST /api/rooms/<uuid>/members`，精确正文 `{request_id,participants:[profile_id]}`，仅 Web 用户可调用；MCP 返回 `403 user_member_invitation_required`。支持既有共享任务及普通 `text` 房；旧无共享任务的文件房返回 `invitation_mode_unsupported`。事务追加成员，总数沿用 8 位上限；同 key/body 或另一 key 邀请已在房间的成员均不重复加入或派发。运行中的规划/工作阶段只给新成员安排既有 plan/coordinate，原在途调用与 owner/epoch 不重置；已交付、暂停、停止、需回复或 checkpoint 阶段先加入待命，不创建目标或恢复任务。既有权限、清理和可用性规则保持。新原生成员首次工作树来自当前确切 canonical，不继承它未参与的旧 handoff 私有差异。邀请复用 `user_outbox` 的 `invite` kind 和小 ack；刷新核原 key，归档/移除仍使未提交请求失效。
+- `POST /api/rooms/<uuid>/members`，精确正文 `{request_id,participants:[profile_id]}`，仅 Web 用户可调用；MCP 返回 `403 user_member_invitation_required`。支持既有共享任务及普通 `text` 房；旧无共享任务的文件房返回 `invitation_mode_unsupported`。事务追加成员，房间成员数不设上限；同 key/body 或另一 key 邀请已在房间的成员均不重复加入或派发。运行中的规划/工作阶段只给新成员安排既有 plan/coordinate，原在途调用与 owner/epoch 不重置；已交付、暂停、停止、需回复或 checkpoint 阶段先加入待命，不创建目标或恢复任务。既有权限、清理和可用性规则保持。新原生成员首次工作树来自当前确切 canonical，不继承它未参与的旧 handoff 私有差异。邀请复用 `user_outbox` 的 `invite` kind 和小 ack；刷新核原 key，归档/移除仍使未提交请求失效。
 
 Snapshot 的 `member_invitation` 提供 `supported/can_invite/reason/candidates`，候选只有当前可接入且未在本房的伙伴，读取不启动 CLI。`members[].joined_pending` 仅表示确有邀请事件且加入后还没有实际 claim；界面显示待安排，不冒充参与过旧交付。加入以 `member_invited` 事件记录，不伪造用户补充消息；历史 run snapshot、交付与审核保持。
 - `POST /api/rooms/<uuid>/messages`，`{text,target,request_id}` → room snapshot；补充当前目标的信息，仅为空闲成员排入有限队列，忙者在后续上下文读取，不隐式扩大预算或重开已交付任务。新目标使用 `/runs`。
@@ -66,7 +66,7 @@ Snapshot 的 `member_invitation` 提供 `supported/can_invite/reason/candidates`
 
 UI日常入口为“新任务”，默认选择Claude Code、Codex两种工具；写需求后点击“开始任务”。输入区只保留短文本框和一行操作；“伙伴”“项目”“···”按需打开任务选项浮层，底部每位伙伴的模型与effort入口、短额度入口相邻显示。模型浮层只展示点中的伙伴，统一权限另设入口。选2–8位时新建请求带`collaboration:true`；未带推进策略的单成员保持原直接答复协议，显式策略下则有任务板及自检。恢复旧待确认请求时不补字段、不改变原请求语义；带新策略的待确认请求遇到无capability服务时保留且拒绝重发，不删除字段冒充旧请求。“工具与状态”查看监控，“本次工具”查看当前成员。输入区不提供团队总时长、调用次数或逐段暂停设置，代码与测试选项按需展开。同聊顶部显示任务、负责人和等待项，末尾显示交付、具体停止原因、尚未完成项和下一步；不增加手动转交按钮。历史标题和日期仅改变展示，不改原目标或记录。同工具额外profile放在“更多会话（高级）”，仅勾选者参与；“新建独立会话”不增加新工具、账号或订阅，复用同一adapter和登录。ID、默认名称和角标可由UI生成；提交结果未知时保留同一ID和表单，仅GET核对，不能自动再POST。
 
-桌面preload提供默认无参数`chooseProjectFolder()`与高级旧入口`chooseProjectFiles()`：固定IPC核对主窗口、主frame和同源，限制一个在途选择；前者只返回用户选定目录，后者返回目录及1–12个文件元数据，均不扫描或读取正文。成功只填表，点击“添加项目”后才调用登记API；取消保留表单。Web不具备该桥，保留手动填写。
+桌面preload提供默认无参数`chooseProjectFolder()`与高级旧入口`chooseProjectFiles()`：固定IPC核对主窗口、主frame和同源，限制一个在途选择；前者只返回用户选定目录，后者返回目录及所选文件（个数不限）的元数据，均不扫描或读取正文。成功只填表，点击“添加项目”后才调用登记API；取消保留表单。Web不具备该桥，保留手动填写。
 
 生产默认服务在启动时做一次支持CLI安装位置检测，仅使用可信适配器的固定resolver，不执行CLI或读取配置/聊天/凭据。`GET /api/partners`另含`discovery:{state,observed_at,tools:[{adapter,name,installed}],scope:"supported_cli_locations"}`，每profile带`installation:{state:"found|missing|unknown"}`；不暴露安装路径。该快照与health认证检查独立，GET不重扫，显式 `/api/partners/discover` 可刷新观察。新房间只能选已启用且安装可用的伙伴；连接器还须通过协议 ready 检查。已有builtin身份复用，不重复生成profile、不改已保存配置或重新启用手动停用者。旧房间身份和处理路径不变；显式注入测试registry/manager可保持原有未启用检测行为。
 
@@ -230,7 +230,7 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 `team`是共享任务单源，旧房为null；新房包含run_id、plan_author、phase、revision、stop_reason、成员对确切清单版本的确认，以及tasks。每项任务包含稳定id、title、description、acceptance、dependencies、write_paths、capability、owner、状态、具体求助及result/result_version/result_revision/result_digest/result_files和审核记录。任务状态open → assigned → working → review → accepted；单人自检明确为self_checked、review_kind:self_check，独立审核为review_kind:independent_review。任务亦可waiting_peer、blocked、unknown、interrupted或cancelled；模型单次返回done不改变整个目标的验收状态。
 
-团队响应为`{message,state:"done|working|needs_user",commands:[...]}`，文件模式另带base_revision/files。commands每次最多100项（`MAX_RESPONSE_COMMANDS`），只允许propose、claim、plan_ready、complete、block、request_help、review，以及运行中调整用的adjust、work调用扩大自己任务范围用的extend和伙伴自己分工作量用的allocate（见下文）。初始plan_author提出完整清单与验收条件，所有成员对同一revision执行plan_ready后进入工作，规划时不认领任务（规划阶段的claim不生效、不记录）。确认后的任务组成任务池，开始前不归任何人：成员手上没有排队或在途调用时，服务把下一项就绪任务交给它，绑定负责人和排队work调用在同一事务里完成，且只在任务仍为open时生效，两名成员不会拿到同一项。就绪指依赖已accepted或self_checked，不管是谁做的。选择顺序：先给做过它某项依赖的成员（接着做同一条链，保留上下文），其余按计划顺序取最早的一项；同时空闲的成员中，相对自己份额做得最少的先拿（`workload.fair_order`；份额相同时本轮领过任务最少的先拿，并列按房间顺序），额度只剩约15%的账号、份额为0或已超过用户上限的成员、角色不做开发的成员只在没有别人能做时才拿；能力须匹配。文件负责人只防两人同时改一个文件：另一位伙伴本轮还有未完成任务列着某个路径时，含该路径的任务不交给别人（计划的写路径检查本就不允许，这里只是保护）；作者的相关任务都已完成、或作者已因额度退出且干净时，谁接都行，work调用开始时按文件当前SHA发转交授权（`task_files_granted`），导入时文件改归接手者。指定文件模式下没人改过的源文件同样按此授权给接手者。已开始的任务（working、waiting_peer、review、有结果或有过work调用）保持负责人，交接和恢复照旧。回复用户时（job_phase user）的claim把open任务留给该成员，别人不拿。额度用完退出的成员不再领取，它名下还没跑过的任务回到池里（`task_returned_to_pool`），恢复后直接继续领取。就绪任务没有任何在场伙伴能接时记`team_plan_stalled`。时间线以`task_taken`显示每次领取。子任务数量不设上限，按工作本身拆；依赖必须指向存在任务、无自依赖或环，依赖任务accepted或self_checked后才排下游，审核方式仍分别保留。不能为用满成员或延长时间制造确认、寒暄或额外任务。
+团队响应为`{message,state:"done|working|needs_user",commands:[...]}`，文件模式另带base_revision/files。commands条数不设上限，只允许propose、claim、plan_ready、complete、block、request_help、review，以及运行中调整用的adjust、work调用扩大自己任务范围用的extend和伙伴自己分工作量用的allocate（见下文）。初始plan_author提出完整清单与验收条件，所有成员对同一revision执行plan_ready后进入工作，规划时不认领任务（规划阶段的claim不生效、不记录）。确认后的任务组成任务池，开始前不归任何人：成员手上没有排队或在途调用时，服务把下一项就绪任务交给它，绑定负责人和排队work调用在同一事务里完成，且只在任务仍为open时生效，两名成员不会拿到同一项。就绪指依赖已accepted或self_checked，不管是谁做的。选择顺序：先给做过它某项依赖的成员（接着做同一条链，保留上下文），其余按计划顺序取最早的一项；同时空闲的成员中，相对自己份额做得最少的先拿（`workload.fair_order`；份额相同时本轮领过任务最少的先拿，并列按房间顺序），额度只剩约15%的账号、份额为0或已超过用户上限的成员、角色不做开发的成员只在没有别人能做时才拿；能力须匹配。文件负责人只防两人同时改一个文件：另一位伙伴本轮还有未完成任务列着某个路径时，含该路径的任务不交给别人（计划的写路径检查本就不允许，这里只是保护）；作者的相关任务都已完成、或作者已因额度退出且干净时，谁接都行，work调用开始时按文件当前SHA发转交授权（`task_files_granted`），导入时文件改归接手者。指定文件模式下没人改过的源文件同样按此授权给接手者。已开始的任务（working、waiting_peer、review、有结果或有过work调用）保持负责人，交接和恢复照旧。回复用户时（job_phase user）的claim把open任务留给该成员，别人不拿。额度用完退出的成员不再领取，它名下还没跑过的任务回到池里（`task_returned_to_pool`），恢复后直接继续领取。就绪任务没有任何在场伙伴能接时记`team_plan_stalled`。时间线以`task_taken`显示每次领取。子任务数量不设上限，按工作本身拆；依赖必须指向存在任务、无自依赖或环，依赖任务accepted或self_checked后才排下游，审核方式仍分别保留。不能为用满成员或延长时间制造确认、寒暄或额外任务。
 
 独立互审由任务状态机安排，不必另建重复审核任务。若同一规划版本仍有成员未确认，常规协调后可再给它一次明确补救，要求确认或说明阻碍；补救签名持久保存，计入原调用与期限。仍无进展时明确记录`team_plan_stalled`及缺少的确认，不替成员确认，也不无限重复唤醒。
 
@@ -260,7 +260,7 @@ Claude额度读取使用本机原生stream-json控制通道，仅发送initializ
 
 ### 轮次交接与换新会话
 
-Claude 原生会话长期续接会把全部上下文带进每次调用。checkpoint 命令可选带 `handoff`：`goal`（≤1000字）、`done`/`decisions`/`unverified`（各≤12条，每条≤500字）、`key_files`（≤24条，每条≤240字），只写事实和位置。没写不算错误，也不多花一次纠错调用，只是下一轮不换会话；写坏了（超限或形状不对）同样不纠错，只记 `round_handoff_invalid`。收到后服务写 `round_handoff_recorded` 事件，带 run_id、objective_id、proposal_digest、内容和 `context_tokens`，取自本次调用最后一次 API 请求的 `input_tokens+cache_read_input_tokens+cache_creation_input_tokens`（result.usage 是整轮累计，只作拿不到逐次数据时的兜底）。
+Claude 原生会话长期续接会把全部上下文带进每次调用。checkpoint 命令可选带 `handoff`：`goal`、`done`/`decisions`/`unverified`、`key_files`，只写事实和位置；宿主不限长度和条数。没写不算错误，也不多花一次纠错调用，只是下一轮不换会话；写坏了（形状不对）同样不纠错，只记 `round_handoff_invalid`。收到后服务写 `round_handoff_recorded` 事件，带 run_id、objective_id、proposal_digest、内容和 `context_tokens`，取自本次调用最后一次 API 请求的 `input_tokens+cache_read_input_tokens+cache_creation_input_tokens`（result.usage 是整轮累计，只作拿不到逐次数据时的兜底）。
 
 用户发起的新一轮（新一轮 `/runs`、完成目标后的自然续写 followup-objective、定向后续 directed-objective）开始时，只有同时满足才换会话：native_project 房间；交接人的 adapter 是 Claude；上一目标状态 complete，且这份交接属于刚结束那一轮、其 proposal_digest 等于最终通过的 checkpoint；context_tokens 不小于 200000；交接人身份确定、有当前 session、上一轮没有未知结果 job、清理回执齐全。换法是把该成员 `session_id` 置空并写 `partner_session_rotated`，旧 session 留在 `native_session_history`，删除房间时照常清理；全程不重放旧调用。同一轮内 checkpoint 的 continue、answer、reassess 都不换。只换 checkpoint 作者本人（`available_members` 的第一位）：其他 Claude 成员的会话没有这份用量读数，保持续接。
 
@@ -381,17 +381,17 @@ MCP 共14项工具：`room_status`、`room_list`、`room_start`、`room_read`、
 
 `mode:"python_artifacts"`只保存本工具新建目录中的文件提案，不接受现有项目路径。旧协议使用一位首写者，不能以 `all` / `both` 同时开写，随后通过请求/反馈队列互审；共享任务协议先确认分工，再由成员按各自write_paths提交与互审。CLI工具仍关闭，不执行文件、测试、shell、依赖安装或网络请求，不能写“测试已通过”。
 
-模型响应在基础三字段外必须有 `base_revision` 和 `files`。每个文件为 `{path,previous_sha256,content}`；新文件的 previous_sha256 为 null，修改须匹配原 hash。只接受顶层 ASCII Python 文件名，最多16个文件、正文合计64KiB；每个路径由实际首提交者负责，共享任务还须符合已确认的write_paths。其他伙伴提出建议或提交自己范围内的新文件，不能覆盖。context只提供一份完整受审版本，以及当前版本号/文件hash/owner；审查旧版本时明确标识，不能把未看过的新内容写成已审。
+模型响应在基础三字段外必须有 `base_revision` 和 `files`。每个文件为 `{path,previous_sha256,content}`；新文件的 previous_sha256 为 null，修改须匹配原 hash。只接受顶层 ASCII Python 文件名，文件个数和正文大小都不设限；每个路径由实际首提交者负责，共享任务还须符合已确认的write_paths。其他伙伴提出建议或提交自己范围内的新文件，不能覆盖。context只提供一份完整受审版本，以及当前版本号/文件hash/owner；审查旧版本时明确标识，不能把未看过的新内容写成已审。
 
 共享任务项目响应另支持 `edits:[{path,base_sha256,old_text,new_text}]`，原生严格schema要求该字段，未使用时为null或空数组；custom adapter可省略，旧协议形状不变。已有文件的小改动优先使用edits，新文件仍通过files提交；两者不能同时非空，非work阶段不得编辑。每批最多16项，old/new正文合计最多32KiB UTF-8。old_text非空且与new_text不同，必须在job的不可变base_revision原文中精确唯一匹配，包括空白和换行；base_sha256须匹配原文件，不能使用正则、模糊匹配或依次匹配前一项生成的文本。同文件各区间不重叠，宿主按原始位置逆序替换；new_text可空，只清空对应文字，不删除文件。
 
-宿主先将整批edits展开为普通完整文件提案，再复用原有任务范围、owner、身份/取消、完整文件敏感内容扫描、该Python模式的64KiB项目上限和原子CAS提交。任一项无效均不发布该批文件；并行不同文件仍可合并，同路径变化及ABA仍拒绝。`invalid_project_edits/project_edit_conflict/project_edit_ambiguous/project_edit_overlap/project_edit_limit` 不加入格式纠正白名单，不自动重试。精确文件正文、SHA、结果版本、互审、执行和导出继续使用真实完整文件；edits不裁切输入上下文，不增权限、调用上限或超时。
+宿主先将整批edits展开为普通完整文件提案，再复用原有任务范围、owner、身份/取消、完整文件敏感内容扫描和原子CAS提交；edits条数和正文大小不设限。任一项无效均不发布该批文件；并行不同文件仍可合并，同路径变化及ABA仍拒绝。`invalid_project_edits/project_edit_conflict/project_edit_ambiguous/project_edit_overlap`（以及旧记录里的`project_edit_limit`）不加入格式纠正白名单，不自动重试。精确文件正文、SHA、结果版本、互审、执行和导出继续使用真实完整文件；edits不裁切输入上下文，不增权限、调用上限或超时。
 
-仅非folder旧工作区模式的可信completed、身份确认、无工具work提案，在范围/owner/完整敏感内容检查通过，且工作区明确因合并项目UTF-8字节超限而整批拒收、确认未提交任何文件时，允许同task一次容量修正。宿主核对受影响路径从不可变base到当前的CAS链，反馈当前/拟写总字节、原上限和超额值（包括其他成员已提交的不同文件）；文件数、CAS、权限、未知或提交不确定等失败不触发。`capacity_attempts`、原failed job、用量、拒收proposal及`capacity_correction_of`持久保留，原owner按原scope重写一次后仍须互审；已运行peer不因此取消。须剩余原调用/时间额度并至少可安排修正与审核两次，格式纠正已用标记不重置。第二次超限正常停止，不扩大64KiB，不把容量问题加入FORMAT_ERRORS，不重放原拒收提案；提示中的`capacity_observation`是宿主容量事实，不授权删除必要行为。
+文件工作区不设文件个数或字节上限，所以没有“容量修正”这一步；旧版本留下的`capacity_correction_*`事件、`capacity_attempts`和`capacity_correction_of`只作为历史记录保留。
 
-非folder旧工作区模式的context另含 `current_project_capacity:{source_bytes,source_byte_limit,file_count,file_limit,unit:"UTF-8 bytes"}`。它来自当前工作区头版本：source_bytes是所有文件正文编码为UTF-8后的实际字节之和，file_count是实际文件数，限额来自该工作区配置；不是字符数、JSON转义后的长度或模型估算。该元数据描述当前提案基线容量，不表示旧审查版本已被重新核对。这里的source_byte_limit是底层工作区限额；任务另有更低容量目标时，仍须单独检查，不能据此将任务上限放宽到64KiB。
+非folder旧工作区模式的context另含 `current_project_size:{source_bytes,file_count,unit:"UTF-8 bytes"}`（共享任务模式另含source_bytes_by_owner）。它来自当前工作区头版本：source_bytes是所有文件正文编码为UTF-8后的实际字节之和，file_count是实际文件数；不是字符数、JSON转义后的长度或模型估算，也不是上限。该元数据描述当前提案基线，不表示旧审查版本已被重新核对。
 
-非folder共享任务的 `current_project_files` 各项另含 `source_bytes`，`current_project_capacity` 另含 `source_bytes_by_owner:{owner:bytes}`，均由宿主按实际文件正文与负责人测量。两者绑定 `proposal_base_revision` 的当前头版本；审核旧 `result_revision` 时，容量观察仍描述当前提案基线，不混作旧版本容量。它们仅补充提示上下文，不改变文件SHA、公开快照或导出形状。
+非folder共享任务的 `current_project_files` 各项另含 `source_bytes`，`current_project_size` 另含 `source_bytes_by_owner:{owner:bytes}`，均由宿主按实际文件正文与负责人测量。两者绑定 `proposal_base_revision` 的当前头版本；审核旧 `result_revision` 时，容量观察仍描述当前提案基线，不混作旧版本容量。它们仅补充提示上下文，不改变文件SHA、公开快照或导出形状。
 
 非folder共享任务提示超过128KiB传输限制时，先将旧轮goal变为240字符的明确节选，保留其轮次、状态与版本证明；仍超限才让任务板的重复当前result引用完整 `task.result`，并仅保留最近两条聊天的240字符节选。`context_compaction` 标明已用压缩，节选带 `truncated/omitted_characters`。当前用户目标、完整当前task及依赖结果、精确受审文件正文/SHA和权限不裁切；这些必需材料仍超限则拒绝 `context_too_large`，不扩大限制、自动重试或增加调用。
 
@@ -417,7 +417,7 @@ SVG预览只接受当前版本的精确 `.svg` 路径并核原文SHA，返回 `c
 
 ## 已有项目的高级指定文件改稿
 
-`mode:"project_files"`使用已登记的`project_id`；旧协议选一位首写者，共享任务协议按已确认任务的路径分工。该登记路径仅接收用户给定的绝对目录及 1–12 个相对文件名，不递归扫描；每个文件最多16KiB，总计48KiB。路径为有限深度的安全 ASCII 相对路径，正文为 UTF-8 文本，支持白名单的源码、标记及文档类型；拒绝路径穿越、各层符号链接、硬链接、隐藏或凭据文件、二进制及明显敏感内容。私有登记只保存元数据，0600文件及0700目录配合锁与原子替换；损坏或登记文件缺失时停止，不静默清空。
+`mode:"project_files"`使用已登记的`project_id`；旧协议选一位首写者，共享任务协议按已确认任务的路径分工。该登记路径仅接收用户给定的绝对目录及相对文件名，不递归扫描；文件个数、单个大小和总量都不设限。路径为安全 ASCII 相对路径，正文为 UTF-8 文本，支持白名单的源码、标记及文档类型；拒绝路径穿越、各层符号链接、硬链接、隐藏或凭据文件、二进制及明显敏感内容。私有登记只保存元数据，0600文件及0700目录配合锁与原子替换；损坏或登记文件缺失时停止，不静默清空。
 
 登记时只验证选定文件；每个新房间创建时重新捕获，保存内容 hash 与整组 source_hash。原目录只读，捕获内容作为房间的数据提案，没有目录挂载、原地编辑、shell、依赖安装、项目测试或自动合入。文件正文会进入所选供应商上下文；source.path 元数据不传给房间模型，正文不做通用路径脱敏。
 

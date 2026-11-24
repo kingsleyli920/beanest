@@ -19,15 +19,17 @@ import re
 
 SEPARATOR = "~x"
 DEFAULT_LIMIT = 3   # tasks one partner may work on at once, lanes included; the user changes it per partner
-MIN_LIMIT, MAX_LIMIT = 1, 8
+# The user sets how many at once; Beanest sets no upper bound of its own.
+MIN_LIMIT = 1
 _BASE = r"[a-z][a-z0-9_-]{0,31}"
-_LANE = re.compile(r"(" + _BASE + r")~x([2-" + str(MAX_LIMIT) + r"])\Z")
-_LANE_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_~-])(" + _BASE + r")~x[2-" + str(MAX_LIMIT) + r"](?![A-Za-z0-9_~])")
+_NUMBER = r"(?:[2-9]|[1-9][0-9]+)"
+_LANE = re.compile(r"(" + _BASE + r")~x(" + _NUMBER + r")\Z")
+_LANE_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_~-])(" + _BASE + r")~x" + _NUMBER + r"(?![A-Za-z0-9_~])")
 
 
 def lane_id(partner: str, number: int) -> str:
     """The identity of a partner's nth session; the first is the partner itself."""
-    if not MIN_LIMIT <= number <= MAX_LIMIT:
+    if type(number) is not int or number < MIN_LIMIT:
         raise ValueError("invalid_parallel_session")
     return partner if number == 1 else partner + SEPARATOR + str(number)
 
@@ -51,7 +53,7 @@ def lane_number(value) -> int:
 
 
 def checked_limit(value) -> int:
-    if type(value) is not int or not MIN_LIMIT <= value <= MAX_LIMIT:
+    if type(value) is not int or value < MIN_LIMIT:
         raise ValueError("invalid_parallel_limit")
     return value
 

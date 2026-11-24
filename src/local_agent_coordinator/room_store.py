@@ -7,7 +7,6 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
-import math
 import re
 import os
 from pathlib import Path
@@ -22,7 +21,7 @@ from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, sa
 from .parallel_sessions import is_lane, lane_number, partner_of
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached, task_settled
-from .room_contract import MAX_ROOM_MEMBERS, RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
+from .room_contract import RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
 from .stop_policy import continues_automatically, OWN_RECOVERY
@@ -73,18 +72,13 @@ def checked_id(value: object) -> str:
 
 
 class RoomStore:
-    def __init__(self, path: Path, *, max_calls: int = 8, room_timeout: float = 900,
-                 clock=time.time, agents: dict[str, str] | None = None, agent_adapters=None,
-                 agent_bean_styles=None, team_max_calls: int = 32, team_timeout: float = 7200):
+    def __init__(self, path: Path, *, clock=time.time, agents: dict[str, str] | None = None,
+                 agent_adapters=None, agent_bean_styles=None):
         self.path = Path(path).absolute()
         self.account_workloads = dict  # replaced by the service when a partner directory exists
         self.account_capacity = dict   # likewise: each partner's billing and percent left
         self.task_capabilities = lambda provider: ("text", "python")  # replaced by the service
         self.parallel_limits = dict    # likewise: how many tasks each partner may work on at once
-        self.max_calls = max_calls
-        self.room_timeout = room_timeout
-        self.team_max_calls = team_max_calls
-        self.team_timeout = team_timeout
         self.clock = clock
         self.agents = dict(LEGACY_NAMES if agents is None else agents)
         self.agent_adapters = dict(agent_adapters or {})
@@ -107,16 +101,6 @@ class RoomStore:
         self._timelines_lock = threading.Lock()
         if not Path(path).is_absolute():
             raise RoomError("invalid_state_path")
-        if type(max_calls) is not int or not 1 <= max_calls <= 8:
-            raise RoomError("invalid_configuration")
-        if (isinstance(room_timeout, bool) or not isinstance(room_timeout, (int, float))
-                or not math.isfinite(room_timeout) or not 0 < room_timeout <= 900):
-            raise RoomError("invalid_configuration")
-        if type(team_max_calls) is not int or not 2 <= team_max_calls <= 32:
-            raise RoomError("invalid_configuration")
-        if (isinstance(team_timeout, bool) or not isinstance(team_timeout, (int, float))
-                or not 0 < team_timeout <= 7200 or not math.isfinite(team_timeout)):
-            raise RoomError("invalid_configuration")
         try:
             if self.path.is_symlink() or self.path.parent.is_symlink():
                 raise RoomError("invalid_state_path")
@@ -1739,12 +1723,11 @@ class RoomStore:
                     "utf8_bytes": len(text.encode("utf-8")), "truncated": False}
 
     def read_events(self, room_id, *, before_seq=None, after_seq=None, through_seq=None, limit=None, max_bytes=None):
-        from .room_projection import EVENT_DEFAULT_BYTES, EVENT_DEFAULT_LIMIT, EVENT_MAX_LIMIT, wire_bytes
-        from .message_capacity import MAX_JSON_BODY_BYTES
+        from .room_projection import EVENT_DEFAULT_BYTES, EVENT_DEFAULT_LIMIT, EVENT_MAX_BYTES, EVENT_MAX_LIMIT, wire_bytes
         limit = EVENT_DEFAULT_LIMIT if limit is None else limit
         max_bytes = EVENT_DEFAULT_BYTES if max_bytes is None else max_bytes
         if (before_seq is not None and after_seq is not None or type(limit) is not int or not 1 <= limit <= EVENT_MAX_LIMIT
-                or type(max_bytes) is not int or not 1 <= max_bytes <= MAX_JSON_BODY_BYTES
+                or type(max_bytes) is not int or not 1 <= max_bytes <= EVENT_MAX_BYTES
                 or any(value is not None and (type(value) is not int or not 0 <= value <= 9223372036854775807)
                        for value in (before_seq, after_seq, through_seq))):
             raise RoomError("invalid_event_cursor")
@@ -1775,15 +1758,11 @@ class RoomStore:
                 size = wire_bytes(candidate)
                 if chosen and size > max_bytes:
                     break
-                if size > MAX_JSON_BODY_BYTES:
-                    raise RoomError("event_too_large")
                 chosen.append(event)
                 if size > max_bytes:
-                    break  # Return this whole event alone, never skip it.
+                    break  # Return this whole event alone, however large: never skip or refuse it.
             result = page(chosen)
             result["oversize"] = bool(chosen) and wire_bytes(result) > max_bytes
-            if wire_bytes(result) > MAX_JSON_BODY_BYTES:
-                raise RoomError("event_too_large")
             return result
 
     def dispatchable_member_ids(self, room_id):
@@ -4399,7 +4378,7 @@ class RoomStore:
         if not collaboration and mode in PROJECT_MODES and target in ("all", "both"):
             raise RoomError("project_requires_first_author")
         if participants is not None and (not isinstance(participants, list)
-                or not 1 <= len(participants) <= MAX_ROOM_MEMBERS
+                or not participants
                 or any(not safe_agent_id(value) for value in participants)
                 or len(set(participants)) != len(participants)):
             raise RoomError("invalid_participants")
@@ -4435,7 +4414,7 @@ class RoomStore:
             if previous is not None:
                 return previous["room_id"], False
             selected = tuple(self.agents) if participants is None else tuple(participants)
-            if not 1 <= len(selected) <= MAX_ROOM_MEMBERS or any(value not in self.agents for value in selected):
+            if not selected or any(value not in self.agents for value in selected):
                 raise RoomError("invalid_participants")
             for provider in selected:
                 reason = self._partner_dispatch_reason(db, provider)
@@ -4491,7 +4470,7 @@ class RoomStore:
     @staticmethod
     def invitation_parameters(room_id, participants):
         room_id = checked_id(room_id)
-        if (not isinstance(participants, list) or not 1 <= len(participants) <= MAX_ROOM_MEMBERS
+        if (not isinstance(participants, list) or not participants
                 or any(not safe_agent_id(value) for value in participants)
                 or len(set(participants)) != len(participants)):
             raise RoomError("invalid_participants")
@@ -4526,8 +4505,6 @@ class RoomStore:
                 raise RoomError("invitation_mode_unsupported")
             existing = self.partner_ids_in_transaction(db, room_id)
             added = [provider for provider in participants if provider not in existing]
-            if len(existing) + len(added) > MAX_ROOM_MEMBERS:
-                raise RoomError("member_limit_reached")
             for provider in added:
                 if self._partner_dispatch_reason(db, provider):
                     raise RoomError("agent_unavailable")
@@ -5838,7 +5815,7 @@ class RoomStore:
     def finish_job(self, job_id, *, session_id=None, message="", usage=None,
                    state="done", action=None, error=None, uncertain=False, identity_uncertain=None, artifact_revision=None,
                    team_commands=None, artifact_digest=None, artifact_files=None, correct_format=False,
-                   capacity_rejection=None, inspection_observation=None, native_rejection=None,
+                   inspection_observation=None, native_rejection=None,
                    native_partial_inspection=None, native_repair=None, native_question=None, rejection_evidence=None,
                    confine=False):
         """confine: the caller audited this failed native call (nothing left running, its own session,
@@ -5944,7 +5921,7 @@ class RoomStore:
                     # Diagnostic only: its own failure must never touch the job or usage.
                     pass
             if native_question is not None and error == "native_permission_required" and not uncertain:
-                question = checked_message(native_question)
+                question = checked_text(native_question)
                 self._event(db, room_id, "message", sender=provider, recipient="all", job_id=job_id,
                             text=question, native_question=True)
                 if is_team and team_context["task_id"] is not None:
@@ -6002,6 +5979,7 @@ class RoomStore:
             if is_team and team_context["correction_of"]:
                 self._event(db, room_id, "format_correction_finished", sender=provider,
                             job_id=job_id, correction_of=team_context["correction_of"], status=status, error=error)
+            # Only a job queued before the file caps were removed can carry this.
             if is_team and team_context["capacity_correction_of"]:
                 self._event(db, room_id, "capacity_correction_finished", sender=provider,
                             job_id=job_id, correction_of=team_context["capacity_correction_of"], status=status, error=error)
@@ -6021,11 +5999,6 @@ class RoomStore:
                                 assignment_epoch=team_context["assignment_epoch"], result_version=team_context["result_version"],
                                 observation=native_rejection, canonical_imported=False)
                 if self._team.correct_format(db, job, error, native_rejection, rejection_evidence=rejection_evidence):
-                    self._settle(db, room_id)
-                    return
-            if (is_team and capacity_rejection is not None and error == "project_limit_exceeded"
-                    and not uncertain and artifact_revision is None):
-                if self._team.correct_capacity(db, job, capacity_rejection):
                     self._settle(db, room_id)
                     return
             if is_team:
@@ -6119,12 +6092,9 @@ class RoomStore:
             raise RoomError("invalid_project_inspection")
         try:
             encoded = json.dumps(observation, ensure_ascii=False, allow_nan=False)
-            encoded_size = len(encoded.encode("utf-8"))
+            encoded.encode("utf-8")
         except (TypeError, ValueError, RecursionError, UnicodeError):
             raise RoomError("invalid_project_inspection") from None
-        # Leave room for the context envelope and its trusted job binding.
-        if encoded_size > MAX_INSPECTION_CONTEXT_BYTES - 1024:
-            raise RoomError("project_inspection_limit_exceeded")
         return self.finish_job(job_id, session_id=session_id, message=message, usage=usage,
                                state="working", team_commands=[], inspection_observation=encoded)
 
@@ -6192,7 +6162,10 @@ class RoomStore:
                 observation = {"job_id": row["job_id"], "observation": json.loads(row["observation_json"])}
                 candidate = {"observations": [observation, *result["observations"]],
                              "truncated": result["truncated"]}
-                if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_INSPECTION_CONTEXT_BYTES:
+                # The newest read is always shown whole, however large; only
+                # older reads give way, with truncated set.
+                if (result["observations"]
+                        and len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_INSPECTION_CONTEXT_BYTES):
                     result["truncated"] = True
                     break
                 result = candidate

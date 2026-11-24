@@ -43,9 +43,11 @@ class HandoffSchema(unittest.TestCase):
         self.assertEqual({stable_bytes(phase, author) for phase in PHASES for author in (True, False)}, {stable_bytes("work")})
         item = json.loads(stable_bytes("work"))["properties"]["commands"]["items"]
         self.assertEqual(item["properties"]["handoff"]["type"], ["object", "null"])
-        self.assertEqual(item["properties"]["handoff"]["properties"]["goal"]["maxLength"], round_handoff.GOAL_MAX_CHARACTERS)
-        self.assertEqual(item["properties"]["handoff"]["properties"]["done"]["maxItems"], round_handoff.LIST_MAX_ITEMS)
-        self.assertEqual(item["properties"]["handoff"]["properties"]["key_files"]["items"]["maxLength"], round_handoff.KEY_FILE_MAX_CHARACTERS)
+        # Catches the handoff schema capping the partner's own record by length or count.
+        handoff = item["properties"]["handoff"]["properties"]
+        self.assertEqual(handoff["goal"], {"type": "string", "minLength": 1})
+        self.assertEqual(handoff["done"], {"type": "array", "items": {"type": "string", "minLength": 1}})
+        self.assertEqual(handoff["key_files"], {"type": "array", "items": {"type": "string", "minLength": 1}})
         self.assertIn("handoff", item["required"])
 
     def test_other_adapters_are_not_offered_handoff(self):
@@ -69,13 +71,16 @@ class HandoffParsing(unittest.TestCase):
         self.assertNotIn("handoff", dropped["commands"][0])
         self.assertNotIn("handoff", parse("checkpoint", flat(**CHECKPOINT, handoff=None))["commands"][0])
 
-    def test_normalized_handoff_boundaries(self):
-        # Catches off-by-one limits and partially trusted shapes reaching storage.
+    def test_normalized_handoff_keeps_any_size_and_refuses_only_bad_shapes(self):
+        # Catches a long or many-item handoff being dropped, and partially trusted shapes reaching storage.
         good = {"goal": "x" * 1000, "done": ["d"] * 12, "decisions": [], "unverified": ["u" * 500], "key_files": ["f" * 240] * 24}
         self.assertEqual(round_handoff.normalized_handoff(good)["goal"], "x" * 1000)
-        for name, mutation in {"goal too long": {"goal": "x" * (round_handoff.GOAL_MAX_CHARACTERS + 1)}, "too many items": {"done": ["d"] * (round_handoff.LIST_MAX_ITEMS + 1)},
-                               "item too long": {"unverified": ["u" * (round_handoff.ITEM_MAX_CHARACTERS + 1)]}, "too many files": {"key_files": ["f"] * (round_handoff.KEY_FILES_MAX_ITEMS + 1)},
-                               "file too long": {"key_files": ["f" * (round_handoff.KEY_FILE_MAX_CHARACTERS + 1)]}, "blank goal": {"goal": "   "},
+        large = {"goal": "x" * 10_001, "done": ["d"] * 101, "decisions": ["c" * 5_001], "unverified": [],
+                 "key_files": ["f" * 1_025] + ["g"] * 500}
+        kept = round_handoff.normalized_handoff(large)
+        self.assertEqual((len(kept["goal"]), len(kept["done"]), len(kept["decisions"][0]), len(kept["key_files"]),
+                          len(kept["key_files"][0])), (10_001, 101, 5_001, 501, 1_025))
+        for name, mutation in {"blank goal": {"goal": "   "}, "nul in goal": {"goal": "a\0b"},
                                "blank item": {"done": [" "]}, "wrong type": {"done": "main.py"}}.items():
             with self.subTest(name=name):
                 self.assertIsNone(round_handoff.normalized_handoff({**good, **mutation}))
@@ -272,7 +277,7 @@ class RoundHandoffService(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_handoff_is_noted_without_correction_or_rotation(self):
         # Catches a schema-escaping handoff forcing a format retry or being half-stored.
-        self.round_handoffs = [{"goal": "x" * (round_handoff.GOAL_MAX_CHARACTERS + 1), "done": [], "decisions": [], "unverified": [], "key_files": []}]
+        self.round_handoffs = [{"goal": "Kept.", "done": [" "], "decisions": [], "unverified": [], "key_files": []}]
         room_id, state = await self.finished_room()
         self.assertEqual(len(self.events(state, "round_handoff_invalid")), 1)
         self.assertEqual(self.events(state, "round_handoff_recorded"), [])

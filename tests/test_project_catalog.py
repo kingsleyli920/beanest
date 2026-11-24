@@ -88,8 +88,7 @@ class ProjectCatalogTests(unittest.TestCase):
     def test_paths_and_file_lists_fail_before_reading_source(self):
         invalid_lists = [[], ["../README.md"], ["/README.md"], ["src//score.ts"], ["src/../README.md"],
                          [".git/config"], [".env"], ["secrets.json"], ["credentials.json"], ["id_rsa"],
-                         ["image.png"], ["README.md", "readme.md"], ["src\\score.ts"], ["x" * 81 + ".txt"],
-                         [f"a{number}.py" for number in range(13)], "README.md", [None]]
+                         ["image.png"], ["README.md", "readme.md"], ["src\\score.ts"], "README.md", [None]]
         with patch.object(self.catalog, "_capture", side_effect=AssertionError("must validate first")):
             for files in invalid_lists:
                 with self.subTest(files=files):
@@ -120,19 +119,47 @@ class ProjectCatalogTests(unittest.TestCase):
 
     def test_binary_sensitive_limits_and_missing_files_fail_closed(self):
         samples = [(b"a\0b", "invalid_project_files"), (b"\xff", "invalid_project_files"),
-                   (b"\x01", "invalid_project_files"), (b"x" * 16385, "project_limit_exceeded"),
+                   (b"\x01", "invalid_project_files"),
                    (b"api_key = 'private-example-value'", "project_sensitive_content"),
                    (b"-----BEGIN OPENSSH PRIVATE KEY-----", "project_sensitive_content"),
                    (b"Authorization: Bearer abcdefghijklmnopqrstuv", "project_sensitive_content")]
         for raw, code in samples:
             (self.source / "sample.txt").write_bytes(raw)
             self.assertCode(code, lambda: self.catalog.register("Example", str(self.source), ["sample.txt"]))
-        for number in range(4):
-            (self.source / f"s{number}.txt").write_text("x" * 16384)
-        self.assertCode("project_limit_exceeded", lambda: self.catalog.register(
-            "Example", str(self.source), [f"s{number}.txt" for number in range(4)]))
         self.assertCode("project_file_unavailable", lambda: self.catalog.register("Example", str(self.source), ["missing.py"]))
         self.assertEqual(self.catalog.list(), [])
+
+    def test_selected_files_have_no_count_size_or_depth_cap(self):
+        # Catches the old 12-file / 16 KiB-per-file / 48 KiB-total / 8-level / 80-character caps coming back.
+        names = [f"docs/part{number:02d}.md" for number in range(40)]
+        for name in names:
+            (self.source / name).parent.mkdir(exist_ok=True)
+            (self.source / name).write_text("段落。" * 5000 + "\n")  # 45001 UTF-8 bytes each
+        deep = "/".join(["level"] * 9) + "/" + "n" * 120 + ".txt"
+        (self.source / deep).parent.mkdir(parents=True)
+        (self.source / deep).write_text("y" * 300000)
+        item = self.catalog.register("Large", str(self.source), [*names, deep])
+        captured = self.catalog.capture(item["id"])
+        self.assertEqual(len(captured["files"]), 41)
+        self.assertEqual(sum(len(file["content"].encode("utf-8")) for file in captured["files"]), 2100040)
+        self.assertEqual(next(file for file in captured["files"] if file["path"] == deep)["content"], "y" * 300000)
+
+    def test_catalog_keeps_more_than_100_registrations_and_grows_past_one_mib(self):
+        # Catches the old 100-registration cap and the 1 MiB catalog-file cap refusing a new project.
+        for number in range(120):
+            self.catalog.register_folder(f"Folder {number}", str(self.source))
+        long_dir = self.source / ("d" * 200) / ("e" * 200)
+        long_dir.mkdir(parents=True)
+        names = []
+        for number in range(1800):
+            name = f"{'d' * 200}/{'e' * 200}/{'f' * 190}{number:04d}.txt"
+            (self.source / name).write_text("z")
+            names.append(name)
+        self.catalog.register("Many long paths", str(self.source), names)
+        self.assertGreater((self.root / "catalog.json").stat().st_size, 1024 * 1024)
+        listed = ProjectCatalog(self.root).list()
+        self.assertEqual(len(listed), 121)
+        self.assertEqual(len(listed[-1]["files"]), 1800)
 
     def test_capture_rejects_changes_during_the_read(self):
         item = self.register()

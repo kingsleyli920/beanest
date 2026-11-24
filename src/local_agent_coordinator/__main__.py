@@ -12,11 +12,12 @@ def main():
     parser = argparse.ArgumentParser(description="Local Agent Coordinator bounded prototype")
     parser.add_argument("command", choices=["doctor", "demo", "show"])
     parser.add_argument("--runtime", type=Path, default=Path("runtime"))
-    parser.add_argument("--timeout", type=float, default=120)
+    # No timer unless the user sets one: a call runs until the partner finishes.
+    parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--run-id")
     args = parser.parse_args()
-    if args.timeout <= 0 or args.timeout > 600:
-        parser.error("timeout must be in (0, 600]")
+    if args.timeout is not None and not args.timeout > 0:
+        parser.error("timeout must be positive")
     if args.command == "doctor":
         result = doctor()
     elif args.command == "show":

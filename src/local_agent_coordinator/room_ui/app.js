@@ -213,7 +213,9 @@ const errorLabels = localizedLabels({
   project_file_unavailable: '有文件或文件夹找不到、读不了，请核对路径和访问权限。',
   project_sensitive_content: '选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。',
   project_binary_file: '这是二进制文件（例如图片），不能按文本阅读；下载已修改文件可以拿到原样字节。',
-  project_limit_exceeded: '选定文件超出当前范围：最多 12 个，每个 16 KiB，总计 48 KiB。',
+  project_diff_too_large: '文件很大，这里不逐行对比；改动已经保存，下载已修改文件可以拿到全文。',
+  // Beanest no longer caps file count or size; this code only appears in older records.
+  project_limit_exceeded: '这批内容没有保存，已有成果保留。',
   project_capture_limit: '项目超出当前隔离副本的容量范围，尚未开始处理；请缩小项目目录后重试。',
   project_source_changed: '项目来源在准备过程中发生变化，未接受本次快照；请确认文件稳定后重试。',
   invalid_project_inspection: '伙伴的文件查找请求不符合当前范围，未读取额外内容。',
@@ -282,9 +284,9 @@ const workspaceRejections = new Set([
 const closedStatuses = new Set(['cancelled', 'interrupted', 'budget_exhausted', 'failed']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const agentPattern = /^[a-z][a-z0-9_-]{0,31}$/;
-const transportLimits = Object.freeze({ max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608 });
-const utf8Bytes = (text) => new TextEncoder().encode(text).byteLength;
-function validUserText(text) { return typeof text === 'string' && utf8Bytes(text) <= transportLimits.max_message_utf8_bytes; }
+// null: the server sets no message or request size limit; a message of any length is sent.
+const transportLimits = Object.freeze({ max_message_utf8_bytes: null, max_request_utf8_bytes: null });
+function validUserText(text) { return typeof text === 'string'; }
 function checkUserText(text) {
   if (validUserText(text)) return true;
   showNotice(errorLabels.message_too_large, 'error'); return false;
@@ -1629,7 +1631,7 @@ function deliveryDocuments(snapshot) {
   if (project?.available && delivery && Number.isSafeInteger(project.revision) && project.revision >= 0
       && /^[0-9a-f]{64}$/.test(project.snapshot_sha256 || '') && delivery.revision === project.revision
       && delivery.digest === project.snapshot_sha256 && Array.isArray(delivery.files)) {
-    for (const file of delivery.files.slice(0, 1024)) {
+    for (const file of delivery.files) {
       if (file?.verified !== true || typeof file.path !== 'string' || !file.path || !/^[0-9a-f]{64}$/.test(file.sha256 || '')
           || documents.some((doc) => doc.file && doc.path === file.path && doc.sha256 === file.sha256)) continue;
       const binding = runBinding({ id: file.run_id, revision: file.revision, digest: file.digest });
@@ -1647,7 +1649,7 @@ function deliveryDocuments(snapshot) {
     doc.meta = t("本目标成果 · 文件版本 {p0} · {p1}", { p0: doc.revision, p1: doc.deliveryReview });
   }
   const tasks = Array.isArray(snapshot.collaboration?.tasks) ? snapshot.collaboration.tasks : [];
-  for (const task of tasks.slice(0, 64)) {
+  for (const task of tasks) {
     if (typeof task.result !== 'string' || !task.result.trim()) continue;
     const taskRecord = snapshot.team?.tasks?.find((entry) => entry.id === task.id) || task;
     const hasFileDelivery = Array.isArray(taskRecord.result_files) && taskRecord.result_files.some((result) =>
@@ -3394,7 +3396,6 @@ const projectTextExtensions = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.js
   '.properties', '.csv', '.rst', '.cmake', '.svg']);
 function explicitFilesProblem(files) {
   if (!files.length) return t("请至少填写一个文件路径，每行一个。");
-  if (files.length > 12) return t("最多 12 个文件，现在填了 {p0} 个。", { p0: files.length });
   const absolute = files.find((file) => file.startsWith('/') || file.startsWith('~') || /^[A-Za-z]:[\\/]/.test(file));
   if (absolute) return t("请写相对项目文件夹的路径，例如 src/main.py，不要写完整路径：{p0}", { p0: absolute });
   const outside = files.find((file) => file.includes('\\') || file.split('/').some((part) => !part || part === '.' || part === '..'));
@@ -3421,12 +3422,7 @@ function broadFolderWarning(path) {
   if (/^\/(?:Users|home|Volumes\/[^/]+)?$/.test(clean)) return t("这是整块磁盘或系统文件夹，范围太大。建议只选项目所在的文件夹。确定要登记，就再点一次“添加项目”。");
   return '';
 }
-function projectLimitMessage(folder) {
-  return folder ? t("项目或这批修改超过本机处理上限；未保存这批修改，已有成果保留。") : errorLabels.project_limit_exceeded;
-}
-
 function executionMessage(code) {
-  if (code === 'project_limit_exceeded' && state.snapshot?.room.mode === 'project_folder') return projectLimitMessage(true);
   return Object.hasOwn(executionLabels, code) ? executionLabels[code] : Object.hasOwn(errorLabels, code) ? errorLabels[code] : t("本轮结果需要核对。");
 }
 
@@ -3484,9 +3480,6 @@ function roomPath(id) {
 async function api(path, method = 'GET', body) {
   if (state.roomPagingSupported && path.startsWith('/api/partners') && !path.includes('view=')) path += `${path.includes('?') ? '&' : '?'}view=compact`;
   const encoded = body === undefined ? undefined : JSON.stringify(body);
-  if (encoded && utf8Bytes(encoded) > (state.roomPagingSupported || path.endsWith('/messages/receipt') ? transportLimits.max_request_utf8_bytes : 16 * 1024)) {
-    throw new RequestError(state.roomPagingSupported ? errorLabels.request_too_large : t("当前服务的传输容量不足，原文已保留，请更新服务后再发送。"));
-  }
   const partnerContext = path.startsWith('/api/partners') ? { intentEpoch: state.partnerIntentEpoch, generation: ++state.partnerRequestGeneration } : null;
   const codeStatusRead = method === 'GET' && /^\/api\/rooms\/[^/]+\/code-status(?:\?|$)/.test(path);
   const controller = new AbortController();
@@ -3500,11 +3493,8 @@ async function api(path, method = 'GET', body) {
     if (!result || typeof result !== 'object') throw new RequestError(t("本地服务返回了无法识别的记录。"), { uncertain: method !== 'GET' });
     if (!response.ok || result.error) {
       const code = typeof result.error === 'string' ? result.error : '';
-      const folder = path === workspaceApi.projects ? body?.selection_kind === 'folder'
-        : (body?.mode || state.snapshot?.room.mode || state.mode) === 'project_folder';
-      const message = code === 'project_limit_exceeded' ? projectLimitMessage(folder)
-        // Registering a folder that is missing or unreadable is about the folder, not "selected files".
-        : code === 'project_file_unavailable' && path === workspaceApi.projects && body?.selection_kind === 'folder' ? t("找不到这个文件夹，或者没有权限读取。请核对路径。")
+      // Registering a folder that is missing or unreadable is about the folder, not "selected files".
+      const message = code === 'project_file_unavailable' && path === workspaceApi.projects && body?.selection_kind === 'folder' ? t("找不到这个文件夹，或者没有权限读取。请核对路径。")
         : errorLabels[code];
       throw new RequestError(message || t("请求未完成，请核对本地服务与任务状态。"), {
         code, uncertain: method !== 'GET' && !workspaceRejections.has(code)
@@ -7102,7 +7092,7 @@ async function restorePending() {
       && (request.kind !== 'answer' || typeof request.body.text === 'string' && request.body.text.trim() && validUserText(request.body.text))
       : typeof request?.body?.target === 'string' && agentPattern.test(request.body.target) && typeof (request.body.goal ?? request.body.text) === 'string' && validUserText(request.body.goal ?? request.body.text) && uuidPattern.test(request.body.request_id));
     const participants = request?.body?.participants;
-    const validParticipants = participants === undefined || (Array.isArray(participants) && participants.length > 0 && participants.length <= 8 && participants.every((id) => typeof id === 'string' && agentPattern.test(id)) && new Set(participants).size === participants.length);
+    const validParticipants = participants === undefined || (Array.isArray(participants) && participants.length > 0 && participants.every((id) => typeof id === 'string' && agentPattern.test(id)) && new Set(participants).size === participants.length);
     const validProject = request?.body?.project_id === undefined || uuidPattern.test(request.body.project_id);
     const validWorkMode = request?.body?.work_mode === undefined || ['plan', 'build'].includes(request.body.work_mode);
     const validRun = !['run', 'suggested', 'accept', 'fork', 'objective', 'restart', 'native_handoff', 'native_recovery', 'objective_reassessment', 'continue', 'answer'].includes(request?.kind) || (runBinding({ id: request.body.run_id, revision: request.body.revision, digest: request.body.digest })
@@ -7377,7 +7367,7 @@ async function loadComposerDraft(id) {
     });
     if (!state.drafts.has(id) && draft && typeof draft.text === 'string' && validUserText(draft.text)
         && typeof draft.target === 'string' && (draft.target === 'all' || agentPattern.test(draft.target))) {
-      const participants = id === 'new' && Array.isArray(draft.participants) && draft.participants.length <= 8
+      const participants = id === 'new' && Array.isArray(draft.participants)
         && draft.participants.every((value) => typeof value === 'string' && agentPattern.test(value))
         && new Set(draft.participants).size === draft.participants.length ? draft.participants : undefined;
       state.drafts.set(id, { text: draft.text, target: draft.target, targetExplicit: true,

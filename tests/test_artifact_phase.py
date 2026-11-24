@@ -61,18 +61,13 @@ class ArtifactPhaseTests(unittest.IsolatedAsyncioTestCase):
         await self.service.shutdown()
         self.temp.cleanup()
 
-    async def test_explicit_long_call_limit_preserves_default_and_hard_ceiling(self):
-        self.assertEqual(self.service.call_timeout, 120)
-        for invalid in (True, False, 0, -1, 600.1, float('inf'), float('nan'), '600'):
-            with self.subTest(timeout=invalid), self.assertRaises(RoomError):
-                RoomService(self.root / 'invalid.sqlite3', self.root / 'invalid',
-                            registry=default_registry(), call_timeout=invalid)
-        extended = RoomService(self.root / 'long.sqlite3', self.root / 'long',
-                               registry=default_registry(), call_timeout=600)
-        try:
-            self.assertEqual(extended.call_timeout, 600)
-        finally:
-            await extended.shutdown()
+    async def test_service_has_no_call_timer_setting(self):
+        # Catches a configurable per-call timer (the old call_timeout 120 s, at most 600 s) coming back.
+        self.assertFalse(hasattr(self.service, 'call_timeout'))
+        with self.assertRaises(TypeError):
+            RoomService(self.root / 'invalid.sqlite3', self.root / 'invalid',
+                        registry=default_registry(), call_timeout=600)
+        self.assertIsNone((await self.service.status())['limits']['call_seconds'])
 
     async def settle(self, room_id):
         for _ in range(100):
@@ -99,10 +94,11 @@ class ArtifactPhaseTests(unittest.IsolatedAsyncioTestCase):
         observed = await self.settle(second["room"]["id"])
         self.assertEqual(self.calls[calls_before]["project"]["files"], previous["project"]["files"])
         self.assertEqual(self.calls[calls_before]["proposal_base_revision"], 1)
-        self.assertEqual(self.calls[calls_before]["current_project_capacity"], {
-            "source_bytes": 14, "source_byte_limit": 65536,
-            "file_count": 1, "file_limit": 16, "unit": "UTF-8 bytes",
+        # Catches the prompt telling a partner about a byte or file-count limit that no longer exists.
+        self.assertEqual(self.calls[calls_before]["current_project_size"], {
+            "source_bytes": 14, "file_count": 1, "unit": "UTF-8 bytes",
         })
+        self.assertNotIn("current_project_capacity", self.calls[calls_before])
         self.assertEqual(observed["snapshot"]["project"]["files"], previous["project"]["files"])
         old_ids = {member["session_id"] for member in previous["members"]}
         self.assertTrue(old_ids.isdisjoint(member["session_id"] for member in observed["snapshot"]["members"]))

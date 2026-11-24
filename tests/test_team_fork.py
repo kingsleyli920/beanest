@@ -5,7 +5,6 @@ import unittest
 from uuid import uuid4
 
 from local_agent_coordinator.room_service import RoomError
-from local_agent_coordinator.message_capacity import MAX_MESSAGE_UTF8_BYTES
 from tests import test_team_runs as runs
 from tests import test_team_runs_http as http
 from tests import test_room_execution as execution
@@ -190,7 +189,6 @@ class TeamForkHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST", path, body, token=self.server.mcp_token)[0], 403)
         code, rejected = self.request("POST", path.replace("/api/", "/api/mcp/"), body, mcp=True)
         self.assertEqual((code, rejected["error"]), (403, "user_fork_required"))
-        self.assertEqual(self.request("POST", path, {**body, 'text': 'x' * (MAX_MESSAGE_UTF8_BYTES + 1)})[0], 413)
         for invalid in ({**body, "revision": True}, {**body, "retry": True}):
             self.assertEqual(self.request("POST", path, invalid)[0], 400)
         code, forked = self.request("POST", path, body)

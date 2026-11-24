@@ -22,6 +22,8 @@ class HeldInvoke:
             self.started.set()
         try:
             await self.release.wait()
+            # The transport's own deadline ran out (Beanest sets none of its own).
+            raise asyncio.TimeoutError
         finally:
             self.cleaned.append(provider)
 
@@ -34,8 +36,7 @@ class LegacyRoomSettleTests(unittest.IsolatedAsyncioTestCase):
         registry = AgentRegistry([AgentSpec(provider, provider.title(), partial(self.invoke, provider))
                                   for provider in ("claude", "codex")])
         self.service = RoomService(root / "rooms.sqlite3", root / "workspaces",
-                                   registry=registry,
-                                   call_timeout=0.2)
+                                   registry=registry)
         self.store = self.service.store
 
     async def asyncTearDown(self):
@@ -49,6 +50,7 @@ class LegacyRoomSettleTests(unittest.IsolatedAsyncioTestCase):
         await self.service.send_message(room_id, "Keep this followup", "all", str(uuid4()))
         queued = [job for job in self.store.snapshot(room_id)["jobs"] if job["status"] == "queued"]
         self.assertEqual(len(queued), 2)
+        self.invoke.release.set()
         await asyncio.wait_for(asyncio.gather(*tuple(self.service._workers.values())), 2)
 
         snapshot = await self.service.read_room(room_id)

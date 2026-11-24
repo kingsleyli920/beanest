@@ -125,9 +125,9 @@ class TeamStoreTests(unittest.TestCase):
         self.assertCode("request_conflict", lambda: self.store.create_room("Goal", "claude", "team-key"))
         self.assertCode("project_requires_first_author", lambda: self.store.create_room("Old", "all", "old-project", mode="python_artifacts"))
 
-    def test_obsolete_team_budget_configuration_does_not_limit_new_tasks(self):
+    def test_new_tasks_have_no_call_or_time_budget(self):
         self.store.close()
-        self.store = RoomStore(self.path, clock=lambda: self.now, team_max_calls=7, team_timeout=125.5)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         room_id = self.room()
         expected = {"used": 0, "limit": None, "deadline": None}
         self.assertEqual(self.store.snapshot(room_id)["budget"], expected)
@@ -143,7 +143,7 @@ class TeamStoreTests(unittest.TestCase):
         before = self.store.snapshot(original)
         self.store.close()
         self.now += 300
-        self.store = RoomStore(self.path, clock=lambda: self.now, team_max_calls=29, team_timeout=60)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         self.assertEqual(self.store.create_room("Existing team", "all", "frozen-team", collaboration=True),
                          (original, False))
         after = self.store.snapshot(original)
@@ -153,17 +153,14 @@ class TeamStoreTests(unittest.TestCase):
         self.assertEqual(self.store.snapshot(fresh)["budget"],
                          {"used": 0, "limit": None, "deadline": None})
 
-    def test_team_budget_configuration_rejects_invalid_types_and_unbounded_values(self):
+    def test_store_takes_no_call_count_or_time_budget(self):
+        # Catches the dead team_max_calls (2-32) / team_timeout (<= 7200 s) settings coming back.
         invalid_path = self.path.parent / "invalid.sqlite3"
-        invalid_calls = (True, False, None, 1, 0, -1, 33, 2.0, "2", 10 ** 100)
-        invalid_timeouts = (True, False, None, 0, -1, 7200.1, float("inf"), float("-inf"),
-                            float("nan"), "60", 1j, 10 ** 1000)
-        for field, values in (("team_max_calls", invalid_calls), ("team_timeout", invalid_timeouts)):
-            for value in values:
-                with self.subTest(field=field, value=value):
-                    self.assertCode("invalid_configuration", lambda: RoomStore(invalid_path, **{field: value}))
-                    self.assertFalse(invalid_path.exists())
-        minimum = RoomStore(invalid_path, team_max_calls=2, team_timeout=0.5, clock=lambda: self.now)
+        for field in ("max_calls", "room_timeout", "team_max_calls", "team_timeout"):
+            with self.subTest(field=field), self.assertRaises(TypeError):
+                RoomStore(invalid_path, **{field: 1})
+            self.assertFalse(invalid_path.exists())
+        minimum = RoomStore(invalid_path, clock=lambda: self.now)
         try:
             room_id, _ = minimum.create_room("Minimum bounded team", "all", "minimum", collaboration=True)
             self.assertEqual(minimum.snapshot(room_id)["budget"],

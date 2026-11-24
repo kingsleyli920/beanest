@@ -105,7 +105,7 @@ class ProjectInspectionStoreTests(unittest.TestCase):
 
     def test_historical_constructor_budget_does_not_stop_inspection(self):
         self.store.close()
-        self.store = RoomStore(self.path, max_calls=2, clock=lambda: self.now)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         room_id = self.room()
         for _ in range(3):
             self.assertIsNotNone(self.inspect(self.store.claim(room_id, "claude")))
@@ -273,14 +273,18 @@ class ProjectInspectionStoreTests(unittest.TestCase):
         self.assertEqual(context["observations"][-1]["observation"]["result"]["error"], "file_not_found")
         self.assertEqual(context["observations"][-1]["observation"]["result"]["index"], 2)
 
-    def test_invalid_or_unbounded_observation_does_not_finish_call(self):
+    def test_invalid_observation_does_not_finish_call_and_a_large_one_is_shown_whole(self):
         room_id = self.room()
         job = self.store.claim(room_id, "claude")
-        for observation in ([], {"result": float("nan")}, {"result": "x" * MAX_INSPECTION_CONTEXT_BYTES}):
+        for observation in ([], {"result": float("nan")}):
             with self.assertRaises(RoomError):
                 self.store.finish_project_inspection(job["id"], observation=observation)
         self.assertEqual(self.store.snapshot(room_id)["jobs"][0]["status"], "working")
         self.assertEqual(self.context(room_id)["observations"], [])
+        # Catches a read larger than the old 48 KiB window failing the call, or being left out of the next prompt.
+        large = "x" * (3 * MAX_INSPECTION_CONTEXT_BYTES)
+        self.assertIsNotNone(self.store.finish_project_inspection(job["id"], observation={"result": large}))
+        self.assertEqual([item["observation"]["result"] for item in self.context(room_id)["observations"]], [large])
 
     def test_emoji_observations_use_actual_utf8_budget_and_resume(self):
         room_id = self.room()

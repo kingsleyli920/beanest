@@ -527,8 +527,8 @@ class RoomMCPTests(unittest.IsolatedAsyncioTestCase):
                 await client.text(ROOM_ID, kind, sha, **ids)
         self.assertEqual(len(self.http.requests), count)
 
-    async def test_history_cursors_and_custom_response_bound_remain_strict(self):
-        client = RoomHTTPClient(self.connection, max_response=512)
+    async def test_history_cursors_remain_strict_and_any_page_size_is_read(self):
+        client = RoomHTTPClient(self.connection)
         with self.assertRaises(RoomClientError) as error:
             await client.events(ROOM_ID)
         self.assertEqual(error.exception.code, "paging_unavailable")
@@ -541,21 +541,24 @@ class RoomMCPTests(unittest.IsolatedAsyncioTestCase):
                 await client.events(ROOM_ID, **arguments)
         self.assertEqual(len(self.http.requests), count)
         self.http.page_events = [{"seq": 1, "text": "a" * 1024}]
-        with self.assertRaises(RoomClientError) as error:
-            await client.events(ROOM_ID)
-        self.assertEqual(error.exception.code, "response_too_large")
-        self.assertFalse(error.exception.remote_state_unknown)
+        self.assertEqual((await client.events(ROOM_ID))["events"], self.http.page_events)
 
-    async def test_explicit_history_page_still_rejects_over_wire_budget(self):
+    async def test_history_page_past_the_old_8_mib_wire_budget_is_read_whole(self):
+        # Catches the old response_too_large refusal of one long event (a long message could not be read back).
         self.http.paging = True
-        self.http.page_events = [{"seq": 1, "text": "a" * (8 * 1024 * 1024)}]
+        self.http.page_events = [{"seq": 1, "text": "a" * (9 * 1024 * 1024)}]
         client = RoomHTTPClient(self.connection)
         await client.status()
-        with self.assertRaises(RoomClientError) as error:
-            await client.events(ROOM_ID)
-        self.assertEqual(error.exception.code, "response_too_large")
-        self.assertFalse(error.exception.remote_state_unknown)
+        page = await client.events(ROOM_ID)
+        self.assertEqual(len(page["events"][0]["text"]), 9437184)
         self.assertEqual(len(self.http.requests), 2)
+
+    async def test_room_state_past_the_old_2_mib_response_limit_is_read(self):
+        # Catches the old 2 MiB MAX_RESPONSE refusal that kept an agent from reading a long room.
+        self.http.room = {"room": {"id": ROOM_ID, "goal": "g" * (3 * 1024 * 1024)}, "events": []}
+        client = RoomHTTPClient(self.connection)
+        state = await client.read(ROOM_ID)
+        self.assertEqual(len(state["room"]["goal"]), 3145728)
 
     async def test_connection_permissions_owner_symlink_and_url_are_checked_before_network(self):
         self.connection.chmod(0o644)
@@ -588,8 +591,9 @@ class RoomMCPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.http.requests, [])
 
     async def test_redirect_response_limit_and_total_timeout_are_bounded(self):
-        client = RoomHTTPClient(self.connection, timeout=0.03, max_response=512)
-        for mode, code in (("redirect", "redirect_rejected"), ("large", "response_too_large"),
+        client = RoomHTTPClient(self.connection, timeout=0.03)
+        # "large" declares a body it never sends: a broken transport, not a size refusal.
+        for mode, code in (("redirect", "redirect_rejected"), ("large", "http_unavailable"),
                            ("hang", "http_unavailable")):
             self.http.mode = mode
             with self.assertRaises(RoomClientError) as error:
@@ -603,8 +607,7 @@ class RoomMCPTests(unittest.IsolatedAsyncioTestCase):
         client = RoomHTTPClient(self.connection)
         for operation in (lambda: client.start("Goal", "../other", "id"),
                           lambda: client.read("../../private"),
-                          lambda: client.start("\ud800", "claude", "id"),
-                          lambda: client.start("x" * (1024 * 1024 + 1), "claude", "id")):
+                          lambda: client.start("\ud800", "claude", "id")):
             with self.assertRaises(RoomClientError):
                 await operation()
         self.assertEqual(self.http.requests, [])
@@ -621,30 +624,29 @@ class RoomMCPTests(unittest.IsolatedAsyncioTestCase):
         for _, _, body in self.http.requests:
             self.assertEqual(body.get("goal", body.get("text")), text)
 
-    async def test_message_capacity_is_raw_utf8_and_rejects_before_dispatch(self):
+    async def test_message_past_the_old_1_mib_limit_is_dispatched_whole(self):
+        # Catches the old message_too_large refusal of an agent's long message before dispatch.
         client = RoomHTTPClient(self.connection)
-        text = "🫘" * (1024 * 1024 // 4 + 1)
-        for operation in (lambda: client.start(text, "claude", "large-start"),
-                          lambda: client.send(ROOM_ID, text, "all", "large-send"),
-                          lambda: client.continue_run(ROOM_ID, text, "all", "large-run",
-                              run_id=ROOM_ID, revision=1, digest="a" * 64)):
-            with self.assertRaises(RoomClientError) as error:
-                await operation()
-            self.assertEqual(error.exception.code, "message_too_large")
-            self.assertFalse(error.exception.remote_state_unknown)
-        self.assertEqual(self.http.requests, [])
+        text = "🫘" * (2 * 1024 * 1024 // 4 + 1)
+        await client.start(text, "claude", "large-start")
+        self.http.mode = "message_ack"
+        await client.send(ROOM_ID, text, "all", "large-send")
+        await client.continue_run(ROOM_ID, text, "all", "large-run", run_id=ROOM_ID, revision=1, digest="a" * 64)
+        self.assertEqual(len(self.http.requests), 3)
+        for _, _, body in self.http.requests:
+            self.assertEqual(len(body.get("goal", body.get("text")).encode()), 2097156)
 
-    async def test_json_escaping_fits_valid_message_and_whole_body_stays_bounded(self):
+    async def test_json_escaped_message_and_a_body_past_the_old_8_mib_limit_are_sent(self):
         client = RoomHTTPClient(self.connection)
         self.http.mode = "message_ack"
         text = "\x01" * (1024 * 1024)
         await client.send(ROOM_ID, text, "all", "escaped-message")
         self.assertEqual(self.http.requests[-1][2]["text"], text)
-        with self.assertRaises(RoomClientError) as error:
-            await client._request("POST", "/api/mcp/rooms", {"extra": "x" * (8 * 1024 * 1024)})
-        self.assertEqual(error.exception.code, "request_too_large")
-        self.assertFalse(error.exception.remote_state_unknown)
-        self.assertEqual(len(self.http.requests), 1)
+        # Catches the old request_too_large refusal: the whole escaped body is 24 MiB.
+        text = "\x01" * (4 * 1024 * 1024)
+        await client.send(ROOM_ID, text, "all", "escaped-large")
+        self.assertEqual(self.http.requests[-1][2]["text"], text)
+        self.assertEqual(len(self.http.requests), 2)
 
     async def test_registered_agent_targets_are_not_frozen_in_mcp_schema(self):
         async with Client(self.parameters(), read_timeout_seconds=10) as client:

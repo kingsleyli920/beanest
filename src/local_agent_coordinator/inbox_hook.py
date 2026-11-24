@@ -13,7 +13,6 @@ import json
 import os
 import sys
 
-MAX_CHARACTERS = 8000
 HEADING = ("Arrived for you while this call runs (from the host's inbox; the user's entries are the user speaking to you now, "
            "a partner's request is yours to weigh). Act on it before your next step where it concerns your work, and say in "
            "your reply what you did about each entry.\n\n")
@@ -36,11 +35,16 @@ def new_entries(progress_file):
             offset = 0
         if not 0 <= offset < size:
             return ""
-        data = os.pread(descriptor, size - offset, offset)
+        data = b""
+        while len(data) < size - offset:  # one pread() may return only part of a long inbox
+            chunk = os.pread(descriptor, size - offset - len(data), offset + len(data))
+            if not chunk:
+                break
+            data += chunk
     finally:
         os.close(descriptor)
     with open(os.open(seen, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as file:
-        file.write(str(size))
+        file.write(str(offset + len(data)))
     return data.decode("utf-8", "replace").strip()
 
 
@@ -49,7 +53,7 @@ def main():
     text = new_entries(progress_file) if progress_file else ""
     if text:
         sys.stdout.write(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PostToolUse", "additionalContext": HEADING + text[:MAX_CHARACTERS]}}))
+            "hookEventName": "PostToolUse", "additionalContext": HEADING + text}}))
 
 
 if __name__ == "__main__":

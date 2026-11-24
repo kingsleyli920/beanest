@@ -4,10 +4,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
 
 from local_agent_coordinator import adapters, native_adapters as native
-from local_agent_coordinator.message_capacity import MAX_MESSAGE_UTF8_BYTES, MAX_PROMPT_BYTES
 import test_native_adapters as fixture
 import test_json_cli_connector as connector
 
@@ -23,7 +21,7 @@ class PromptInputCapacityTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def large_prompt():
-        return json.dumps({'goal': '\x01' * MAX_MESSAGE_UTF8_BYTES}, ensure_ascii=False)
+        return json.dumps({'goal': '\x01' * (1024 * 1024)}, ensure_ascii=False)
 
     def capture_stdin(self):
         return ("import pathlib, hashlib\n"
@@ -37,8 +35,7 @@ class PromptInputCapacityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_stdin_preserves_one_mib_control_text_inside_json_without_output_budget_change(self):
         prompt = self.large_prompt()
-        self.assertGreater(len(prompt.encode()), 6 * MAX_MESSAGE_UTF8_BYTES)
-        self.assertLess(len(prompt.encode()), MAX_PROMPT_BYTES)
+        self.assertEqual(len(prompt.encode()), 6291468)
         for agent in ('codex', 'claude'):
             with self.subTest(agent=agent):
                 events = fixture.codex_events() if agent == 'codex' else [
@@ -65,40 +62,29 @@ class PromptInputCapacityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('--safe-mode', command)
         self.assertEqual(command[command.index('--tools') + 1], '')
 
-    async def test_all_prompt_entries_reject_over_buffer_before_auth_or_process_start(self):
-        prompt = 'x' * (MAX_PROMPT_BYTES + 1)
-        connection = {'protocol': 'beanest-json-v1', 'executable': str(self.stub), 'args': [], 'billing': 'local'}
-        with patch.object(adapters, '_subscription_status', new=AsyncMock()) as auth, \
-             patch.object(adapters, 'check_json_cli', new=AsyncMock()) as health, \
-             patch.object(adapters.asyncio, 'create_subprocess_exec', new=AsyncMock()) as spawn:
-            for operation in (lambda: adapters.invoke('codex', prompt, self.root),
-                              lambda: native.invoke_native('codex', prompt, self.root, permission='read_only'),
-                              lambda: adapters.invoke_json_cli(connection, prompt, self.root)):
-                with self.subTest(operation=operation), self.assertRaises(ValueError):
-                    await operation()
-            auth.assert_not_called()
-            health.assert_not_called()
-            spawn.assert_not_called()
+    async def test_prompt_past_the_old_16_mib_limit_reaches_each_cli_whole(self):
+        # Catches a prompt size refusal (the old 16 MiB MAX_PROMPT_BYTES) in either transport.
+        prompt = 'x' * (16 * 1024 * 1024 + 1)
+        events = [{'type': 'result', 'subtype': 'success', 'session_id': fixture.SESSION,
+                   'structured_output': {'ok': True}}]
+        with self.make_stub(events, agent='claude', before=self.capture_stdin()):
+            result = await adapters.invoke('claude', prompt, self.root, response_schema={'type': 'object'})
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(int((self.root / 'stdin.size').read_text()), 16777217)
+        with self.make_stub(fixture.codex_events(), agent='codex', before=self.capture_stdin()):
+            result = await native.invoke_native('codex', prompt, self.root,
+                permission='read_only', response_schema=fixture.SCHEMA)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(int((self.root / 'stdin.size').read_text()), 16777217)
 
-    async def test_json_cli_outer_escaping_is_checked_before_handshake(self):
-        # Inner raw prompt fits, but JSON wrapping it exceeds the actual stdin bound.
-        prompt = '\x01' * (MAX_PROMPT_BYTES // 6)
-        self.assertLess(len(prompt.encode()), MAX_PROMPT_BYTES)
-        connection = {'protocol': 'beanest-json-v1', 'executable': str(self.stub), 'args': [], 'billing': 'local'}
-        with patch.object(adapters, 'check_json_cli', new=AsyncMock()) as health, \
-             patch.object(adapters.asyncio, 'create_subprocess_exec', new=AsyncMock()) as spawn:
-            with self.assertRaisesRegex(ValueError, 'connector request exceeds size limit'):
-                await adapters.invoke_json_cli(connection, prompt, self.root)
-            health.assert_not_called()
-            spawn.assert_not_called()
-
-    def test_output_and_schema_limits_remain_separate(self):
-        self.assertEqual(adapters.MAX_TEXT, 4 * 1024 * 1024)
-        self.assertEqual(adapters.MAX_OUTPUT, 32 * 1024 * 1024)
-        self.assertEqual(native._MAX_LINE, 32 * 1024 * 1024)
-        self.assertEqual(adapters.MAX_PROMPT_BYTES, MAX_PROMPT_BYTES)
-        with self.assertRaisesRegex(ValueError, 'structured response exceeds size limit'):
-            adapters._object_text({'message': 'x' * adapters.MAX_TEXT})
+    def test_structured_answer_past_the_old_4_mib_limit_is_kept_whole(self):
+        # Catches the old 4 MiB MAX_TEXT refusal of a long structured answer.
+        text = adapters._object_text({'message': 'x' * (5 * 1024 * 1024)})
+        self.assertEqual(len(text), 5242894)
+        self.assertEqual(json.loads(text)['message'], 'x' * 5242880)
+        for name in ('MAX_TEXT', 'MAX_OUTPUT', 'MAX_PROMPT_BYTES'):
+            self.assertFalse(hasattr(adapters, name), name)
+        self.assertFalse(hasattr(native, '_MAX_LINE'))
 
 
 class ConnectorPromptCapacityTests(unittest.IsolatedAsyncioTestCase):
@@ -107,10 +93,17 @@ class ConnectorPromptCapacityTests(unittest.IsolatedAsyncioTestCase):
     requests = connector.JsonConnectorTests.requests
 
     async def test_real_json_connector_stdin_preserves_decoded_large_original(self):
-        prompt = '\x01' * MAX_MESSAGE_UTF8_BYTES
+        prompt = '\x01' * (1024 * 1024)
         result = await adapters.invoke_json_cli(self.connection, prompt, self.root)
         self.assertEqual(result['status'], 'completed')
         requests = self.requests()
         self.assertEqual([row['request']['kind'] for row in requests], ['check', 'invoke'])
         self.assertEqual(requests[1]['request']['prompt'], prompt)
         self.assertEqual(requests[1]['request']['capabilities'], {'text_only': True, 'tools': False})
+
+    async def test_json_connector_request_past_the_old_16_mib_limit_is_sent(self):
+        # Catches the old "connector request exceeds size limit" refusal of an escaped prompt.
+        prompt = '\x01' * (3 * 1024 * 1024)
+        result = await adapters.invoke_json_cli(self.connection, prompt, self.root)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.requests()[1]['request']['prompt'], prompt)

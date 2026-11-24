@@ -190,7 +190,6 @@ class GitStatusTests(unittest.TestCase):
 
         cases = (
             ("timeout", patch.object(git_status, "READ_SECONDS", 0), "git_timeout"),
-            ("output limit", patch.object(git_status, "MAX_OUTPUT_BYTES", 1), "git_output_too_large"),
             ("empty status", patch.object(git_status, "_run", side_effect=empty_status_output), "git_invalid_output"),
         )
         for name, override, reason in cases:

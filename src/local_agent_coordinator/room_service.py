@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -19,17 +18,15 @@ from . import adapters
 from . import parallel_sessions
 from .parallel_sessions import is_lane, partner_of
 from . import job_progress, native_adapters, native_workspace
-from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached, task_settled
 from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
-from .room_contract import MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_ROOM_MEMBERS, MAX_TASK_PATHS
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
-from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
+from .project_workspace import ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
 from .project_catalog import ProjectCatalog, ProjectCatalogError
 from .project_edits import ProjectEditError, expand_edits
-from .folder_workspace import FolderWorkspace, MAX_FILE_BYTES as FOLDER_FILE_BYTES
+from .folder_workspace import FolderWorkspace
 from .folder_protocol import FOLDER_INSTRUCTION, prompt_context, validate_request
 from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported
@@ -177,9 +174,6 @@ def _outbox_body(kind, room_id, request_id, body):
             checked_message(body[field])
     if body.get("project_id") is not None:
         checked_id(body["project_id"])
-    # Check actual JSON size without changing any original string or fingerprint.
-    if room_projection.wire_bytes(body) > room_projection.transport_limits()["max_request_utf8_bytes"]:
-        raise RoomError("message_too_large")
     return _OUTBOX_ROUTES[kind]
 
 
@@ -273,14 +267,8 @@ def _native_command(candidate, index, allowed_kinds, transport_fields, nonempty_
     return command, None
 
 
-# The whole reply a partner returns; the parts inside have their own generous bounds.
-MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-
-
 def _response(text: str, provider: str, members: tuple[str, ...] = (), *, project=False, team=False, folder=False, native=False,
               native_phase=None, can_propose=True, stable_native=False) -> dict:
-    if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
-        raise RoomError("invalid_agent_response")
     try:
         value = adapters.parse_response_object(text)
     except (ValueError, RecursionError):
@@ -295,10 +283,10 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
         expected.add("edits")
     if (not isinstance(value, dict) or set(value) != expected
             or value["state"] not in ("done", "working", "needs_user")
-            or not isinstance(value[operation_key], list) or len(value[operation_key]) > (MAX_RESPONSE_COMMANDS if team else 1)):
+            or not isinstance(value[operation_key], list) or not team and len(value[operation_key]) > 1):
         raise RoomError("invalid_agent_response")
     try:
-        message = _visible(checked_text(value["message"], MAX_PARTNER_TEXT))
+        message = _visible(checked_text(value["message"]))
     except RoomError:
         raise RoomError("invalid_agent_response") from None
     action = None
@@ -310,7 +298,7 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
             raise RoomError("invalid_agent_action")
         try:
             action = {"to": candidate["to"], "kind": candidate["kind"],
-                      "text": _visible(checked_text(candidate["text"], MAX_PARTNER_TEXT))}
+                      "text": _visible(checked_text(candidate["text"]))}
         except RoomError:
             raise RoomError("invalid_agent_action") from None
     result = {"message": message, "state": value["state"], "action": action}
@@ -378,24 +366,24 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
         result["commands"] = redact(commands)
     if project:
         if (type(value["base_revision"]) is not int or value["base_revision"] < 0
-                or not isinstance(value["files"], list) or len(value["files"]) > 16):
+                or not isinstance(value["files"], list)):
             raise RoomError("invalid_project_files")
         result.update(base_revision=value["base_revision"], files=value["files"])
         if native:
             unchanged = value["unchanged_paths"]
-            if (not isinstance(unchanged, list) or len(unchanged) > MAX_TASK_PATHS
+            if (not isinstance(unchanged, list)
                     or any(not isinstance(item, dict) or set(item) != {"path", "reason"}
                            or not isinstance(item["path"], str) or not isinstance(item["reason"], str)
-                           or not item["reason"].strip() or len(item["reason"]) > MAX_PARTNER_TEXT for item in unchanged)):
+                           or not item["reason"].strip() for item in unchanged)):
                 raise RoomError("invalid_agent_response")
             result["unchanged_paths"] = unchanged
             resolved = value["resolved_conflicts"]
-            if not isinstance(resolved, list) or len(resolved) > MAX_TASK_PATHS or any(not isinstance(path, str) for path in resolved):
+            if not isinstance(resolved, list) or any(not isinstance(path, str) for path in resolved):
                 raise RoomError("invalid_agent_response")
             result["resolved_conflicts"] = resolved
         if team or folder:
             edits = value.get("edits")
-            if edits is not None and (not isinstance(edits, list) or len(edits) > 16):
+            if edits is not None and not isinstance(edits, list):
                 raise RoomError("invalid_project_edits")
             if edits and value["files"]:
                 raise RoomError("invalid_project_edits")
@@ -420,18 +408,12 @@ def _sessions(snapshot):
 
 class RoomService(RoomPromptMixin):
     def __init__(self, state_path: Path, workspace: Path, *, invoke=None, clock=time.time,
-                 max_calls: int = 8, room_timeout: float = 900, call_timeout: float = 120,
-                 team_max_calls: int = 32, team_timeout: float = 7200,
                  registry: AgentRegistry | None = None, runner=None, partners=None, native_invoke=None):
         if registry is not None and (invoke is not None or not isinstance(registry, AgentRegistry)):
             raise RoomError("invalid_configuration")
         self.registry = registry if registry is not None else default_registry()
-        # Longer code-generation trials opt in at service construction. Normal
-        # Static response-protocol calls retain a failure timeout. Native calls
-        # own their progress/cancellation checks and have no artificial timer.
-        if (isinstance(call_timeout, bool) or not isinstance(call_timeout, (int, float))
-                or not math.isfinite(call_timeout) or not 0 < call_timeout <= 600):
-            raise RoomError("invalid_configuration")
+        # No call has a timer of Beanest's own: a call runs until the partner
+        # finishes or the user cancels it. Only a deadline the user set applies.
         self.workspace = Path(workspace).absolute()
         if not Path(workspace).is_absolute() or self.workspace.is_symlink() or self.workspace.parent.is_symlink():
             raise RoomError("invalid_workspace")
@@ -440,7 +422,7 @@ class RoomService(RoomPromptMixin):
             self.workspace.chmod(0o700)
         except OSError:
             raise RoomError("invalid_workspace") from None
-        self.clock, self.call_timeout = clock, call_timeout
+        self.clock = clock
         self.partner_manager = partners
         if partners is None and registry is None and invoke is None:
             self.partner_manager = PartnerManager(self.workspace.parent.resolve() / "partners", self.registry,
@@ -453,8 +435,7 @@ class RoomService(RoomPromptMixin):
         self.invoke = invoke
         self.native_invoke = native_invoke or native_adapters.invoke_native
         self.route_available = network_state.route_available  # replaced in tests
-        self.store = RoomStore(state_path, max_calls=max_calls, room_timeout=room_timeout, clock=clock,
-                               team_max_calls=team_max_calls, team_timeout=team_timeout,
+        self.store = RoomStore(state_path, clock=clock,
                                agents={item["id"]: item["name"] for item in self.registry.describe()},
                                agent_adapters={item["id"]: item.get("adapter", "") for item in self.registry.describe()},
                                agent_bean_styles={item["id"]: item["bean_style"] for item in self.registry.describe()})
@@ -2248,7 +2229,7 @@ class RoomService(RoomPromptMixin):
                 "bean_styles": bean_styles(),
                 "background_error": self._background_error,
                 "limits": {"calls_per_room": None, "room_seconds": None,
-                           "call_seconds": self.call_timeout,
+                           "call_seconds": None,
                            "team_calls_per_room": None, "team_room_seconds": None}}
 
     async def create_room(self, goal, target, request_id, *, source="user", mode="text",
@@ -3201,9 +3182,9 @@ class RoomService(RoomPromptMixin):
                 initial = os.fstat(stream.fileno())
                 if not stat.S_ISREG(initial.st_mode):
                     raise ValueError
-                raw = stream.read(MAX_PROMPT_BYTES + 1024 * 1024 + 1)
+                raw = stream.read()
                 final = os.fstat(stream.fileno())
-            if (len(raw) > MAX_PROMPT_BYTES + 1024 * 1024 or not raw.endswith(b"\n")
+            if (not raw.endswith(b"\n")
                     or (initial.st_ino, initial.st_size, initial.st_mtime_ns) != (final.st_ino, final.st_size, final.st_mtime_ns)):
                 raise ValueError
             rows = [adapters._strict_json(line) for line in raw.splitlines()]
@@ -3333,9 +3314,7 @@ class RoomService(RoomPromptMixin):
             with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError
-                raw = stream.read(MAX_PROMPT_BYTES + 1024 * 1024 + 1)
-            if len(raw) > MAX_PROMPT_BYTES + 1024 * 1024:
-                raise ValueError
+                raw = stream.read()
             rows = [adapters._strict_json(line.decode()) for line in raw.splitlines()]
             if any(not isinstance(row, dict) for row in rows):
                 raise ValueError
@@ -3391,9 +3370,7 @@ class RoomService(RoomPromptMixin):
             with os.fdopen(descriptor, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError
-                raw = stream.read(MAX_PROMPT_BYTES + 1024 * 1024 + 1)
-            if len(raw) > MAX_PROMPT_BYTES + 1024 * 1024:
-                raise ValueError
+                raw = stream.read()
             matches, active = [], None
             for line in raw.splitlines():
                 row = adapters._strict_json(line.decode("utf-8"))
@@ -3489,8 +3466,6 @@ class RoomService(RoomPromptMixin):
         digest = hashlib.sha256()
         for line in stream:
             digest.update(line)
-            if len(line) > native_adapters._MAX_LINE:
-                return None
             row = adapters._strict_json(line)
             if not isinstance(row, dict):
                 return None
@@ -3556,10 +3531,9 @@ class RoomService(RoomPromptMixin):
                     fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
                     with os.fdopen(fd, "rb") as stream:
                         before = os.fstat(stream.fileno())
-                        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                                or before.st_size > native_adapters._MAX_RECEIPT):
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                             raise ValueError("unsafe receipt file")
-                        initial = adapters._strict_json(stream.readline(native_adapters._MAX_LINE + 1))
+                        initial = adapters._strict_json(stream.readline())
                         if (not isinstance(initial, dict) or initial.get("data") != {
                                 "type": "thread.started", "thread_id": candidate["session_id"]}):
                             continue
@@ -3702,15 +3676,13 @@ class RoomService(RoomPromptMixin):
         exact published-tree gates remain mandatory, and the old error stays.
         """
         directory = self.workspace.parent / "native-receipts" / room_id
-        matches, read_bytes = [], 0
+        matches = []
         try:
             if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents):
                 raise ValueError("receipt directory is not a regular directory")
             descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 names = os.listdir(descriptor)
-                if len(names) > 64:
-                    raise ValueError("receipt directory exceeds recovery inspection bound")
                 for name in sorted(names):
                     if not name.endswith(".jsonl"):
                         continue
@@ -3721,12 +3693,11 @@ class RoomService(RoomPromptMixin):
                     file_descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
                     with os.fdopen(file_descriptor, "rb") as stream:
                         before = os.fstat(stream.fileno())
-                        if not stat.S_ISREG(before.st_mode) or before.st_size > 8 * 1024 * 1024:
-                            raise ValueError("receipt exceeds recovery inspection bound")
-                        content = stream.read(8 * 1024 * 1024 + 1)
-                        read_bytes += len(content)
+                        if not stat.S_ISREG(before.st_mode):
+                            raise ValueError("receipt is not a regular file")
+                        content = stream.read()
                         after = os.fstat(stream.fileno())
-                        if (read_bytes > 32 * 1024 * 1024 or len(content) != before.st_size
+                        if (len(content) != before.st_size
                                 or (before.st_ino, before.st_size, before.st_mtime_ns) !=
                                    (after.st_ino, after.st_size, after.st_mtime_ns)):
                             raise ValueError("receipt changed during recovery inspection")
@@ -3900,7 +3871,7 @@ class RoomService(RoomPromptMixin):
         room bounds. The outer trial owns its aggregate limits and journal.
         """
         self._available()
-        if (not isinstance(participants, list) or not 2 <= len(participants) <= MAX_ROOM_MEMBERS
+        if (not isinstance(participants, list) or len(participants) < 2
                 or any(not safe_agent_id(item) for item in participants)
                 or len(set(participants)) != len(participants)):
             raise RoomError("invalid_participants")
@@ -4108,10 +4079,9 @@ class RoomService(RoomPromptMixin):
     async def read_room_state(self, room_id):
         self._available()
         snapshot = self._snapshot(room_id, poll=True)
-        result = room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission)
-        if room_projection.wire_bytes(result) > room_projection.STATE_MAX_BYTES:
-            raise RoomError("room_state_too_large")
-        return result
+        # However long the room has run, its state is returned whole: a size
+        # limit here would leave a long room impossible to open.
+        return room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission)
 
     async def read_room_events(self, room_id, **cursor):
         if self._closed:
@@ -4121,10 +4091,7 @@ class RoomService(RoomPromptMixin):
     async def read_room_text(self, room_id, reference):
         if self._closed:
             raise RoomError("service_stopping")
-        result = self.store.read_text(room_id, reference)
-        if room_projection.wire_bytes(result) > room_projection.transport_limits()["event_page_max_bytes"]:
-            raise RoomError("event_too_large")
-        return result
+        return self.store.read_text(room_id, reference)
 
     async def read_room_job(self, room_id, job_id):
         snapshot = self._snapshot(room_id, poll=True)
@@ -4538,7 +4505,6 @@ class RoomService(RoomPromptMixin):
         reason = ("invitation_mode_unsupported" if not supported else
                   "room_removed" if room["lifecycle_state"] == "removed" else
                   "room_archived" if room["lifecycle_state"] != "active" else
-                  "member_limit_reached" if len(current) >= MAX_ROOM_MEMBERS else
                   "agent_unavailable" if not candidates else None)
         return {"supported": supported, "can_invite": reason is None, "reason": reason, "candidates": candidates}
 
@@ -5720,10 +5686,9 @@ class RoomService(RoomPromptMixin):
             reason = "runner_reported_failure"
         return {"status": result["status"],
                 "exit_code": result.get("exit_code") if type(result.get("exit_code")) is int else None,
-                "stdout": _visible(result.get("stdout", "")[:8000]) if isinstance(result.get("stdout", ""), str) else "",
-                "stderr": _visible(result.get("stderr", "")[:8000]) if isinstance(result.get("stderr", ""), str) else "",
-                "truncated": result.get("truncated") is True or any(
-                    isinstance(result.get(key), str) and len(result[key]) > 8000 for key in ("stdout", "stderr")),
+                "stdout": _visible(result.get("stdout", "")) if isinstance(result.get("stdout", ""), str) else "",
+                "stderr": _visible(result.get("stderr", "")) if isinstance(result.get("stderr", ""), str) else "",
+                "truncated": result.get("truncated") is True,
                 "cleanup_confirmed": result.get("cleanup_confirmed") is True,
                 "reason": reason,
                 "report_trust": "untrusted"}
@@ -5736,8 +5701,9 @@ class RoomService(RoomPromptMixin):
                 if not self.store.claim_execution(run_id):
                     return
                 remaining = seconds_available(reservation["deadline"], self.clock())
-                timeout = min(15, remaining) if remaining is not None else 15
-                if timeout <= 0:
+                # No timer of Beanest's own; only the user's deadline applies.
+                timeout = remaining
+                if timeout is not None and timeout <= 0:
                     result = {"status": "timed_out", "reason": "deadline_exceeded", "cleanup_confirmed": True}
                 else:
                     invoked = True
@@ -6117,15 +6083,12 @@ class RoomService(RoomPromptMixin):
         if (task is None or job["team"]["job_phase"] != "work" or task.get("repair_execution_id")
                 or read_only(job.get("work_mode"), job.get("runtime_settings"))):
             return []
-        free = free[:max(0, MAX_TASK_PATHS - len(allowed))]
         if not free:
             return []
         extend = next((command for command in parsed["commands"] if isinstance(command, dict)
                        and command.get("type") == "extend" and command.get("task_id") == task["id"]
                        and isinstance(command.get("write_paths"), list)), None)
         if extend is None:
-            if len(parsed["commands"]) >= MAX_RESPONSE_COMMANDS:
-                return []
             extend = {"type": "extend", "task_id": task["id"], "write_paths": []}
             parsed["commands"].insert(0, extend)
         extend["write_paths"] = _with_extension(extend["write_paths"], free)
@@ -6455,8 +6418,7 @@ class RoomService(RoomPromptMixin):
                     raise RoomError("invalid_workspace")
                 cwd.mkdir(mode=0o700, parents=True, exist_ok=True)
                 remaining = seconds_available(job["deadline"], self.clock())
-                call_limit = 600 if job.get("team") else self.call_timeout
-                timeout = remaining if native else min(call_limit, remaining) if remaining is not None else call_limit
+                timeout = remaining
                 if timeout is not None and timeout <= 0:
                     raise RoomError("deadline_exceeded")
                 spec = self.registry.get(provider)
@@ -6543,12 +6505,12 @@ class RoomService(RoomPromptMixin):
                 outages, outage_work = 0, None
                 while True:
                     operation = begin_call()
-                    # Native transport owns its deadline and process-group cleanup.
-                    # A second equal wait_for can erase its cancellation receipt.
+                    # The transport owns any deadline the user set and its process-group
+                    # cleanup. A second equal wait_for can erase its cancellation receipt.
                     invoked = True
                     cleanup_confirmed = False
                     try:
-                        result = await operation if native else await asyncio.wait_for(operation, timeout=timeout)
+                        result = await operation
                     except asyncio.CancelledError as error:
                         if endpoint is not None:
                             self._record_api_call(provider, error, runtime_kwargs)
@@ -6612,7 +6574,7 @@ class RoomService(RoomPromptMixin):
                     remaining = seconds_available(job["deadline"], self.clock())
                     if remaining is not None and remaining <= 0:
                         raise RoomError("deadline_exceeded")
-                    timeout = remaining if native else min(call_limit, remaining) if remaining is not None else call_limit
+                    timeout = remaining
                 preflight = preflight_failed(job["session_id"], result=result)
                 observation = result.get("native_execution") or {} if native else {}
                 cleanup_confirmed = (result.get("cleanup_confirmed") is True and observation.get("cleanup_confirmed") is True if native else
@@ -6901,7 +6863,7 @@ class RoomService(RoomPromptMixin):
             return
         text = ""
         if not job.get("team") and job.get("mode") not in PROJECT_MODES and isinstance(result.get("text"), str):
-            text = _visible(result["text"][:8000])
+            text = _visible(result["text"])
         spec = self.registry.get(job["provider"])
         if spec is not None and job.get("adapter") and job["adapter"] != spec.adapter:
             self.store.finish_job(job["id"], error="session_identity_changed", uncertain=True)
@@ -7042,7 +7004,6 @@ class RoomService(RoomPromptMixin):
                                   native_rejection=job.get("native_submission_rejection"), rejection_evidence=rejection_evidence)
             return
         artifact_revision = artifact_digest = artifact_files = None
-        capacity_rejection = None
         if job.get("mode") in PROJECT_MODES:
             try:
                 if parsed["base_revision"] != job.get("artifact_base_revision"):
@@ -7061,16 +7022,9 @@ class RoomService(RoomPromptMixin):
                     # fail its task. Text proposed in a reply is still checked.
                     if not native and any(_SECRET.search(str(item.get("content", ""))) for item in parsed["files"] if isinstance(item, dict)):
                         raise RoomError("artifact_sensitive_content")
-                    project = self._project(job["room_id"])
-                    before = project.snapshot() if job.get("team") else None
-                    try:
-                        committed = project.apply(job["provider"], job["id"], parsed["base_revision"], parsed["files"],
-                            **({"allow_disjoint": True, "ownership_grants": self.store.ownership_grant(job["id"])} if job.get("team") else {}),
-                            **({"native": True} if native else {}))
-                    except ProjectWorkspaceError as error:
-                        if error.code == "project_limit_exceeded" and job.get("team") and job["mode"] not in {"project_folder", "native_project"}:
-                            capacity_rejection = self._capacity_rejection(job, parsed, project, before)
-                        raise
+                    committed = self._project(job["room_id"]).apply(job["provider"], job["id"], parsed["base_revision"], parsed["files"],
+                        **({"allow_disjoint": True, "ownership_grants": self.store.ownership_grant(job["id"])} if job.get("team") else {}),
+                        **({"native": True} if native else {}))
                     artifact_revision = committed["revision"]
                 if native:
                     state = self.store.native_workspace(job["room_id"], job["provider"])
@@ -7105,8 +7059,7 @@ class RoomService(RoomPromptMixin):
             except (RoomError, ProjectWorkspaceError, native_workspace.NativeWorkspaceError) as error:
                 self.store.finish_job(job["id"], session_id=identity, usage=usage,
                     message=parsed["message"], error=error.code,
-                    uncertain=error.code in {"project_commit_unconfirmed", "session_identity_changed"},
-                    capacity_rejection=capacity_rejection)
+                    uncertain=error.code in {"project_commit_unconfirmed", "session_identity_changed"})
                 return
         if job.get("team") and artifact_digest is None:
             completed = next((command for command in parsed["commands"] if command["type"] == "complete"), None)
@@ -7205,47 +7158,6 @@ class RoomService(RoomPromptMixin):
             observation["purpose"] = purpose
         self.store.finish_project_inspection(job["id"], session_id=identity, message=parsed["message"], usage=usage,
                                              observation=observation)
-
-    def _capacity_rejection(self, job, parsed, project, before):
-        """Describe only a known uncommitted byte refusal, never a CAS failure.
-
-        apply may reject a too-large input before reaching its CAS checks. For
-        this recovery gate, verify every affected path across the immutable
-        revision chain too. Other members' disjoint committed files still count.
-        """
-        if job["team"]["job_phase"] != "work":
-            return None
-        try:
-            current = project.snapshot()
-            if current != before:
-                return None
-            base = project.snapshot(revision=parsed["base_revision"])
-            original = {file["path"]: file for file in base["files"]}
-            merged = {file["path"]: file for file in current["files"]}
-            paths = {file["path"] for file in parsed["files"]}
-            for file in parsed["files"]:
-                old = original.get(file["path"])
-                if (file["previous_sha256"] != (old["sha256"] if old else None)
-                        or (old and old["owner"] != job["provider"])
-                        or any(path.casefold() == file["path"].casefold() and path != file["path"] for path in merged)):
-                    return None
-            for revision in range(base["revision"] + 1, current["revision"] + 1):
-                intervening = {file["path"]: file for file in project.snapshot(revision=revision)["files"]}
-                if any(intervening.get(path) != original.get(path) for path in paths):
-                    return None
-            merged.update({file["path"]: file for file in parsed["files"]})
-            if len(merged) > PROJECT_FILE_LIMIT:
-                return None
-            proposed_bytes = sum(len(file["content"].encode("utf-8")) for file in merged.values())
-            if proposed_bytes <= project.max_bytes:
-                return None
-            return {"current_revision": current["revision"], "current_digest": _project_digest(current),
-                    "current_bytes": sum(len(file["content"].encode("utf-8")) for file in current["files"]),
-                    "proposed_bytes": proposed_bytes, "byte_limit": project.max_bytes,
-                    "excess_bytes": proposed_bytes - project.max_bytes, "unit": "UTF-8 bytes",
-                    "proposal": {"base_revision": parsed["base_revision"], "files": parsed["files"]}}
-        except (ProjectWorkspaceError, UnicodeError):
-            return None
 
     @staticmethod
     def _team_worker_cleanup_unknown(snapshot):

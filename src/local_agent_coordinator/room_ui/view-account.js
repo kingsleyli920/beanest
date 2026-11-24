@@ -417,15 +417,18 @@ function parallelLimitSupported(partner) {
 // How many tasks this partner may work on at once. It stays one partner; every extra task uses the same account.
 function parallelLimitControl(id, partner) {
   const row = element('label', '', 'account-workload');
-  const select = element('select'); select.dataset.focusKey = 'account-parallel';
+  // Any whole number from 1 up: Beanest sets no upper bound of its own.
+  const select = element('input'); select.dataset.focusKey = 'account-parallel';
+  select.type = 'number'; select.min = '1'; select.step = '1'; select.inputMode = 'numeric';
   select.disabled = state.workloadSavingId === id || state.managementBusy;
-  for (let value = 1; value <= 8; value += 1) {
-    const option = element('option', value === 1 ? t("1 项（不同时做）") : t("{p0} 项", { p0: value })); option.value = String(value); select.append(option);
-  }
   select.value = String(partner.parallel_limit);
   select.setAttribute('aria-label', t("{p0}最多同时做几项任务", { p0: displayName(id) }));
-  select.addEventListener('change', () => void saveParallelLimit(id, Number(select.value)));
-  row.append(element('span', t("最多同时做")), select);
+  select.addEventListener('change', () => {
+    const value = Number(select.value);
+    if (!Number.isInteger(value) || value < 1) { select.value = String(partner.parallel_limit); return; }
+    if (value !== partner.parallel_limit) void saveParallelLimit(id, value);
+  });
+  row.append(element('span', t("最多同时做")), select, element('span', t("项")));
   const holder = element('div', '', 'account-workload-setting');
   holder.append(row, element('p', t("能同时做的任务比空闲伙伴多时，它会同时做几项，不用排队等人。还是这一个伙伴，每多一项就多用一份同一个账号的额度；额度快用完或接近花费上限时不会多开。"), 'detail-caption'));
   return holder;

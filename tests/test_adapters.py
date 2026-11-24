@@ -297,17 +297,22 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(invalid['text'], '')
             self.assertEqual(invalid['status'], 'failed')
 
-    def test_structured_payload_over_limit_is_rejected_without_truncation(self):
-        event = {'type': 'result', 'subtype': 'success', 'structured_output': {'text': 'x' * adapters.MAX_TEXT}}
+    def test_structured_payload_past_the_old_4_mib_limit_is_kept_whole(self):
+        # Catches the old MAX_TEXT refusal of a long structured answer.
+        event = {'type': 'result', 'subtype': 'success', 'structured_output': {'text': 'x' * (5 * 1024 * 1024)}}
         result = adapters.parse_events('claude', [json.dumps(event).encode()], structured=True)
-        self.assertEqual(result['text'], '')
-        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(len(json.loads(result['text'])['text']), 5242880)
 
-    @patch("local_agent_coordinator.adapters.MAX_TEXT", 128 * 1024)
-    def test_structured_chinese_payload_uses_actual_utf8_limit_and_rejects_invalid_unicode(self):
+    def test_plain_answer_past_the_old_4_mib_limit_is_not_cut(self):
+        # Catches the old silent [:MAX_TEXT] cut of a long plain answer.
+        events = [{'type': 'result', 'subtype': 'success', 'session_id': '42619ac2-4bfa-446c-a773-5193109566ae',
+                   'result': '豆' * (2 * 1024 * 1024)}]
+        result = adapters.parse_events('claude', [json.dumps(event).encode() for event in events])
+        self.assertEqual(len(result['text']), 2097152)
+
+    def test_structured_chinese_payload_is_kept_and_invalid_unicode_rejected(self):
         payload = {'text': '豆' * 23000}
-        self.assertLess(len(json.dumps(payload, ensure_ascii=False).encode('utf-8')), adapters.MAX_TEXT)
-        self.assertGreater(len(json.dumps(payload, ensure_ascii=True).encode('utf-8')), adapters.MAX_TEXT)
         event = {'type': 'result', 'subtype': 'success', 'structured_output': payload}
         result = adapters.parse_events('claude', [json.dumps(event).encode()], structured=True)
         self.assertEqual(result['status'], 'completed')

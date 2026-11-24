@@ -316,7 +316,7 @@ async function browser({ language = 'zh-CN', languageStorage = new Map(), agents
       requests.push(request);
       let value = route ? await route(request, document, options) : undefined;
       if (value === undefined) {
-        if (url === '/api/status') value = { app: 'local-agent-rooms', agents, task_modes: taskModes, ...(executionPolicySupport || nativeProjectSupport || naturalContinuationSupport || roomLifecycleSupport || roomNativeSessionCleanupSupport || messageReceiptsSupport || projectDeletionSupport || naturalRuntimeSupport || partnerLifecycleSupport || pagingSupport || hostOutboxScope || mediaSupport || codeStatusSupport || memberInvitationSupport || taskWithdrawalSupport || taskAnswerSupport ? { ...(hostOutboxScope ? { user_outbox_scope: hostOutboxScope } : {}), ...(pagingSupport ? { transport_limits: { max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608, event_page_default_limit: 100, event_page_default_bytes: 262144, event_page_max_limit: 500, event_page_max_bytes: 8388608 } } : {}), capabilities: { ...(taskWithdrawalSupport ? { task_withdrawal_v1: true } : {}), ...(taskAnswerSupport ? { task_answer_v1: true } : {}), ...(memberInvitationSupport ? { room_member_invitation_v1: true } : {}), ...(codeStatusSupport ? { room_code_status_v1: true } : {}), ...(mediaSupport ? { room_media_v1: true } : {}), ...(hostOutboxScope ? { user_outbox_v1: true } : {}), ...(pagingSupport ? { room_paging_v1: true } : {}), ...(partnerLifecycleSupport ? { partner_lifecycle_operations: true } : {}), ...(naturalRuntimeSupport ? { natural_runtime_settings: true } : {}), ...(messageReceiptsSupport ? { message_receipts: true } : {}), ...(projectDeletionSupport ? { project_registration_deletion: true } : {}), ...(roomNativeSessionCleanupSupport ? { room_native_session_cleanup: true } : {}), ...(roomLifecycleSupport ? { room_lifecycle_operations: true } : {}), ...(executionPolicySupport ? { execution_policy: true } : {}), ...(continuousObjectiveSupport ? { continuous_objective: true } : {}), ...(nativeProjectSupport ? { native_project: true } : {}), ...(naturalContinuationSupport ? { natural_continuation: true } : {}) } } : {}) };
+        if (url === '/api/status') value = { app: 'local-agent-rooms', agents, task_modes: taskModes, ...(executionPolicySupport || nativeProjectSupport || naturalContinuationSupport || roomLifecycleSupport || roomNativeSessionCleanupSupport || messageReceiptsSupport || projectDeletionSupport || naturalRuntimeSupport || partnerLifecycleSupport || pagingSupport || hostOutboxScope || mediaSupport || codeStatusSupport || memberInvitationSupport || taskWithdrawalSupport || taskAnswerSupport ? { ...(hostOutboxScope ? { user_outbox_scope: hostOutboxScope } : {}), ...(pagingSupport ? { transport_limits: { max_message_utf8_bytes: null, max_request_utf8_bytes: null, event_page_default_limit: 100, event_page_default_bytes: 262144, event_page_max_limit: 500, event_page_max_bytes: 8388608 } } : {}), capabilities: { ...(taskWithdrawalSupport ? { task_withdrawal_v1: true } : {}), ...(taskAnswerSupport ? { task_answer_v1: true } : {}), ...(memberInvitationSupport ? { room_member_invitation_v1: true } : {}), ...(codeStatusSupport ? { room_code_status_v1: true } : {}), ...(mediaSupport ? { room_media_v1: true } : {}), ...(hostOutboxScope ? { user_outbox_v1: true } : {}), ...(pagingSupport ? { room_paging_v1: true } : {}), ...(partnerLifecycleSupport ? { partner_lifecycle_operations: true } : {}), ...(naturalRuntimeSupport ? { natural_runtime_settings: true } : {}), ...(messageReceiptsSupport ? { message_receipts: true } : {}), ...(projectDeletionSupport ? { project_registration_deletion: true } : {}), ...(roomNativeSessionCleanupSupport ? { room_native_session_cleanup: true } : {}), ...(roomLifecycleSupport ? { room_lifecycle_operations: true } : {}), ...(executionPolicySupport ? { execution_policy: true } : {}), ...(continuousObjectiveSupport ? { continuous_objective: true } : {}), ...(nativeProjectSupport ? { native_project: true } : {}), ...(naturalContinuationSupport ? { natural_continuation: true } : {}) } } : {}) };
         else if (['/api/rooms', '/api/rooms?view=compact'].includes(url) && options.method === 'GET') value = { rooms };
         else if (url === '/api/projects' && options.method === 'GET') value = { projects };
         else if (['/api/partners', '/api/partners?view=compact'].includes(url) && options.method === 'GET') value = { partners: partners || agents, supported_adapters: [{ id: 'claude', name: 'Claude Code' }, { id: 'codex', name: 'Codex' }] };
@@ -2289,13 +2289,14 @@ test('folder download accepts a verified large ZIP with a Unicode path while leg
   assert.match(old.get('export-note').textContent, /版本不一致/);
 });
 
-test('project size errors describe folder limits without reintroducing the advanced file quota', async () => {
+test('an old project size error is neutral and names no file limit', async () => {
+  // Catches the page still quoting "12 个 / 16 KiB / 48 KiB" or a processing limit Beanest no longer has.
   const project = { id: '33333333-3333-4333-8333-333333333333', name: '项目', path: '/fictional/whole', files: [], selection_kind: 'folder' };
   const ui = await browser({ projects: [project], route: (request) => request.method === 'POST' && request.path === '/api/rooms' ? { error: 'project_limit_exceeded' } : undefined });
   ui.get('project-picker').value = project.id; ui.get('project-picker').fire('change');
   ui.type('修改文件'); await ui.submit();
-  assert.match(ui.get('action-error').textContent, /项目或这批修改超过本机处理上限.*已有成果保留/);
-  assert.doesNotMatch(ui.get('action-error').textContent, /12 个|16 KiB|48 KiB/);
+  assert.equal(ui.get('action-error').textContent, '这批内容没有保存，已有成果保留。');
+  assert.doesNotMatch(ui.get('action-error').textContent, /12 个|16 KiB|48 KiB|上限/);
 });
 
 
@@ -4998,6 +4999,14 @@ test('native read-only permissions describe provider-specific read commands with
   assert.match(ui.get('scope-description').textContent, /暂不运行项目、安装依赖或自动合入/); assert.equal(ui.posts().length, 0);
 });
 
+test('a native room stopped long ago by a size limit is described without naming any limit', async () => {
+  // The 九烛 room showed "最多 12 个，每个 16 KiB"; Beanest no longer has that limit or a folder one.
+  const saved = restartSnapshot(); saved.room.mode = 'native_project'; saved.objective.stop_reason = 'project_limit_exceeded';
+  const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true });
+  assert.match(ui.get('collaboration-outcome').textContent, /这批内容没有保存，已有成果保留。/);
+  assert.doesNotMatch(ui.get('collaboration-outcome').textContent, /12 个|16 KiB|48 KiB|上限/);
+});
+
 test('native progress safeguards and unsupported participants display concrete reasons instead of raw error codes', async () => {
   const saved = restartSnapshot(); saved.room.mode = 'native_project'; saved.objective.stop_reason = 'native_no_progress';
   const ui = await browser({ rooms: [saved.room], saved, executionPolicySupport: true, nativeProjectSupport: true });
@@ -7201,10 +7210,13 @@ test('long UTF8 messages commit their entire escaped body before a small ACK and
   assert.equal(ui.get('character-count').hidden, true); assert.doesNotMatch(html, /maxlength="3000"|0 \/ 3000/);
 });
 
-test('long messages use raw UTF8 capacity and never truncate an oversize draft or silently downgrade through an old host', async () => {
+test('a message past the old 1 MiB limit is sent whole, and an old host still keeps an unsent draft', async () => {
+  // Catches the page refusing a long message (the old 1 MiB "传输容量" refusal) instead of sending it.
   const ui = await browser({ pagingSupport: true });
-  const text = '汉'.repeat(349526); ui.type(text); await ui.submit();
-  assert.equal(ui.posts().length, 0); assert.equal(ui.get('message').value, text); assert.match(ui.get('notice').textContent, /传输容量.*未发送/);
+  const text = '汉'.repeat(700000); ui.type(text); await ui.submit();
+  const post = ui.posts().find((request) => request.path.startsWith('/api/rooms'));
+  assert.ok(post, 'the 2 MiB message is posted'); assert.equal(post.body.goal, text);
+  assert.equal(Buffer.byteLength(post.body.goal), 2100000); assert.doesNotMatch(ui.get('notice').textContent, /传输容量/);
   const old = await browser(); const original = 'a'.repeat(4000); old.type(original); await old.submit();
   assert.equal(old.posts().length, 0); assert.equal(old.get('message').value, original); assert.match(old.get('notice').textContent, /尚未支持长消息.*原文已保留/);
 });
@@ -11293,12 +11305,15 @@ test('explicit file lists get a message about their actual problem', async () =>
     ui.get('project-form').fire('submit'); await settle();
     return ui.get('manager-notice').textContent;
   };
-  assert.equal(await submit(Array.from({ length: 13 }, (_, index) => `n${index}.md`)), '最多 12 个文件，现在填了 13 个。');
   assert.equal(await submit(['/Users/me/a.md']), '请写相对项目文件夹的路径，例如 src/main.py，不要写完整路径：/Users/me/a.md');
   assert.equal(await submit(['src/../a.md']), '路径里不能有 ..、. 或空的一段，文件要在项目文件夹里面：src/../a.md');
   assert.equal(await submit(['a.md', 'A.md']), '这个文件填了两次：A.md');
   assert.equal(await submit(['logo.png']), 'logo.png 不是能处理的文本文件。只能选源码、文档、配置这类文本文件。');
   assert.equal(ui.posts().length, 0, 'nothing is sent for a list the service would reject');
+  // Catches the page refusing more than 12 files before the service sees them; Beanest sets no file-count limit.
+  await submit(Array.from({ length: 40 }, (_, index) => `n${index}.md`));
+  const registered = ui.posts().find((request) => request.path === '/api/projects');
+  assert.equal(registered.body.files.length, 40);
   const missing = await browser({ route(request) { if (request.path === '/api/projects' && request.method === 'POST') return { error: 'project_file_unavailable' }; } });
   await missing.click('open-projects');
   missing.get('project-name').value = '虚构项目'; missing.get('project-path').value = '/fictional/missing';
@@ -12323,23 +12338,24 @@ test('a partner working on several tasks at once stays one row that says how man
 
 test('how many tasks a partner may work on at once is set on its account card, and only where the tool can', async () => {
   // Catches: the limit never reaching the server or sent as text, the control offered for a tool the host
-  // runs through the user's own command, or a choice outside 1 to 8.
+  // runs through the user's own command, or an upper bound of Beanest's own (it was 8).
   const saved = snapshot({ agents: catalog.slice(0, 2) });
   const partners = [{ ...catalog[0], adapter: 'claude', enabled: true, selectable: true, parallel_limit: 3, account: claudeUsageAccount([]) },
     { ...catalog[1], adapter: 'codex', enabled: true, selectable: true, parallel_limit: 1, connection_state: 'configured' }];
   const ui = await browser({ agents: catalog.slice(0, 2), partners, rooms: [saved.room], saved,
-    route(request) { if (request.path === '/api/partners/claude/parallel-limit') return { partners: [{ ...partners[0], parallel_limit: 6 }, partners[1]], supported_adapters: [] }; } });
+    route(request) { if (request.path === '/api/partners/claude/parallel-limit') return { partners: [{ ...partners[0], parallel_limit: request.body.limit }, partners[1]], supported_adapters: [] }; } });
   const control = (id) => descendants(ui.get(`provider-account-${id}`)).find((node) => node.dataset?.focusKey === 'account-parallel');
   const select = control('claude');
   assert.equal(select.value, '3');
-  assert.deepEqual(select.children.map((option) => [option.value, option.textContent]),
-    [['1', '1 项（不同时做）'], ['2', '2 项'], ['3', '3 项'], ['4', '4 项'], ['5', '5 项'], ['6', '6 项'], ['7', '7 项'], ['8', '8 项']]);
+  assert.equal(select.type, 'number'); assert.equal(select.min, '1'); assert.equal(select.max, undefined);
   assert.equal(select.getAttribute('aria-label'), 'Claude Code最多同时做几项任务');
   assert.equal(control('codex') === undefined, true, 'a tool reached through the user\'s own command keeps to one task');
-  select.value = '6'; select.fire('change'); await settle();
+  for (const bad of ['0', '2.5', '']) { control('claude').value = bad; control('claude').fire('change'); await settle(); }
+  assert.equal(control('claude').value, '3', 'a value that is not a whole number from 1 up goes back, unsent');
+  control('claude').value = '12'; control('claude').fire('change'); await settle();
   assert.deepEqual(ui.posts().filter((post) => post.path.endsWith('/parallel-limit')).map((post) => [post.path, post.body]),
-    [['/api/partners/claude/parallel-limit', { limit: 6 }]]);
-  assert.equal(control('claude').value, '6');
+    [['/api/partners/claude/parallel-limit', { limit: 12 }]]);
+  assert.equal(control('claude').value, '12');
 });
 
 // Catches a row action that hides for everyone: it may disappear only where a pointer can hover, and

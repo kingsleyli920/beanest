@@ -18,7 +18,6 @@ from pathlib import Path
 import re
 import shutil
 import stat
-import time
 from uuid import uuid4
 
 from pathspec import GitIgnoreSpec
@@ -33,20 +32,13 @@ from .project_workspace import (ProjectWorkspace, ProjectWorkspaceError, _uuid,
 FORMAT = "beanest-folder-workspace-v1"
 # A real project (a game with art, a monorepo) is gigabytes and hundreds of
 # thousands of files; Beanest must not be the reason it cannot be used.
-MAX_SOURCE_FILES = 500_000
-MAX_SOURCE_BYTES = 64 * 1024 * 1024 * 1024
-CAPTURE_SECONDS = 1800
-MAX_FILE_BYTES = 64 * 1024 * 1024
-MAX_CHANGE_BYTES = 256 * 1024 * 1024
-# A real task on a large project changes dozens of files, and a long room adds
-# up over many rounds; these bounds only stop a runaway, never ordinary work.
-MAX_CHANGED_TOTAL_BYTES = 256 * 1024 * 1024
-MAX_CHANGE_FILES = 1000
-MAX_INDEX_BYTES = 512 * 1024 * 1024
+# No size or count here refuses a partner's work: git and the partners' own
+# tools set none, so Beanest sets none. Only a single answer to a read or
+# search is paged; the next page is always one call away.
 MAX_RESPONSE_BYTES = 16 * 1024
-MAX_SEARCH_BYTES = 16 * 1024 * 1024
-MAX_IGNORE_BYTES = 64 * 1024
-MAX_IGNORE_PATTERNS = 1000
+# The line-by-line comparison view skips a file larger than this; the file
+# itself is saved and downloadable like any other.
+DIFF_VIEW_BYTES = 64 * 1024 * 1024
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _EXCLUDED_DIRS = frozenset({
@@ -116,7 +108,6 @@ class FolderWorkspace(ProjectWorkspace):
                 or type(create) is not bool):
             raise ProjectWorkspaceError("invalid_project_request")
         self.format = FORMAT
-        self.max_bytes = MAX_CHANGE_BYTES
         with self._locked(create=create) as (room, revisions, created):
             if created:
                 os.mkdir("blobs", mode=0o700, dir_fd=room)
@@ -129,14 +120,9 @@ class FolderWorkspace(ProjectWorkspace):
         descriptor = os.open(filename, _FILE_FLAGS, dir_fd=directory)
         try:
             _private(descriptor)
-            if os.fstat(descriptor).st_size > MAX_INDEX_BYTES:
-                raise ProjectWorkspaceError("project_storage_corrupt")
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = None
-                raw = stream.read(MAX_INDEX_BYTES + 1)
-            if len(raw) > MAX_INDEX_BYTES:
-                raise ProjectWorkspaceError("project_storage_corrupt")
-            return raw
+                return stream.read()
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -194,10 +180,10 @@ class FolderWorkspace(ProjectWorkspace):
         if (not isinstance(value, dict)
                 or set(value) - {"deleted"} != {"format", "revision", "files", "source", "excluded"}
                 or value["format"] != FORMAT or value["revision"] != revision
-                or not isinstance(value["files"], list) or len(value["files"]) > MAX_SOURCE_FILES
+                or not isinstance(value["files"], list)
                 or not isinstance(value["excluded"], dict)):
             raise ProjectWorkspaceError("project_storage_corrupt")
-        seen, total = set(), 0
+        seen = set()
         for item in value["files"]:
             if (not isinstance(item, dict)
                     or set(item) - {"path", "sha256", "bytes", "text", "owner", "changed", "executable"}
@@ -216,15 +202,11 @@ class FolderWorkspace(ProjectWorkspace):
                     or type(item["text"]) is not bool or type(item["changed"]) is not bool
                     or (item["owner"] is not None and not safe_member_id(item["owner"]))):
                 raise ProjectWorkspaceError("project_storage_corrupt")
-            total += item["bytes"]
             seen.add(item["path"].casefold())
-        if (total > MAX_SOURCE_BYTES
-                or sum(item["bytes"] for item in value["files"] if item["changed"]) > MAX_CHANGED_TOTAL_BYTES):
-            raise ProjectWorkspaceError("project_storage_corrupt")
         # Captured source files a proposal removed. Only written when nonempty,
         # so indexes and digests without deletions are byte-for-byte unchanged.
         deleted = value.get("deleted", [])
-        if "deleted" in value and (not isinstance(deleted, list) or not deleted or len(deleted) > MAX_SOURCE_FILES):
+        if "deleted" in value and (not isinstance(deleted, list) or not deleted):
             raise ProjectWorkspaceError("project_storage_corrupt")
         removed = set()
         for item in deleted:
@@ -260,8 +242,6 @@ class FolderWorkspace(ProjectWorkspace):
                   "proposal_id": proposal_id, "fingerprint": fingerprint}
         updated = {**manifest, "revision": revision, "commits": [*manifest["commits"], commit]}
         encoded = canonical_json(updated)
-        if max(len(raw), len(encoded)) > MAX_INDEX_BYTES:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         temporary = ".manifest-" + str(uuid4())
         attempted = False
         try:
@@ -295,19 +275,14 @@ class FolderWorkspace(ProjectWorkspace):
 
     def _verified_blob(self, blobs, entry):
         """Bound verification work before returning any file bytes to a caller."""
-        if entry["bytes"] > MAX_SEARCH_BYTES:
-            raise ProjectWorkspaceError("project_read_limit_exceeded")
         descriptor = self._blob(blobs, entry)
         try:
             digest = hashlib.sha256()
-            deadline = time.monotonic() + 2
             while True:
-                raw = os.read(descriptor, 256 * 1024)
+                raw = os.read(descriptor, 1024 * 1024)
                 if not raw:
                     break
                 digest.update(raw)
-                if time.monotonic() >= deadline:
-                    raise ProjectWorkspaceError("project_read_limit_exceeded")
             if digest.hexdigest() != entry["sha256"]:
                 raise ProjectWorkspaceError("project_storage_corrupt")
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -338,10 +313,8 @@ class FolderWorkspace(ProjectWorkspace):
 
     def _raw(self, blobs, entry):
         """Exact verified bytes of one stored file, text or binary."""
-        if entry["bytes"] > MAX_FILE_BYTES:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         with os.fdopen(self._blob(blobs, entry), "rb") as stream:
-            raw = stream.read(MAX_FILE_BYTES + 1)
+            raw = stream.read()
         if len(raw) != entry["bytes"] or _hash(raw) != entry["sha256"]:
             raise ProjectWorkspaceError("project_storage_corrupt")
         return raw
@@ -415,7 +388,6 @@ class FolderWorkspace(ProjectWorkspace):
                 output = os.open(destination.name, _DIR_FLAGS, dir_fd=parent)
                 identity = os.fstat(output)
                 blobs = _open_directory("blobs", parent=room)
-                deadline = time.monotonic() + CAPTURE_SECONDS
                 metadata = []
                 try:
                     for entry in index["files"]:
@@ -438,8 +410,6 @@ class FolderWorkspace(ProjectWorkspace):
                                 while True:
                                     if cancelled is not None and cancelled():
                                         raise ProjectWorkspaceError("project_export_cancelled")
-                                    if time.monotonic() >= deadline:
-                                        raise ProjectWorkspaceError("project_read_limit_exceeded")
                                     chunk = source.read(256 * 1024)
                                     if not chunk:
                                         break
@@ -476,7 +446,7 @@ class FolderWorkspace(ProjectWorkspace):
             os.close(parent)
 
     def files_for_paths(self, paths, revision=None):
-        if not isinstance(paths, list) or len(paths) > MAX_CHANGE_FILES:
+        if not isinstance(paths, list):
             raise ProjectWorkspaceError("invalid_project_files")
         names = [_path(path) for path in paths]
         if len(set(names)) != len(names):
@@ -495,7 +465,7 @@ class FolderWorkspace(ProjectWorkspace):
 
     def metadata_for_paths(self, paths, revision=None):
         """Return exact immutable file metadata without decoding large/binary assets."""
-        if not isinstance(paths, list) or len(paths) > MAX_CHANGE_FILES:
+        if not isinstance(paths, list):
             raise ProjectWorkspaceError("invalid_project_files")
         names = [_path(path) for path in paths]
         if len(set(names)) != len(names):
@@ -508,7 +478,7 @@ class FolderWorkspace(ProjectWorkspace):
 
     def raw_files_for_paths(self, paths, revision=None):
         """Exact bytes of named files at one immutable revision, binary included."""
-        if not isinstance(paths, list) or len(paths) > MAX_CHANGE_FILES:
+        if not isinstance(paths, list):
             raise ProjectWorkspaceError("invalid_project_files")
         names = [_path(path) for path in paths]
         if len(set(names)) != len(names):
@@ -526,7 +496,7 @@ class FolderWorkspace(ProjectWorkspace):
 
     def assign_baseline_owners(self, mapping, *, allowed_owners):
         """Freeze known handoff authors on a fresh capture without changing bytes."""
-        if not isinstance(mapping, dict) or not mapping or len(mapping) > MAX_SOURCE_FILES:
+        if not isinstance(mapping, dict) or not mapping:
             raise ProjectWorkspaceError("invalid_project_request")
         for path, binding in mapping.items():
             _path(path)
@@ -576,8 +546,9 @@ class FolderWorkspace(ProjectWorkspace):
             for entry in (before, after):
                 if entry is not None and not entry["text"]:
                     return {**result, "reason": "project_binary_file"}
-                if entry is not None and entry["bytes"] > MAX_FILE_BYTES:
-                    return {**result, "reason": "project_limit_exceeded"}
+                if entry is not None and entry["bytes"] > DIFF_VIEW_BYTES:
+                    # Only this line-by-line view is skipped; the file itself is saved.
+                    return {**result, "reason": "project_diff_too_large"}
         # Immutable revision numbers make these separate short reads safe even
         # if another task publishes a newer head between them.
         try:
@@ -636,7 +607,6 @@ class FolderWorkspace(ProjectWorkspace):
         # Source I/O never holds the shared workspace lock. A concurrent status
         # read sees the empty baseline until a complete index is published.
         try:
-            deadline = time.monotonic() + CAPTURE_SECONDS
             source = _open_absolute(source_path)
             files, excluded = self._capture_tree(source, stage, cancelled=cancelled)
             if cancelled is not None and cancelled():
@@ -657,8 +627,6 @@ class FolderWorkspace(ProjectWorkspace):
                     for sha in sorted({entry["sha256"] for entry in files}):
                         if cancelled is not None and cancelled():
                             raise ProjectWorkspaceError("project_capture_cancelled")
-                        if time.monotonic() >= deadline:
-                            raise ProjectWorkspaceError("project_capture_limit")
                         try:
                             os.link(sha, sha, src_dir_fd=stage, dst_dir_fd=blobs, follow_symlinks=False)
                             promoted.append(sha)
@@ -698,25 +666,18 @@ class FolderWorkspace(ProjectWorkspace):
                     os.close(parent)
 
     def _capture_tree(self, source, blobs, *, cancelled=None):
-        deadline = time.monotonic() + CAPTURE_SECONDS
         observed, files, excluded = {}, [], Counter()
-        seen, total, scanned = set(), 0, 0
+        seen, total = set(), 0
 
         def check_budget():
             if cancelled is not None and cancelled():
                 raise ProjectWorkspaceError("project_capture_cancelled")
-            if time.monotonic() >= deadline:
-                raise ProjectWorkspaceError("project_capture_limit")
 
         def directory_names(directory):
-            nonlocal scanned
             names = []
             with os.scandir(directory) as entries:
                 for entry in entries:
                     check_budget()
-                    scanned += 1
-                    if scanned > MAX_SOURCE_FILES * 4:
-                        raise ProjectWorkspaceError("project_capture_limit")
                     names.append(entry.name)
             return sorted(names)
 
@@ -731,17 +692,14 @@ class FolderWorkspace(ProjectWorkspace):
                 if stat.S_ISREG(metadata.st_mode):
                     descriptor = os.open(".gitignore", _FILE_FLAGS, dir_fd=directory)
                     try:
-                        if os.fstat(descriptor).st_size > MAX_IGNORE_BYTES:
-                            raise ProjectWorkspaceError("project_capture_limit")
-                        raw = os.read(descriptor, MAX_IGNORE_BYTES + 1)
+                        with os.fdopen(os.dup(descriptor), "rb") as stream:
+                            raw = stream.read()
                         after = os.fstat(descriptor)
                         if _attributes(metadata) != _attributes(after) or len(raw) != after.st_size:
                             raise ProjectWorkspaceError("project_source_changed")
                         observed[prefix + ".gitignore"] = _attributes(after)
                         try:
                             patterns = raw.decode("utf-8").splitlines()
-                            if len(patterns) > MAX_IGNORE_PATTERNS:
-                                raise ProjectWorkspaceError("project_capture_limit")
                             local_rules.append((prefix, GitIgnoreSpec.from_lines(patterns, backend="simple")))
                             check_budget()
                         except (UnicodeError, ValueError):
@@ -784,8 +742,6 @@ class FolderWorkspace(ProjectWorkspace):
                     finally:
                         os.close(child)
                 elif stat.S_ISREG(metadata.st_mode):
-                    if len(files) >= MAX_SOURCE_FILES or total + metadata.st_size > MAX_SOURCE_BYTES:
-                        raise ProjectWorkspaceError("project_capture_limit")
                     descriptor = os.open(name, _FILE_FLAGS, dir_fd=directory)
                     try:
                         if _attributes(os.fstat(descriptor)) != _attributes(metadata):
@@ -843,7 +799,7 @@ class FolderWorkspace(ProjectWorkspace):
                     if not chunk:
                         break
                     size += len(chunk)
-                    if size > metadata.st_size or size > MAX_SOURCE_BYTES:
+                    if size > metadata.st_size:
                         raise ProjectWorkspaceError("project_source_changed")
                     digest.update(chunk)
                     stream.write(chunk)
@@ -925,15 +881,12 @@ class FolderWorkspace(ProjectWorkspace):
         if not entry["text"]:
             raise ProjectWorkspaceError("project_binary_file")
         lines, used, truncated, next_offset = [], 0, False, None
-        number, scanned, deadline = 0, 0, time.monotonic() + 2
+        number = 0
         with os.fdopen(self._verified_blob(blobs, entry), "rb") as stream:
             while True:
                 raw = stream.readline(MAX_RESPONSE_BYTES + 1)
                 if not raw:
                     break
-                scanned += len(raw)
-                if scanned > MAX_SEARCH_BYTES or time.monotonic() >= deadline:
-                    raise ProjectWorkspaceError("project_read_limit_exceeded")
                 if number < offset:
                     if raw.endswith(b"\n"):
                         number += 1
@@ -964,25 +917,17 @@ class FolderWorkspace(ProjectWorkspace):
             raise ProjectWorkspaceError("invalid_project_request") from None
         if not query or query_size > 1024 or "\n" in query or "\r" in query:
             raise ProjectWorkspaceError("invalid_project_request")
-        matches, seen, scanned, used = [], 0, 0, 0
-        deadline = time.monotonic() + 2
+        matches, seen, used = [], 0, 0
         for entry in selected:
             if not entry["text"]:
                 continue
-            if scanned + entry["bytes"] > MAX_SEARCH_BYTES:
-                raise ProjectWorkspaceError("project_search_limit_exceeded")
             with os.fdopen(self._verified_blob(blobs, entry), "rb") as stream:
                 number = -1
                 while True:
-                    raw = stream.readline(MAX_FILE_BYTES + 1)
+                    raw = stream.readline()
                     if not raw:
                         break
                     number += 1
-                    if len(raw) > MAX_FILE_BYTES:
-                        raise ProjectWorkspaceError("project_search_limit_exceeded")
-                    scanned += len(raw)
-                    if scanned > MAX_SEARCH_BYTES or time.monotonic() >= deadline:
-                        raise ProjectWorkspaceError("project_search_limit_exceeded")
                     line = raw.decode("utf-8")
                     if query not in line:
                         continue
@@ -1077,9 +1022,9 @@ class FolderWorkspace(ProjectWorkspace):
         """
         if (not safe_member_id(provider) or not isinstance(proposal_id, str) or not _ID.fullmatch(proposal_id)
                 or type(base_revision) is not int or base_revision < 0 or type(allow_disjoint) is not bool
-                or not isinstance(files, list) or not 1 <= len(files) <= MAX_CHANGE_FILES):
+                or not isinstance(files, list) or not files):
             raise ProjectWorkspaceError("invalid_project_request")
-        prepared, names, total, payloads = [], set(), 0, {}
+        prepared, names, payloads = [], set(), {}
         for item in files:
             if not isinstance(item, dict) or not {"path", "previous_sha256"} <= set(item):
                 raise ProjectWorkspaceError("invalid_project_files")
@@ -1127,15 +1072,10 @@ class FolderWorkspace(ProjectWorkspace):
                 except (UnicodeError, binascii.Error, ValueError):
                     raise ProjectWorkspaceError("invalid_project_files") from None
                 entry.update(sha256=_hash(raw), bytes=len(raw), text=False)
-            if len(raw) > MAX_FILE_BYTES:
-                raise ProjectWorkspaceError("project_limit_exceeded")
             if "executable" in item:
                 entry["executable"] = item["executable"]
-            total += len(raw)
             payloads[path] = raw
             prepared.append(entry)
-        if total > MAX_CHANGE_BYTES:
-            raise ProjectWorkspaceError("project_limit_exceeded")
         prepared.sort(key=lambda item: item["path"])
         parameters = {"provider": provider, "base_revision": base_revision,
                       "files": prepared, "allow_disjoint": allow_disjoint}
@@ -1208,10 +1148,6 @@ class FolderWorkspace(ProjectWorkspace):
                     merged[path]["executable"] = previous["executable"]
                 folded[path.casefold()] = path
                 deleted.pop(path, None)
-            if len(merged) > MAX_SOURCE_FILES or sum(item["bytes"] for item in merged.values()) > MAX_SOURCE_BYTES:
-                raise ProjectWorkspaceError("project_limit_exceeded")
-            if sum(item["bytes"] for item in merged.values() if item["changed"]) > MAX_CHANGED_TOTAL_BYTES:
-                raise ProjectWorkspaceError("project_limit_exceeded")
             blobs = _open_directory("blobs", parent=room)
             try:
                 for raw in payloads.values():

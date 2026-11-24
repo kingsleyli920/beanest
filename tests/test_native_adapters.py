@@ -706,25 +706,8 @@ for event in {events!r}:
                     'CLAUDE_CONFIG_DIR': None, 'CODEX_HOME': None, 'KIMI_API_KEY': None, 'MOONSHOT_API_KEY': None,
                     **expected})
 
-    async def test_receipt_past_its_cap_stops_recording_and_the_call_still_completes(self):
-        # Catches: a long call being killed and failed because its private
-        # receipt grew past the cap. Recording stops there, once, with a
-        # marker; the turn, its answer and its tool counts are unaffected.
-        marker = '{"channel": "diagnostic", "data": {"type": "native_receipt_truncated"}}'
-        with patch.object(native, '_MAX_RECEIPT', 400), self.make_stub(codex_events()):
-            result = await native.invoke_native('codex', 'hello', self.root, permission='full_access',
-                response_schema=SCHEMA, receipt_dir=self.root / 'private')
-        self.assertEqual((result['status'], result.get('failure_code')), ('completed', None))
-        self.assertEqual(json.loads(result['text']), {'message': 'done', 'action': 'finish'})
-        evidence = result['native_execution']
-        self.assertEqual((evidence['tool_calls'], evidence['tool_results'], evidence['exit_code']), (1, 1, 0))
-        path = Path(evidence['receipt_path'])
-        lines = path.read_text().splitlines()
-        self.assertEqual(json.loads(lines[0])['data'], {'type': 'thread.started', 'thread_id': SESSION})
-        self.assertEqual((lines[-1], lines.count(marker)), (marker, 1))
-        self.assertLessEqual(path.stat().st_size, 400)
-        self.assertNotIn('turn.completed', path.read_text())
-        # Under the cap nothing is cut and no marker is written.
+    async def test_receipt_records_the_whole_call(self):
+        # Catches recording that stops part way: recovery later reads the receipt to its end.
         with self.make_stub(codex_events()):
             whole = await native.invoke_native('codex', 'hello', self.root, permission='full_access',
                 response_schema=SCHEMA, receipt_dir=self.root / 'whole')

@@ -121,7 +121,7 @@ def verify_query(query: dict, cases: dict) -> list[dict]:
     return results
 
 
-async def demo(root: Path, timeout: float = 120) -> dict:
+async def demo(root: Path, timeout: float | None = None) -> dict:
     store = RunStore(root)
     store.emit("task.started", task="normalize-label", max_calls=4)
     summary = {"status": "running", "run_id": store.path.name, "calls": [],

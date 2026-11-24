@@ -23,10 +23,29 @@ import time
 import uuid
 import weakref
 
-from .message_capacity import MAX_PROMPT_BYTES
+# A partner's output, its lines and its prompt have no size limit here: a
+# limit of Beanest's own would end a partner's work that the CLI itself allows.
+_READ_CHUNK = 1024 * 1024
 
-MAX_OUTPUT = 32 * 1024 * 1024
-MAX_TEXT = 4 * 1024 * 1024
+
+async def read_lines(stream):
+    """Yield each line of an asyncio stream, however long, ending in its newline.
+
+    StreamReader.readline() fails on a line longer than the reader's buffer
+    limit; reading in chunks has no such limit. A last line without a newline
+    is yielded as it is, like readline() at end of file.
+    """
+    pending = bytearray()
+    while chunk := await stream.read(_READ_CHUNK):
+        start = 0
+        while (end := chunk.find(b'\n', start)) != -1:
+            pending += chunk[start:end + 1]
+            yield bytes(pending)
+            pending.clear()
+            start = end + 1
+        pending += chunk[start:]
+    if pending:
+        yield bytes(pending)
 CODEX_APP = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CLAUDE_SYSTEM_PATHS = (Path('/opt/homebrew/bin/claude'), Path('/usr/local/bin/claude'))
 # DeepSeek Harness installs from npm; the global prefixes Homebrew's and the system Node use.
@@ -658,11 +677,9 @@ def _object_text(value):
         raise ValueError('structured response must be an object')
     try:
         text = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-        size = len(text.encode('utf-8'))
+        text.encode('utf-8')
     except UnicodeError:
         raise ValueError('structured response must be valid UTF-8') from None
-    if size > MAX_TEXT:
-        raise ValueError('structured response exceeds size limit')
     return text
 
 
@@ -822,7 +839,7 @@ def parse_events(agent: str, lines: list[bytes], *, structured: bool = False,
         except (ValueError, TypeError, RecursionError):
             result.update(status='failed', text='', failure_code='protocol_turn_incomplete')
     else:
-        result['text'] = '\n'.join(texts)[:MAX_TEXT]
+        result['text'] = '\n'.join(texts)
     if turn_failed:
         result['status'] = 'failed'
     if any(event.get('code') == 'unknown_provider_error' for event in result['events']):
@@ -860,7 +877,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 async def _run(command: list[str], prompt: str, cwd: Path, timeout: float, *,
-               include_stderr: bool = False, max_output: int = MAX_OUTPUT,
+               include_stderr: bool = False, max_output: int | None = None,
                cleanup_metadata: dict | None = None) -> tuple[list[bytes], int]:
     process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=_environment(),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -872,7 +889,7 @@ async def _run(command: list[str], prompt: str, cwd: Path, timeout: float, *,
             chunks = []
             while chunk := await stream.read(65536):
                 size += len(chunk)
-                if size > max_output:
+                if max_output is not None and size > max_output:
                     raise RuntimeError('Agent output exceeded limit')
                 chunks.append(chunk)
             return b''.join(chunks)
@@ -1452,7 +1469,7 @@ async def runtime_options(agent, cwd, *, timeout=10):
 
 
 async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = None,
-                 timeout: float = 120, *, response_schema: dict | None = None,
+                 timeout: float | None = None, *, response_schema: dict | None = None,
                  runtime_settings: dict | None = None) -> dict:
     if agent == 'kimi':
         from .kimi_acp import invoke_native as invoke_kimi
@@ -1473,10 +1490,11 @@ async def invoke(agent: str, prompt: str, cwd: Path, session_id: str | None = No
                                 response_schema=response_schema, runtime_settings=runtime_settings)
     if agent not in ('codex', 'claude'):
         raise ValueError('agent must be codex or claude')
-    if not 0 < timeout <= 600:
-        raise ValueError('timeout must be between 0 and 600 seconds')
-    if not isinstance(prompt, str) or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
-        raise ValueError('prompt exceeds size limit')
+    # None: no timer; the call runs until the partner finishes or is cancelled.
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError('timeout must be positive or None')
+    if not isinstance(prompt, str):
+        raise ValueError('prompt must be text')
     schema_json = None
     if response_schema is not None:
         try:
@@ -1614,7 +1632,7 @@ async def check_json_cli(connection: dict, cwd: Path, timeout: float = 10) -> di
 
 
 async def invoke_json_cli(connection: dict | None, prompt: str, cwd: Path,
-                          session_id: str | None = None, timeout: float = 120, *,
+                          session_id: str | None = None, timeout: float | None = None, *,
                           response_schema: dict | None = None) -> dict:
     """Invoke one explicitly configured text connector with bounded ownership.
 
@@ -1624,8 +1642,8 @@ async def invoke_json_cli(connection: dict | None, prompt: str, cwd: Path,
     if connection is None:
         raise RuntimeError('connector_not_configured')
     connection = json_cli_connection(connection)
-    if (type(timeout) not in (int, float) or not 0 < timeout <= 600
-            or not isinstance(prompt, str) or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES
+    if ((timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0))
+            or not isinstance(prompt, str)
             or (session_id is not None and (not isinstance(session_id, str)
                                            or not _JSON_SESSION.fullmatch(session_id)))):
         raise ValueError('invalid_connector_request')
@@ -1640,16 +1658,14 @@ async def invoke_json_cli(connection: dict | None, prompt: str, cwd: Path,
                'session_id': session_id, 'response_schema': response_schema,
                'capabilities': {'text_only': True, 'tools': False}}
     request_text = json.dumps(request, ensure_ascii=False, allow_nan=False)
-    if len(request_text.encode('utf-8')) > MAX_PROMPT_BYTES:
-        raise ValueError('connector request exceeds size limit')
     started = time.monotonic()
     failed = {'session_id': session_id, 'text': '', 'usage': None, 'events': [], 'status': 'failed'}
     try:
-        health = await check_json_cli(connection, cwd, timeout)
+        health = await check_json_cli(connection, cwd, 10 if timeout is None else timeout)
         if not health['ready']:
             return {**failed, 'failure_code': 'connector_not_ready'}
-        remaining = timeout - (time.monotonic() - started)
-        if remaining <= 0:
+        remaining = None if timeout is None else timeout - (time.monotonic() - started)
+        if remaining is not None and remaining <= 0:
             raise asyncio.TimeoutError
         lines, code = await _run([find_json_cli(connection), *connection['args']],
                                 request_text, cwd, remaining)
@@ -1661,7 +1677,7 @@ async def invoke_json_cli(connection: dict | None, prompt: str, cwd: Path,
                 or value['status'] != 'completed' or value['tools_used'] != []
                 or not isinstance(value['session_id'], str) or not _JSON_SESSION.fullmatch(value['session_id'])
                 or (session_id is not None and value['session_id'] != session_id)
-                or not isinstance(value['text'], str) or len(value['text'].encode('utf-8')) > MAX_TEXT
+                or not isinstance(value['text'], str)
                 or value['usage'] is not None and not isinstance(value['usage'], dict)):
             raise ValueError
         return {'session_id': value['session_id'], 'text': value['text'],

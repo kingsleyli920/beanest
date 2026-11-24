@@ -61,6 +61,19 @@ def traces(home):
 
 
 class Validation(unittest.TestCase):
+    def test_twenty_models_and_twelve_peak_windows_are_saved(self):
+        # Catches the old MAX_MODELS = 16 / MAX_WINDOWS = 8 configuration caps.
+        with tempfile.TemporaryDirectory() as directory:
+            base = settings(Path(directory) / "keys.env")
+            template = base["models"][0]
+            models = [{**template, "id": f"deepseek-model-{index:02d}"} for index in range(20)]
+            windows = [{"start": f"{hour:02d}:00", "end": f"{hour:02d}:30", "days": [0, 1, 2, 3, 4]} for hour in range(12)]
+            saved = api_models.config({**base, "models": models, "default_model": "deepseek-model-19",
+                                       "peak_windows": windows})
+            self.assertEqual(len(saved["models"]), 20)
+            self.assertEqual(len(saved["peak_windows"]), 12)
+            self.assertEqual(saved["models"][19]["id"], "deepseek-model-19")
+
     def test_only_the_dsh_host_is_accepted_and_no_endpoint_can_be_set(self):
         # Catches the retired Claude-hosted path or a custom endpoint slipping back into saved partners.
         with tempfile.TemporaryDirectory() as directory:

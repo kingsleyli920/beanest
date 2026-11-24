@@ -35,7 +35,6 @@ def _claude_tool_name_valid(name):
             and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.:-]{0,255}', name) is not None)
 
 
-_MAX_LINE = 32 * 1024 * 1024
 _CLEANUP_SETTLE_SECONDS = 10
 # A command a partner runs is ended when its whole process tree has used less
 # than STUCK_TOOL_CPU_SECONDS of CPU for STUCK_TOOL_IDLE_SECONDS: it is waiting
@@ -47,11 +46,6 @@ STUCK_TOOL_CPU_SECONDS = 2.0
 STUCK_TOOL_POLL_SECONDS = 30
 # Children a CLI starts in its first seconds are its own servers (MCP), not commands.
 _TOOL_START_GRACE_SECONDS = 5
-_MAX_RECEIPT = 64 * 1024 * 1024
-# Written once when a receipt reaches _MAX_RECEIPT. The receipt is evidence for
-# a later audit, not a budget on the work: recording stops, the call does not.
-_RECEIPT_TRUNCATED = json.dumps({'channel': 'diagnostic',
-                                 'data': {'type': 'native_receipt_truncated'}}).encode() + b'\n'
 _PUBLIC_PROGRESS_CACHE_SIZE = 256
 _MAX_PUBLIC_PROGRESS_BYTES = 16 * 1024
 ACTIVITY_OPERATIONS = frozenset({
@@ -615,12 +609,12 @@ def claude_quota_recovery_proof(cwd, session_id, *, claimed_at, finished_at, val
         return None
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
         before = os.fstat(stream.fileno())
-        if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024 * 1024:
+        if not stat.S_ISREG(before.st_mode):
             return None
         active, prompt_hash, quota, prompt_uuid, error_uuid = False, None, False, None, None
         digest = hashlib.sha256()
         for raw in stream:
-            if len(raw) > adapters.MAX_OUTPUT or not raw.endswith(b'\n'):
+            if not raw.endswith(b'\n'):
                 return None
             row = adapters._strict_json(raw)
             if not isinstance(row, dict):
@@ -1486,8 +1480,8 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
         if timeout is not None and (type(timeout) not in (int, float)
                                    or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError('timeout must be positive or None')
-        if not isinstance(prompt, str) or len(prompt.encode('utf-8')) > adapters.MAX_PROMPT_BYTES:
-            raise ValueError('prompt exceeds size limit')
+        if not isinstance(prompt, str):
+            raise ValueError('prompt must be text')
         cwd = Path(cwd).resolve(strict=True)
         if not cwd.is_dir():
             raise ValueError('cwd must be a directory')
@@ -1522,8 +1516,6 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
     receipt_path = None
     receipt = None
     schema_directory = None
-    receipt_bytes = 0
-    receipt_full = False
     tasks = []
     exit_code = None
     cancelled_error = None
@@ -1554,15 +1546,16 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
             environment[job_progress.ENVIRONMENT_VARIABLE] = str(progress_file)
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=_MAX_LINE + 1)
+            stderr=asyncio.subprocess.PIPE, start_new_session=True)
         if on_process is not None:
             on_process(process.pid)
 
         receipt_diagnostics = _ClaudeReceiptDiagnostics(response_schema) if agent == 'claude' else None
 
         async def record(channel, raw, *, rejected=False):
-            nonlocal receipt_bytes, receipt_full
-            if receipt and not receipt_full:
+            # The whole call is recorded, however long: recovery later reads
+            # this receipt to its end, and a cut receipt could not prove it.
+            if receipt:
                 evidence = (_protocol_diagnostic(raw, stream.ignored) if rejected else
                             _receipt_event(agent, raw, format_tool_ids=stream.format_tools))
                 diagnostics = (receipt_diagnostics.observe(raw, stream)
@@ -1576,21 +1569,13 @@ async def invoke_native(agent: str, prompt: str, cwd: Path, session_id: str | No
                 elif diagnostics:
                     rows.append({'channel': 'diagnostic', 'data': diagnostics})
                 for row in rows:
-                    value = json.dumps(row, ensure_ascii=False).encode() + b'\n'
-                    if receipt_bytes + len(value) + len(_RECEIPT_TRUNCATED) > _MAX_RECEIPT:
-                        # Long work outgrows the receipt, never the reverse:
-                        # mark where recording stopped and let the call run on.
-                        receipt.write(_RECEIPT_TRUNCATED)
-                        receipt_full = True
-                        break
-                    receipt_bytes += len(value)
-                    receipt.write(value)
+                    receipt.write(json.dumps(row, ensure_ascii=False).encode() + b'\n')
                 receipt.flush()
 
         async def stdout():
-            while raw := await process.stdout.readline():
-                if len(raw) > _MAX_LINE:
-                    raise RuntimeError('native_protocol_line_limit')
+            # A protocol line of any length is read whole (readline() would
+            # fail past the stream's buffer limit).
+            async for raw in adapters.read_lines(process.stdout):
                 await record('stdout', raw)
                 await stream.consume(raw)
                 if stream.ignored or stream.failure:
