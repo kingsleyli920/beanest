@@ -10,7 +10,6 @@ from unittest.mock import patch
 from local_agent_coordinator import adapters, native_adapters
 from local_agent_coordinator.room_response_schema import (command_shape, native_room_response_schema,
                                                            response_schema, stable_command_shape)
-from local_agent_coordinator.room_contract import MAX_RESPONSE_COMMANDS
 from local_agent_coordinator.room_service import ResponseValidationError, RoomError, RoomService, _response
 from tests import test_native_room_service as native
 
@@ -77,7 +76,8 @@ class StableSchemaBytes(unittest.TestCase):
         schema = json.loads(claude_bytes("review", False))
         item = schema["properties"]["commands"]["items"]
         self.assertEqual(item["properties"]["type"]["enum"], ALL_KINDS)
-        self.assertEqual(schema["properties"]["commands"]["maxItems"], MAX_RESPONSE_COMMANDS)
+        # No count cap on commands: a large plan arrives in one reply.
+        self.assertNotIn("maxItems", schema["properties"]["commands"])
         self.assertEqual(schema["properties"]["files"]["maxItems"], 0)
         self.assertEqual(schema["properties"]["edits"]["maxItems"], 0)
         for field in ("reason", "summary"):

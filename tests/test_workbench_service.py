@@ -128,14 +128,16 @@ class WorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(profiles[actor]['monitor']['session_count'], 1)
             self.assertEqual(profiles[actor]['monitor']['latest_usage']['values']['input_tokens'], len(actor))
 
-    async def test_large_directory_requires_explicit_selection_before_dispatch(self):
+    async def test_large_directory_joins_whole_and_only_the_target_is_dispatched(self):
+        # Catches a member cap refusing a room when more than 32 partners are registered and none was picked.
         for number in range(30):
             self.manager.add(id=f'extra_{number}', name=f'Extra {number}', adapter='codex')
-        with self.assertRaises(RoomError) as error:
-            await self.service.create_room('No implicit large group.', 'claude', 'too-many-defaults')
-        self.assertEqual(error.exception.code, 'invalid_participants')
-        self.assertEqual(self.fake.calls, [])
-        self.assertEqual((await self.service.list_rooms())['rooms'], [])
+        everyone = await self.service.create_room('The whole directory.', 'clover', 'all-defaults')
+        await self.settle()
+        self.assertEqual(len(everyone['members']), len(self.service.store.agents))
+        self.assertGreater(len(everyone['members']), 32)
+        self.assertEqual([call['actor'] for call in self.fake.calls], ['clover'])
+        self.fake.calls.clear()
 
         room = await self.service.create_room('Only these two.', 'clover', 'explicit-small-group',
                                               participants=['clover', 'sprout'])

@@ -9,8 +9,7 @@ from uuid import uuid4
 
 from local_agent_coordinator.room_response_schema import response_schema
 from local_agent_coordinator.room_server import publish_connection
-from local_agent_coordinator.room_contract import MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS
-from local_agent_coordinator.room_service import MAX_RESPONSE_BYTES, RoomError, RoomService, _response
+from local_agent_coordinator.room_service import RoomError, RoomService, _response
 from local_agent_coordinator.room_store import RoomStore
 from local_agent_coordinator.team_store import _COMMAND_FIELDS
 from tests import test_room_server as http_fixtures
@@ -113,11 +112,15 @@ class TeamPhaseSchemaTests(unittest.TestCase):
         for phase in (None, "work"):
             self.assertTrue(self.validator(phase, project=True).is_valid(response(project=True, files=files)))
 
-    def test_team_visible_message_is_nonempty_and_bounded_without_changing_legacy_shape(self):
+    def test_team_visible_message_is_nonempty_and_unbounded_without_changing_legacy_shape(self):
+        # Catches the schema handed to partners capping how long a visible message may be.
         validator = self.validator("coordinate", can_propose=False)
-        for message, valid in (("", False), ("字", True), ("字" * MAX_PARTNER_TEXT, True), ("字" * (MAX_PARTNER_TEXT + 1), False)):
+        for message, valid in (("", False), ("字", True), ("字" * 100_001, True), ("字" * 250_000, True)):
             with self.subTest(length=len(message)):
                 self.assertEqual(validator.is_valid(response(message=message)), valid)
+        schema = response_schema(project=False, member_ids=MEMBERS, provider="claude", collaboration=True, team_phase="work")
+        self.assertEqual(schema["properties"]["message"], {"type": "string", "minLength": 1})
+        self.assertNotIn("maxItems", schema["properties"]["commands"])
         legacy = response_schema(project=True, member_ids=MEMBERS, provider="claude")
         ignored_team_options = response_schema(project=True, member_ids=MEMBERS, provider="claude",
                                                team_phase="help", can_propose=False)
@@ -270,31 +273,36 @@ class TeamProtocolParsingTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_plain_preamble_is_allowed_but_duplicate_values_and_unbounded_commands_fail_closed(self):
+    def test_plain_preamble_is_allowed_but_duplicate_values_fail_closed_and_many_commands_pass(self):
         raw = json.dumps(response())
         self.assertEqual(_response("```json\n" + raw + "\n```", "claude", MEMBERS, team=True)["commands"], [])
         self.assertEqual(_response("Before\n" + raw, "claude", MEMBERS, team=True)["commands"], [])
         for invalid in [
             raw + raw,
             '{"message":"first","message":"second","state":"done","commands":[]}',
-            json.dumps(response([{"type": "plan_ready"}] * (MAX_RESPONSE_COMMANDS + 1))),
             json.dumps(response(state="accepted")),
         ]:
             with self.subTest(invalid=invalid[:100]):
                 self.assertCode("invalid_agent_response", lambda: _response(invalid, "claude", MEMBERS, team=True))
+        # Catches a cap on how many commands one reply may carry (it was 100).
+        many = _response(json.dumps(response([{"type": "plan_ready"}] * 150)), "claude", MEMBERS, team=True)
+        self.assertEqual(len(many["commands"]), 150)
 
-    def test_text_and_project_limits_use_utf8_bytes_and_keep_project_fields_explicit(self):
-        value = response([{"type": "complete", "task_id": "main", "result": "界" * 1_500_000}], message="字" * 8000)
+    def test_large_replies_pass_and_project_fields_stay_explicit(self):
+        # Catches a whole-reply byte cap (it was 4 MiB): a 6 MiB reply must parse in full.
+        value = response([{"type": "complete", "task_id": "main", "result": "界" * 2_200_000}], message="字" * 8000)
         raw = json.dumps(value, ensure_ascii=False)
-        self.assertLess(len(raw), MAX_RESPONSE_BYTES)
-        self.assertGreater(len(raw.encode("utf-8")), MAX_RESPONSE_BYTES)
-        self.assertCode("invalid_agent_response", lambda: _response(raw, "claude", MEMBERS, team=True))
+        self.assertGreater(len(raw.encode("utf-8")), 6 * 1024 * 1024)
+        parsed = _response(raw, "claude", MEMBERS, team=True)
+        self.assertEqual(len(parsed["commands"][0]["result"]), 2_200_000)
+        self.assertEqual(len(parsed["message"]), 8000)
         project = {**response([{"type": "complete", "task_id": "main", "result": "界" * 4000}], message="字" * 8000), "base_revision": 0, "files": []}
         self.assertEqual(_response(json.dumps(project, ensure_ascii=False), "claude", MEMBERS, team=True, project=True)["files"], [])
         self.assertCode("invalid_agent_response", lambda: _response(json.dumps(response()), "claude", MEMBERS, team=True, project=True))
         self.assertCode("invalid_project_files", lambda: _response(json.dumps(response(project=True, base_revision=True)), "claude", MEMBERS, team=True, project=True))
         huge = response(project=True, files=[{"path": "main.py", "previous_sha256": None, "content": "界" * 1_500_000}])
-        self.assertCode("invalid_agent_response", lambda: _response(json.dumps(huge, ensure_ascii=False), "claude", MEMBERS, team=True, project=True))
+        files = _response(json.dumps(huge, ensure_ascii=False), "claude", MEMBERS, team=True, project=True)["files"]
+        self.assertEqual(len(files[0]["content"]), 1_500_000)
 
     def test_visible_text_and_nested_command_data_are_redacted_without_rewriting_code(self):
         secret = "fixture-token-abcdefghijklmnop"

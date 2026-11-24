@@ -15,7 +15,7 @@ from local_agent_coordinator.agent_registry import default_registry
 from local_agent_coordinator.room_server import create_room_server
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError, checked_text
-from local_agent_coordinator.room_service import MAX_RESPONSE_BYTES, _response
+from local_agent_coordinator.room_service import _response
 import test_native_room_service as native
 import test_team_runs_http as http
 from test_team_store import proposal
@@ -276,7 +276,7 @@ class LongTeamTextValidationTests(unittest.TestCase):
     plan = store_fixtures.TeamStoreTests.plan
     assertCode = store_fixtures.TeamStoreTests.assertCode
 
-    def test_complete_and_help_accept_long_utf8_but_reject_invalid_or_oversize_text(self):
+    def test_complete_and_help_accept_any_length_but_reject_invalid_text(self):
         room = self.plan()
         job = self.store.claim(room, "claude")
         for kind, field, extra in (("complete", "result", {}), ("request_help", "text", {"to": "codex", "capability": "text"})):
@@ -285,11 +285,11 @@ class LongTeamTextValidationTests(unittest.TestCase):
             for value in (None, 1, False, [], "", " \n", "unsafe\0text", "bad\ud800"):
                 with self.subTest(kind=kind, value_type=type(value).__name__):
                     self.assertCode("invalid_text", lambda: self.store.prevalidate_team_result(job["id"], [{**command, field: value}]))
-            # Past the old 1 MiB message limit: accepted, not message_too_large.
-            self.assertTrue(self.store.prevalidate_team_result(job["id"], [{**command, field: "a" * (1024 * 1024 + 1)}]))
-        # Removing a field's hidden cap does not remove the whole-response bound.
-        envelope = json.dumps({"message": "Report", "state": "done", "commands": [{"type": "complete", "task_id": "main", "result": "a" * (MAX_RESPONSE_BYTES + 1)}]})
-        self.assertCode("invalid_agent_response", lambda: _response(envelope, "claude", ("claude", "codex"), team=True))
+            # Catches a size cap on a partner's result or help text (it was 1 MiB per field).
+            self.assertTrue(self.store.prevalidate_team_result(job["id"], [{**command, field: "a" * (6 * 1024 * 1024)}]))
+        # Catches a whole-reply byte cap (it was 4 MiB): a 6 MiB reply is parsed, not refused.
+        envelope = json.dumps({"message": "Report", "state": "done", "commands": [{"type": "complete", "task_id": "main", "result": "a" * (6 * 1024 * 1024)}]})
+        self.assertEqual(len(_response(envelope, "claude", ("claude", "codex"), team=True)["commands"][0]["result"]), 6 * 1024 * 1024)
 
     def test_long_result_does_not_bypass_owner_version_or_assignment_cas(self):
         room = self.plan()

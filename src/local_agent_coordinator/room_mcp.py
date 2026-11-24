@@ -265,7 +265,7 @@ class RoomHTTPClient:
                 raise RoomClientError("invalid_arguments")
             body["work_mode"] = work_mode
         if participants is not None:
-            if not isinstance(participants, list) or not 1 <= len(participants) <= 8:
+            if not isinstance(participants, list) or not participants:
                 raise RoomClientError("invalid_arguments")
             body["participants"] = [_target(item) for item in participants]
             if (len(set(body["participants"])) != len(body["participants"])

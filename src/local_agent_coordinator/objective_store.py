@@ -12,7 +12,7 @@ from uuid import uuid4
 from .block_contract import USER_BLOCK_CAUSES
 from .execution_policy import normalized_policy, effective_policy, ExecutionPolicyError, calls_available, stage_available, public_deadline, deadline_reached, task_settled
 from .parallel_sessions import partner_of
-from .room_contract import MAX_PARTNER_TEXT, RoomError, checked_text
+from .room_contract import RoomError, checked_text
 from .stop_policy import continues_automatically, OWN_RECOVERY
 
 
@@ -254,7 +254,7 @@ class ObjectiveStore:
         for key in ("summary", "next_goal", "scope_reference", "question"):
             value = proposal[key]
             if value is not None:
-                checked_text(value, MAX_PARTNER_TEXT)
+                checked_text(value)
         if (not isinstance(proposal["summary"], str)
                 or decision == "continue" and (not isinstance(proposal["next_goal"], str) or not proposal["next_goal"].strip())
                 or decision == "needs_user" and not isinstance(proposal["question"], str)):

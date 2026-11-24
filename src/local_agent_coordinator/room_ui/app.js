@@ -1630,7 +1630,7 @@ function deliveryDocuments(snapshot) {
   if (project?.available && delivery && Number.isSafeInteger(project.revision) && project.revision >= 0
       && /^[0-9a-f]{64}$/.test(project.snapshot_sha256 || '') && delivery.revision === project.revision
       && delivery.digest === project.snapshot_sha256 && Array.isArray(delivery.files)) {
-    for (const file of delivery.files.slice(0, 1024)) {
+    for (const file of delivery.files) {
       if (file?.verified !== true || typeof file.path !== 'string' || !file.path || !/^[0-9a-f]{64}$/.test(file.sha256 || '')
           || documents.some((doc) => doc.file && doc.path === file.path && doc.sha256 === file.sha256)) continue;
       const binding = runBinding({ id: file.run_id, revision: file.revision, digest: file.digest });
@@ -1648,7 +1648,7 @@ function deliveryDocuments(snapshot) {
     doc.meta = t("本目标成果 · 文件版本 {p0} · {p1}", { p0: doc.revision, p1: doc.deliveryReview });
   }
   const tasks = Array.isArray(snapshot.collaboration?.tasks) ? snapshot.collaboration.tasks : [];
-  for (const task of tasks.slice(0, 64)) {
+  for (const task of tasks) {
     if (typeof task.result !== 'string' || !task.result.trim()) continue;
     const taskRecord = snapshot.team?.tasks?.find((entry) => entry.id === task.id) || task;
     const hasFileDelivery = Array.isArray(taskRecord.result_files) && taskRecord.result_files.some((result) =>
@@ -7103,7 +7103,7 @@ async function restorePending() {
       && (request.kind !== 'answer' || typeof request.body.text === 'string' && request.body.text.trim() && validUserText(request.body.text))
       : typeof request?.body?.target === 'string' && agentPattern.test(request.body.target) && typeof (request.body.goal ?? request.body.text) === 'string' && validUserText(request.body.goal ?? request.body.text) && uuidPattern.test(request.body.request_id));
     const participants = request?.body?.participants;
-    const validParticipants = participants === undefined || (Array.isArray(participants) && participants.length > 0 && participants.length <= 8 && participants.every((id) => typeof id === 'string' && agentPattern.test(id)) && new Set(participants).size === participants.length);
+    const validParticipants = participants === undefined || (Array.isArray(participants) && participants.length > 0 && participants.every((id) => typeof id === 'string' && agentPattern.test(id)) && new Set(participants).size === participants.length);
     const validProject = request?.body?.project_id === undefined || uuidPattern.test(request.body.project_id);
     const validWorkMode = request?.body?.work_mode === undefined || ['plan', 'build'].includes(request.body.work_mode);
     const validRun = !['run', 'suggested', 'accept', 'fork', 'objective', 'restart', 'native_handoff', 'native_recovery', 'objective_reassessment', 'continue', 'answer'].includes(request?.kind) || (runBinding({ id: request.body.run_id, revision: request.body.revision, digest: request.body.digest })
@@ -7378,7 +7378,7 @@ async function loadComposerDraft(id) {
     });
     if (!state.drafts.has(id) && draft && typeof draft.text === 'string' && validUserText(draft.text)
         && typeof draft.target === 'string' && (draft.target === 'all' || agentPattern.test(draft.target))) {
-      const participants = id === 'new' && Array.isArray(draft.participants) && draft.participants.length <= 8
+      const participants = id === 'new' && Array.isArray(draft.participants)
         && draft.participants.every((value) => typeof value === 'string' && agentPattern.test(value))
         && new Set(draft.participants).size === draft.participants.length ? draft.participants : undefined;
       state.drafts.set(id, { text: draft.text, target: draft.target, targetExplicit: true,

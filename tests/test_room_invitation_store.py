@@ -11,7 +11,7 @@ class RoomInvitationStoreTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="beanest-invite-store-")
         self.store = RoomStore(Path(self.directory.name) / "rooms.sqlite3",
-                               agents={"m" + str(i): "Peer " + str(i) for i in range(34)})
+                               agents={"m" + str(i): "Peer " + str(i) for i in range(41)})
 
     def tearDown(self):
         self.store.close()
@@ -22,13 +22,17 @@ class RoomInvitationStoreTests(unittest.TestCase):
             operation()
         self.assertEqual(caught.exception.code, code)
 
-    def test_capacity_and_unsupported_legacy_mode_never_partially_change_members(self):
-        # The room bound is MAX_ROOM_MEMBERS (32); it only stops a runaway, but must still never half-apply.
+    def test_no_member_cap_and_a_refused_invitation_never_partially_changes_members(self):
+        # Catches a room member cap (it was 32): a 31-member room takes 9 more, to 40.
         room, _ = self.store.create_room("Existing chat", "m0", str(uuid4()), participants=["m" + str(i) for i in range(31)])
         before = self.store.snapshot(room)
-        self.assertCode("member_limit_reached", lambda: self.store.invite_members(room, ["m31", "m32"], str(uuid4())))
+        # One unknown partner refuses the whole invitation, so none of the others half-joins.
+        self.assertCode("agent_unavailable", lambda: self.store.invite_members(room, ["m31", "m99"], str(uuid4())))
         self.assertEqual(self.store.snapshot(room), before)
-        self.assertEqual(self.store.invite_members(room, ["m31"], str(uuid4())), ["m31"])
+        self.assertEqual(self.store.invite_members(room, ["m" + str(i) for i in range(31, 39)], str(uuid4())),
+                         ["m31", "m32", "m33", "m34", "m35", "m36", "m37", "m38"])
+        self.assertEqual(self.store.invite_members(room, ["m39"], str(uuid4())), ["m39"])
+        self.assertEqual(len(self.store.snapshot(room)["members"]), 40)
         joined = self.store.snapshot(room)
         self.assertEqual(self.store.invite_members(room, ["m31"], str(uuid4())), [])
         self.assertEqual(self.store.snapshot(room), joined)
@@ -36,6 +40,12 @@ class RoomInvitationStoreTests(unittest.TestCase):
         previous = self.store.snapshot(legacy)
         self.assertCode("invitation_mode_unsupported", lambda: self.store.invite_members(legacy, ["m1"], str(uuid4())))
         self.assertEqual(self.store.snapshot(legacy), previous)
+
+    def test_a_room_starts_with_forty_members(self):
+        # Catches a cap on how many partners a new room may start with (it was 32).
+        room, created = self.store.create_room("Big team", "all", str(uuid4()), participants=["m" + str(i) for i in range(40)])
+        self.assertTrue(created)
+        self.assertEqual(len(self.store.snapshot(room)["members"]), 40)
 
     def test_joined_pending_requires_a_real_post_join_claim_and_text_invites_stay_idle(self):
         room, _ = self.store.create_room("Text", "m0", str(uuid4()), participants=["m0"])

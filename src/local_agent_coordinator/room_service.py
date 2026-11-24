@@ -22,7 +22,6 @@ from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached, task_settled
 from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
-from .room_contract import MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_ROOM_MEMBERS, MAX_TASK_PATHS
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
 from .project_catalog import ProjectCatalog, ProjectCatalogError
@@ -268,14 +267,8 @@ def _native_command(candidate, index, allowed_kinds, transport_fields, nonempty_
     return command, None
 
 
-# The whole reply a partner returns; the parts inside have their own generous bounds.
-MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-
-
 def _response(text: str, provider: str, members: tuple[str, ...] = (), *, project=False, team=False, folder=False, native=False,
               native_phase=None, can_propose=True, stable_native=False) -> dict:
-    if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
-        raise RoomError("invalid_agent_response")
     try:
         value = adapters.parse_response_object(text)
     except (ValueError, RecursionError):
@@ -290,10 +283,10 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
         expected.add("edits")
     if (not isinstance(value, dict) or set(value) != expected
             or value["state"] not in ("done", "working", "needs_user")
-            or not isinstance(value[operation_key], list) or len(value[operation_key]) > (MAX_RESPONSE_COMMANDS if team else 1)):
+            or not isinstance(value[operation_key], list) or not team and len(value[operation_key]) > 1):
         raise RoomError("invalid_agent_response")
     try:
-        message = _visible(checked_text(value["message"], MAX_PARTNER_TEXT))
+        message = _visible(checked_text(value["message"]))
     except RoomError:
         raise RoomError("invalid_agent_response") from None
     action = None
@@ -305,7 +298,7 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
             raise RoomError("invalid_agent_action")
         try:
             action = {"to": candidate["to"], "kind": candidate["kind"],
-                      "text": _visible(checked_text(candidate["text"], MAX_PARTNER_TEXT))}
+                      "text": _visible(checked_text(candidate["text"]))}
         except RoomError:
             raise RoomError("invalid_agent_action") from None
     result = {"message": message, "state": value["state"], "action": action}
@@ -378,14 +371,14 @@ def _response(text: str, provider: str, members: tuple[str, ...] = (), *, projec
         result.update(base_revision=value["base_revision"], files=value["files"])
         if native:
             unchanged = value["unchanged_paths"]
-            if (not isinstance(unchanged, list) or len(unchanged) > MAX_TASK_PATHS
+            if (not isinstance(unchanged, list)
                     or any(not isinstance(item, dict) or set(item) != {"path", "reason"}
                            or not isinstance(item["path"], str) or not isinstance(item["reason"], str)
-                           or not item["reason"].strip() or len(item["reason"]) > MAX_PARTNER_TEXT for item in unchanged)):
+                           or not item["reason"].strip() for item in unchanged)):
                 raise RoomError("invalid_agent_response")
             result["unchanged_paths"] = unchanged
             resolved = value["resolved_conflicts"]
-            if not isinstance(resolved, list) or len(resolved) > MAX_TASK_PATHS or any(not isinstance(path, str) for path in resolved):
+            if not isinstance(resolved, list) or any(not isinstance(path, str) for path in resolved):
                 raise RoomError("invalid_agent_response")
             result["resolved_conflicts"] = resolved
         if team or folder:
@@ -3878,7 +3871,7 @@ class RoomService(RoomPromptMixin):
         room bounds. The outer trial owns its aggregate limits and journal.
         """
         self._available()
-        if (not isinstance(participants, list) or not 2 <= len(participants) <= MAX_ROOM_MEMBERS
+        if (not isinstance(participants, list) or len(participants) < 2
                 or any(not safe_agent_id(item) for item in participants)
                 or len(set(participants)) != len(participants)):
             raise RoomError("invalid_participants")
@@ -4512,7 +4505,6 @@ class RoomService(RoomPromptMixin):
         reason = ("invitation_mode_unsupported" if not supported else
                   "room_removed" if room["lifecycle_state"] == "removed" else
                   "room_archived" if room["lifecycle_state"] != "active" else
-                  "member_limit_reached" if len(current) >= MAX_ROOM_MEMBERS else
                   "agent_unavailable" if not candidates else None)
         return {"supported": supported, "can_invite": reason is None, "reason": reason, "candidates": candidates}
 
@@ -6091,15 +6083,12 @@ class RoomService(RoomPromptMixin):
         if (task is None or job["team"]["job_phase"] != "work" or task.get("repair_execution_id")
                 or read_only(job.get("work_mode"), job.get("runtime_settings"))):
             return []
-        free = free[:max(0, MAX_TASK_PATHS - len(allowed))]
         if not free:
             return []
         extend = next((command for command in parsed["commands"] if isinstance(command, dict)
                        and command.get("type") == "extend" and command.get("task_id") == task["id"]
                        and isinstance(command.get("write_paths"), list)), None)
         if extend is None:
-            if len(parsed["commands"]) >= MAX_RESPONSE_COMMANDS:
-                return []
             extend = {"type": "extend", "task_id": task["id"], "write_paths": []}
             parsed["commands"].insert(0, extend)
         extend["write_paths"] = _with_extension(extend["write_paths"], free)
@@ -6874,7 +6863,7 @@ class RoomService(RoomPromptMixin):
             return
         text = ""
         if not job.get("team") and job.get("mode") not in PROJECT_MODES and isinstance(result.get("text"), str):
-            text = _visible(result["text"][:8000])
+            text = _visible(result["text"])
         spec = self.registry.get(job["provider"])
         if spec is not None and job.get("adapter") and job["adapter"] != spec.adapter:
             self.store.finish_job(job["id"], error="session_identity_changed", uncertain=True)

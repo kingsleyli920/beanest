@@ -21,7 +21,7 @@ from .agent_registry import BEAN_STYLE_IDS, LEGACY_NAMES, default_bean_style, sa
 from .parallel_sessions import is_lane, lane_number, partner_of
 from .runtime_settings import normalized_settings, RuntimeSettingsError, read_only, native_permission
 from .execution_policy import public_call_limit, calls_available, stage_available, public_deadline, deadline_reached, task_settled
-from .room_contract import MAX_ROOM_MEMBERS, RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
+from .room_contract import RoomError, checked_message, checked_text  # re-exported: callers import these from room_store
 
 PROJECT_MODES = ("python_artifacts", "python_sandbox", "project_files", "project_folder", "text_artifacts", "native_project")
 from .stop_policy import continues_automatically, OWN_RECOVERY
@@ -4378,7 +4378,7 @@ class RoomStore:
         if not collaboration and mode in PROJECT_MODES and target in ("all", "both"):
             raise RoomError("project_requires_first_author")
         if participants is not None and (not isinstance(participants, list)
-                or not 1 <= len(participants) <= MAX_ROOM_MEMBERS
+                or not participants
                 or any(not safe_agent_id(value) for value in participants)
                 or len(set(participants)) != len(participants)):
             raise RoomError("invalid_participants")
@@ -4414,7 +4414,7 @@ class RoomStore:
             if previous is not None:
                 return previous["room_id"], False
             selected = tuple(self.agents) if participants is None else tuple(participants)
-            if not 1 <= len(selected) <= MAX_ROOM_MEMBERS or any(value not in self.agents for value in selected):
+            if not selected or any(value not in self.agents for value in selected):
                 raise RoomError("invalid_participants")
             for provider in selected:
                 reason = self._partner_dispatch_reason(db, provider)
@@ -4470,7 +4470,7 @@ class RoomStore:
     @staticmethod
     def invitation_parameters(room_id, participants):
         room_id = checked_id(room_id)
-        if (not isinstance(participants, list) or not 1 <= len(participants) <= MAX_ROOM_MEMBERS
+        if (not isinstance(participants, list) or not participants
                 or any(not safe_agent_id(value) for value in participants)
                 or len(set(participants)) != len(participants)):
             raise RoomError("invalid_participants")
@@ -4505,8 +4505,6 @@ class RoomStore:
                 raise RoomError("invitation_mode_unsupported")
             existing = self.partner_ids_in_transaction(db, room_id)
             added = [provider for provider in participants if provider not in existing]
-            if len(existing) + len(added) > MAX_ROOM_MEMBERS:
-                raise RoomError("member_limit_reached")
             for provider in added:
                 if self._partner_dispatch_reason(db, provider):
                     raise RoomError("agent_unavailable")
@@ -5923,7 +5921,7 @@ class RoomStore:
                     # Diagnostic only: its own failure must never touch the job or usage.
                     pass
             if native_question is not None and error == "native_permission_required" and not uncertain:
-                question = checked_message(native_question)
+                question = checked_text(native_question)
                 self._event(db, room_id, "message", sender=provider, recipient="all", job_id=job_id,
                             text=question, native_question=True)
                 if is_team and team_context["task_id"] is not None:
