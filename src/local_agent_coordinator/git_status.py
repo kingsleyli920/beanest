@@ -18,7 +18,6 @@ import time
 from .project_catalog import _open_absolute, ProjectCatalogError
 
 
-MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 READ_SECONDS = 5
 CODE_STATUS_SECONDS = 15
 MAX_DETAIL_FILES = 20
@@ -105,8 +104,6 @@ def _run(command, directory, arguments, deadline, *, input_bytes=None, allowed_e
                         selector.unregister(key.fileobj)
                     else:
                         output.extend(chunk)
-                        if len(output) > MAX_OUTPUT_BYTES:
-                            raise _GitError("git_output_too_large")
         process.wait(timeout=max(0.001, deadline - time.monotonic()))
         if process.returncode not in allowed_exit_codes:
             raise _GitError("git_failed")

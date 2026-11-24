@@ -6092,12 +6092,9 @@ class RoomStore:
             raise RoomError("invalid_project_inspection")
         try:
             encoded = json.dumps(observation, ensure_ascii=False, allow_nan=False)
-            encoded_size = len(encoded.encode("utf-8"))
+            encoded.encode("utf-8")
         except (TypeError, ValueError, RecursionError, UnicodeError):
             raise RoomError("invalid_project_inspection") from None
-        # Leave room for the context envelope and its trusted job binding.
-        if encoded_size > MAX_INSPECTION_CONTEXT_BYTES - 1024:
-            raise RoomError("project_inspection_limit_exceeded")
         return self.finish_job(job_id, session_id=session_id, message=message, usage=usage,
                                state="working", team_commands=[], inspection_observation=encoded)
 
@@ -6165,7 +6162,10 @@ class RoomStore:
                 observation = {"job_id": row["job_id"], "observation": json.loads(row["observation_json"])}
                 candidate = {"observations": [observation, *result["observations"]],
                              "truncated": result["truncated"]}
-                if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_INSPECTION_CONTEXT_BYTES:
+                # The newest read is always shown whole, however large; only
+                # older reads give way, with truncated set.
+                if (result["observations"]
+                        and len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_INSPECTION_CONTEXT_BYTES):
                     result["truncated"] = True
                     break
                 result = candidate
