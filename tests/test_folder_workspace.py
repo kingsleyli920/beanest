@@ -107,9 +107,6 @@ class FolderWorkspaceTests(unittest.TestCase):
         (self.source / "b.txt").write_text("b")
         self.assertCode("project_capture_cancelled", lambda: self.workspace.seed_folder(
             self.registration, cancelled=lambda: True))
-        self.assertEqual(self.workspace.snapshot()["revision"], 0)
-        with patch("local_agent_coordinator.folder_workspace.MAX_SOURCE_FILES", 1):
-            self.assertCode("project_capture_limit", self.seed)
         self.assertEqual(self.workspace.snapshot()["total_files"], 0)
         self.assertEqual(list((self.root / self.room_id).glob(".capture-*")), [])
         self.assertEqual(list((self.root / self.room_id / "blobs").iterdir()), [])
@@ -200,11 +197,11 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.inspect("read", "large.txt", offset=1)["content"], "next\n")
 
     # The per-file bound is far larger now; a small one keeps this boundary behaviour tested without huge files.
-    @patch("local_agent_coordinator.folder_workspace.MAX_FILE_BYTES", 1024 * 1024)
-    def test_megabyte_line_search_fails_explicitly_and_content_corruption_is_refused(self):
+    def test_megabyte_line_search_finds_it_and_content_corruption_is_refused(self):
         (self.source / "large.txt").write_text("x" * (1024 * 1024 + 10), encoding="utf-8")
         self.seed()
-        self.assertCode("project_search_limit_exceeded", lambda: self.inspect("search", query="x"))
+        found = self.inspect("search", query="x")["matches"]
+        self.assertEqual([(match["path"], match["line"], match["line_truncated"]) for match in found], [("large.txt", 0, True)])
         read = self.inspect("read", "large.txt")
         self.assertEqual(len(read["content"]), 16 * 1024)
         self.assertTrue(read["truncated"])
@@ -214,16 +211,20 @@ class FolderWorkspaceTests(unittest.TestCase):
             stream.write(b"y")
         self.assertCode("project_storage_corrupt", lambda: self.inspect("read", "large.txt"))
 
-    def test_total_source_bytes_timeout_and_read_scan_caps_are_explicit(self):
-        (self.source / "a.txt").write_text("a" * 20)
-        with patch("local_agent_coordinator.folder_workspace.MAX_SOURCE_BYTES", 10):
-            self.assertCode("project_capture_limit", self.seed)
-        with patch("local_agent_coordinator.folder_workspace.CAPTURE_SECONDS", 0):
-            self.assertCode("project_capture_limit", self.seed)
-        self.seed()
-        with patch("local_agent_coordinator.folder_workspace.MAX_SEARCH_BYTES", 10):
-            self.assertCode("project_read_limit_exceeded", lambda: self.inspect("read", "a.txt"))
-            self.assertCode("project_search_limit_exceeded", lambda: self.inspect("search", query="a"))
+    def test_a_large_project_long_gitignore_and_large_file_are_captured_read_and_searched_whole(self):
+        # Beanest set its own caps on source size, files, .gitignore length,
+        # capture time, reads and searches; git and the partners set none.
+        (self.source / ".gitignore").write_text("".join(f"ignored-{n}/\n" for n in range(1200)) + "skip.log\n")
+        (self.source / "skip.log").write_text("ignored\n")
+        late = "".join(f"line {n}\n" for n in range(2_000_000)) + "needle at the end\n"
+        (self.source / "big.txt").write_text(late)
+        seed = self.seed()
+        self.assertEqual(seed["total_files"], 2, "the long .gitignore is honored, not refused")
+        self.assertGreater(seed["total_bytes"], 16 * 1024 * 1024)
+        found = self.inspect("search", query="needle")["matches"]
+        self.assertEqual([(match["path"], match["line"]) for match in found], [("big.txt", 2_000_000)])
+        page = self.inspect("read", "big.txt", offset=1_999_999, limit=5)
+        self.assertEqual(page["content"], "line 1999999\nneedle at the end\n")
 
     def test_parallel_disjoint_commits_and_owner_pinning(self):
         (self.source / "a.txt").write_text("a")
@@ -257,13 +258,11 @@ class FolderWorkspaceTests(unittest.TestCase):
             "codex", "one", seed["revision"], [self.proposal("a.txt", "other", seed["revision"])]))
 
     # The per-file bound is far larger now; a small one keeps this boundary behaviour tested without huge files.
-    @patch("local_agent_coordinator.folder_workspace.MAX_FILE_BYTES", 1024 * 1024)
-    def test_whole_batch_rejection_for_secret_size_path_and_file_directory_collision(self):
+    def test_whole_batch_rejection_for_secret_path_and_file_directory_collision(self):
         self.seed()
         for bad, code in (({"path": ".env", "previous_sha256": None, "content": "value"}, "project_sensitive_content"),
                           ({"path": "secret.txt", "previous_sha256": None, "content": "sk-" + "x" * 30}, "project_sensitive_content"),
-                          ({"path": "../escape.txt", "previous_sha256": None, "content": "bad"}, "invalid_project_files"),
-                          ({"path": "big.txt", "previous_sha256": None, "content": "x" * (1024 * 1024 + 1)}, "project_limit_exceeded")):
+                          ({"path": "../escape.txt", "previous_sha256": None, "content": "bad"}, "invalid_project_files")):
             self.assertCode(code, lambda: self.workspace.apply("codex", "bad", 1,
                 [{"path": "good.txt", "previous_sha256": None, "content": "good"}, bad]))
             self.assertEqual(self.workspace.snapshot()["revision"], 1)
@@ -328,7 +327,7 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertNotIn("deleted_files", snapshot)
         self.assertEqual(self.workspace.files_for_paths(["old.py"])[0]["content"], "old\n")
 
-    def test_large_existing_file_small_edit_can_commit_and_cumulative_changed_cap_is_atomic(self):
+    def test_large_existing_file_small_edit_can_commit(self):
         content = "x" * (300 * 1024)
         (self.source / "large.txt").write_text(content)
         baseline = self.seed()
@@ -336,38 +335,31 @@ class FolderWorkspaceTests(unittest.TestCase):
         changed = self.workspace.apply("codex", "large-edit", baseline["revision"],
                                        [self.proposal("large.txt", modified)])
         self.assertEqual(changed["files"][0]["content"], modified)
-        with patch("local_agent_coordinator.folder_workspace.MAX_CHANGED_TOTAL_BYTES", len(content) + 3):
-            self.assertCode("project_limit_exceeded", lambda: self.workspace.apply("codex", "over-total", changed["revision"],
-                [{"path": "new.txt", "previous_sha256": None, "content": "four"}]))
-        self.assertEqual(self.workspace.snapshot(), {key: value for key, value in changed.items() if key != "replayed"})
 
-    def test_a_long_rooms_binary_evidence_never_stops_further_work(self):
+    def test_a_long_rooms_evidence_never_stops_further_work(self):
         # The 九烛 room stopped for good once 245 MiB of recordings, screenshots
         # and reports had been submitted over a week: every later result was
-        # refused and auto-continue resubmitted it forever. Binary files are not
-        # held in a snapshot, so only changed text counts toward the room total.
+        # refused and auto-continue resubmitted it forever. No total, batch,
+        # file-count or file-size cap of Beanest's own refuses work any more.
         import base64
         from local_agent_coordinator import artifact_export
         (self.source / "readme.txt").write_text("hello\n")
         seed = self.seed()
-        clip = bytes(range(256)) * 64  # 16 KiB of binary evidence
-        with patch("local_agent_coordinator.folder_workspace.MAX_CHANGED_TOTAL_BYTES", 1024):
-            recorded = self.workspace.apply("codex", "clip", seed["revision"], [
-                {"path": "artifacts/clip.mp4", "previous_sha256": None, "content_base64": base64.b64encode(clip).decode()}])
-            later = self.workspace.apply("codex", "report", recorded["revision"],
-                                         [{"path": "artifacts/report.txt", "previous_sha256": None, "content": "done\n"}])
-            reopened = FolderWorkspace(self.root, self.room_id)
-            self.assertEqual(reopened.snapshot()["revision"], later["revision"], "a stored room past the old total still opens")
-            self.assertCode("project_limit_exceeded", lambda: self.workspace.apply("codex", "text", later["revision"],
-                [{"path": "notes.txt", "previous_sha256": None, "content": "x" * 2048}]))
-        current = self.workspace.snapshot()
-        binaries = self.workspace.raw_files_for_paths(["artifacts/clip.mp4"], revision=current["revision"])
-        self.assertEqual(artifact_export.export_project(current, expected_revision=current["revision"], binaries=binaries)["revision"],
-                         current["revision"])
-        with patch.object(artifact_export, "MAX_FOLDER_EXPORT_BYTES", len(clip)):
-            with self.assertRaises(artifact_export.ArtifactExportError) as caught:
-                artifact_export.export_project(current, expected_revision=current["revision"], binaries=binaries)
-            self.assertEqual(caught.exception.code, "project_limit_exceeded", "only the in-memory download is bounded")
+        clip = os.urandom(70 * 1024 * 1024)  # larger than the old 64 MiB file cap
+        report = "line\n" * (60 * 1024 * 1024 // 5)
+        recorded = self.workspace.apply("codex", "clip", seed["revision"], [
+            {"path": "artifacts/clip.mp4", "previous_sha256": None, "content_base64": base64.b64encode(clip).decode()},
+            {"path": "artifacts/report.txt", "previous_sha256": None, "content": report}])
+        many = [{"path": f"artifacts/frames/{n:04d}.txt", "previous_sha256": None, "content": f"{n}\n"} for n in range(1200)]
+        later = self.workspace.apply("codex", "frames", recorded["revision"], many)
+        reopened = FolderWorkspace(self.root, self.room_id)
+        self.assertEqual(reopened.snapshot()["revision"], later["revision"], "a stored room this size opens again")
+        self.assertEqual(len(later["files"]), 1202)
+        self.assertEqual(reopened.raw_files_for_paths(["artifacts/clip.mp4"], revision=later["revision"])["artifacts/clip.mp4"], clip)
+        current = reopened.snapshot()
+        binaries = reopened.raw_files_for_paths(["artifacts/clip.mp4"], revision=current["revision"])
+        exported = artifact_export.export_project(current, expected_revision=current["revision"], binaries=binaries)
+        self.assertEqual(exported["revision"], current["revision"], "the download holds all of it too")
 
     def test_export_manifest_root_name_is_readable_in_baseline_but_cannot_be_modified_or_created(self):
         (self.source / ".beanest-export.json").write_text("baseline manifest")
@@ -391,10 +383,6 @@ class FolderWorkspaceTests(unittest.TestCase):
         for path in ("existing.txt/child.txt", "EXISTING.txt/child.txt", "directory"):
             self.assertCode("project_file_conflict", lambda: self.workspace.apply("codex", "collision", seed["revision"],
                 [{"path": path, "previous_sha256": None, "content": "new"}]))
-        with patch("local_agent_coordinator.folder_workspace.MAX_CHANGE_BYTES", 5):
-            self.assertCode("project_limit_exceeded", lambda: self.workspace.apply("codex", "batch", seed["revision"],
-                [{"path": "a.txt", "previous_sha256": None, "content": "aaa"},
-                 {"path": "b.txt", "previous_sha256": None, "content": "bbb"}]))
         self.assertEqual(self.workspace.snapshot()["revision"], seed["revision"])
 
     def test_private_source_hardlink_is_copied_to_an_independent_blob(self):
@@ -465,7 +453,6 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.workspace.source_comparison("old.txt", revision=0)["reason"], "project_not_seeded")
 
     # The per-file bound is far larger now; a small one keeps this boundary behaviour tested without huge files.
-    @patch("local_agent_coordinator.folder_workspace.MAX_FILE_BYTES", 1024 * 1024)
     def test_source_comparison_utf8_diff_is_bounded_and_missing_large_binary_corrupt_are_explicit(self):
         (self.source / "text.txt").write_text("原" * 10_000 + "\n", encoding="utf-8")
         (self.source / "large.txt").write_text("x" * (1024 * 1024 + 1))
@@ -477,7 +464,8 @@ class FolderWorkspaceTests(unittest.TestCase):
         self.assertTrue(compared["available"])
         self.assertTrue(compared["truncated"])
         self.assertLessEqual(len(compared["diff"].encode("utf-8")), 16 * 1024)
-        self.assertEqual(self.workspace.source_comparison("large.txt")["reason"], "project_limit_exceeded")
+        with patch("local_agent_coordinator.folder_workspace.DIFF_VIEW_BYTES", 1024 * 1024):
+            self.assertEqual(self.workspace.source_comparison("large.txt")["reason"], "project_diff_too_large")
         self.assertEqual(self.workspace.source_comparison("binary.bin")["reason"], "project_binary_file")
         baseline_entry = next(item for item in self.inspect()["entries"] if item["path"] == "text.txt")
         blob = self.root / self.room_id / "blobs" / baseline_entry["sha256"]

@@ -8,15 +8,12 @@ import json
 import zipfile
 
 from .project_catalog import ProjectCatalogError, validate_text_path
-from .folder_workspace import FORMAT as FOLDER_FORMAT, MAX_SOURCE_FILES, validate_folder_path
+from .folder_workspace import FORMAT as FOLDER_FORMAT, validate_folder_path
 from .project_workspace import ProjectWorkspaceError
 
 
 MAX_FILES = 16
 MAX_BYTES = 64 * 1024
-# The archive is built in memory from every changed file, binary ones included.
-# Only this download is bounded; partners keep submitting past it.
-MAX_FOLDER_EXPORT_BYTES = 1024 * 1024 * 1024
 MANIFEST_NAME = ".beanest-export.json"
 
 
@@ -41,10 +38,11 @@ def export_project(project: dict, *, expected_revision: int, binaries=None) -> d
         raise ArtifactExportError("project_revision_conflict")
     files = project.get("files")
     folder = project.get("format") == FOLDER_FORMAT
-    file_limit, byte_limit = (MAX_SOURCE_FILES, MAX_FOLDER_EXPORT_BYTES) if folder else (MAX_FILES, MAX_BYTES)
+    # A folder download holds whatever the partners changed, however large.
+    file_limit, byte_limit = (None, None) if folder else (MAX_FILES, MAX_BYTES)
     deleted = project.get("deleted_files", []) if folder else []
     if (not isinstance(files, list) or not isinstance(deleted, list)
-            or not 1 <= len(files) + len(deleted) or len(files) > file_limit):
+            or not 1 <= len(files) + len(deleted) or file_limit is not None and len(files) > file_limit):
         raise ArtifactExportError("project_export_unavailable")
     prepared, seen, size = [], set(), 0
     for file in files:
@@ -66,7 +64,7 @@ def export_project(project: dict, *, expected_revision: int, binaries=None) -> d
             raise ArtifactExportError("project_export_corrupt")
         seen.add(path.casefold())
         size += len(content)
-        if size > byte_limit:
+        if byte_limit is not None and size > byte_limit:
             raise ArtifactExportError("project_limit_exceeded")
         digest = hashlib.sha256(content).hexdigest()
         if digest != file.get("sha256"):

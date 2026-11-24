@@ -29,7 +29,7 @@ from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES,
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, ProjectWorkspace, ProjectWorkspaceError, project_digest as _project_digest
 from .project_catalog import ProjectCatalog, ProjectCatalogError
 from .project_edits import ProjectEditError, expand_edits
-from .folder_workspace import FolderWorkspace, MAX_FILE_BYTES as FOLDER_FILE_BYTES
+from .folder_workspace import FolderWorkspace
 from .folder_protocol import FOLDER_INSTRUCTION, prompt_context, validate_request
 from .partner_manager import PartnerManager, PartnerError, unavailable_discovery
 from .native_setup import NATIVE_IDS, native_spec_supported

@@ -213,6 +213,7 @@ const errorLabels = localizedLabels({
   project_file_unavailable: '有文件或文件夹找不到、读不了，请核对路径和访问权限。',
   project_sensitive_content: '选定文件含疑似敏感内容，未带入协作；请移除凭据或私密记录后再添加。',
   project_binary_file: '这是二进制文件（例如图片），不能按文本阅读；下载已修改文件可以拿到原样字节。',
+  project_diff_too_large: '文件很大，这里不逐行对比；改动已经保存，下载已修改文件可以拿到全文。',
   project_limit_exceeded: '选定文件超出当前范围：最多 12 个，每个 16 KiB，总计 48 KiB。',
   project_capture_limit: '项目超出当前隔离副本的容量范围，尚未开始处理；请缩小项目目录后重试。',
   project_source_changed: '项目来源在准备过程中发生变化，未接受本次快照；请确认文件稳定后重试。',

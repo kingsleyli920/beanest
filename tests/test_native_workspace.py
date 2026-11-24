@@ -138,6 +138,19 @@ class NativeWorkspaceTests(unittest.TestCase):
         self.assertNotIn("executable", files["new.png"])
         self.assertEqual((project / "asset.bin").read_bytes(), b"\x00\x01")
 
+    def test_a_recording_larger_than_the_old_cap_is_collected_whole(self):
+        # Beanest refused any file over 64 MiB a partner wrote; git and the
+        # partner's own tools set no such limit, so neither does Beanest.
+        source = self.export("source", {"readme.md": "hi\n"})
+        receipt = self.prepare(source)
+        project = Path(receipt["project"])
+        clip = os.urandom(70 * 1024 * 1024)
+        (project / "evidence.mp4").write_bytes(clip)
+        result = collect_changes(project, receipt, ["evidence.mp4"])
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual([(item["path"], item["bytes"], item["sha256"]) for item in result["files"]],
+                         [("evidence.mp4", len(clip), hashlib.sha256(clip).hexdigest())])
+
     def test_unowned_deletion_binary_and_mode_flip_stay_blocked(self):
         # Catches an ownership breach riding in as a deletion, binary or chmod.
         source = self.export("source", {"asset.bin": b"\x00", "old.py": "old\n", "run.sh": "echo hi\n"})
