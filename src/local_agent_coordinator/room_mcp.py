@@ -21,13 +21,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from .agent_registry import safe_agent_id
-from .message_capacity import MAX_JSON_BODY_BYTES, MessageCapacityError, checked_message_text
+from .message_capacity import MessageCapacityError, checked_message_text
+from .room_projection import EVENT_MAX_BYTES
 from .room_store import TASK_MODES, WORK_MODES
 
 
 MAX_CONNECTION = 4096
-MAX_REQUEST = MAX_JSON_BODY_BYTES
-MAX_RESPONSE = 2 * 1024 * 1024
 MAX_HEADERS = 16 * 1024
 _URL = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/?\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
@@ -149,15 +148,13 @@ def _room_id(value: object) -> str:
 
 
 class RoomHTTPClient:
-    def __init__(self, connection: Path, *, timeout: float = 20,
-                 max_response: int = MAX_RESPONSE):
+    def __init__(self, connection: Path, *, timeout: float = 20):
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                or not math.isfinite(timeout) or not 0 < timeout <= 30
-                or type(max_response) is not int or not 1 <= max_response <= MAX_RESPONSE):
+                or not math.isfinite(timeout) or not 0 < timeout <= 30):
             raise RoomClientError("invalid_configuration")
         self.path = Path(connection)
         self.connection = _read_connection(self.path)
-        self.timeout, self.max_response = timeout, max_response
+        self.timeout = timeout
         self.paging_supported = False
 
     def _check_connection(self):
@@ -167,7 +164,7 @@ class RoomHTTPClient:
                 or not secrets.compare_digest(current.token, pinned.token)):
             raise RoomClientError("connection_changed")
 
-    async def _exchange(self, method: str, path: str, body: bytes, *, response_limit=None):
+    async def _exchange(self, method: str, path: str, body: bytes):
         reader, writer = await asyncio.open_connection("127.0.0.1", self.connection.port,
                                                        limit=MAX_HEADERS)
         try:
@@ -199,10 +196,9 @@ class RoomHTTPClient:
             if 300 <= code < 400:
                 raise RoomClientError("redirect_rejected")
             length = fields.get(b"content-length", b"")
-            if b"transfer-encoding" in fields or not re.fullmatch(rb"[0-9]{1,9}", length):
+            # Any size: a long room's state is read whole, never refused.
+            if b"transfer-encoding" in fields or not re.fullmatch(rb"[0-9]+", length):
                 raise RoomClientError("invalid_http_response")
-            if int(length) > (self.max_response if response_limit is None else response_limit):
-                raise RoomClientError("response_too_large")
             if fields.get(b"content-type", b"").lower().split(b";", 1)[0] != b"application/json":
                 raise RoomClientError("invalid_http_response")
             raw = await reader.readexactly(int(length))
@@ -226,21 +222,14 @@ class RoomHTTPClient:
             except (OSError, asyncio.TimeoutError):
                 pass
 
-    async def _request(self, method: str, path: str, payload=None, *, large_page=False):
+    async def _request(self, method: str, path: str, payload=None):
         self._check_connection()
+        # No request size limit: an agent may send a message of any length.
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode() if payload is not None else b""
-        if len(body) > MAX_REQUEST:
-            raise RoomClientError("request_too_large")
         try:
-            # A single explicitly requested history/text item may exceed the
-            # compact state budget. Never raise the bound for a whole room.
-            response_limit = (MAX_JSON_BODY_BYTES if large_page and self.max_response == MAX_RESPONSE
-                              else self.max_response)
-            return await asyncio.wait_for(
-                self._exchange(method, path, body, response_limit=response_limit), self.timeout)
+            return await asyncio.wait_for(self._exchange(method, path, body), self.timeout)
         except RoomClientError as error:
-            if method == "POST" and error.code in {
-                "invalid_http_response", "response_too_large", "redirect_rejected"}:
+            if method == "POST" and error.code in {"invalid_http_response", "redirect_rejected"}:
                 raise RoomClientError(error.code, remote_state_unknown=True) from None
             raise
         except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError):
@@ -304,14 +293,14 @@ class RoomHTTPClient:
         for name, value, minimum, maximum in (
                 ("before_seq", before_seq, 0, None), ("after_seq", after_seq, 0, None),
                 ("through_seq", through_seq, 0, None), ("limit", limit, 1, 500),
-                ("max_bytes", max_bytes, 1, MAX_JSON_BODY_BYTES)):
+                ("max_bytes", max_bytes, 1, EVENT_MAX_BYTES)):
             if value is None:
                 continue
             if type(value) is not int or value < minimum or maximum is not None and value > maximum:
                 raise RoomClientError("invalid_arguments")
             query[name] = value
         path = "/api/mcp/rooms/" + _room_id(room_id) + "/events"
-        return await self._request("GET", path + ("?" + urlencode(query) if query else ""), large_page=True)
+        return await self._request("GET", path + ("?" + urlencode(query) if query else ""))
 
     async def text(self, room_id, kind, sha256, *, run_id=None, objective_id=None,
                    job_id=None, task_id=None, result_version=None, seq=None, execution_id=None):
@@ -342,7 +331,7 @@ class RoomHTTPClient:
                 raise RoomClientError("invalid_arguments")
         query = {"kind": kind, **identifiers, "sha256": sha256}
         path = "/api/mcp/rooms/" + _room_id(room_id) + "/text?" + urlencode(query)
-        return await self._request("GET", path, large_page=True)
+        return await self._request("GET", path)
 
     async def job(self, room_id, job_id):
         if not self.paging_supported:

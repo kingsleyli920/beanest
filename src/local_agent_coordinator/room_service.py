@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -19,7 +18,6 @@ from . import adapters
 from . import parallel_sessions
 from .parallel_sessions import is_lane, partner_of
 from . import job_progress, native_adapters, native_workspace
-from .message_capacity import MAX_PROMPT_BYTES
 from . import room_projection, room_media, git_status, code_delivery
 from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
 from .execution_policy import seconds_available, deadline_reached, task_settled
@@ -177,9 +175,6 @@ def _outbox_body(kind, room_id, request_id, body):
             checked_message(body[field])
     if body.get("project_id") is not None:
         checked_id(body["project_id"])
-    # Check actual JSON size without changing any original string or fingerprint.
-    if room_projection.wire_bytes(body) > room_projection.transport_limits()["max_request_utf8_bytes"]:
-        raise RoomError("message_too_large")
     return _OUTBOX_ROUTES[kind]
 
 
@@ -420,18 +415,12 @@ def _sessions(snapshot):
 
 class RoomService(RoomPromptMixin):
     def __init__(self, state_path: Path, workspace: Path, *, invoke=None, clock=time.time,
-                 max_calls: int = 8, room_timeout: float = 900, call_timeout: float = 120,
-                 team_max_calls: int = 32, team_timeout: float = 7200,
                  registry: AgentRegistry | None = None, runner=None, partners=None, native_invoke=None):
         if registry is not None and (invoke is not None or not isinstance(registry, AgentRegistry)):
             raise RoomError("invalid_configuration")
         self.registry = registry if registry is not None else default_registry()
-        # Longer code-generation trials opt in at service construction. Normal
-        # Static response-protocol calls retain a failure timeout. Native calls
-        # own their progress/cancellation checks and have no artificial timer.
-        if (isinstance(call_timeout, bool) or not isinstance(call_timeout, (int, float))
-                or not math.isfinite(call_timeout) or not 0 < call_timeout <= 600):
-            raise RoomError("invalid_configuration")
+        # No call has a timer of Beanest's own: a call runs until the partner
+        # finishes or the user cancels it. Only a deadline the user set applies.
         self.workspace = Path(workspace).absolute()
         if not Path(workspace).is_absolute() or self.workspace.is_symlink() or self.workspace.parent.is_symlink():
             raise RoomError("invalid_workspace")
@@ -440,7 +429,7 @@ class RoomService(RoomPromptMixin):
             self.workspace.chmod(0o700)
         except OSError:
             raise RoomError("invalid_workspace") from None
-        self.clock, self.call_timeout = clock, call_timeout
+        self.clock = clock
         self.partner_manager = partners
         if partners is None and registry is None and invoke is None:
             self.partner_manager = PartnerManager(self.workspace.parent.resolve() / "partners", self.registry,
@@ -453,8 +442,7 @@ class RoomService(RoomPromptMixin):
         self.invoke = invoke
         self.native_invoke = native_invoke or native_adapters.invoke_native
         self.route_available = network_state.route_available  # replaced in tests
-        self.store = RoomStore(state_path, max_calls=max_calls, room_timeout=room_timeout, clock=clock,
-                               team_max_calls=team_max_calls, team_timeout=team_timeout,
+        self.store = RoomStore(state_path, clock=clock,
                                agents={item["id"]: item["name"] for item in self.registry.describe()},
                                agent_adapters={item["id"]: item.get("adapter", "") for item in self.registry.describe()},
                                agent_bean_styles={item["id"]: item["bean_style"] for item in self.registry.describe()})
@@ -2248,7 +2236,7 @@ class RoomService(RoomPromptMixin):
                 "bean_styles": bean_styles(),
                 "background_error": self._background_error,
                 "limits": {"calls_per_room": None, "room_seconds": None,
-                           "call_seconds": self.call_timeout,
+                           "call_seconds": None,
                            "team_calls_per_room": None, "team_room_seconds": None}}
 
     async def create_room(self, goal, target, request_id, *, source="user", mode="text",
@@ -3201,9 +3189,9 @@ class RoomService(RoomPromptMixin):
                 initial = os.fstat(stream.fileno())
                 if not stat.S_ISREG(initial.st_mode):
                     raise ValueError
-                raw = stream.read(MAX_PROMPT_BYTES + 1024 * 1024 + 1)
+                raw = stream.read()
                 final = os.fstat(stream.fileno())
-            if (len(raw) > MAX_PROMPT_BYTES + 1024 * 1024 or not raw.endswith(b"\n")
+            if (not raw.endswith(b"\n")
                     or (initial.st_ino, initial.st_size, initial.st_mtime_ns) != (final.st_ino, final.st_size, final.st_mtime_ns)):
                 raise ValueError
             rows = [adapters._strict_json(line) for line in raw.splitlines()]
@@ -3333,9 +3321,7 @@ class RoomService(RoomPromptMixin):
             with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError
-                raw = stream.read(MAX_PROMPT_BYTES + 1024 * 1024 + 1)
-            if len(raw) > MAX_PROMPT_BYTES + 1024 * 1024:
-                raise ValueError
+                raw = stream.read()
             rows = [adapters._strict_json(line.decode()) for line in raw.splitlines()]
             if any(not isinstance(row, dict) for row in rows):
                 raise ValueError
@@ -3391,9 +3377,7 @@ class RoomService(RoomPromptMixin):
             with os.fdopen(descriptor, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError
-                raw = stream.read(MAX_PROMPT_BYTES + 1024 * 1024 + 1)
-            if len(raw) > MAX_PROMPT_BYTES + 1024 * 1024:
-                raise ValueError
+                raw = stream.read()
             matches, active = [], None
             for line in raw.splitlines():
                 row = adapters._strict_json(line.decode("utf-8"))
@@ -3489,8 +3473,6 @@ class RoomService(RoomPromptMixin):
         digest = hashlib.sha256()
         for line in stream:
             digest.update(line)
-            if len(line) > native_adapters._MAX_LINE:
-                return None
             row = adapters._strict_json(line)
             if not isinstance(row, dict):
                 return None
@@ -3556,10 +3538,9 @@ class RoomService(RoomPromptMixin):
                     fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
                     with os.fdopen(fd, "rb") as stream:
                         before = os.fstat(stream.fileno())
-                        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                                or before.st_size > native_adapters._MAX_RECEIPT):
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                             raise ValueError("unsafe receipt file")
-                        initial = adapters._strict_json(stream.readline(native_adapters._MAX_LINE + 1))
+                        initial = adapters._strict_json(stream.readline())
                         if (not isinstance(initial, dict) or initial.get("data") != {
                                 "type": "thread.started", "thread_id": candidate["session_id"]}):
                             continue
@@ -3702,15 +3683,13 @@ class RoomService(RoomPromptMixin):
         exact published-tree gates remain mandatory, and the old error stays.
         """
         directory = self.workspace.parent / "native-receipts" / room_id
-        matches, read_bytes = [], 0
+        matches = []
         try:
             if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents):
                 raise ValueError("receipt directory is not a regular directory")
             descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 names = os.listdir(descriptor)
-                if len(names) > 64:
-                    raise ValueError("receipt directory exceeds recovery inspection bound")
                 for name in sorted(names):
                     if not name.endswith(".jsonl"):
                         continue
@@ -3721,12 +3700,11 @@ class RoomService(RoomPromptMixin):
                     file_descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
                     with os.fdopen(file_descriptor, "rb") as stream:
                         before = os.fstat(stream.fileno())
-                        if not stat.S_ISREG(before.st_mode) or before.st_size > 8 * 1024 * 1024:
-                            raise ValueError("receipt exceeds recovery inspection bound")
-                        content = stream.read(8 * 1024 * 1024 + 1)
-                        read_bytes += len(content)
+                        if not stat.S_ISREG(before.st_mode):
+                            raise ValueError("receipt is not a regular file")
+                        content = stream.read()
                         after = os.fstat(stream.fileno())
-                        if (read_bytes > 32 * 1024 * 1024 or len(content) != before.st_size
+                        if (len(content) != before.st_size
                                 or (before.st_ino, before.st_size, before.st_mtime_ns) !=
                                    (after.st_ino, after.st_size, after.st_mtime_ns)):
                             raise ValueError("receipt changed during recovery inspection")
@@ -4108,10 +4086,9 @@ class RoomService(RoomPromptMixin):
     async def read_room_state(self, room_id):
         self._available()
         snapshot = self._snapshot(room_id, poll=True)
-        result = room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission)
-        if room_projection.wire_bytes(result) > room_projection.STATE_MAX_BYTES:
-            raise RoomError("room_state_too_large")
-        return result
+        # However long the room has run, its state is returned whole: a size
+        # limit here would leave a long room impossible to open.
+        return room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission)
 
     async def read_room_events(self, room_id, **cursor):
         if self._closed:
@@ -4121,10 +4098,7 @@ class RoomService(RoomPromptMixin):
     async def read_room_text(self, room_id, reference):
         if self._closed:
             raise RoomError("service_stopping")
-        result = self.store.read_text(room_id, reference)
-        if room_projection.wire_bytes(result) > room_projection.transport_limits()["event_page_max_bytes"]:
-            raise RoomError("event_too_large")
-        return result
+        return self.store.read_text(room_id, reference)
 
     async def read_room_job(self, room_id, job_id):
         snapshot = self._snapshot(room_id, poll=True)
@@ -6455,8 +6429,7 @@ class RoomService(RoomPromptMixin):
                     raise RoomError("invalid_workspace")
                 cwd.mkdir(mode=0o700, parents=True, exist_ok=True)
                 remaining = seconds_available(job["deadline"], self.clock())
-                call_limit = 600 if job.get("team") else self.call_timeout
-                timeout = remaining if native else min(call_limit, remaining) if remaining is not None else call_limit
+                timeout = remaining
                 if timeout is not None and timeout <= 0:
                     raise RoomError("deadline_exceeded")
                 spec = self.registry.get(provider)
@@ -6543,12 +6516,12 @@ class RoomService(RoomPromptMixin):
                 outages, outage_work = 0, None
                 while True:
                     operation = begin_call()
-                    # Native transport owns its deadline and process-group cleanup.
-                    # A second equal wait_for can erase its cancellation receipt.
+                    # The transport owns any deadline the user set and its process-group
+                    # cleanup. A second equal wait_for can erase its cancellation receipt.
                     invoked = True
                     cleanup_confirmed = False
                     try:
-                        result = await operation if native else await asyncio.wait_for(operation, timeout=timeout)
+                        result = await operation
                     except asyncio.CancelledError as error:
                         if endpoint is not None:
                             self._record_api_call(provider, error, runtime_kwargs)
@@ -6612,7 +6585,7 @@ class RoomService(RoomPromptMixin):
                     remaining = seconds_available(job["deadline"], self.clock())
                     if remaining is not None and remaining <= 0:
                         raise RoomError("deadline_exceeded")
-                    timeout = remaining if native else min(call_limit, remaining) if remaining is not None else call_limit
+                    timeout = remaining
                 preflight = preflight_failed(job["session_id"], result=result)
                 observation = result.get("native_execution") or {} if native else {}
                 cleanup_confirmed = (result.get("cleanup_confirmed") is True and observation.get("cleanup_confirmed") is True if native else

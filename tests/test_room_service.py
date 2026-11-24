@@ -123,7 +123,7 @@ class RoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fake.calls), 3)
         for call in self.fake.calls:
             self.assertEqual(call["cwd"], self.root / "workspaces" / room_id / call["agent"])
-            self.assertLessEqual(call["timeout"], 120)
+            self.assertIsNone(call["timeout"])  # no timer of our own on any call
 
     async def test_task_review_feedback_instructions_are_distinct_and_parent_bound(self):
         self.fake.responses["claude"] = [
@@ -314,18 +314,31 @@ class RoomServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["room"]["status"], "unknown")
         self.assertTrue(snapshot["members"][0]["identity_uncertain"])
 
-    async def test_real_wait_timeout_cleans_up_without_dense_polling_or_retry(self):
-        await self.service.shutdown()
+    async def test_text_call_running_past_the_old_600_second_limit_completes(self):
+        # Catches a per-call timer of Beanest's own (the old 120 s / 600 s wait_for) ending a slow partner.
+        loop = asyncio.get_running_loop()
+        real_time, skipped = loop.time, [0.0]
+        loop.time = lambda: real_time() + skipped[0]  # the loop's timers see an hour pass
+        self.addCleanup(loop.__dict__.pop, "time", None)
+        loop.slow_callback_duration = 10 ** 6  # the skipped hour is not a slow callback
         self.fake.gate = asyncio.Event()
-        self.service = RoomService(self.root / "timeout.sqlite3", self.root / "workspaces",
-                                   invoke=self.fake, call_timeout=0.01)
         room = await self.create()
+        await within(self._first_call(), 2)
+        skipped[0] += 3600
+        await asyncio.sleep(0.05)  # any timer due within the hour fires here
+        self.assertEqual(self.fake.active["claude"], 1)
+        self.fake.gate.set()
         await self.settle()
         snapshot = await self.service.read_room(room["room"]["id"])
-        self.assertEqual(snapshot["jobs"][0]["status"], "unknown")
-        self.assertEqual(snapshot["jobs"][0]["error"], "deadline_exceeded")
+        self.assertEqual(snapshot["jobs"][0]["status"], "completed")
+        self.assertIsNone(snapshot["jobs"][0]["error"])
+        self.assertIsNone(self.fake.calls[0]["timeout"])
         self.assertEqual(self.fake.active["claude"], 0)
         self.assertEqual(len(self.fake.calls), 1)
+
+    async def _first_call(self):
+        while not self.fake.calls:
+            await asyncio.sleep(0.005)
 
     async def test_explicit_followup_can_resolve_a_completed_protocol_error(self):
         self.fake.responses["claude"] = [answer(text="Bad JSON"), answer("Corrected")]

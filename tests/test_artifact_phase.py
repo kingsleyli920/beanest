@@ -61,18 +61,13 @@ class ArtifactPhaseTests(unittest.IsolatedAsyncioTestCase):
         await self.service.shutdown()
         self.temp.cleanup()
 
-    async def test_explicit_long_call_limit_preserves_default_and_hard_ceiling(self):
-        self.assertEqual(self.service.call_timeout, 120)
-        for invalid in (True, False, 0, -1, 600.1, float('inf'), float('nan'), '600'):
-            with self.subTest(timeout=invalid), self.assertRaises(RoomError):
-                RoomService(self.root / 'invalid.sqlite3', self.root / 'invalid',
-                            registry=default_registry(), call_timeout=invalid)
-        extended = RoomService(self.root / 'long.sqlite3', self.root / 'long',
-                               registry=default_registry(), call_timeout=600)
-        try:
-            self.assertEqual(extended.call_timeout, 600)
-        finally:
-            await extended.shutdown()
+    async def test_service_has_no_call_timer_setting(self):
+        # Catches a configurable per-call timer (the old call_timeout 120 s, at most 600 s) coming back.
+        self.assertFalse(hasattr(self.service, 'call_timeout'))
+        with self.assertRaises(TypeError):
+            RoomService(self.root / 'invalid.sqlite3', self.root / 'invalid',
+                        registry=default_registry(), call_timeout=600)
+        self.assertIsNone((await self.service.status())['limits']['call_seconds'])
 
     async def settle(self, room_id):
         for _ in range(100):

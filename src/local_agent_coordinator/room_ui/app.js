@@ -283,9 +283,9 @@ const workspaceRejections = new Set([
 const closedStatuses = new Set(['cancelled', 'interrupted', 'budget_exhausted', 'failed']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const agentPattern = /^[a-z][a-z0-9_-]{0,31}$/;
-const transportLimits = Object.freeze({ max_message_utf8_bytes: 1048576, max_request_utf8_bytes: 8388608 });
-const utf8Bytes = (text) => new TextEncoder().encode(text).byteLength;
-function validUserText(text) { return typeof text === 'string' && utf8Bytes(text) <= transportLimits.max_message_utf8_bytes; }
+// null: the server sets no message or request size limit; a message of any length is sent.
+const transportLimits = Object.freeze({ max_message_utf8_bytes: null, max_request_utf8_bytes: null });
+function validUserText(text) { return typeof text === 'string'; }
 function checkUserText(text) {
   if (validUserText(text)) return true;
   showNotice(errorLabels.message_too_large, 'error'); return false;
@@ -3488,9 +3488,6 @@ function roomPath(id) {
 async function api(path, method = 'GET', body) {
   if (state.roomPagingSupported && path.startsWith('/api/partners') && !path.includes('view=')) path += `${path.includes('?') ? '&' : '?'}view=compact`;
   const encoded = body === undefined ? undefined : JSON.stringify(body);
-  if (encoded && utf8Bytes(encoded) > (state.roomPagingSupported || path.endsWith('/messages/receipt') ? transportLimits.max_request_utf8_bytes : 16 * 1024)) {
-    throw new RequestError(state.roomPagingSupported ? errorLabels.request_too_large : t("当前服务的传输容量不足，原文已保留，请更新服务后再发送。"));
-  }
   const partnerContext = path.startsWith('/api/partners') ? { intentEpoch: state.partnerIntentEpoch, generation: ++state.partnerRequestGeneration } : null;
   const codeStatusRead = method === 'GET' && /^\/api\/rooms\/[^/]+\/code-status(?:\?|$)/.test(path);
   const controller = new AbortController();

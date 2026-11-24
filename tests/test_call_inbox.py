@@ -113,8 +113,9 @@ class CallInbox(pool.PoolService):
 
 
 class InboxFile(pool.unittest.TestCase):
-    def test_entries_are_appended_private_and_capped_and_a_link_is_not_followed(self):
-        # Catches an entry replacing the earlier ones, a world-readable file, an unbounded entry,
+    def test_entries_are_appended_private_and_whole_and_a_link_is_not_followed(self):
+        # Catches an entry replacing the earlier ones, a world-readable file, an entry cut short
+        # (the old 4000-character cap dropped the rest of a message marked read),
         # and the host writing through a link a command planted in its place.
         import os, tempfile
         with tempfile.TemporaryDirectory() as temp:
@@ -124,7 +125,7 @@ class InboxFile(pool.unittest.TestCase):
             path = job_progress.inbox_path(progress)
             text = path.read_text()
             self.assertTrue(text.startswith("## From the user\none\n\n## From codex\n"))
-            self.assertEqual(text.count("y"), 4000)
+            self.assertEqual(text.count("y"), 5000)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             other = job_progress.create_progress_file(Path(temp) / "p")
             target = Path(temp) / "elsewhere"

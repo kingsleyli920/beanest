@@ -203,7 +203,7 @@ class RoomExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_execution_feedback_is_not_dropped_at_obsolete_model_call_cap(self):
         await self.service.shutdown()
-        self.service = self.make_service(max_calls=3)
+        self.service = self.make_service()
         created = await self.create()
         await self.settle()
         saved = await self.service.read_room(created["room"]["id"])

@@ -24,7 +24,6 @@ from uuid import uuid4
 MAX_SECONDS = 7200
 MAX_CALLS = 96
 MAX_EXECUTIONS = 24
-MAX_CALL_SECONDS = 600
 MAX_SOURCE_BYTES = 65536
 PHASE_CALLS = 8
 PHASE_EXECUTIONS = 2
@@ -80,12 +79,11 @@ def validate_plan(plan):
         raise TrialError("invalid_trial_plan") from None
 
 
-def validate_limits(*, max_calls, max_executions, total_timeout, call_timeout, poll_interval=1):
+def validate_limits(*, max_calls, max_executions, total_timeout, poll_interval=1):
     if (type(max_calls) is not int or not 1 <= max_calls <= MAX_CALLS
             or type(max_executions) is not int or not 1 <= max_executions <= MAX_EXECUTIONS):
         raise TrialError("invalid_trial_limits")
-    for value, maximum in ((total_timeout, MAX_SECONDS), (call_timeout, MAX_CALL_SECONDS),
-                           (poll_interval, 5)):
+    for value, maximum in ((total_timeout, MAX_SECONDS), (poll_interval, 5)):
         if type(value) not in (int, float) or not 0 < value <= maximum or not math.isfinite(value):
             raise TrialError("invalid_trial_limits")
 
@@ -307,10 +305,10 @@ class WorkflowTrial:
     def __init__(self, server, journal, plan, *, clock=time.time, monotonic=time.monotonic,
                  sleep=time.sleep, poll_interval=1, max_calls=MAX_CALLS,
                  max_executions=MAX_EXECUTIONS, total_timeout=MAX_SECONDS,
-                 call_timeout=MAX_CALL_SECONDS, source_byte_limit=MAX_SOURCE_BYTES,
+                 source_byte_limit=MAX_SOURCE_BYTES,
                  initial_source=None):
         validate_limits(max_calls=max_calls, max_executions=max_executions,
-                        total_timeout=total_timeout, call_timeout=call_timeout, poll_interval=poll_interval)
+                        total_timeout=total_timeout, poll_interval=poll_interval)
         if type(source_byte_limit) is not int or not 1 <= source_byte_limit <= MAX_SOURCE_BYTES:
             raise TrialError("invalid_trial_limits")
         if initial_source is not None:
@@ -323,7 +321,6 @@ class WorkflowTrial:
         self.clock, self.monotonic, self.sleep = clock, monotonic, sleep
         self.poll_interval = poll_interval
         self.max_calls, self.max_executions, self.total_timeout = max_calls, max_executions, total_timeout
-        self.call_timeout = call_timeout
         self.source_byte_limit = source_byte_limit
         # This is an explicit library input, never inferred from old journals
         # or exposed as an HTTP, MCP or command-line resume operation.
@@ -437,7 +434,7 @@ class WorkflowTrial:
             "schema": 1, "trial_id": str(uuid4()), "status": "prepared", "reason": None,
             "created_at": started, "updated_at": started, "plan": self.plan,
             "caps": {"seconds": self.total_timeout, "model_calls": self.max_calls,
-                     "executions": self.max_executions, "call_timeout": self.call_timeout,
+                     "executions": self.max_executions,
                      "source_byte_limit": self.source_byte_limit,
                      "phase_model_calls": PHASE_CALLS,
                      "phase_executions": PHASE_EXECUTIONS},
@@ -542,7 +539,6 @@ def main(argv=None):
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--runner-root", type=Path)
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--call-timeout", type=float, default=MAX_CALL_SECONDS)
     parser.add_argument("--seconds", type=float, default=MAX_SECONDS)
     parser.add_argument("--max-calls", type=int, default=MAX_CALLS)
     parser.add_argument("--max-executions", type=int, default=MAX_EXECUTIONS)
@@ -552,7 +548,7 @@ def main(argv=None):
     http_started = False
     try:
         validate_limits(max_calls=args.max_calls, max_executions=args.max_executions,
-                        total_timeout=args.seconds, call_timeout=args.call_timeout)
+                        total_timeout=args.seconds)
         if args.status:
             print(json.dumps(summary(TrialJournal.read_only(args.runtime)), ensure_ascii=False))
             return 0
@@ -569,7 +565,7 @@ def main(argv=None):
             from .python_runner import PythonRunner
             from .room_service import RoomService
             service = RoomService(args.runtime / "rooms.sqlite3", args.runtime / "workspaces",
-                                  runner=PythonRunner(args.runner_root), call_timeout=args.call_timeout)
+                                  runner=PythonRunner(args.runner_root))
             try:
                 server = create_trial_server(service, args.port)
                 thread = threading.Thread(target=server.serve_forever, name="beanest-trial-http", daemon=True)
@@ -581,7 +577,7 @@ def main(argv=None):
                 try:
                     result = WorkflowTrial(server, journal, plan, max_calls=args.max_calls,
                                            max_executions=args.max_executions,
-                                           total_timeout=args.seconds, call_timeout=args.call_timeout).run()
+                                           total_timeout=args.seconds).run()
                 finally:
                     signal.signal(signal.SIGTERM, previous)
             finally:

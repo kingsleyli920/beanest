@@ -105,7 +105,7 @@ class ProjectInspectionStoreTests(unittest.TestCase):
 
     def test_historical_constructor_budget_does_not_stop_inspection(self):
         self.store.close()
-        self.store = RoomStore(self.path, max_calls=2, clock=lambda: self.now)
+        self.store = RoomStore(self.path, clock=lambda: self.now)
         room_id = self.room()
         for _ in range(3):
             self.assertIsNotNone(self.inspect(self.store.claim(room_id, "claude")))

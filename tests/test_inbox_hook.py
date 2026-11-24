@@ -52,15 +52,18 @@ class InboxHook(unittest.TestCase):
                          "## Message from the user, sent while this call was running\n十二图就是十二途。")
         self.assertEqual(self.run_hook(), "")
 
-    def test_a_long_entry_is_capped_and_still_counted_as_read(self):
-        # Catches an oversized entry being pushed to a side file by the tool, or handed over again and again.
-        job_progress.append_inbox(self.progress, "From the user", "y" * 3900)
+    def test_a_10000_character_message_is_handed_over_whole_once(self):
+        # Catches the old 4000/8000-character cut that dropped the rest of a user's message while marking it read.
+        text = "".join(f"第{index:04d}句照原文。" for index in range(1000))
+        self.assertEqual(len(text), 10000)
+        job_progress.append_inbox(self.progress, "Message from the user, sent while this call was running", text)
         job_progress.append_inbox(self.progress, "From the user", "z" * 3900)
-        job_progress.append_inbox(self.progress, "From the user", "w" * 3900)
-        text = self.context(self.run_hook())
-        self.assertEqual(len(text), len(inbox_hook.HEADING) + inbox_hook.MAX_CHARACTERS)
-        self.assertLess(len(text), 10000)
-        self.assertEqual(self.run_hook(), "")
+        handed = self.context(self.run_hook())
+        self.assertEqual(handed[len(inbox_hook.HEADING):],
+                         "## Message from the user, sent while this call was running\n" + text
+                         + "\n\n## From the user\n" + "z" * 3900)
+        self.assertEqual(len(handed), len(inbox_hook.HEADING) + 13978)
+        self.assertEqual(self.run_hook(), "", "counted as read only once it was all handed over")
 
     def test_it_stays_silent_and_harmless_when_anything_is_off(self):
         # Catches a tool call failed or delayed by the hook: no variable, a missing file, a planted link,

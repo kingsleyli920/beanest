@@ -283,7 +283,7 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['objective']['stage'],3)
         self.assertGreater(result['project']['revision'],1)
 
-    async def test_no_deadline_does_not_disable_user_cancel_or_per_call_timeout(self):
+    async def test_no_deadline_keeps_user_cancel_and_sets_no_call_timer(self):
         held=asyncio.Event()
         entered=asyncio.Event()
         original=self.handler
@@ -308,7 +308,8 @@ class ContinuousObjectiveTests(unittest.IsolatedAsyncioTestCase):
         result=await self.service.cancel_room(created['room']['id'])
         self.assertTrue(result['cancellation_confirmed'])
         self.assertFalse((await self.service.status())['autonomous_work_active'])
-        self.assertTrue(all(0<timeout<=600 for timeout in observed))
+        self.assertTrue(observed)
+        self.assertTrue(all(timeout is None for timeout in observed))  # no timer of Beanest's own
 
     async def test_explicit_deadline_cancels_inflight_work_without_late_files(self):
         entered = asyncio.Event()

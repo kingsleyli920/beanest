@@ -22,7 +22,7 @@ import selectors
 
 from local_agent_coordinator.bridge import BridgeError
 from local_agent_coordinator.task_store import StoreError
-from local_agent_coordinator.ui_server import create_server, main, MAX_BODY, _HTTPError
+from local_agent_coordinator.ui_server import create_server, main, _HTTPError
 
 
 TASK = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -245,7 +245,6 @@ class LocalUIServerTests(unittest.TestCase):
 
     def test_body_requires_bounded_length_json_object_and_unique_fields(self):
         cases = [(None, {}, 411), (b"{}", {"Content-Type": "text/plain"}, 415),
-                 (b"", {"Content-Length": str(MAX_BODY + 1)}, 413),
                  (b"{}", {"Transfer-Encoding": "chunked"}, 400),
                  (b"{", {}, 400), (b"\xff", {}, 400), ([], {}, 400),
                  (b'{"agent":"claude","agent":"codex"}', {}, 400),
@@ -283,10 +282,12 @@ class LocalUIServerTests(unittest.TestCase):
             self.assertGreater(len(raw), 16 * 1024)
             self.assertEqual(self.json_request("POST", "/api/tasks", raw)[0], 200)
             self.assertIn(text, self.bridge.calls[-1])
+        # Catches the old 8 MiB body_too_large (HTTP 413): a 12 MiB body is read whole.
         payload = json.dumps({"agent": "codex", "prompt": "wire boundary", "request_id": "wire-max"}).encode()
-        raw = b" " * (MAX_BODY - len(payload)) + payload
-        self.assertEqual(len(raw), MAX_BODY)
+        raw = b" " * (12 * 1024 * 1024 - len(payload)) + payload
+        self.assertEqual(len(raw), 12582912)
         self.assertEqual(self.json_request("POST", "/api/tasks", raw)[0], 200)
+        self.assertIn("wire boundary", self.bridge.calls[-1])
 
     def test_errors_expose_only_fixed_codes_and_valid_task_id(self):
         stderr = io.StringIO()

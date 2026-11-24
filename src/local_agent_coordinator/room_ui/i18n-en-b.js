@@ -104,7 +104,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "时间未知": "Time unknown",
   "未命名任务": "Untitled task",
   "任务记录格式异常，请刷新状态。": "The task record has an invalid format. Refresh the status.",
-  "当前服务的传输容量不足，原文已保留，请更新服务后再发送。": "The current service's transfer capacity is insufficient. Your original text is preserved; update the service before sending again.",
   "本地服务返回了无法识别的记录。": "The local service returned an unrecognized record.",
   "请求未完成，请核对本地服务与任务状态。": "The request did not complete. Check the local service and task status.",
   "本次代码查询等待超时，尚未取得新结果；可以稍后重试。": "This code-status query timed out without a new result. You can try again later.",

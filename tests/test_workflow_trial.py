@@ -153,12 +153,11 @@ class TrialTests(unittest.TestCase):
             load_plan(source)
 
     def test_trial_limits_reject_boolean_nonfinite_fractional_counts_and_out_of_bounds(self):
-        valid = {"max_calls": 96, "max_executions": 24, "total_timeout": 7200, "call_timeout": 600}
+        valid = {"max_calls": 96, "max_executions": 24, "total_timeout": 7200}
         invalid = {
             "max_calls": (True, False, 0, -1, 97, 95.5, 95.0, float('inf'), float('nan')),
             "max_executions": (True, False, 0, -1, 25, 2.5, 2.0, float('inf'), float('nan')),
             "total_timeout": (True, False, 0, -1, 7201, float('inf'), float('-inf'), float('nan')),
-            "call_timeout": (True, False, 0, -1, 601, float('inf'), float('-inf'), float('nan')),
         }
         for key, values in invalid.items():
             for value in values:
@@ -570,8 +569,8 @@ class TrialTests(unittest.TestCase):
         self.assertTrue(server.stopped.is_set())
         recorded = json.loads((self.runtime / JOURNAL_NAME).read_text())
         self.assertIs(recorded["cleanup_confirmed"], True)
-        self.assertEqual(factory.call_args.kwargs['call_timeout'], 600)
-        self.assertEqual(recorded["caps"]["call_timeout"], 600)
+        self.assertNotIn('call_timeout', factory.call_args.kwargs)  # no per-call timer reaches the service
+        self.assertNotIn("call_timeout", recorded["caps"])
         self.assertNotIn("PRIVATE", output.getvalue())
         self.assertNotIn("Private", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
@@ -589,23 +588,23 @@ class TrialTests(unittest.TestCase):
              patch('local_agent_coordinator.workflow_trial.create_trial_server', return_value=server), \
              redirect_stdout(io.StringIO()):
             result = main(["--runtime", str(self.runtime), "--plan", str(source),
-                           "--runner-root", str(runner_root), "--seconds", "3000.5", "--call-timeout", "480",
+                           "--runner-root", str(runner_root), "--seconds", "3000.5",
                            "--max-calls", "95", "--max-executions", "23"])
         self.assertEqual(result, 0)
-        self.assertEqual(factory.call_args.kwargs['call_timeout'], 480)
+        self.assertNotIn('call_timeout', factory.call_args.kwargs)
         caps = json.loads((self.runtime / JOURNAL_NAME).read_text())["caps"]
         self.assertEqual(caps, {"seconds": 3000.5, "model_calls": 95, "executions": 23,
-                                "call_timeout": 480, "source_byte_limit": 65536,
+                                "source_byte_limit": 65536,
                                 "phase_model_calls": 8, "phase_executions": 2})
 
     def test_invalid_cli_limits_do_not_create_runtime_or_construct_service(self):
-        values = (("--call-timeout", "nan"), ("--call-timeout", "601"), ("--seconds", "inf"),
+        values = (("--seconds", "inf"),
                   ("--seconds", "7201"), ("--max-calls", "97"), ("--max-executions", "25"))
         with patch('local_agent_coordinator.room_service.RoomService', side_effect=AssertionError) as factory:
             for option, value in values:
                 with self.subTest(option=option, value=value), redirect_stderr(io.StringIO()):
                     self.assertEqual(main(["--runtime", str(self.runtime), option, value]), 2)
-            for option, value in (("--max-calls", "95.5"), ("--call-timeout", "true")):
+            for option, value in (("--max-calls", "95.5"), ("--call-timeout", "600")):
                 with self.subTest(option=option, value=value), redirect_stderr(io.StringIO()), \
                      self.assertRaises(SystemExit) as error:
                     main(["--runtime", str(self.runtime), option, value])

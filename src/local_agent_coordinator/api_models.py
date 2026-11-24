@@ -37,8 +37,6 @@ PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 CAP_FIELDS = ("daily", "monthly")
 # RESERVE_PERCENT is the subscription reserve's line: with this much of a cap
 # left, the partner gets work only when nobody else can take it.
-MAX_MODELS = 16
-MAX_WINDOWS = 8
 MAX_ENV_FILE_BYTES = 64 * 1024
 MAX_KEY_BYTES = 4096
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
@@ -173,13 +171,13 @@ def config(value) -> dict:
         raise ApiModelError("invalid_api_prices")
     timezone(value["timezone"])
     models = value["models"]
-    if not isinstance(models, list) or not 1 <= len(models) <= MAX_MODELS:
+    if not isinstance(models, list) or not models:
         raise ApiModelError("invalid_api_models")
     models = [_model(item) for item in models]
     if len({item["id"] for item in models}) != len(models) or value["default_model"] not in {item["id"] for item in models}:
         raise ApiModelError("invalid_api_models")
     windows = value["peak_windows"]
-    if not isinstance(windows, list) or len(windows) > MAX_WINDOWS:
+    if not isinstance(windows, list):
         raise ApiModelError("invalid_api_peak_windows")
     caps = value["caps"]
     if not isinstance(caps, dict) or set(caps) != set(CAP_FIELDS):
@@ -328,7 +326,7 @@ class SpendLedger:
             return {}
         try:
             info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            if not stat.S_ISREG(info.st_mode):  # one row per partner, and partners have no count limit
                 raise ApiModelError("api_spend_state_corrupt")
             with os.fdopen(descriptor, encoding="utf-8") as stream:
                 descriptor = -1

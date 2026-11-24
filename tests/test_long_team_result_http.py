@@ -15,7 +15,6 @@ from local_agent_coordinator.agent_registry import default_registry
 from local_agent_coordinator.room_server import create_room_server
 from local_agent_coordinator.room_service import RoomService
 from local_agent_coordinator.room_store import RoomError, checked_text
-from local_agent_coordinator.message_capacity import MAX_MESSAGE_UTF8_BYTES
 from local_agent_coordinator.room_service import MAX_RESPONSE_BYTES, _response
 import test_native_room_service as native
 import test_team_runs_http as http
@@ -286,8 +285,8 @@ class LongTeamTextValidationTests(unittest.TestCase):
             for value in (None, 1, False, [], "", " \n", "unsafe\0text", "bad\ud800"):
                 with self.subTest(kind=kind, value_type=type(value).__name__):
                     self.assertCode("invalid_text", lambda: self.store.prevalidate_team_result(job["id"], [{**command, field: value}]))
-            self.assertCode("message_too_large", lambda: self.store.prevalidate_team_result(
-                job["id"], [{**command, field: "a" * (MAX_MESSAGE_UTF8_BYTES + 1)}]))
+            # Past the old 1 MiB message limit: accepted, not message_too_large.
+            self.assertTrue(self.store.prevalidate_team_result(job["id"], [{**command, field: "a" * (1024 * 1024 + 1)}]))
         # Removing a field's hidden cap does not remove the whole-response bound.
         envelope = json.dumps({"message": "Report", "state": "done", "commands": [{"type": "complete", "task_id": "main", "result": "a" * (MAX_RESPONSE_BYTES + 1)}]})
         self.assertCode("invalid_agent_response", lambda: _response(envelope, "claude", ("claude", "codex"), team=True))

@@ -306,7 +306,7 @@ class RoomArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.service.clock = self.service.store.clock = lambda: now[0]
 
         def expires_during_provider(agent, context):
-            now[0] += self.service.store.room_timeout
+            now[0] += 900  # the old default room deadline
             return response(context, files=[change("toy.py", DRAFT)])
 
         self.fake.handler = expires_during_provider

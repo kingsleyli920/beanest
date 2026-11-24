@@ -12,12 +12,16 @@ import json
 from . import parallel_sessions
 from .execution_policy import seconds_available, task_settled
 from .folder_protocol import FOLDER_INSTRUCTION
-from .message_capacity import MAX_PROMPT_BYTES
 from .project_workspace import MAX_FILES as PROJECT_FILE_LIMIT, project_digest as _project_digest
 from .room_contract import RoomError
 from .room_store import PROJECT_MODES, RoomStore
 from .roles import prompt_role
 from .runtime_settings import read_only, read_only_capabilities
+
+# Past this size a prompt drops old history (earlier run goals, all but the
+# last messages) to excerpts. It is never refused: what cannot be dropped is
+# sent whole, however large.
+COMPACT_PROMPT_BYTES = 16 * 1024 * 1024
 
 
 # Who builds is decided by the host, from who is free and able right now. A
@@ -475,8 +479,6 @@ class RoomPromptMixin:
             "If an excerpt is truncated or missing, say what you could not inspect; do not claim full "
             "review of omitted text.\nCONTEXT DATA:\n" + json.dumps(_prompt_context(context), ensure_ascii=False)
         )
-        if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-            raise RoomError("context_too_large")
         return prompt
 
     def _team_prompt(self, job):
@@ -887,13 +889,13 @@ class RoomPromptMixin:
             protocol += ROLE_INSTRUCTION
         prefix = protocol + project_instruction + "\nCONTEXT DATA:\n"
         prompt = prefix + json.dumps(_prompt_context(context), ensure_ascii=False)
-        if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        if len(prompt.encode("utf-8")) > COMPACT_PROMPT_BYTES:
             # Old goals are background, not authority for this run. Keep the
             # current goal, bound task and inspected files complete and exact.
             context["previous_runs"] = _previous_runs(snapshot["runs"], job["team"]["run_id"], goal_characters=240)
             context["context_compaction"] = {"previous_run_goal_excerpt_characters": 240}
             prompt = prefix + json.dumps(_prompt_context(context), ensure_ascii=False)
-        if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        if len(prompt.encode("utf-8")) > COMPACT_PROMPT_BYTES:
             if task:
                 context["team"]["tasks"] = [{**item, "result": {"reference": "task.result"}}
                     if item["id"] == task["id"] else item for item in context["team"]["tasks"]]
@@ -902,8 +904,6 @@ class RoomPromptMixin:
             context["context_compaction"].update(duplicate_current_result_reference="task.result" if task else None,
                 recent_message_limit=2, recent_message_excerpt_characters=240)
             prompt = prefix + json.dumps(_prompt_context(context), ensure_ascii=False)
-        if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-            raise RoomError("context_too_large")
         return prompt
 
     def _native_protocol(self, job, context):

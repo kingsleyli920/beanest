@@ -45,7 +45,6 @@ from .kimi_acp import ACPConnection, ACPError, TurnUpdates
 PROVIDER = "deepseek-official"
 _SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _LOG_NAME = re.compile(r"session\.v([1-9][0-9]{0,3})\.jsonl\Z")
-_MAX_LINE = 64 * 1024 * 1024
 PATCH_NAME = "beanest-acp.patch.yml"
 # The persistence plugin's whole config: its root as dsh ships it, and plain JSON lines.
 PATCH = ("# Written by Beanest for this partner's own DSH_HOME. Session logs stay plain\n"
@@ -192,8 +191,8 @@ def _appended(path, before, each):
                 or info.st_size < offset):
             raise ACPError("native_turn_unconfirmed")
         stream.seek(offset)
-        while raw := stream.readline(_MAX_LINE + 1):
-            if len(raw) > _MAX_LINE or not raw.endswith(b"\n"):
+        while raw := stream.readline():
+            if not raw.endswith(b"\n"):
                 raise ACPError("native_turn_unconfirmed")
             row = json.loads(raw)
             if not isinstance(row, dict):
@@ -270,7 +269,7 @@ async def start(cwd, environment, home, *, on_update=None, permission="plan"):
     process = await asyncio.create_subprocess_exec(
         adapters.find_dsh(), "--profile", "acp", "--patch", str(patch), cwd=cwd, env=environment,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=adapters.MAX_OUTPUT + 1)
+        stderr=asyncio.subprocess.PIPE, start_new_session=True)
     # dsh's own sandbox holds read-only and workspace-write; an escalation it
     # asks about is refused once, and Full Access never asks (approved if it did).
     return process, ACPConnection(process, on_update=on_update, permission=permission, sandboxed=False)
@@ -308,9 +307,7 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
                         response_schema=None, runtime_settings=None, on_activity=None,
                         receipt_dir=None, progress_file=None, on_process=None):
     from .native_adapters import _cleanup, _processes, _remember, _settle_cleanup
-    from .message_capacity import MAX_PROMPT_BYTES
-    if (not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES
-            or permission not in PERMISSION_MODES):
+    if not isinstance(prompt, str) or not prompt or permission not in PERMISSION_MODES:
         raise ValueError("invalid_prompt")
     if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
         raise ValueError("invalid_timeout")
@@ -329,8 +326,6 @@ async def invoke_native(prompt, cwd, session_id=None, timeout=None, *, permissio
         if len(schema.encode("utf-8")) > 64 * 1024:
             raise ValueError("invalid_response_schema")
         prompt += "\nReturn your final answer as one JSON object matching this schema, without Markdown fences:\n" + schema
-    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-        raise ValueError("invalid_prompt")
     endpoint = adapters.bound_api_endpoint("dsh")
     home = adapters.bound_account_home("dsh")
     # A dsh partner always runs on its own key in its own home; nothing starts without them.

@@ -17,12 +17,10 @@ import webbrowser
 
 from . import parallel_sessions
 from .bridge import Bridge, BridgeConfig, BridgeError
-from .message_capacity import MAX_JSON_BODY_BYTES
 from .paradev import ParadevError
 from .task_store import StoreError
 
 
-MAX_BODY = MAX_JSON_BODY_BYTES
 ASSET_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -272,12 +270,19 @@ class _Handler(BaseHTTPRequestHandler):
         length = self._header("Content-Length")
         if length is None or not re.fullmatch(r"[0-9]+", length):
             raise _HTTPError(411, "body_length_required")
-        if len(length) > len(str(MAX_BODY)) or int(length) > MAX_BODY:
-            raise _HTTPError(413, "body_too_large")
         content_type = self._header("Content-Type") or ""
         if content_type.lower().split(";", 1)[0].strip() != "application/json":
             raise _HTTPError(415, "json_required")
-        raw = self.rfile.read(int(length))
+        # Any size is accepted. Read in pieces so a body is never allocated
+        # from the declared length before its bytes actually arrive.
+        remaining, chunks = int(length), []
+        while remaining:
+            chunk = self.rfile.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
         if len(raw) != int(length):
             raise _HTTPError(400, "invalid_json")
         try:
