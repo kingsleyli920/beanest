@@ -97,6 +97,33 @@ class InternalReplanStoreTests(unittest.TestCase):
         self.finish(side, [{'type':'complete','task_id':'side','result':'Concrete independently checked result.'}])
         self.assertNotEqual(self.task(room, 'final')['status'], 'working')
 
+    def test_a_block_waiting_for_a_named_task_goes_back_to_its_owner_once_that_task_is_accepted(self):
+        # Catches the 九烛 room: K5 blocked "to come after K7 and K8"; both were accepted, every planner
+        # confirmed with nothing to add, and the plan stalled, then replanned K5 again on every continue.
+        room = self.plan(paths=True)
+        peer = self.store.claim(room, 'codex')
+        main = self.store.claim(room, 'claude')
+        self.finish(main, [{'type':'block', 'task_id':'main', 'cause':'coordination_required',
+                            'reason':'main needs to come after tests: both touch the same fixtures.'}])
+        self.finish(peer, [{'type':'complete','task_id':'tests','result':'Concrete independently checked result.'}])
+        review = self.store.claim(room, 'claude')
+        self.finish(review, [{'type':'review','task_id':'tests','verdict':'accept','reason':'Exact result checked.'}])
+        self.assertEqual(self.store.snapshot(room)['team']['phase'], 'planning')
+        for _ in range(4):
+            if self.store.snapshot(room)['team']['phase'] != 'planning': break
+            for member in ('claude', 'codex'):
+                job = self.store.claim(room, member)
+                if job:
+                    self.assertEqual(job['kind'], 'team_coordinate')
+                    self.finish(job, [{'type':'plan_ready'}])
+        snapshot = self.store.snapshot(room)
+        self.assertEqual((snapshot['team']['phase'], snapshot['team']['stop_reason']), ('working', None))
+        self.assertEqual((self.task(room, 'main')['status'], self.task(room, 'main')['owner']), ('assigned', 'claude'))
+        released = [event for event in snapshot['events'] if event['kind'] == 'internal_replan_released']
+        self.assertEqual([(event['task_id'], event['accepted_since']) for event in released], [('main', ['tests'])])
+        work = self.store.claim(room, 'claude')
+        self.assertEqual((work['kind'], work['team']['task_id']), ('team_work', 'main'))
+
     def test_ready_without_a_proposal_cannot_resume_parent_or_loop(self):
         room = self.planning()
         for _ in range(8):

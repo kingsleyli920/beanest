@@ -2834,6 +2834,46 @@ class TeamStore:
                           "AND block_cause IN " + _REPLAN_CAUSES_SQL + " AND internal_replan_revision=? ORDER BY id",
                           (room_id, team["current_run_id"], team["revision"])).fetchall() if team["phase"] == "planning" else []
 
+    def _release_replans_the_board_moved_past(self, db, room_id):
+        """Hand a blocked task back to its owner when every member confirmed the
+        plan without a prerequisite and a task its block named was accepted since.
+
+        A partner blocks to wait for other work ("K5 needs to come after K7 and
+        K8"); once that work is accepted the planners have nothing to add and can
+        only confirm. Without this the plan stalled and every continue replanned
+        the same task again. A block that named no task accepted since stays, so
+        an unchanged block cannot loop.
+        """
+        team = self.team(db, room_id)
+        released = []
+        for task in self._replan_parents(db, room_id):
+            blocked_at = db.execute(
+                "SELECT max(seq) FROM events WHERE room_id=? AND json_extract(value_json,'$.task_id')=? "
+                "AND json_extract(value_json,'$.kind') IN ('task_blocked','internal_replan_requested')",
+                (room_id, task["id"])).fetchone()[0]
+            if blocked_at is None:
+                continue
+            accepted = [row[0] for row in db.execute(
+                "SELECT DISTINCT s.id FROM events e JOIN shared_tasks s ON s.room_id=e.room_id AND s.run_id=? "
+                "AND s.id=json_extract(e.value_json,'$.task_id') WHERE e.room_id=? AND e.seq>? AND s.id!=? "
+                "AND json_extract(e.value_json,'$.kind')='team_command' AND json_extract(e.value_json,'$.command')='review' "
+                "AND s.status IN ('accepted','self_checked') ORDER BY s.id",
+                (team["current_run_id"], room_id, blocked_at, task["id"]))]
+            reason = task["blocked_reason"] or ""
+            named = [value for value in accepted
+                     if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(value) + r"(?![A-Za-z0-9_-])", reason)]
+            if named:
+                released.append((task, named))
+        for task, accepted in released:
+            db.execute("UPDATE shared_tasks SET status=CASE WHEN owner IS NOT NULL THEN 'assigned' ELSE 'open' END,"
+                       "blocked_reason=NULL,block_cause=NULL,internal_replan_revision=NULL,reviewer=NULL,"
+                       "assignment_epoch=assignment_epoch+1,ownership_grant_json=NULL "
+                       "WHERE room_id=? AND run_id=? AND id=? AND status='blocked'",
+                       (room_id, team["current_run_id"], task["id"]))
+            self.store._event(db, room_id, "internal_replan_released", sender="system", run_id=team["current_run_id"],
+                              task_id=task["id"], accepted_since=accepted)
+        return bool(released)
+
     def _hand_back_repeated(self, db, job, context, task_id, reason):
         """The same result came back a third time: the team replans the task.
 
@@ -3316,13 +3356,15 @@ class TeamStore:
             # A blocked task does not hold the confirmed plan in planning (work that does not need
             # it starts, and the block is dealt with on its own), except a replan whose
             # prerequisites nobody has proposed yet.
+            if not unready and self._replan_parents(db, room_id):
+                if not self._release_replans_the_board_moved_past(db, room_id):
+                    self.stop(db, room_id, "team_plan_stalled")
+                    return False
+                changed = True
             if not unready and not self._replan_parents(db, room_id):
                 db.execute("UPDATE teams SET phase='working' WHERE room_id=?", (room_id,))
                 changed = True
             else:
-                if self._replan_parents(db, room_id) and not unready:
-                    self.stop(db, room_id, "team_plan_stalled")
-                    return False
                 return self._stop_if_planning_blocked(db, room_id, unready) or self._coordinate(db, room_id, unready)
         tasks = db.execute("SELECT * FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=? ORDER BY rowid", (room_id,)).fetchall()
         for task in sorted(tasks, key=lambda row: row["status"] != "review"):
