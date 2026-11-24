@@ -6,13 +6,9 @@ response schema can all depend on it without importing one another.
 from __future__ import annotations
 
 
-# Generous bounds that only stop a runaway response; a real task on a large
-# project can own dozens of files, so these must never shape ordinary work.
-MAX_TASK_PATHS = 1000
-MAX_TASK_DEPENDENCIES = 64
-MAX_RESPONSE_COMMANDS = 100
-MAX_PARTNER_TEXT = 100_000  # characters in one field a partner writes (message, description, reason)
-MAX_ROOM_MEMBERS = 32
+# Beanest sets no count or size bound on what partners write or on how many
+# partners a room holds: the agents themselves have none, so neither does the
+# room. Shape, identity and safety are still checked.
 
 
 class RoomError(RuntimeError):
@@ -53,8 +49,11 @@ def checked_message(value: object) -> str:
         raise RoomError(error.code) from None
 
 
-def checked_text(value: object, maximum: int = 3000) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum or "\0" in value:
+def checked_text(value: object, maximum: int | None = None) -> str:
+    """Non-empty text without NUL. maximum is only for identifiers (request and
+    task ids); what a partner writes is never bounded by length."""
+    if (not isinstance(value, str) or not value.strip() or maximum is not None and len(value) > maximum
+            or "\0" in value):
         raise RoomError("invalid_text")
     try:
         value.encode("utf-8")

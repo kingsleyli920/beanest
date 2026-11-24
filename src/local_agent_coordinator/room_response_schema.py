@@ -9,7 +9,7 @@ from __future__ import annotations
 from .agent_registry import safe_agent_id
 from .block_contract import BLOCK_CAUSES
 from .round_handoff import handoff_schema
-from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_ROOM_MEMBERS, MAX_TASK_PATHS
+from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS
 
 
 _TEAM_PHASES = frozenset({"plan", "coordinate", "work", "review", "help", "user", "checkpoint", "checkpoint_review"})
@@ -99,7 +99,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
                     stable: bool = False, omit_kinds: frozenset = frozenset()) -> dict:
     """Return an independent schema for one room member's JSON response.
 
-    The bounded roster must include the responding member. A single-member
+    The roster must include the responding member. A single-member
     room permits no actions, without emitting an invalid empty enum. Team callers
     may restrict the response to the recorded job phase; omitting it permits all
     existing team command types. Storage still validates task permissions.
@@ -112,7 +112,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
             or type(stable) is not bool or stable and (not native or team_phase is not None)
             or (team_phase is not None and (type(team_phase) is not str or team_phase not in _TEAM_PHASES))
             or type(member_ids) is not tuple
-            or not 1 <= len(member_ids) <= MAX_ROOM_MEMBERS
+            or not member_ids
             or any(type(member) is not str or not safe_agent_id(member) for member in member_ids)
             or len(set(member_ids)) != len(member_ids)
             or type(provider) is not str or not safe_agent_id(provider)
@@ -211,12 +211,12 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
                 rule = ("Used only by " + ", ".join(users) + "; for every other command type this field must be null. ")
                 command_properties[field]["description"] = rule + command_properties[field].get("description", "")
         properties.pop("actions")
-        properties["message"] = {"type": "string", "minLength": 1, "maxLength": MAX_PARTNER_TEXT}
+        properties["message"] = {"type": "string", "minLength": 1}
         # Fixed fields avoid native generators losing fields across object-union
         # branches. The service requires unused fields to be null, then restores
         # the canonical command before transactional permission checks.
-        properties["commands"] = {"type": "array", "maxItems": MAX_RESPONSE_COMMANDS if kinds else 0,
-                                  "items": _object(command_properties) if kinds else _object({})}
+        properties["commands"] = ({"type": "array", "items": _object(command_properties)} if kinds else
+                                  {"type": "array", "maxItems": 0, "items": _object({})})
     if project:
         properties.update({
             "base_revision": {"type": "integer", "minimum": 0},
@@ -249,7 +249,7 @@ def response_schema(*, project: bool, member_ids: tuple[str, ...], provider: str
     if native:
         properties["files"]["maxItems"] = 0
         properties["edits"]["maxItems"] = 0
-        properties["unchanged_paths"] = {"type": "array", "maxItems": MAX_TASK_PATHS,
+        properties["unchanged_paths"] = {"type": "array",
             "items": _object({"path": {"type": "string"}, "reason": {"type": "string", "minLength": 1}})}
-        properties["resolved_conflicts"] = {"type": "array", "maxItems": MAX_TASK_PATHS, "items": {"type": "string"}}
+        properties["resolved_conflicts"] = {"type": "array", "items": {"type": "string"}}
     return _object(properties)

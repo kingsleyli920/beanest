@@ -359,7 +359,8 @@ class PoolService(unittest.IsolatedAsyncioTestCase):
                           and call["context"]["job"]["job_phase"] == "plan" and "its response was rejected" in call["prompt"])
         self.assertIn("Error code: invalid_team_task", correction["prompt"])
         self.assertIn("no leading or trailing '/'", correction["prompt"])
-        self.assertIn("at most 1000", correction["prompt"])
+        # The correction states the real rules and no longer announces a path-count cap.
+        self.assertNotIn("at most 1000", correction["prompt"])
 
     async def test_a_partner_joining_mid_run_takes_waiting_work(self):
         # Catches a newcomer sitting idle while tasks wait in the pool, or a started task being taken from its owner.

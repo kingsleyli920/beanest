@@ -14,8 +14,7 @@ from .runtime_settings import normalized_settings, RuntimeSettingsError, read_on
 from .execution_policy import task_settled, WITHDRAWN, public_call_limit, calls_available, stage_available, public_deadline, deadline_reached
 from .objective_store import ObjectiveStore
 from .block_contract import PARTNER_BLOCK_CAUSES, USER_BLOCK_CAUSES, BlockContractError, normalize_block_cause
-from .room_contract import (COMMAND_FIELDS as _COMMAND_FIELDS, MAX_PARTNER_TEXT, MAX_RESPONSE_COMMANDS, MAX_TASK_DEPENDENCIES, MAX_TASK_PATHS,
-                            RoomError, checked_text, checked_message)
+from .room_contract import COMMAND_FIELDS as _COMMAND_FIELDS, RoomError, checked_text
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -40,13 +39,13 @@ from .stop_policy import block_waits_for_user
 _REJECTION_RULES = {
     "invalid_team_task": (
         "Each propose must have: id of letters, digits, '_' or '-' (up to 64 characters); non-empty title, description and "
-        "acceptance; dependencies listing other task ids (at most "
-        f"{MAX_TASK_DEPENDENCIES}, not itself, no repeats); capability text, python or image; write_paths of relative POSIX "
-        f"file paths (at most {MAX_TASK_PATHS}), with no leading or trailing '/', no '.', '..' or empty parts, no backslash and "
+        "acceptance; dependencies listing other task ids (not itself, no repeats); capability text, python or image; "
+        "write_paths of relative POSIX file paths, with no leading or trailing '/', no '.', '..' or empty parts, no backslash and "
         "no repeats ignoring case. Check every task against these and fix the ones that break them. "
         "An adjust names one existing task at most once and gives its complete new dependencies (same rules) and "
         "write_paths; those write_paths may only drop paths the task already has, never add one. "),
-    "invalid_team_commands": f"A response may carry at most {MAX_RESPONSE_COMMANDS} commands. ",
+    "invalid_team_commands": ("Each command has a known type and exactly that type's fields, and a response ends its own "
+                              "task at most once (one complete, block, review or request_help). "),
     "invalid_objective_checkpoint": (
         "A checkpoint response carries exactly one checkpoint command (one allocate may accompany it) and nothing else. "
         "decision is continue, complete or needs_user. continue must give next_goal as non-empty text: the unfinished "
@@ -62,7 +61,7 @@ def _task_id(value):
 
 
 def _paths(values, *, max_length=240):
-    if not isinstance(values, list) or len(values) > MAX_TASK_PATHS:
+    if not isinstance(values, list):
         raise RoomError("invalid_team_task")
     seen = set()
     for value in values:
@@ -1942,7 +1941,7 @@ class TeamStore:
                 or deadline_reached(room["deadline"], self.store.clock())):
             return False
         self.validate_assignment(db, job)
-        if not isinstance(commands, list) or len(commands) > MAX_RESPONSE_COMMANDS:
+        if not isinstance(commands, list):
             raise RoomError("invalid_team_commands")
         if context["job_phase"] in {"checkpoint", "checkpoint_review"}:
             # A checkpoint may also say how the next stretch of work is split.
@@ -1972,7 +1971,7 @@ class TeamStore:
                   or commands[0]["verdict"] not in {"accept", "changes_requested"}):
                 raise RoomError("objective_checkpoint_conflict")
             if context["job_phase"] == "checkpoint_review":
-                checked_message(commands[0]["reason"])
+                checked_text(commands[0]["reason"])
             return True
         rows = db.execute("SELECT * FROM shared_tasks WHERE run_id=(SELECT current_run_id FROM teams WHERE room_id=shared_tasks.room_id) AND room_id=?", (job["room_id"],)).fetchall()
         tasks = {row["id"]: dict(row) for row in rows}
@@ -2037,8 +2036,8 @@ class TeamStore:
                 if task_id in tasks or task_id in {item["id"] for item in proposals}:
                     raise RoomError("team_task_conflict")
                 for field in ("title", "description", "acceptance"):
-                    checked_text(command[field], MAX_PARTNER_TEXT)
-                if (not isinstance(command["dependencies"], list) or len(command["dependencies"]) > MAX_TASK_DEPENDENCIES
+                    checked_text(command[field])
+                if (not isinstance(command["dependencies"], list)
                         or len({_task_id(value) for value in command["dependencies"]}) != len(command["dependencies"])
                         or task_id in command["dependencies"] or not isinstance(command["capability"], str)
                         or command["capability"] not in {"text", "python", "image"}):
@@ -2069,7 +2068,7 @@ class TeamStore:
                 if task_id in idle and (set(command["dependencies"]) != set(json.loads(tasks[task_id]["dependencies_json"]))
                         or len(command["write_paths"]) >= len(json.loads(tasks[task_id]["write_paths_json"]))):
                     raise RoomError("team_plan_locked")
-                if (not isinstance(command["dependencies"], list) or len(command["dependencies"]) > MAX_TASK_DEPENDENCIES
+                if (not isinstance(command["dependencies"], list)
                         or len({_task_id(value) for value in command["dependencies"]}) != len(command["dependencies"])
                         or task_id in command["dependencies"]):
                     raise RoomError("invalid_team_task")
@@ -2126,12 +2125,12 @@ class TeamStore:
                             or task["owner"] == job["provider"] and task["review_kind"] != "self_check"
                             or not isinstance(command["verdict"], str) or command["verdict"] not in {"accept", "changes_requested"}):
                         raise RoomError("team_task_permission")
-                    checked_message(command["reason"])
+                    checked_text(command["reason"])
                 elif kind in {"complete", "request_help"}:
                     if (context["job_phase"] != "work" or task["status"] != "working"
                             or task["owner"] != job["provider"]):
                         raise RoomError("team_task_permission")
-                    checked_message(command["result"] if kind == "complete" else command["text"])
+                    checked_text(command["result"] if kind == "complete" else command["text"])
                     if kind == "request_help":
                         if command.get("repair_paths") is not None:
                             _paths(command["repair_paths"], max_length=1024 if room["mode"] in {"project_folder", "native_project"} else 240)
@@ -2150,13 +2149,13 @@ class TeamStore:
                 elif kind == "block":
                     if context["job_phase"] not in {"work", "review"}:
                         raise RoomError("team_task_permission")
-                    checked_text(command["reason"], MAX_PARTNER_TEXT)
+                    checked_text(command["reason"])
                     try:
                         normalize_block_cause(command.get("cause"))
                     except BlockContractError:
                         raise RoomError("invalid_team_commands") from None
                 task_terminal_commands += 1
-        if len(proposals) > MAX_RESPONSE_COMMANDS or task_terminal_commands > 1:
+        if task_terminal_commands > 1:
             raise RoomError("invalid_team_commands")
         combined = {key: json.loads(task["dependencies_json"]) for key, task in tasks.items()}
         if mid_run and (proposals or adjustments):
@@ -2691,7 +2690,7 @@ class TeamStore:
                               for member, value in shares.items())
                 or not any(member in members for member in shares)):
             raise RoomError("invalid_team_allocation")
-        checked_text(command["reason"], MAX_PARTNER_TEXT)
+        checked_text(command["reason"])
         merged = {**(self._allocation(db, context["run_id"]) or {}), **shares}
         if all(merged.get(member) == 0 for member in members):
             raise RoomError("invalid_team_allocation")
@@ -3190,7 +3189,7 @@ class TeamStore:
     @staticmethod
     def artifact_hashes(files):
         """Canonical path/hash proof from a service-verified workspace snapshot."""
-        if not isinstance(files, list) or not 1 <= len(files) <= MAX_TASK_PATHS:
+        if not isinstance(files, list) or not files:
             return None
         try:
             paths = _paths([file["path"] for file in files])

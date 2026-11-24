@@ -1,6 +1,6 @@
 """The short record one round leaves for a fresh native session.
 
-The model writes it, so it stays data: limits are checked here and it never
+The model writes it, so it stays data: its shape is checked here and it never
 grants permission or scope. A long resumed session carries its whole context
 into every call, which is the cost this record exists to cut.
 """
@@ -16,23 +16,17 @@ TASK_ROTATION_MIN_CONTEXT_TOKENS = 400_000
 # no later call by this partner to ask, so the record is requested well before.
 TASK_HANDOFF_REQUEST_MIN_CONTEXT_TOKENS = 200_000
 
-# An over-long handoff is dropped whole, so these stay far above a real summary.
-GOAL_MAX_CHARACTERS = 10_000
-ITEM_MAX_CHARACTERS = 5_000
-LIST_MAX_ITEMS = 100
-KEY_FILE_MAX_CHARACTERS = 1024
-KEY_FILES_MAX_ITEMS = 500
-_LISTS = (("done", LIST_MAX_ITEMS, ITEM_MAX_CHARACTERS), ("decisions", LIST_MAX_ITEMS, ITEM_MAX_CHARACTERS),
-          ("unverified", LIST_MAX_ITEMS, ITEM_MAX_CHARACTERS), ("key_files", KEY_FILES_MAX_ITEMS, KEY_FILE_MAX_CHARACTERS))
-_FIELDS = frozenset({"goal", *(name for name, _, _ in _LISTS)})
+# The partner decides how long its own record is: no length or count bound
+# drops it. The prompt asks for a short record; that is guidance, not a gate.
+_LISTS = ("done", "decisions", "unverified", "key_files")
+_FIELDS = frozenset({"goal", *_LISTS})
 
 
 def handoff_schema() -> dict:
     """Transport shape. Constant, because Claude's cached schema must not vary."""
-    properties = {"goal": {"type": "string", "minLength": 1, "maxLength": GOAL_MAX_CHARACTERS}}
-    for name, items, characters in _LISTS:
-        properties[name] = {"type": "array", "maxItems": items,
-                            "items": {"type": "string", "minLength": 1, "maxLength": characters}}
+    properties = {"goal": {"type": "string", "minLength": 1}}
+    for name in _LISTS:
+        properties[name] = {"type": "array", "items": {"type": "string", "minLength": 1}}
     return {"type": ["object", "null"], "properties": properties, "required": list(properties),
             "additionalProperties": False,
             "description": ("Used by a checkpoint command, and by a complete or review command when "
@@ -40,23 +34,23 @@ def handoff_schema() -> dict:
                             "session: facts and locations, not the story of how you worked.")}
 
 
-def _text(value, limit):
-    return value.strip() if isinstance(value, str) and value.strip() and len(value) <= limit and "\0" not in value else None
+def _text(value):
+    return value.strip() if isinstance(value, str) and value.strip() and "\0" not in value else None
 
 
 def normalized_handoff(value) -> dict | None:
-    """The stored form, or None when any part breaks the shape or a limit."""
+    """The stored form, or None when any part breaks the shape."""
     if not isinstance(value, dict) or set(value) != _FIELDS:
         return None
-    goal = _text(value["goal"], GOAL_MAX_CHARACTERS)
+    goal = _text(value["goal"])
     if goal is None:
         return None
     result = {"goal": goal}
-    for name, items, characters in _LISTS:
+    for name in _LISTS:
         entries = value[name]
-        if not isinstance(entries, list) or len(entries) > items:
+        if not isinstance(entries, list):
             return None
-        cleaned = [_text(entry, characters) for entry in entries]
+        cleaned = [_text(entry) for entry in entries]
         if any(entry is None for entry in cleaned):
             return None
         result[name] = cleaned
