@@ -178,5 +178,29 @@ class RepairedDeliveryContinuationHTTPTests(unittest.TestCase):
         self.assertEqual(self.delivery_file(first, newer_sha)[0], 409)
 
 
+    def test_a_followup_after_a_delivered_file_changed_is_accepted_and_names_the_change(self):
+        # Catches the 九烛 room: after its goal completed, three delivered files had moved on (a fix
+        # accepted through a later review task) and every message the user sent was refused with
+        # "task state or version changed, refresh and retry" — refreshing never helped.
+        first = self.resume_and_complete(self.bootstrap_stopped())
+        project = self.service._project(self.room_id)
+        repaired = project.files_for_paths(["src/a.txt"])[0]
+        project.apply("claude", "unrecorded-later-change", project.snapshot()["revision"], [{
+            "path": "src/a.txt", "previous_sha256": repaired["sha256"], "content": "Later canonical bytes.\n"}])
+        code, current = self.request("GET", f"/api/rooms/{self.room_id}")
+        self.assertEqual(code, 200)
+        self.assertFalse(current["objective"]["delivery"]["verified"])
+        code, response = self.request("POST", f"/api/rooms/{self.room_id}/messages", self.continue_body(
+            current, "现在是必须我测才能继续推进吗？"))
+        self.assertEqual(code, 200, {"error": response.get("error")})
+        code, after = self.request("GET", f"/api/rooms/{self.room_id}")
+        baseline = after["objective"]["baseline"]
+        self.assertNotEqual(after["objective"]["id"], first["objective"]["id"])
+        self.assertEqual(baseline["changed_since_delivery"],
+                         [{"path": "src/a.txt", "expected_sha256": repaired["sha256"], "reason": "changed"}])
+        self.assertNotIn("src/a.txt", [file["path"] for file in baseline["files"]])
+        self.assertTrue(baseline["verified"])
+
+
 if __name__ == "__main__":
     unittest.main()
