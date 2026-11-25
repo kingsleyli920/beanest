@@ -2109,10 +2109,16 @@ class RoomService(RoomPromptMixin):
                     baseline["review_retry"] = True
             elif action == "followup-objective":
                 delivery = snapshot["objective"]["delivery"]
-                if not delivery["verified"]:
-                    raise RoomError("objective_binding_changed")
+                # A file changed after its delivery was recorded (work accepted
+                # through a later review task, a partner's last commit) is the
+                # room's current state, not a reason to refuse what the user says
+                # next: 九烛 could take no message at all once its goal completed.
+                # The baseline keeps the files that still match and names the rest.
                 baseline = {"run_id": run_id, "revision": revision, "digest": digest,
-                            "files": delivery["files"], "verified": True}
+                            "files": [file for file in delivery["files"] if file["verified"] or file.get("reworking")],
+                            "verified": True}
+                if not delivery["verified"]:
+                    baseline["changed_since_delivery"] = delivery["missing_or_changed"]
             scope_retry = None
             if (action == "restart-objective" and snapshot["room"]["mode"] == "native_project"
                     and any(task["status"] == "blocked" and task["blocked_reason"] == "team_scope_conflict"
