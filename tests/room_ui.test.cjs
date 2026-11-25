@@ -12295,6 +12295,27 @@ test('a command that has run for a while can be stopped from the working line, a
     latest_native_activity: { ...saved.jobs[0].latest_native_activity, elapsed_time_seconds: 600 } }, saved.jobs[1]] } });
   assert.equal(english.get('work-indicator-tool').textContent, 'A command from Claude Code has run for 10 min');
 });
+test('a partner whose CLI cannot reach its model says it is retrying on the working line', async () => {
+  // Catches the 九烛 room: Codex retried a dropped model stream for 85 minutes and nothing on screen said so.
+  const saved = activeActivitySnapshot();
+  saved.jobs[0].model_retrying = { attempt: 3, created_at: Date.now() / 1000 };
+  const ui = await browser({ rooms: [saved.room], saved });
+  assert.equal(ui.get('work-indicator-tool').hidden, false);
+  assert.equal(ui.get('work-indicator-tool').textContent, 'Claude Code 连不上模型，正在重连（第 3 次）');
+  assert.equal(ui.get('interrupt-tool').hidden, true, 'there is no command to end');
+  const english = await browser({ language: 'en', rooms: [saved.room], saved });
+  assert.equal(english.get('work-indicator-tool').textContent, "Claude Code can't reach its model and is retrying (attempt 3)");
+  // Once the partner does something again the line goes; a long command keeps its own line and button.
+  saved.jobs[0].model_retrying = null;
+  const working = await browser({ rooms: [saved.room], saved });
+  assert.equal(working.get('work-indicator-tool').hidden, true);
+  saved.jobs[0].model_retrying = { attempt: 1, created_at: Date.now() / 1000 };
+  saved.jobs[0].latest_native_activity = { kind: 'native_tool_activity', sender: 'claude', job_id: jobId, state: 'running',
+    tool_kind: 'Bash', elapsed_time_seconds: 600, created_at: Date.now() / 1000 };
+  const both = await browser({ rooms: [saved.room], saved });
+  assert.equal(both.get('work-indicator-tool').textContent, 'Claude Code 的一条命令已运行 10 分钟');
+  assert.equal(both.get('interrupt-tool').hidden, false);
+});
 test('a partner working on several tasks at once stays one row that says how many, and its open card lists each', async () => {
   // Catches: a parallel session drawn as a second partner, the row naming only one of the tasks, the list
   // left on screen after the rush, or a queued piece shown as already running.

@@ -6261,8 +6261,20 @@ function renderWorkIndicator(snapshot) {
     const elapsed = Number.isFinite(tool.elapsed_time_seconds) ? tool.elapsed_time_seconds : Date.now() / 1000 - tool.created_at;
     return elapsed >= INTERRUPTIBLE_TOOL_SECONDS ? { job, elapsed } : null;
   }).find(Boolean);
+  // A partner whose CLI cannot reach its model retries by itself; without this line
+  // the room looks stuck. Anything the partner does afterwards clears it.
+  const retrying = longTool ? null : working.map((job) => {
+    const own = [...events].reverse().find((event) => event.job_id === job.id
+      && ['native_model_retrying', 'native_tool_activity', 'native_progress_status'].includes(event.kind));
+    const retry = job.model_retrying !== undefined ? job.model_retrying : own?.kind === 'native_model_retrying' ? own : null;
+    return Number.isInteger(retry?.attempt) && retry.attempt > 0 ? { job, attempt: retry.attempt } : null;
+  }).find(Boolean);
   const toolLine = $('work-indicator-tool'); const interrupt = $('interrupt-tool');
-  toolLine.hidden = interrupt.hidden = !longTool;
+  toolLine.hidden = !longTool && !retrying; interrupt.hidden = !longTool;
+  if (retrying) {
+    const label = t("{p0} 连不上模型，正在重连（第 {p1} 次）", { p0: displayName(retrying.job.provider), p1: retrying.attempt });
+    if (toolLine.textContent !== label) toolLine.textContent = label;
+  }
   if (longTool) {
     const label = t("{p0} 的一条命令已运行 {p1}", { p0: displayName(longTool.job.provider), p1: livenessMinutes(longTool.elapsed) });
     if (toolLine.textContent !== label) toolLine.textContent = label;

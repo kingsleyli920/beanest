@@ -1066,6 +1066,9 @@ class _Stream:
         self.loose_tools = {}
         # Why the event just consumed was skipped; empty when it was understood.
         self.ignored = []
+        # Codex reports each failed attempt to reach its model as a top-level
+        # error and tries again by itself; the room shows that it is retrying.
+        self.model_retries = 0
 
     def ignore(self, code, *, effects=False):
         """Skip content this parser does not recognize; the call carries on.
@@ -1111,6 +1114,18 @@ class _Stream:
         self.events.append(event)
         if self.callback is not None:
             returned = self.callback(dict(event))
+            if inspect.isawaitable(returned):
+                await returned
+
+    async def model_retrying(self):
+        """A failed attempt to reach the model, which the CLI is retrying.
+
+        Only the attempt number leaves the parser: the provider's message can
+        quote request details. Nothing here ends or changes the call.
+        """
+        self.model_retries += 1
+        if self.callback is not None:
+            returned = self.callback({'type': 'native_model_retrying', 'attempt': self.model_retries})
             if inspect.isawaitable(returned):
                 await returned
 
@@ -1179,6 +1194,8 @@ class _Stream:
                 self.final_lines.append(raw)
                 if kind == 'thread.started':
                     self.identity(event.get('thread_id'))
+                if kind == 'error':
+                    await self.model_retrying()
                 if kind in {'turn.completed', 'turn.failed'}:
                     self.terminal_count += 1
                     if kind == 'turn.completed' and not set(self.tools) - self.finished_tools:
