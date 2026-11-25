@@ -132,7 +132,7 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             {**{key: value for key, value in file.items() if key != "content"}, "content_available": isinstance(file.get("content"), str)}
             for file in snapshot["project"].get("files", [])]}
 
-    claimed, cleanup, activities, progress, statuses, flags = {}, {}, {}, {}, {}, {}
+    claimed, cleanup, activities, progress, statuses, flags, retrying = {}, {}, {}, {}, {}, {}, {}
     latest_cache_miss = latest_handoff = None
     for event in events:
         job_id = event.get("job_id")
@@ -146,12 +146,17 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             claimed[job_id] = event
         elif event["kind"] == "job_cleanup":
             cleanup[job_id] = event.get("cleanup_confirmed")
+        elif event["kind"] == "native_model_retrying":
+            retrying[job_id] = {"attempt": event.get("attempt"), "created_at": event["created_at"]}
         elif event["kind"] == "native_tool_activity":
             activities[job_id] = event
+            retrying.pop(job_id, None)
         elif event["kind"] == "native_progress_status":
             statuses[job_id] = event
+            retrying.pop(job_id, None)
         elif event["kind"] == "message" and event.get("native_progress"):
             progress[job_id] = event
+            retrying.pop(job_id, None)
         elif event["kind"] in {"native_partial_inspection_queued", "partner_handoff_inspection", "native_readonly_discussion"}:
             flags.setdefault(job_id, set()).add(event["kind"])
     result["latest_native_cache_miss"] = latest_cache_miss
@@ -191,7 +196,9 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
             "native_partial_inspection": permission_job["native_partial_inspection"],
             "native_readonly_discussion": "native_readonly_discussion" in phase_flags,
             "latest_native_activity": activities.get(job["id"]), "latest_public_progress": public,
-            "latest_progress_status": statuses.get(job["id"])}
+            "latest_progress_status": statuses.get(job["id"]),
+            # The CLI failed to reach its model and is retrying, with nothing done since.
+            "model_retrying": retrying.get(job["id"])}
         jobs.append({**replace_text(job, "text", "job_text", room_id, job_id=job["id"]), **view})
         if job["status"] in {"queued", "working"}:
             live.append(view)

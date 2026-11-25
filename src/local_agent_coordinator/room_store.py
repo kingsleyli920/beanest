@@ -4157,6 +4157,15 @@ class RoomStore:
                         operation=operation, executable=executable,
                         heartbeat=event.get("heartbeat"), elapsed_time_seconds=event.get("elapsed_time_seconds"))
 
+    def record_model_retrying(self, job_id, attempt):
+        """The partner's CLI failed to reach its model and is trying again (display only)."""
+        with self._connection(write=True) as db:
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None or job["status"] != "working":
+                return
+            self._event(db, job["room_id"], "native_model_retrying", sender=job["provider"], job_id=job_id,
+                        attempt=attempt)
+
     def record_native_progress_status(self, job_id, text):
         """Store display-only text a command wrote to its progress file.
 

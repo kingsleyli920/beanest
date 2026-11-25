@@ -6379,6 +6379,10 @@ class RoomService(RoomPromptMixin):
                 "original_characters": original if type(original) is int and original >= len(event["text"]) else len(event["text"])})
         elif event.get("type") == "native_tool":
             self.store.record_native_activity(job["id"], event)
+        elif event.get("type") == "native_model_retrying":
+            attempt = event.get("attempt")
+            if type(attempt) is int and attempt > 0:
+                self.store.record_model_retrying(job["id"], attempt)
         elif event.get("type") == "native_tool_interrupted":
             idle = event.get("idle_seconds")
             self.store.record_tool_interrupted(job["id"], reason="idle", commands=1,
