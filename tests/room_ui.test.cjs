@@ -12546,3 +12546,45 @@ test('warning dismissal still works when session storage refuses preferences', a
   await ui.click('dismiss-notice'); await ui.poll();
   assert.equal(ui.get('notice').hidden, true); assert.equal(ui.posts().length, 0);
 });
+
+test('native workspace warnings count a partner file once while retaining conflict and blocked reasons and both evidence changes', async () => {
+  const saved = activeActivitySnapshot();
+  saved.native_workspaces = [{ provider: 'codex', conflicts: [{ path: 'artifacts/aftermath/index.html', kind: 'source_handoff', baseline_sha256: 'base', source_sha256: 'source', candidate_sha256: 'candidate' }],
+    blocked: [{ path: 'artifacts/aftermath/index.html', reason: 'native_unresolved_conflict', sha256: 'private', canonical_sha256: 'canonical' },
+      { path: 'artifacts/aftermath/index.html', reason: 'native_path_not_owned', sha256: 'private', canonical_sha256: 'canonical' }] }];
+  const original = JSON.stringify(saved.native_workspaces);
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  const details = () => ui.document.querySelectorAll('.native-workspace-issues')[0];
+  assert.equal(details().children[0].textContent, '有 1 项改动需要处理，尚未纳入交付');
+  assert.equal(details().children[1].children.length, 1);
+  assert.match(details().children[1].textContent, /Codex · artifacts\/aftermath\/index.html：需核对新旧版本冲突；旧版本冲突尚未明确解决，改动未导入；超出本任务授权写入范围/);
+  assert.equal(JSON.stringify(saved.native_workspaces), original, 'grouping changes no diagnostic evidence');
+  ui.type('未发送的要求'); await ui.click('dismiss-native-workspace-warning'); await ui.poll();
+  assert.ok(!details() || details().parentNode.hidden);
+  saved.native_workspaces[0].blocked[0].canonical_sha256 = 'new-canonical'; await ui.poll();
+  assert.equal(details().children[0].textContent, '有 1 项改动需要处理，尚未纳入交付');
+  await ui.click('dismiss-native-workspace-warning'); await ui.poll(); assert.ok(!details() || details().parentNode.hidden);
+  saved.native_workspaces[0].conflicts[0].candidate_sha256 = 'new-candidate'; await ui.poll();
+  assert.equal(details().children[1].children.length, 1);
+  assert.match(details().children[1].textContent, /需核对新旧版本冲突.*授权写入范围/);
+  assert.equal(ui.get('message').value, '未发送的要求'); assert.equal(ui.posts().length, 0);
+});
+
+test('native workspace file grouping keeps different partners and paths separate and does not guess missing paths in either language', async () => {
+  for (const language of ['zh-CN', 'en']) {
+    const saved = activeActivitySnapshot();
+    saved.native_workspaces = [
+      { provider: 'claude', conflicts: [{ path: 'same.html', candidate_sha256: 'claude' }], blocked: [{ path: 'same.html', reason: 'native_unresolved_conflict' }, { path: 'other.html', reason: 'native_path_not_owned' }] },
+      { provider: 'codex', conflicts: [{ path: 'same.html', candidate_sha256: 'codex' }], blocked: [{ path: 'same.html', reason: 'native_path_not_owned' }, { reason: 'native_binary_not_imported' }, { reason: 'native_symlink_refused' }] },
+    ];
+    const ui = await browser({ language, rooms: [saved.room], saved, nativeProjectSupport: true });
+    const details = ui.document.querySelectorAll('.native-workspace-issues')[0];
+    assert.match(details.children[0].textContent, language === 'en' ? /5 changes/ : /有 5 项改动/);
+    const rows = details.children[1].children;
+    assert.equal(rows.length, 5);
+    assert.match(rows[0].textContent, /Claude Code · same.html/); assert.match(rows[2].textContent, /Codex · same.html/);
+    assert.match(rows[0].textContent, language === 'en' ? /conflict.*not been explicitly resolved/i : /需核对新旧版本冲突.*旧版本冲突/);
+    assert.match(rows[2].textContent, language === 'en' ? /conflict.*scope/i : /需核对新旧版本冲突.*授权写入范围/);
+    assert.equal(ui.posts().length, 0);
+  }
+});

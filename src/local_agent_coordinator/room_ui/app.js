@@ -6211,6 +6211,15 @@ function renderNativeWorkspaceNotes(container, snapshot) {
     ...(Array.isArray(workspace.blocked) ? workspace.blocked.map((item) => ({ ...item, provider: workspace.provider })) : []),
   ]);
   if (!issues.length) return;
+  // Conflict and import diagnostics can describe the same private file.
+  // Count that file once, keeping every diagnostic for display and dismissal.
+  const files = new Map();
+  for (const item of issues) {
+    const identified = typeof item.provider === 'string' && item.provider.length && typeof item.path === 'string' && item.path.length;
+    const key = identified ? JSON.stringify([item.provider, item.path]) : Symbol();
+    if (!files.has(key)) files.set(key, { provider: item.provider, path: item.path, reports: [] });
+    files.get(key).reports.push(item);
+  }
   const roomId = snapshot.room.id;
   const evidence = issues.map((item) => [item.provider, item.path, item.reason, !!item.conflict, item.sha256 ?? null, item.canonical_sha256 ?? null,
     item.kind ?? null, item.baseline_sha256 ?? null, item.source_sha256 ?? null, item.candidate_sha256 ?? null])
@@ -6219,12 +6228,18 @@ function renderNativeWorkspaceNotes(container, snapshot) {
   if (warningDismissals(roomId).values.has(fingerprint)) return;
   const wrapper = element('div', '', 'native-workspace-warning');
   const details = element('details', '', 'native-workspace-issues');
-  details.append(element('summary', t("有 {p0} 项改动需要处理，尚未纳入交付", { p0: issues.length })));
+  details.append(element('summary', t("有 {p0} 项改动需要处理，尚未纳入交付", { p0: files.size })));
   const reasons = { native_binary_not_imported: t("二进制改动尚未导入"), native_deletion_not_imported: t("删除操作尚未导入"),
     native_path_not_owned: t("超出本任务授权写入范围"), native_symlink_refused: t("符号链接未导入"), native_mode_change_not_imported: t("文件权限改动尚未导入"),
     native_change_too_large: t("改动超过本次导入范围"), native_merge_conflict: t("文件版本冲突"), native_unresolved_conflict: t("旧版本冲突尚未明确解决，改动未导入") };
   const list = element('ul');
-  for (const item of issues) list.append(element('li', `${displayName(item.provider)} · ${typeof item.path === 'string' ? item.path : t("文件路径未提供")}${interfaceColon()}${item.conflict ? t("需核对新旧版本冲突") : reasons[item.reason] || t("改动未导入，原因待核对")}`));
+  for (const file of files.values()) {
+    const messages = [
+      ...(file.reports.some((item) => item.conflict) ? [t("需核对新旧版本冲突")] : []),
+      ...file.reports.filter((item) => !item.conflict).map((item) => reasons[item.reason] || t("改动未导入，原因待核对")),
+    ];
+    list.append(element('li', `${displayName(file.provider)} · ${typeof file.path === 'string' ? file.path : t("文件路径未提供")}${interfaceColon()}${[...new Set(messages)].join(interfaceSemicolon())}`));
+  }
   details.append(list, element('p', t("这些改动保留为待处理项，不表示已合入成果或完成目标。"), 'detail-caption'));
   const publishedCount = workspaces.reduce((count, workspace) => count + (Number.isSafeInteger(workspace.published_count) && workspace.published_count > 0 ? workspace.published_count : 0), 0);
   if (publishedCount) details.append(element('p', t("另有 {p0} 项此前标记的改动已与当前成果一致。", { p0: publishedCount }), 'detail-caption'));
