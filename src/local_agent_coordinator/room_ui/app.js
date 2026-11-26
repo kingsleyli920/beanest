@@ -331,7 +331,7 @@ const state = {
   exportBusy: false, exportMessage: '', exportRoom: null,
   forkSource: null,
   codeStatusSupported: false, codeStatusEntries: new Map(), codeStatusRendered: null, mediaSupported: false, media: null, mediaHistoryChoices: new Map(), reader: null, materialsRoom: null, runtimeOptions: null, runtimeSettings: null, runtimeScope: null, runtimeDraftDirty: false, runtimePermissionExplicit: false, workModeDraftDirty: false, runtimeDraftToken: null, workModeDraftToken: null, runtimeLoading: false, runtimeRefreshId: null, runtimeMessage: '', runtimePopoverOpen: false, runtimePopoverTrigger: null, runtimePartner: null,
-  executionPolicySupported: false, continuousObjectiveSupported: false, naturalContinuationSupported: false, naturalRuntimeSupported: false, roomPagingSupported: false, transportLimits: null,
+  executionPolicySupported: false, continuousObjectiveSupported: false, naturalContinuationSupported: false, naturalRuntimeSupported: false, roomPagingKnown: false, roomPagingSupported: false, transportLimits: null,
   deliveryLimit: 256, deliveryScope: '',
   drafts: new Map(), roomNodes: new Map(), eventNodes: new Map(), progressNodes: new Map(),
   renderedRoom: null, jobsFingerprint: '', collaborationFingerprint: '', unseen: 0,
@@ -6774,6 +6774,11 @@ async function refresh({ initial = false, restoreSelection = false } = {}) {
     renderControls();
     const [status] = await Promise.allSettled([api('/api/status')]);
     if (status.status === 'fulfilled') configurePaging(status.value);
+    else if (!state.roomPagingKnown) {
+      // A failed capability read is not evidence that this server needs the
+      // legacy full-history endpoint. The next poll can negotiate and restore.
+      setConnection(false); showReadFailure(status.reason); return;
+    }
     const results = [status, ...await Promise.allSettled([api(state.roomPagingSupported ? '/api/rooms?view=compact' : '/api/rooms'), api(workspaceApi.projects), api(state.roomPagingSupported ? `${workspaceApi.partners}?view=compact` : workspaceApi.partners), ...(selected ? [readRoomSnapshot(selected)] : [])])];
     if (epoch !== state.epoch || state.busy) return;
     const [, list, projects, partners, snapshot] = results;
@@ -6827,7 +6832,7 @@ async function refresh({ initial = false, restoreSelection = false } = {}) {
     else if (discoveryError) showNotice(discoveryError, 'error');
     else if (status.status === 'fulfilled' && status.value.background_error) showNotice(executionMessage(status.value.background_error), 'error', status.value.background_error);
     else if (!state.pending || state.noticeReadFailure) showNotice();
-    if ((initial || restoreSelection) && !state.selected && list.status === 'fulfilled' && Array.isArray(list.value.rooms)) {
+    if ((initial || restoreSelection || roomFromLocation()) && !state.selected && list.status === 'fulfilled' && Array.isArray(list.value.rooms)) {
       const hash = window.location?.hash || '';
       const requestedRoom = roomFromLocation();
       if (requestedRoom && state.rooms.some((room) => room.id === requestedRoom)) {

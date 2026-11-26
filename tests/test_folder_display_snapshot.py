@@ -113,16 +113,20 @@ class FolderDisplayHTTPTests(unittest.TestCase):
     tearDown = paging.RoomPagingHTTPTests.tearDown
     request = paging.RoomPagingHTTPTests.request
 
-    def test_state_poll_does_not_load_large_file_but_full_read_and_binding_remain_exact(self):
-        room_id, _ = self.service.store.create_room("Inspect a large report.", "claude", str(uuid4()),
-            mode="project_folder", project_id=str(uuid4()), work_mode="build")
-        project = self.service._project(room_id, create=True)
+    def large_project(self):
         source = self.root / "source"
         source.mkdir()
         registration = self.service.catalog.register_folder("Synthetic source", str(source))
+        room_id, _ = self.service.store.create_room("Inspect a large report.", "claude", str(uuid4()),
+            mode="project_folder", project_id=registration["id"], work_mode="build")
+        project = self.service._project(room_id, create=True)
         seeded = project.seed_folder(registration)
         content = "Large report 中文\\n" * (256 * 1024)
         project.apply("claude", "large-report", seeded["revision"], [{"path": "report.txt", "previous_sha256": None, "content": content}])
+        return room_id, project, content
+
+    def test_state_poll_does_not_load_large_file_but_full_read_and_binding_remain_exact(self):
+        room_id, project, content = self.large_project()
         full = project.snapshot()
         expected_digest = project_digest(full)
         code, cold, size = self.request("GET", f"/api/rooms/{room_id}/state")
@@ -140,4 +144,25 @@ class FolderDisplayHTTPTests(unittest.TestCase):
         self.assertEqual(code, 200, raw)
         self.assertEqual(raw["project"]["files"][0]["content"], content)
         self.assertEqual(raw["project"]["snapshot_sha256"], expected_digest)
+        self.assertEqual(self.calls, [])
+
+    def test_cold_code_status_uses_only_fresh_metadata_while_binding_keeps_full_read(self):
+        room_id, project, _ = self.large_project()
+        original = self.service._code_status_context(room_id)
+        with patch.object(project, "_raw", side_effect=AssertionError("Code status loaded project content")):
+            metadata = self.service._code_status_context(room_id, metadata_only=True)
+            self.assertEqual(metadata["canonical"], original["canonical"])
+            self.assertEqual(metadata["workspaces"], original["workspaces"])
+            for path, entry in original["canonical_changes"].items():
+                self.assertEqual({key: value for key, value in entry.items() if key != "content"},
+                                 {key: value for key, value in metadata["canonical_changes"][path].items()
+                                  if key != "content_available"})
+            code, status, _ = self.request("GET", f"/api/rooms/{room_id}/code-status")
+            self.assertEqual(code, 200, status)
+            self.assertEqual(status["workspaces"][0]["path"], str(self.root / "source"))
+            # Binding still takes the fresh full read; this synthetic guard must
+            # fail it rather than let the read-only optimization bypass it.
+            code, failure, _ = self.request("POST", f"/api/rooms/{room_id}/delivery-repository", {"workspace_id": "project"})
+            self.assertEqual((code, failure.get("error")), (500, "operation_failed"))
+        self.assertIsNone(self.service.store.delivery_repository(room_id))
         self.assertEqual(self.calls, [])

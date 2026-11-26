@@ -12646,3 +12646,47 @@ test('a timed-out mutation remains uncertain across successful polling without a
   assert.deepEqual(savedOutbox(ui.storage).request.body, original);
   assert.equal(ui.get('pending-request').hidden, false); assert.equal(ui.posts().length, 1);
 });
+
+test('cold hash restoration waits for capability negotiation after a failed status read and resumes through paged routes on the next poll', async () => {
+  let statusFails = true;
+  const events = [message(1, 'claude', '协商恢复后的尾页')]; const saved = snapshot({ events }); const projected = pagedFixture(saved, events);
+  const ui = await browser({ pagingSupport: true, rooms: [saved.room], saved, selectSaved: false, locationHash: `#room=${roomId}`,
+    route(request) {
+      if (request.path === '/api/status' && statusFails) throw new Error('controlled first status failure');
+      if (request.path.endsWith('/state')) return projected;
+      return eventPageRoute(request, events);
+    } });
+  assert.equal(ui.requests.filter((request) => request.path === `/api/rooms/${roomId}`).length, 0);
+  assert.equal(ui.requests.filter((request) => request.path.includes(`/api/rooms/${roomId}/state`)).length, 0);
+  assert.equal(ui.location.hash, `#room=${roomId}`); assert.equal(ui.get('notice').hidden, false);
+  statusFails = false; await ui.poll();
+  assert.equal(ui.requests.filter((request) => request.path === `/api/rooms/${roomId}`).length, 0);
+  assert.ok(ui.requests.some((request) => request.path === `/api/rooms/${roomId}/state`));
+  assert.match(ui.get('events').textContent, /协商恢复后的尾页/);
+  assert.equal(ui.get('notice').hidden, true); assert.equal(ui.posts().length, 0);
+});
+
+test('a server explicitly without paging still restores the cold hash through its legacy snapshot', async () => {
+  const saved = snapshot({ events: [message(1, 'claude', '真实旧协议兼容')] });
+  const ui = await browser({ rooms: [saved.room], saved, selectSaved: false, locationHash: `#room=${roomId}`,
+    route(request) { if (request.path === '/api/status') return { app: 'local-agent-rooms', agents: catalog, task_modes: ['text'], capabilities: { room_paging_v1: false } }; } });
+  assert.equal(ui.requests.filter((request) => request.path === `/api/rooms/${roomId}`).length, 1);
+  assert.equal(ui.requests.filter((request) => request.path.endsWith('/state')).length, 0);
+  assert.match(ui.get('events').textContent, /真实旧协议兼容/); assert.equal(ui.posts().length, 0);
+});
+
+test('a temporary status failure retains negotiated paging and keeps reading current room state without falling back to full history', async () => {
+  let statusFails = false;
+  const events = [message(1, 'claude', '已经读到的尾页')]; const saved = snapshot({ events }); const projected = pagedFixture(saved, events);
+  const ui = await browser({ pagingSupport: true, rooms: [saved.room], saved, selectSaved: false, locationHash: `#room=${roomId}`,
+    route(request) {
+      if (request.path === '/api/status' && statusFails) throw new Error('controlled later status failure');
+      if (request.path.endsWith('/state')) return projected;
+      return eventPageRoute(request, events);
+    } });
+  statusFails = true; await ui.poll();
+  assert.equal(ui.requests.filter((request) => request.path === `/api/rooms/${roomId}`).length, 0);
+  assert.ok(ui.requests.filter((request) => request.path === `/api/rooms/${roomId}/state`).length >= 2);
+  assert.match(ui.get('events').textContent, /已经读到的尾页/); assert.equal(ui.get('notice').hidden, false);
+  statusFails = false; await ui.poll(); assert.equal(ui.get('notice').hidden, true); assert.equal(ui.posts().length, 0);
+});

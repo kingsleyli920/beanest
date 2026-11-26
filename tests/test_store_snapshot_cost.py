@@ -1,5 +1,6 @@
 """Long-running rooms keep complete results without transferring unused blobs."""
 import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sqlite3
@@ -95,6 +96,57 @@ class StoreSnapshotCostTests(unittest.TestCase):
             sizes = [len(item[0]) for item in self.store._timelines.values()]
             self.assertLessEqual(sum(size > 60 for size in sizes), 1)
             self.assertLessEqual(sum(size for size in sizes if size <= 60), 60)
+
+    def test_event_page_uses_one_indexed_range_without_per_event_queries(self):
+        with self.store._connection(write=True) as db:
+            for index in range(1000):
+                self.store._event(db, self.room, "warning" if index % 2 else "note",
+                                  sender="system", text=str(index))
+            latest = db.execute("SELECT MAX(seq) FROM events WHERE room_id=?", (self.room,)).fetchone()[0]
+        queries = []
+        connection = self.store._connection
+        @contextmanager
+        def traced_connection(**kwargs):
+            with connection(**kwargs) as db:
+                db.set_trace_callback(queries.append)
+                yield db
+        with patch.object(self.store, "_connection", traced_connection):
+            result = self.store.read_events(self.room, through_seq=latest, limit=100, max_bytes=262144)
+        self.assertEqual(len(result["events"]), 100)
+        self.assertEqual(result["last_seq"], latest)
+        self.assertTrue(result["has_before"])
+        self.assertFalse(result["has_after"])
+        selects = [query for query in queries if query.lstrip().upper().startswith("SELECT")]
+        self.assertLessEqual(len(selects), 6, "event candidates each issued boundary queries")
+        with connection() as db:
+            plan = db.execute("EXPLAIN QUERY PLAN SELECT seq,value_json FROM events "
+                              "WHERE room_id=? AND seq<=? ORDER BY seq DESC LIMIT ?",
+                              (self.room, latest, 100)).fetchall()
+        details = " ".join(row[3] for row in plan)
+        self.assertIn("events_room_seq", details)
+        self.assertNotIn("TEMP B-TREE", details)
+
+    def test_page_boundaries_use_room_rows_inside_highwater_even_across_gaps(self):
+        other = self.store.create_room("Unrelated room", "claude", str(uuid4()))[0]
+        with self.store._connection(write=True) as db:
+            first = db.execute("SELECT MIN(seq) FROM events WHERE room_id=?", (self.room,)).fetchone()[0]
+            for room in (self.room, other, self.room):
+                self.store._event(db, room, "warning", sender="system", text="gap fixture")
+            room_seqs = [row[0] for row in db.execute("SELECT seq FROM events WHERE room_id=? ORDER BY seq", (self.room,))]
+            through = room_seqs[-2]
+            db.execute("DELETE FROM events WHERE room_id=? AND seq>? AND seq<?", (self.room, first, through))
+        for cursors in ({"before_seq": through}, {"after_seq": first}, {"before_seq": through + 1},
+                        {"after_seq": through}, {"before_seq": first}, {}):
+            with self.subTest(cursors=cursors):
+                result = self.store.read_events(self.room, through_seq=through, limit=100, **cursors)
+                with self.store._connection() as db:
+                    actual_rows = [row[0] for row in db.execute("SELECT seq FROM events WHERE room_id=? AND seq<=? ORDER BY seq",
+                                                               (self.room, through))]
+                first_result, last_result = result["first_seq"], result["last_seq"]
+                before = first_result if first_result is not None else cursors.get("before_seq", cursors.get("after_seq", 0) + 1)
+                after = last_result if last_result is not None else cursors.get("after_seq", cursors["before_seq"] - 1 if "before_seq" in cursors else through)
+                self.assertEqual(result["has_before"], any(seq < before for seq in actual_rows))
+                self.assertEqual(result["has_after"], any(seq > after for seq in actual_rows))
 
 
 if __name__ == "__main__":

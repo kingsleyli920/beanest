@@ -148,6 +148,7 @@ class RoomStore:
                         seq INTEGER PRIMARY KEY AUTOINCREMENT,
                         room_id TEXT NOT NULL REFERENCES rooms(id), value_json TEXT NOT NULL
                     );
+                    CREATE INDEX IF NOT EXISTS events_room_seq ON events(room_id,seq);
                     CREATE TABLE IF NOT EXISTS requests (
                         request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
                         room_id TEXT NOT NULL REFERENCES rooms(id)
@@ -1737,6 +1738,13 @@ class RoomStore:
             through = latest if through_seq is None else through_seq
             if through > latest or after_seq is not None and after_seq > through:
                 raise RoomError("invalid_event_cursor")
+            # All candidate pages share this transaction and high-water mark.
+            # Read the range ends once; per-event EXISTS queries otherwise
+            # repeat scans of a long room while enforcing the byte limit.
+            earliest = db.execute("SELECT seq FROM events WHERE room_id=? AND seq<=? ORDER BY seq ASC LIMIT 1",
+                                  (room_id, through)).fetchone()
+            newest = db.execute("SELECT seq FROM events WHERE room_id=? AND seq<=? ORDER BY seq DESC LIMIT 1",
+                                (room_id, through)).fetchone()
             forward = after_seq is not None
             clause = "seq>?" if forward else "seq<?" if before_seq is not None else "1=1"
             parameters = (room_id, through, after_seq if forward else before_seq) if (forward or before_seq is not None) else (room_id, through)
@@ -1749,8 +1757,8 @@ class RoomStore:
                 before = first if first is not None else before_seq if before_seq is not None else (after_seq if after_seq is not None else 0) + 1
                 after = last if last is not None else after_seq if after_seq is not None else before_seq - 1 if before_seq is not None else through
                 return {"room_id": room_id, "events": ordered, "through_seq": through, "first_seq": first, "last_seq": last,
-                    "has_before": db.execute("SELECT 1 FROM events WHERE room_id=? AND seq<? AND seq<=? LIMIT 1", (room_id, before, through)).fetchone() is not None,
-                    "has_after": db.execute("SELECT 1 FROM events WHERE room_id=? AND seq>? AND seq<=? LIMIT 1", (room_id, after, through)).fetchone() is not None,
+                    "has_before": earliest is not None and earliest[0] < before,
+                    "has_after": newest is not None and newest[0] > after,
                     "oversize": False}
             for row in rows:
                 event = {"seq": row["seq"], **json.loads(row["value_json"])}

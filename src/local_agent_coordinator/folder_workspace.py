@@ -361,6 +361,12 @@ class FolderWorkspace(ProjectWorkspace):
             finally:
                 os.close(blobs)
 
+    def metadata_snapshot(self, revision=None):
+        """Fresh immutable-index metadata for readers that need no content or digest."""
+        with self._locked() as (room, revisions, _):
+            index = self._index(revisions, self._manifest(room), revision)
+            return self._summary(index, None, include_content=False)
+
     def _display_blob_signature(self, index, blobs):
         signature = []
         for entry in index["files"]:

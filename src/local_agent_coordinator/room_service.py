@@ -512,7 +512,7 @@ class RoomService(RoomPromptMixin):
         """Inspect a registration, native cwd, or exact delivery's repository."""
         self._available()
         deadline = time.monotonic() + git_status.CODE_STATUS_SECONDS
-        context = self._code_status_context(room_id)
+        context = self._code_status_context(room_id, metadata_only=True)
         snapshot, workspaces = context["snapshot"], context["workspaces"]
         native_states, retained_states = context["native_states"], context["retained_states"]
         canonical, canonical_changes = context["canonical"], context["canonical_changes"]
@@ -628,7 +628,7 @@ class RoomService(RoomPromptMixin):
                                                          "external_count", "complete", "observed_at")})
         return recorded[-3:]
 
-    def _code_status_context(self, room_id):
+    def _code_status_context(self, room_id, *, metadata_only=False):
         snapshot = self.store.snapshot(room_id)
         workspaces = []
         native_states = []
@@ -637,9 +637,11 @@ class RoomService(RoomPromptMixin):
         canonical_changes = None
         if snapshot["room"]["mode"] in PROJECT_MODES:
             try:
-                project_snapshot = self._project(room_id).snapshot()
+                project = self._project(room_id)
+                read = project.metadata_snapshot if metadata_only and isinstance(project, FolderWorkspace) else project.snapshot
+                project_snapshot = read()
                 canonical = {entry["path"]: entry["sha256"] for entry in project_snapshot["files"]}
-                baseline_snapshot = self._project(room_id).snapshot(1) if project_snapshot["revision"] else project_snapshot
+                baseline_snapshot = read(1) if project_snapshot["revision"] else project_snapshot
                 baseline = {entry["path"]: entry for entry in baseline_snapshot["files"]}
                 current = {entry["path"]: entry for entry in project_snapshot["files"]}
                 canonical_changes = {path: current.get(path) for path in set(baseline) | set(current)
@@ -747,7 +749,9 @@ class RoomService(RoomPromptMixin):
         Captured copies already have their own selectors. Their ancestors must
         not turn an ignored private copy into the coordinator's repository.
         """
-        sources = self._room_media_sources(room_id, snapshot=snapshot)
+        # Repository discovery consumes delivered task reports, not document
+        # previews (which are marked non-external and discarded below).
+        sources = self._room_media_sources(room_id, snapshot=snapshot, include_documents=False)
         external = sorted(((text, source) for text, source, allowed in sources[1] if allowed),
             key=lambda item: item[1].get("delivery", {}).get("seq", -1), reverse=True)
         workspaces, inspected, files = {}, {}, {}
@@ -5034,7 +5038,7 @@ class RoomService(RoomPromptMixin):
             raise RoomError("media_invalid_path")
         return Path(value)
 
-    def _room_media_sources(self, room_id, *, snapshot=None):
+    def _room_media_sources(self, room_id, *, snapshot=None, include_documents=True):
         """Use published room records, not a recursive search for project assets."""
         snapshot = self.store.snapshot(room_id) if snapshot is None else snapshot
         run_id = (snapshot.get("current_run") or {}).get("id")
@@ -5121,12 +5125,14 @@ class RoomService(RoomPromptMixin):
             texts.append((checkpoint["summary"], source, bool(completed and native_delivery(author))))
         if snapshot["room"]["mode"] in PROJECT_MODES:
             try:
-                project = self._project(room_id).snapshot()
+                workspace = self._project(room_id)
+                project = (workspace.metadata_snapshot() if not include_documents and isinstance(workspace, FolderWorkspace)
+                           else workspace.snapshot())
             except ProjectWorkspaceError:
                 project = {"files": [], "source": None}
             if (project.get("source") or {}).get("path"):
                 roots.append(Path(project["source"]["path"]))
-            for file in project["files"]:
+            for file in project["files"] if include_documents else ():
                 if file["path"].lower().endswith((".md", ".markdown")) and isinstance(file.get("content"), str):
                     texts.append((file["content"], {"run_id": run_id, "revision": project["revision"],
                         "document_path": file["path"], "document_sha256": file["sha256"]}, False))

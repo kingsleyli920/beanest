@@ -698,6 +698,7 @@ function renderEvents(snapshot, { preservePosition = false } = {}) {
 const roomHistories = new Map();
 function pagedRoom(snapshot) { return snapshot?.projection === 'room_state_v1'; }
 function configurePaging(status) {
+  state.roomPagingKnown = true;
   state.memberInvitationSupported = status?.capabilities?.room_member_invitation_v1 === true;
   state.taskWithdrawalSupported = status?.capabilities?.task_withdrawal_v1 === true;
   state.taskAnswerSupported = status?.capabilities?.task_answer_v1 === true;
