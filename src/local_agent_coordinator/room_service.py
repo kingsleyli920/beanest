@@ -5172,6 +5172,10 @@ class RoomService(RoomPromptMixin):
     def _room_media_assets(self, room_id, *, sources=None):
         _, texts, roots = self._room_media_sources(room_id) if sources is None else sources
         assets = {}
+        references = [(room_media.local_references(text), source, external) for text, source, external in texts]
+        # One observation per exact authorized candidate in this view. Nothing
+        # survives the request, and opening an asset still verifies it afresh.
+        observed = {}
         for entry in self.store.room_attachments(room_id):
             item = {**entry, "available": True}
             try:
@@ -5180,8 +5184,8 @@ class RoomService(RoomPromptMixin):
             except room_media.MediaError:
                 item["available"] = False
             assets[item["id"]] = item
-        for text, source, external in texts:
-            for reference in room_media.local_references(text):
+        for links, source, external in references:
+            for reference in links:
                 try:
                     relative = self._media_reference_path(reference)
                 except RoomError:
@@ -5200,9 +5204,17 @@ class RoomService(RoomPromptMixin):
                         continue
                     candidates.append(path)
                 for path in dict.fromkeys(candidates):
-                    try:
-                        item = self._media_asset(room_id, path, reference, source)
-                    except room_media.MediaError:
+                    if path not in observed:
+                        try:
+                            observed[path] = self._media_asset(room_id, path, reference, source)
+                        except room_media.MediaError:
+                            observed[path] = None
+                    verified = observed[path]
+                    if verified is None:
+                        continue
+                    item = {**verified, "path": reference, "reference_aliases": [reference], "source": source}
+                    if item["id"] in assets:
+                        self._merge_media_reference(assets[item["id"]], reference, source)
                         continue
                     same = next((known for known in assets.values() if known["sha256"] == item["sha256"]
                                  and reference in known["reference_aliases"]), None)
@@ -5213,17 +5225,21 @@ class RoomService(RoomPromptMixin):
                         assets[item["id"]] = item
         # A relative link can name an already discovered exact external file.
         # This adds an alias only; it never opens a directory from report prose.
-        for text, source, _ in texts:
-            for reference in room_media.local_references(text):
+        suffixes = {}
+        for item in assets.values():
+            parts = Path(item["_path"]).parts
+            for offset in range(len(parts)):
+                suffixes.setdefault(parts[offset:], []).append(item)
+        for links, source, _ in references:
+            for reference in links:
                 try:
                     relative = self._media_reference_path(reference)
                 except RoomError:
                     continue
                 if relative.is_absolute() or ".." in relative.parts:
                     continue
-                for item in assets.values():
-                    if Path(item["_path"]).parts[-len(relative.parts):] == relative.parts:
-                        self._merge_media_reference(item, reference, source)
+                for item in suffixes.get(relative.parts, ()):
+                    self._merge_media_reference(item, reference, source)
         return list(assets.values())
 
     @staticmethod

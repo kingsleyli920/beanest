@@ -97,6 +97,9 @@ def open_verified(path, expected_sha256=None) -> tuple[BinaryIO, dict]:
     directory = descriptor = None
     stream = None
     try:
+        # A missing candidate needn't reopen every ancestor. Existing paths
+        # still require the complete no-follow opening and verification below.
+        path.stat(follow_symlinks=False)
         directory = os.open(path.anchor, _DIR_FLAGS)
         for part in path.parts[1:-1]:
             child = os.open(part, _DIR_FLAGS, dir_fd=directory)

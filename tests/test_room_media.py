@@ -40,6 +40,29 @@ class RoomMediaTests(unittest.TestCase):
                 observed.st_dev, observed.st_ino, observed.st_mode, observed.st_nlink,
                 observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns))
 
+    def test_missing_candidate_does_not_reopen_ancestors_but_sensitive_path_is_rejected_first(self):
+        with patch.object(room_media.os, "open", wraps=os.open) as opened:
+            self.assert_media_error("media_unavailable", open_verified, self.root / "absent.mp4")
+        self.assertEqual(opened.call_count, 0)
+        with patch.object(Path, "stat") as observed:
+            self.assert_media_error("media_unsafe_path", open_verified, self.root / ".env" / "clip.mp4")
+        observed.assert_not_called()
+
+    def test_existence_probe_does_not_authorize_a_symlink_replacement(self):
+        path = self.root / "clip.mp4"
+        target = self.root / "other.mp4"
+        path.write_bytes(b"original")
+        target.write_bytes(b"replacement")
+        original_stat = Path.stat
+        def replace_after_probe(candidate, **kwargs):
+            result = original_stat(candidate, **kwargs)
+            if candidate == path:
+                path.unlink()
+                path.symlink_to(target)
+            return result
+        with patch.object(Path, "stat", autospec=True, side_effect=replace_after_probe):
+            self.assert_media_error("media_unsafe_path", open_verified, path)
+
     def test_symlink_ancestors_leaf_hardlinks_and_fifo_are_rejected(self):
         directory = self.root / "real"
         directory.mkdir()

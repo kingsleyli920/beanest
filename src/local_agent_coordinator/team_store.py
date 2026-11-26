@@ -625,6 +625,54 @@ class TeamStore:
             self.store._event(db, room_id, "host_text_failure_resumed", sender="user", run_id=target_run_id,
                               source=text_failure, old_commands_replayed=False)
 
+    def _resume_unstarted_carried_restart(self, db, room_id, team, room, objective):
+        """Repair an untouched carried board whose old queued calls never began.
+
+        A prior service could carry these tasks as interrupted, leaving nothing
+        for the scheduler. This runs behind the ordinary pause/quota gates and
+        never substitutes for recovery of a call that was actually claimed.
+        """
+        if room["mode"] != "native_project" or team["phase"] != "working" or objective is None:
+            return
+        continuation = json.loads(objective["continuation_json"] or "{}")
+        source_run = continuation.get("source_run_id")
+        if not source_run or source_run == team["current_run_id"]:
+            return
+        candidates = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? "
+            "AND status='interrupted' AND blocked_reason='service_restarted'", (room_id, team["current_run_id"])).fetchall()
+        if not candidates:
+            return
+        run = db.execute("SELECT used FROM team_runs WHERE id=?", (team["current_run_id"],)).fetchone()
+        if (run["used"] or self.pending(db, room_id) or room["stop_confirmed"] == 0
+                or not self.objectives.available_members(db, room_id)
+                or db.execute("SELECT 1 FROM team_jobs WHERE run_id=? LIMIT 1", (team["current_run_id"],)).fetchone()
+                or self.store._native_continuation_requires_recovery(db, room_id)
+                or not self.store._stage_cleanup_confirmed(db, room_id)
+                or not all(self.store._continuation_provider_clean(db, room_id, provider)
+                           for provider in self.store.member_ids_in_transaction(db, room_id))):
+            return
+        unchanged = ("title", "description", "acceptance", "capability", "dependencies_json", "write_paths_json",
+                     "owner", "result", "result_version", "result_revision", "result_digest", "result_files_json",
+                     "review_reason", "review_kind")
+        for task in candidates:
+            prior = db.execute("SELECT * FROM shared_tasks WHERE room_id=? AND run_id=? AND id=?",
+                               (room_id, source_run, task["id"])).fetchone()
+            if (prior is None or prior["status"] != "interrupted" or prior["blocked_reason"] != "service_restarted"
+                    or task["assignment_epoch"] != prior["assignment_epoch"] + 1
+                    or any(task[key] != prior[key] for key in unchanged)):
+                continue
+            claimed = db.execute("SELECT 1 FROM jobs j JOIN team_jobs t ON t.job_id=j.id "
+                "WHERE j.room_id=? AND t.run_id=? AND t.task_id=? AND j.error='service_restarted' "
+                "AND EXISTS (SELECT 1 FROM events e WHERE e.room_id=j.room_id "
+                "AND json_extract(e.value_json,'$.kind')='job_claimed' "
+                "AND json_extract(e.value_json,'$.job_id')=j.id) LIMIT 1", (room_id, source_run, task["id"])).fetchone()
+            if claimed:
+                continue
+            status = ("review" if task["result_version"] and task["review_reason"] is None else
+                      "assigned" if task["owner"] else "open")
+            db.execute("UPDATE shared_tasks SET status=?,blocked_reason=NULL WHERE room_id=? AND run_id=? AND id=?",
+                       (status, room_id, team["current_run_id"], task["id"]))
+
     def redeliver_unanswered(self, db, room_id, source_run_id):
         """A user's message whose reply call ended without a reply (its process
         was killed, crashed or was cancelled when a peer failed) goes to the same
@@ -3283,6 +3331,7 @@ class TeamStore:
             return False
         if not self.objectives.can_dispatch(db, room_id):
             return False
+        self._resume_unstarted_carried_restart(db, room_id, team, room, objective)
         self.resume_deferred_redelivery(db, room_id)
         self.hand_out_waiting_messages(db, room_id)
         if team["phase"] in {"checkpoint", "checkpoint_review"}:
