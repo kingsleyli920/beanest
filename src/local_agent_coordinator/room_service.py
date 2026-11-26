@@ -5051,15 +5051,33 @@ class RoomService(RoomPromptMixin):
         current_tasks = (snapshot.get("team") or {}).get("tasks", [])
         tasks = {(task["run_id"], task["id"]): task for task in history["tasks"]}
         tasks.update({(run_id, task["id"]): task for task in current_tasks})
-        completions = {(event.get("objective_id"), event.get("run_id")): event for event in events
-            if event["kind"] == "objective_checkpoint_finished" and event.get("decision") == "complete"
-            and event.get("code") is None}
-        completion_by_run = {event["run_id"]: event for event in completions.values()}
-
         def native_delivery(job_id):
             observation = native.get(job_id, {})
             return (snapshot["room"]["mode"] == "native_project" and finished.get(job_id) == "completed"
                     and observation.get("status") == "completed")
+
+        # Index the timeline once. In a long room the same carried task may
+        # appear in hundreds of runs; rescanning every event for each copy
+        # stalls both media discovery and unrelated reads sharing the GIL.
+        completions, publications, checkpoint_finishes = {}, {}, {}
+        native_completions = set()
+        for event in events:
+            kind, job_id = event["kind"], event.get("job_id")
+            role = roles.get(job_id, {})
+            if (kind == "objective_checkpoint_finished" and event.get("decision") == "complete"
+                    and event.get("code") is None):
+                completions[(event.get("objective_id"), event.get("run_id"))] = event
+            elif kind == "team_command":
+                if event.get("command") == "review":
+                    key = (event.get("run_id"), event.get("task_id"),
+                           role.get("result_version"), role.get("assignment_epoch"))
+                    publications[key] = max(publications.get(key, event["seq"]), event["seq"])
+                elif event.get("command") == "complete" and native_delivery(job_id):
+                    native_completions.add((event.get("run_id"), event.get("task_id"),
+                                            event.get("sender"), role.get("result_version")))
+            elif kind == "job_finished" and role.get("phase") == "checkpoint":
+                checkpoint_finishes.setdefault(role.get("run_id"), []).append((event["seq"], job_id))
+        completion_by_run = {event["run_id"]: event for event in completions.values()}
 
         def task_source(task, source_run):
             # A carried report keeps its actual source. Reading its delivered
@@ -5077,19 +5095,11 @@ class RoomService(RoomPromptMixin):
             source = {"run_id": origin_run, "task_id": task["id"], "result_version": task["result_version"]}
             accepted = task["status"] in {"accepted", "self_checked"}
             completed = completion_by_run.get(source_run)
-            publications = [event["seq"] for event in events
-                if event["kind"] == "team_command" and event.get("command") == "review"
-                and event.get("run_id") == source_run and event.get("task_id") == task["id"]
-                and roles.get(event.get("job_id"), {}).get("result_version") == task["result_version"]
-                and roles.get(event.get("job_id"), {}).get("assignment_epoch") == task["assignment_epoch"]]
-            if accepted and (publications or completed):
+            publication = publications.get((source_run, task["id"], task["result_version"], task["assignment_epoch"]))
+            if accepted and (publication is not None or completed):
                 source["delivery"] = {"run_id": source_run,
-                    "seq": max(publications + ([completed["seq"]] if completed else []))}
-            external = accepted and any(native_delivery(event.get("job_id"))
-                and event.get("run_id") == origin_run and event.get("task_id") == task["id"]
-                and event.get("sender") == origin["owner"]
-                and roles.get(event.get("job_id"), {}).get("result_version") == task["result_version"] - 1
-                for event in events if event["kind"] == "team_command" and event.get("command") == "complete")
+                    "seq": max(([publication] if publication is not None else []) + ([completed["seq"]] if completed else []))}
+            external = accepted and (origin_run, task["id"], origin["owner"], task["result_version"] - 1) in native_completions
             return source, external
 
         texts, roots = [], []
@@ -5118,10 +5128,8 @@ class RoomService(RoomPromptMixin):
             completed = completions.get((checkpoint["objective_id"], source_run))
             if completed:
                 source["delivery"] = {"run_id": source_run, "seq": completed["seq"]}
-            author = next((event.get("job_id") for event in reversed(events)
-                if completed and event["seq"] < completed["seq"] and event["kind"] == "job_finished"
-                and roles.get(event.get("job_id"), {}).get("run_id") == source_run
-                and roles.get(event.get("job_id"), {}).get("phase") == "checkpoint"), None)
+            author = next((job_id for seq, job_id in reversed(checkpoint_finishes.get(source_run, []))
+                           if completed and seq < completed["seq"]), None)
             texts.append((checkpoint["summary"], source, bool(completed and native_delivery(author))))
         if snapshot["room"]["mode"] in PROJECT_MODES:
             try:
