@@ -107,7 +107,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "请求未完成，请核对本地服务与任务状态。": "The request did not complete. Check the local service and task status.",
   "本次代码查询等待超时，尚未取得新结果；可以稍后重试。": "This code-status query timed out without a new result. You can try again later.",
   "本次代码查询未完成，尚未取得新结果；可以稍后重试。": "This code-status query did not complete and has no new result. You can try again later.",
-  "连接中断或等待超时，请先刷新。如果刚重启过豆窝，旧浏览器地址可能失效，请从桌面版重新打开。": "The connection was interrupted or timed out. Refresh first. If Beanest was just restarted, the old browser address may be invalid; reopen it from the desktop app.",
   "当前": "Current",
   "已归档": "Archived",
   "已移除": "Removed",

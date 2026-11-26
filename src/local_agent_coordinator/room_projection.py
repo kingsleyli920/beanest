@@ -91,7 +91,6 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
     result = {**snapshot, "projection": "room_state_v1", "through_seq": through,
               "event_count": len(events), "events": []}
     result["room"] = replace_text(snapshot["room"], "goal", "room_goal", room_id)
-    result["jobs"] = [replace_text(job, "text", "job_text", room_id, job_id=job["id"]) for job in snapshot["jobs"]]
     current = snapshot.get("current_run")
     referenced_runs = {current["id"]} if current else set()
     def collect_run_refs(value):
@@ -129,7 +128,7 @@ def room_state(snapshot, roles, permission_for, *, job_ids=None):
                 for task in snapshot[section]["tasks"]]}
     if snapshot.get("project"):
         result["project"] = {**snapshot["project"], "files": [
-            {**{key: value for key, value in file.items() if key != "content"}, "content_available": isinstance(file.get("content"), str)}
+            {**{key: value for key, value in file.items() if key != "content"}, "content_available": file.get("content_available", isinstance(file.get("content"), str))}
             for file in snapshot["project"].get("files", [])]}
 
     claimed, cleanup, activities, progress, statuses, flags, retrying = {}, {}, {}, {}, {}, {}, {}

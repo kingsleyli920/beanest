@@ -1281,4 +1281,9 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "中断命令要你本人在界面里操作。": "Only you can stop a command, from the interface.",
   "关闭提示": "Dismiss notice",
   "另有 {p0} 项此前标记的改动已与当前成果一致。": "Another {p0} previously flagged changes now match the current output.",
+  "本次读取等待超时，尚未取得新结果；豆窝会继续尝试刷新状态。": "This read timed out without a new result. Beanest will keep trying to refresh the status.",
+  "这次操作等待超时，结果尚未确认；请先核对状态，避免重复操作。": "This operation timed out and its result is unconfirmed. Check its status first to avoid repeating the operation.",
+  "本地服务响应暂时无法读取，请稍后刷新。": "The local service response could not be read. Refresh again later.",
+  "无法连接本地服务，请先刷新。如果刚重启过豆窝，旧浏览器地址可能失效，请从桌面版重新打开。": "Cannot connect to the local service. Refresh first. If Beanest was just restarted, the old browser address may be invalid; reopen it from the desktop app.",
+
 });

@@ -327,7 +327,7 @@ const state = {
   accountSourceBusy: null, accountSourceErrors: new Map(),
   manager: null, managerReturnFocus: null, managementBusy: false, projectRename: null, projectListFingerprint: '', partnerListFingerprint: '',
   hostOutboxSupported: false, hostOutboxScope: null, hostOutboxPolling: false, hostOutboxRows: new Map(), hostOutboxRequests: new Map(), hostOutboxRetirements: new Map(), hostOutboxRetiring: new Set(), hostAutomaticAttempts: new Set(),
-  actionError: null, busy: false, busyRequest: null, refreshing: false, pending: null, epoch: 0, authScope: null, scopeChanged: false,
+  actionError: null, noticeReadFailure: false, busy: false, busyRequest: null, refreshing: false, pending: null, epoch: 0, authScope: null, scopeChanged: false,
   exportBusy: false, exportMessage: '', exportRoom: null,
   forkSource: null,
   codeStatusSupported: false, codeStatusEntries: new Map(), codeStatusRendered: null, mediaSupported: false, media: null, mediaHistoryChoices: new Map(), reader: null, materialsRoom: null, runtimeOptions: null, runtimeSettings: null, runtimeScope: null, runtimeDraftDirty: false, runtimePermissionExplicit: false, workModeDraftDirty: false, runtimeDraftToken: null, workModeDraftToken: null, runtimeLoading: false, runtimeRefreshId: null, runtimeMessage: '', runtimePopoverOpen: false, runtimePopoverTrigger: null, runtimePartner: null,
@@ -3376,7 +3376,12 @@ function renderDismissibleNotice(node, message, type, fingerprint, id) {
   node.append(element('span', message, 'warning-message'), warningDismissButton(roomId, fingerprint, () => { node.hidden = true; }, id));
 }
 function showNotice(message = '', type = '', evidence = message) {
+  state.noticeReadFailure = false;
   renderDismissibleNotice($('notice'), message, type, JSON.stringify(['notice', type, evidence]), 'dismiss-notice');
+}
+function showReadFailure(error) {
+  showNotice(error.message, 'error', error.code || error.message);
+  state.noticeReadFailure = ['request_timeout', 'local_service_unavailable', 'response_unreadable'].includes(error.code);
 }
 function quotaActionErrorResolved(error) {
   if (!quotaBlockCodes.has(error.code)) return false;
@@ -3558,7 +3563,11 @@ async function api(path, method = 'GET', body) {
     if (codeStatusRead) throw new RequestError(controller.signal.aborted
       ? t("本次代码查询等待超时，尚未取得新结果；可以稍后重试。")
       : t("本次代码查询未完成，尚未取得新结果；可以稍后重试。"), { code: controller.signal.aborted ? 'code_status_timeout' : 'code_status_unavailable' });
-    throw new RequestError(t("连接中断或等待超时，请先刷新。如果刚重启过豆窝，旧浏览器地址可能失效，请从桌面版重新打开。"), { uncertain: method !== 'GET' });
+    if (controller.signal.aborted) throw new RequestError(method === 'GET'
+      ? t("本次读取等待超时，尚未取得新结果；豆窝会继续尝试刷新状态。")
+      : t("这次操作等待超时，结果尚未确认；请先核对状态，避免重复操作。"), { code: 'request_timeout', uncertain: method !== 'GET' });
+    if (error instanceof SyntaxError) throw new RequestError(t("本地服务响应暂时无法读取，请稍后刷新。"), { code: 'response_unreadable', uncertain: method !== 'GET' });
+    throw new RequestError(t("无法连接本地服务，请先刷新。如果刚重启过豆窝，旧浏览器地址可能失效，请从桌面版重新打开。"), { code: 'local_service_unavailable', uncertain: method !== 'GET' });
   } finally {
     clearTimeout(timeout);
   }
@@ -6732,7 +6741,7 @@ async function selectRoom(id, { restoringLocation = false } = {}) {
     else if (error.code === 'forbidden') { leaveUnavailableRoom(); showNotice(error.message, 'error'); }
     else {
       if (restoringLocation) leaveUnavailableRoom({ preserveLocation: true });
-      showNotice(error.message, 'error'); renderControls();
+      showReadFailure(error); renderControls();
     }
   }
 }
@@ -6814,10 +6823,10 @@ async function refresh({ initial = false, restoreSelection = false } = {}) {
       applySnapshot(snapshot.value);
     }
     const failure = results.find((result) => result.status === 'rejected');
-    if (failure) showNotice(failure.reason.message, 'error');
+    if (failure) showReadFailure(failure.reason);
     else if (discoveryError) showNotice(discoveryError, 'error');
     else if (status.status === 'fulfilled' && status.value.background_error) showNotice(executionMessage(status.value.background_error), 'error', status.value.background_error);
-    else if (!state.pending) showNotice();
+    else if (!state.pending || state.noticeReadFailure) showNotice();
     if ((initial || restoreSelection) && !state.selected && list.status === 'fulfilled' && Array.isArray(list.value.rooms)) {
       const hash = window.location?.hash || '';
       const requestedRoom = roomFromLocation();

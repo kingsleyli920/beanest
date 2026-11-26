@@ -3012,7 +3012,7 @@ test('context menu keeps active work guarded and closes on an authoritative capa
 test('a disconnected browser gives a conditional desktop recovery path without searching ports or dispatching work', async () => {
   const ui = await browser({ route(request) { if (request.method === 'GET') throw new Error('fictional offline service'); } });
   assert.equal(ui.get('send').disabled, true);
-  assert.match(ui.get('notice').textContent, /连接中断或等待超时.*如果刚重启过豆窝，旧浏览器地址可能失效.*从桌面版重新打开/);
+  assert.match(ui.get('notice').textContent, /无法连接本地服务.*如果刚重启过豆窝，旧浏览器地址可能失效.*从桌面版重新打开/);
   assert.match(ui.get('composer-note').textContent, /本地服务未连接.*请先刷新.*如果刚重启过豆窝.*从桌面版重新打开/);
   assert.equal(ui.posts().length, 0);
   assert.ok(ui.requests.every((request) => request.path.startsWith('/api/')), 'recovery advice never probes other ports or services');
@@ -12587,4 +12587,62 @@ test('native workspace file grouping keeps different partners and paths separate
     assert.match(rows[2].textContent, language === 'en' ? /conflict.*scope/i : /需核对新旧版本冲突.*授权写入范围/);
     assert.equal(ui.posts().length, 0);
   }
+});
+
+test('a slow status read is a timeout rather than a stale address and overlapping polls stay single flight until recovery', async () => {
+  let now = Date.now(); let slow = false; let aborted = 0;
+  const saved = activeActivitySnapshot();
+  const ui = await browser({ now: () => now, rooms: [saved.room], saved, route(request, _document, options) {
+    if (slow && request.path === '/api/projects') return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => { aborted += 1; reject(new Error('controlled read deadline')); }, { once: true });
+    });
+  } });
+  slow = true; const before = ui.requests.filter((request) => request.path === '/api/projects').length;
+  const refreshing = ui.refresh(); await settle();
+  await ui.poll(); await ui.windowEvent('focus'); await ui.poll();
+  assert.equal(ui.requests.filter((request) => request.path === '/api/projects').length, before + 1);
+  now += 20001; await ui.runTimers(); await refreshing;
+  assert.equal(aborted, 1); assert.equal(ui.get('notice').hidden, false);
+  assert.match(ui.get('notice').textContent, /本次读取等待超时.*继续尝试刷新状态/);
+  assert.doesNotMatch(ui.get('notice').textContent, /连接中断|旧浏览器|桌面版/);
+  assert.equal(ui.get('connection').textContent, '本地服务已连接');
+  slow = false; await ui.poll(); assert.equal(ui.get('notice').hidden, true);
+  assert.equal(ui.posts().length, 0);
+});
+
+test('a recovered full refresh clears only the old read failure while an uncertain mutation stays preserved and never replays', async () => {
+  let offline = false; let projectsFail = false;
+  const ui = await browser({ route(request) {
+    if (request.method === 'POST' && request.path === '/api/rooms') throw new Error('controlled lost mutation response');
+    if (request.method === 'GET' && (offline || projectsFail && request.path === '/api/projects')) throw new Error('controlled read failure');
+  } });
+  ui.type('原始要求保持'); await ui.submit();
+  const requestId = ui.posts()[0].body.request_id;
+  assert.equal(ui.get('pending-request').hidden, false);
+  offline = true; await ui.poll(); assert.equal(ui.get('notice').hidden, false);
+  offline = false; projectsFail = true; await ui.poll();
+  assert.equal(ui.get('connection').textContent, '本地服务已连接');
+  assert.equal(ui.get('notice').hidden, false, 'a healthy status endpoint does not erase a still-failing project read');
+  projectsFail = false; await ui.poll();
+  assert.equal(ui.get('notice').hidden, true);
+  assert.equal(ui.get('pending-request').hidden, false);
+  assert.equal(savedOutbox(ui.storage).request.body.request_id, requestId);
+  assert.equal(savedOutbox(ui.storage).request.body.goal, '原始要求保持');
+  assert.equal(ui.posts().length, 1);
+});
+
+test('a timed-out mutation remains uncertain across successful polling without automatic retry or losing its original request', async () => {
+  let now = Date.now(); let aborted = 0;
+  const ui = await browser({ now: () => now, route(request, _document, options) {
+    if (request.method === 'POST' && request.path === '/api/rooms') return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => { aborted += 1; reject(new Error('controlled mutation deadline')); }, { once: true });
+    });
+  } });
+  ui.type('不能重发的原始要求'); await ui.submit();
+  const original = structuredClone(ui.posts()[0].body);
+  now += 75001; await ui.runTimers();
+  assert.equal(aborted, 1); assert.equal(ui.get('pending-request').hidden, false);
+  await ui.poll(); await ui.poll();
+  assert.deepEqual(savedOutbox(ui.storage).request.body, original);
+  assert.equal(ui.get('pending-request').hidden, false); assert.equal(ui.posts().length, 1);
 });

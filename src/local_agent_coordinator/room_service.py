@@ -1522,16 +1522,21 @@ class RoomService(RoomPromptMixin):
                                                       allow_new_text_files=mode == "text_artifacts")
         return self._projects[room_id]
 
-    def _snapshot(self, room_id, *, list_view=False, poll=False):
+    def _snapshot(self, room_id, *, list_view=False, poll=False, metadata_only=False):
         """poll=True only for display reads: can_recover_native may then come
         from _recovery_display's cached audit. Every action keeps poll=False."""
         snapshot = self.store.snapshot(room_id, events=not list_view)
         snapshot["member_invitation"] = self._member_invitation(snapshot)
         if snapshot["room"]["mode"] in PROJECT_MODES:
             try:
-                project = self._project(snapshot["room"]["id"]).snapshot()
+                workspace = self._project(snapshot["room"]["id"])
+                if (metadata_only or list_view) and isinstance(workspace, FolderWorkspace):
+                    project, digest = workspace.display_snapshot()
+                else:
+                    project = workspace.snapshot()
+                    digest = _project_digest(project)
                 snapshot["project"] = {"available": True, **project,
-                                       "snapshot_sha256": _project_digest(project),
+                                       "snapshot_sha256": digest,
                                        "execution": ("sandboxed_unittest" if snapshot["room"]["mode"] == "python_sandbox" and not read_only(snapshot["room"]["work_mode"], snapshot["room"].get("runtime_settings"))
                                                      else "disabled"),
                                        "execution_reason": (("plan_read_only" if snapshot["room"]["work_mode"] == "plan" else "permission_read_only") if read_only(snapshot["room"]["work_mode"], snapshot["room"].get("runtime_settings")) else
@@ -4110,7 +4115,7 @@ class RoomService(RoomPromptMixin):
 
     async def read_room_state(self, room_id):
         self._available()
-        snapshot = self._snapshot(room_id, poll=True)
+        snapshot = self._snapshot(room_id, poll=True, metadata_only=True)
         # However long the room has run, its state is returned whole: a size
         # limit here would leave a long room impossible to open.
         return room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission)
@@ -4126,7 +4131,7 @@ class RoomService(RoomPromptMixin):
         return self.store.read_text(room_id, reference)
 
     async def read_room_job(self, room_id, job_id):
-        snapshot = self._snapshot(room_id, poll=True)
+        snapshot = self._snapshot(room_id, poll=True, metadata_only=True)
         if not any(job["id"] == job_id for job in snapshot["jobs"]):
             raise RoomError("text_reference_not_found")
         projected = room_projection.room_state(snapshot, self.store.job_roles(room_id), self._native_permission, job_ids={job_id})

@@ -108,6 +108,7 @@ class FolderWorkspace(ProjectWorkspace):
                 or type(create) is not bool):
             raise ProjectWorkspaceError("invalid_project_request")
         self.format = FORMAT
+        self._display_digest_cache = None
         with self._locked(create=create) as (room, revisions, created):
             if created:
                 os.mkdir("blobs", mode=0o700, dir_fd=room)
@@ -326,9 +327,11 @@ class FolderWorkspace(ProjectWorkspace):
             return {"content": self._content(blobs, entry)}
         return {"content": None, "text": False}
 
-    def _summary(self, index, blobs):
+    def _summary(self, index, blobs, *, include_content=True):
         changed = [{**{key: item[key] for key in ("path", "sha256", "owner", "bytes")},
-                    **self._readable(blobs, item)} for item in index["files"] if item["changed"]]
+                    **(self._readable(blobs, item) if include_content else
+                       {"content_available": item["text"], **({"text": False} if not item["text"] else {})})}
+                   for item in index["files"] if item["changed"]]
         entries = {}
         for item in index["files"]:
             first, _, rest = item["path"].partition("/")
@@ -355,6 +358,76 @@ class FolderWorkspace(ProjectWorkspace):
             blobs = _open_directory("blobs", parent=room)
             try:
                 return self._summary(index, blobs)
+            finally:
+                os.close(blobs)
+
+    def _display_blob_signature(self, index, blobs):
+        signature = []
+        for entry in index["files"]:
+            if not entry["changed"] or not entry["text"]:
+                continue
+            descriptor = self._blob(blobs, entry)
+            try:
+                info = os.fstat(descriptor)
+                signature.append((entry["sha256"], info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                                  info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+            finally:
+                os.close(descriptor)
+        return tuple(signature)
+
+    def _display_digest(self, summary, index, blobs):
+        # Match project_digest's JSON exactly, but hold only one file's text
+        # while hashing. Large projects must not allocate the whole wire JSON.
+        digest = hashlib.sha256()
+        encoder = json.JSONEncoder(sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        def encode(value):
+            for chunk in encoder.iterencode(value):
+                digest.update(chunk.encode("utf-8"))
+        digest.update(b"{")
+        for number, key in enumerate(sorted(summary)):
+            if number:
+                digest.update(b",")
+            encode(key)
+            digest.update(b":")
+            if key != "files":
+                encode(summary[key])
+                continue
+            digest.update(b"[")
+            first = True
+            for entry in index["files"]:
+                if not entry["changed"]:
+                    continue
+                if not first:
+                    digest.update(b",")
+                first = False
+                encode({**{name: entry[name] for name in ("path", "sha256", "owner", "bytes")},
+                        **self._readable(blobs, entry)})
+            digest.update(b"]")
+        digest.update(b"}")
+        return digest.hexdigest()
+
+    def display_snapshot(self):
+        """Metadata plus the exact full-snapshot digest, only for display reads.
+
+        Recheck the immutable index and text blob identities on every read.
+        A changed blob is read and verified before replacing the cached digest;
+        action snapshots continue to read and verify the full content afresh.
+        """
+        with self._locked() as (room, revisions, _):
+            manifest = self._manifest(room)
+            index = self._index(revisions, manifest)
+            blobs = _open_directory("blobs", parent=room)
+            try:
+                summary = self._summary(index, blobs, include_content=False)
+                signature = self._display_blob_signature(index, blobs)
+                key = (manifest["commits"][index["revision"]]["sha256"], index["revision"], signature)
+                cached = self._display_digest_cache
+                if cached is None or cached[0] != key:
+                    digest = self._display_digest(summary, index, blobs)
+                    if self._display_blob_signature(index, blobs) != signature:
+                        raise ProjectWorkspaceError("project_storage_corrupt")
+                    self._display_digest_cache = (key, digest)
+                return summary, self._display_digest_cache[1]
             finally:
                 os.close(blobs)
 

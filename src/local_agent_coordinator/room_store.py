@@ -6423,7 +6423,8 @@ class RoomStore:
                     "failed_jobs": counts.get('failed', 0) + counts.get('unknown', 0)}
 
     # The background watchdog visits every room every few seconds, so a cap
-    # by room count thrashes; cap the decoded events kept (~1.5 KB each).
+    # by room count thrashes. Keep at most one oversized room plus this
+    # budget for ordinary rooms, so visiting a small room does not evict it.
     _TIMELINE_EVENTS = 60_000
 
     def _timeline(self, db, room_id):
@@ -6452,9 +6453,18 @@ class RoomStore:
                 if current is None or current[2] != rewrites or (current[0][-1] if current[0] else 0) < through:
                     self._timelines[room_id] = (seqs, events, rewrites)
                     self._timelines.move_to_end(room_id)
-                    while (len(self._timelines) > 1 and sum(len(item[0]) for item in self._timelines.values())
-                           > self._TIMELINE_EVENTS):
-                        self._timelines.popitem(last=False)
+                    oversized = [key for key, item in self._timelines.items()
+                                 if len(item[0]) > self._TIMELINE_EVENTS]
+                    for key in oversized[:-1]:
+                        del self._timelines[key]
+                    ordinary = [key for key, item in self._timelines.items()
+                                if len(item[0]) <= self._TIMELINE_EVENTS]
+                    total = sum(len(self._timelines[key][0]) for key in ordinary)
+                    for key in ordinary:
+                        if total <= self._TIMELINE_EVENTS:
+                            break
+                        total -= len(self._timelines[key][0])
+                        del self._timelines[key]
         visible = events[:bisect_right(seqs, through)]
         if os.environ.get("BEANEST_VERIFY_EVENT_CACHE") == "1":
             # Test-only guard: a caller that mutated a cached event in place.
@@ -6514,7 +6524,15 @@ class RoomStore:
             objective = self._team.objectives.snapshot(db, row["id"])
             handoff = db.execute("SELECT * FROM native_handoffs WHERE room_id=?", (row["id"],)).fetchone()
             native_workspaces = []
-            for item in db.execute("SELECT provider,state_json FROM native_workspaces WHERE room_id=?", (row["id"],)):
+            # Baseline manifests can be megabytes; this view only needs the
+            # diagnostic lists. Distinguish an absent list from explicit null.
+            for item in db.execute(
+                    "SELECT provider,json_object("
+                    "'blocked',CASE WHEN json_type(state_json,'$.blocked') IS NULL THEN json('[]') "
+                    "ELSE json_extract(state_json,'$.blocked') END,"
+                    "'conflicts',CASE WHEN json_type(state_json,'$.conflicts') IS NULL THEN json('[]') "
+                    "ELSE json_extract(state_json,'$.conflicts') END) AS state_json "
+                    "FROM native_workspaces WHERE room_id=?", (row["id"],)):
                 state = json.loads(item["state_json"])
                 native_workspaces.append({"provider": item["provider"], "state": "blocked" if state.get("blocked") else "ready",
                     "conflicts": [{"path": conflict["path"], "reason": "native_merge_conflict"} for conflict in state.get("conflicts", [])],

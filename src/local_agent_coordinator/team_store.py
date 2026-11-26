@@ -246,7 +246,10 @@ class TeamStore:
                  "created_at": row["created_at"], "finished_at": row["finished_at"], "accepted_at": row["accepted_at"],
                  "revision": row["artifact_revision"], "digest": row["artifact_digest"],
                  "budget": {"used": row["used"], "limit": public_call_limit(row["call_limit"]), "deadline": public_deadline(row["deadline"])}}
-                for row in db.execute("SELECT * FROM team_runs WHERE room_id=? ORDER BY number", (room_id,))]
+                for row in db.execute(
+                    "SELECT id,number,goal,status,objective_id,work_mode,runtime_settings_json,created_at,finished_at,"
+                    "accepted_at,artifact_revision,artifact_digest,used,call_limit,deadline "
+                    "FROM team_runs WHERE room_id=? ORDER BY number", (room_id,))]
 
     def accept(self, db, room_id, run_id, revision, digest):
         team = self.team(db, room_id)
