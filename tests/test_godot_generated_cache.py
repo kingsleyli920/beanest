@@ -63,8 +63,9 @@ class GodotGeneratedCacheTests(unittest.TestCase):
                 self.assertEqual(changes['blocked'], [{'path':'code/.godot/captured.txt','reason':reason}])
                 self.assertFalse(changes.get('generated'))
 
-    def test_sensitive_symlink_and_ordinary_unowned_changes_remain_rejected(self):
-        # Catches a credential file being imported, or an unowned source edit slipping through.
+    def test_private_cache_links_do_not_exempt_sensitive_content_or_source_links(self):
+        # Cache links are not inputs; credentials and source ownership keep
+        # their existing rules regardless of an excluded link in the same tree.
         receipt = self.prepare(self.export('source', {'own.gd':'old\n'}))
         project = Path(receipt['project'])
         directory = project / 'code/.godot'
@@ -79,6 +80,11 @@ class GodotGeneratedCacheTests(unittest.TestCase):
         self.assertEqual(changes['files'], [])
         (directory / '.env').unlink()
         (directory / 'cache').symlink_to(project / 'own.gd')
+        changes = collect_changes(project, receipt, ['own.gd'])
+        self.assertEqual(changes['files'], [])
+        self.assertEqual(changes['blocked'], [{'path':'unowned.gd','reason':'native_path_not_owned'}])
+        self.assertFalse(changes.get('generated'))
+        (project / 'source-link.gd').symlink_to(project / 'own.gd')
         with self.assertRaisesRegex(NativeWorkspaceError, 'native_symlink_refused'):
             collect_changes(project, receipt, ['own.gd'])
 

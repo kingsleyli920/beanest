@@ -432,8 +432,17 @@ def collect_changes(workspace, baseline_manifest, allowed_paths, *, resolved_con
     untracked = {_path(name) for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if name}
     checked = set()
     for name in sorted(set(entries) | allowed | untracked):
-        path = _file(root, name, checked)
         before = entries.get(name)
+        try:
+            path = _file(root, name, checked)
+        except NativeWorkspaceError as error:
+            # Native tools may link an excluded dependency/cache directory to
+            # an existing installation. Never read its target or import it;
+            # a captured input or an ordinary source link still stays refused.
+            if (error.code == "native_symlink_refused" and before is None
+                    and _excluded(name) == "excluded_directory"):
+                continue
+            raise
         exists = path.exists()
         if exists and before is None and name in allowed and path.is_dir():
             # A task may name a folder as a write path. The folder is not a

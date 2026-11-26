@@ -70,7 +70,12 @@ class GeneratedCacheFixture(OutcomeFixture):
                 path = path.parent / 'credentials.json'
                 path.write_bytes(b'fictional-not-a-secret')
             elif self.fault == 'symlink':
+                path = Path(cwd) / 'linked-source.md'
                 path.symlink_to(Path(cwd) / 'README.md')
+            elif self.fault == 'dependency_symlink':
+                path = Path(cwd) / '.claude/worktrees/fixture/node_modules'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(self.source, target_is_directory=True)
             elif self.fault == 'ordinary':
                 path = Path(cwd) / 'code/unowned.md'
                 path.write_bytes(b'Unauthorized source input.\n')
@@ -177,6 +182,21 @@ class GeneratedCacheImportHTTPTests(unittest.TestCase):
         failed = next(job for job in final['jobs'] if job['id'] == fixture.work[0]['job_id'])
         self.assertEqual(failed['error'], 'native_symlink_refused')
         self.assertTrue(Path(fixture.work[0]['path']).is_symlink())
+
+    def test_excluded_dependency_link_does_not_void_a_completed_source_change(self):
+        fixture = self.fixture(fault='dependency_symlink')
+        fixture.create()
+        final = fixture.settled()
+        self.assertEqual(final['objective']['status'], 'complete')
+        self.assertTrue(all(task['status'] == 'accepted' for task in final['team']['tasks']))
+        project = fixture.service._project(fixture.room_id)
+        self.assertEqual(project.inspect(dict(kind='read', path='result.md', query=None,
+                         offset=0, limit=20))['content'], fixture.report.decode())
+        self.assertFalse(any('node_modules' in entry['path'].split('/')
+                             for entry in project.snapshot()['files']))
+        link = Path(fixture.work[0]['path'])
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((fixture.source / 'README.md').read_bytes(), fixture.original_readme)
 
     def test_a_free_source_file_the_call_also_wrote_is_published_with_its_task(self):
         # Catches a finished report being voided, and the team stopped, for a
