@@ -107,6 +107,46 @@ def _file_digest(path):
     return sha
 
 
+def pending_blocked(manifest, canonical):
+    """Project old import warnings against the current shared file bytes.
+
+    This is display evidence, not an import or an ownership decision. The
+    persisted manifest remains intact, and unknown evidence stays visible.
+    """
+    blocked = manifest.get("blocked", [])
+    if not isinstance(blocked, list) or not all(isinstance(issue, dict) for issue in blocked):
+        raise NativeWorkspaceError("invalid_native_manifest")
+    try:
+        root = _directory(manifest["project"])
+    except (NativeWorkspaceError, OSError, KeyError, TypeError, ValueError):
+        root = None
+    pending, published = [], 0
+    for issue in blocked:
+        name, actual = issue.get("path"), None
+        expected = canonical.get(name) if isinstance(canonical, dict) and isinstance(name, str) else None
+        if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            expected = None
+        if root is not None:
+            try:
+                path = _file(root, name)
+                before = path.stat()
+                if stat.S_ISREG(before.st_mode):
+                    observed = _file_digest(path)
+                    after = _file(root, name).stat()
+                    if all(getattr(before, key) == getattr(after, key) for key in
+                           ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")):
+                        actual = observed
+            except (NativeWorkspaceError, OSError, TypeError, ValueError):
+                pass
+        # Equal bytes settle only the old "not owned" import warning. A mode
+        # or coordination conflict needs its own evidence, even for equal bytes.
+        if issue.get("reason") == "native_path_not_owned" and actual is not None and actual == expected:
+            published += 1
+        else:
+            pending.append({**issue, "sha256": actual, "canonical_sha256": expected})
+    return {"blocked": pending, "published_count": published}
+
+
 def signature_paths(manifest, extra_names=()):
     """The absolute paths tree_signature() lstat()s for one private tree: its
     root, Git's untracked-file inputs, every baseline file, the named extra

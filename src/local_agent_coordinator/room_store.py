@@ -4938,6 +4938,15 @@ class RoomStore:
                         include_provenance=True, include_retry_review=True)
                     if baseline.get("files") != expected_files:
                         raise RoomError("objective_binding_changed")
+                if baseline and baseline.get("changed_since_delivery") and not baseline.get("review_retry"):
+                    # The service compared these bytes with the current project;
+                    # recheck the published task bindings in this transaction.
+                    current_files = {file["path"]: file["sha256"] for file in baseline["files"]}
+                    current_files.update({file["path"]: file["published_by"]["sha256"]
+                                          for file in baseline["changed_since_delivery"]})
+                    files, changed = self._restart_result_files(db, room_id, binding["run_id"], current_files)
+                    if files != baseline["files"] or changed != baseline["changed_since_delivery"]:
+                        raise RoomError("objective_binding_changed")
                 cut_off = self._native_cut_off_work(db, room_id) if room["mode"] == "native_project" else []
                 if any({key: value for key, value in item.items() if key != "observation"} not in cut_off
                        for item in retained_work or ()):
@@ -5243,6 +5252,40 @@ class RoomStore:
                 files[file["path"]] = {**file, "run_id": run_id, "task_id": task["id"],
                                        "review_kind": "pending_review"}
         return list(files.values()) if include_provenance else {path: file["sha256"] for path, file in files.items()}
+
+    def restart_result_files(self, room_id, run_id, current_files):
+        """Keep accepted bytes, naming those superseded by published work still awaiting review."""
+        with self._connection() as db:
+            return self._restart_result_files(db, room_id, run_id, current_files)
+
+    def _restart_result_files(self, db, room_id, run_id, current_files):
+        accepted = self._run_result_files(db, room_id, run_id, include_provenance=True)
+        tasks = {task["id"]: task for task in db.execute(
+            "SELECT * FROM shared_tasks WHERE room_id=? AND run_id=?", (room_id, run_id))}
+        kept, changed = [], []
+        for file in accepted:
+            current_sha = current_files.get(file["path"])
+            if current_sha == file["sha256"]:
+                kept.append(file)
+                continue
+            original = tasks[file["task_id"]]
+            successors = [task for task in tasks.values()
+                if task["status"] in {"review", "blocked"} and task["review_reason"] is None
+                and task["blocked_reason"] in {None, "agent_quota_exhausted", "subscription_limit_reached",
+                                                "all_partners_quota_exhausted"}
+                and task["result_version"] > 0 and type(task["result_revision"]) is int
+                and type(original["result_revision"]) is int
+                and task["result_revision"] > original["result_revision"]
+                and any(item["path"] == file["path"] and item["sha256"] == current_sha
+                        for item in json.loads(task["result_files_json"] or "[]"))]
+            if not successors:
+                raise RoomError("objective_binding_changed")
+            successor = max(successors, key=lambda task: task["result_revision"])
+            changed.append({"path": file["path"], "expected_sha256": file["sha256"], "reason": "changed",
+                "published_by": {"task_id": successor["id"], "revision": successor["result_revision"],
+                    "digest": successor["result_digest"], "result_version": successor["result_version"],
+                    "sha256": current_sha, "review_kind": "pending_review"}})
+        return kept, changed
 
     def autonomous_work_active(self):
         with self._connection() as db:

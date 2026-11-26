@@ -128,7 +128,7 @@ class FakeElement {
 
   fire(name, fields = {}) {
     if (name === 'click' && this.disabled) return;
-    const event = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...fields };
+    const event = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...fields };
     for (const listener of this.listeners.get(name) || []) listener(event);
   }
 
@@ -12447,4 +12447,102 @@ test('a partner waiting for the network says so, and goes back to its usual line
   await ui.poll();
   assert.match(ui.get('partner-liveness-claude').textContent, /^刚刚有活动/);
   assert.doesNotMatch(ui.get('partner-liveness-claude').className, /warning/);
+});
+
+
+test('workspace warnings dismiss by room and byte evidence across polling and reload, not refresh timestamps', async () => {
+  const saved = activeActivitySnapshot();
+  saved.native_workspaces = [{ provider: 'codex', published_count: 25, blocked: [{ path: 'review.ts', reason: 'native_path_not_owned', sha256: 'private-a', canonical_sha256: 'shared-a' }] }];
+  const options = { rooms: [saved.room], saved, nativeProjectSupport: true };
+  const ui = await browser(options);
+  assert.match(ui.get('collaboration-outcome').textContent, /有 1 项改动.*另有 25 项/);
+  ui.type('未发送草稿'); await ui.click('dismiss-native-workspace-warning');
+  await ui.poll(); assert.ok(!ui.document.getElementById('dismiss-native-workspace-warning') || ui.document.getElementById('dismiss-native-workspace-warning').parentNode.hidden);
+  saved.native_workspaces[0].checked_revision = 999; await ui.poll();
+  assert.ok(!ui.document.getElementById('dismiss-native-workspace-warning') || ui.document.getElementById('dismiss-native-workspace-warning').parentNode.hidden);
+  const reopened = await browser({ ...options, storage: ui.storage });
+  assert.doesNotMatch(reopened.get('collaboration-outcome').textContent, /有 1 项改动/);
+  const other = structuredClone(saved); other.room.id = '77777777-7777-4777-8777-777777777777';
+  const otherUi = await browser({ ...options, rooms: [other.room], saved: other, storage: ui.storage,
+    route(request) { if (request.path === `/api/rooms/${other.room.id}`) return other; } });
+  assert.match(otherUi.get('collaboration-outcome').textContent, /有 1 项改动/);
+  saved.native_workspaces[0].blocked[0].sha256 = 'private-b'; await reopened.poll();
+  assert.match(reopened.get('collaboration-outcome').textContent, /有 1 项改动/);
+  assert.equal(ui.get('message').value, '未发送草稿'); assert.equal(ui.posts().length, 0); assert.equal(reopened.posts().length, 0);
+  saved.native_workspaces[0].blocked = []; await reopened.poll();
+  assert.doesNotMatch(reopened.get('collaboration-outcome').textContent, /尚未纳入交付/);
+  saved.native_workspaces[0].conflicts = [{ path: 'conflict.ts', kind: 'source_handoff', baseline_sha256: 'base', source_sha256: 'source-a', candidate_sha256: 'candidate' }];
+  await reopened.poll(); await reopened.click('dismiss-native-workspace-warning'); await reopened.poll();
+  saved.native_workspaces[0].conflicts[0].source_sha256 = 'source-b'; await reopened.poll();
+  assert.match(reopened.get('collaboration-outcome').textContent, /有 1 项改动.*conflict.ts/);
+});
+
+test('action warning dismissal survives polling and repeated same refusal without deleting draft or retrying', async () => {
+  const saved = withNaturalContinuation(objectiveSnapshot({ status: 'running' }));
+  const ui = await browser({ rooms: [saved.room], saved, naturalContinuationSupport: true, route(request) {
+    if (request.path.endsWith('/messages')) return { error: 'objective_conflict' };
+  } });
+  ui.type('保留要求'); await ui.submit(); assert.equal(ui.get('action-error').hidden, false);
+  await ui.click('dismiss-action-error'); await ui.poll(); assert.equal(ui.get('action-error').hidden, true);
+  ui.type('保留要求'); await ui.submit(); assert.equal(ui.get('action-error').hidden, true);
+  assert.equal(ui.get('message').value, '保留要求'); assert.equal(ui.posts().length, 2);
+});
+
+test('quota action warning clears only on actual resumed work, ordinary failures persist', async () => {
+  const saved = withNaturalContinuation(objectiveSnapshot({ status: 'running' }));
+  let code = 'all_partners_quota_exhausted';
+  const ui = await browser({ rooms: [saved.room], saved, naturalContinuationSupport: true, route(request) {
+    if (request.path.endsWith('/messages')) return { error: code };
+  } });
+  ui.type('继续做'); await ui.submit(); assert.equal(ui.get('action-error').hidden, false);
+  await ui.poll(); assert.equal(ui.get('action-error').hidden, false);
+  saved.current_run.id = '66666666-6666-4666-8666-666666666666'; saved.current_run.status = 'in_progress';
+  await ui.poll(); assert.equal(ui.get('action-error').hidden, true);
+  code = 'objective_conflict'; saved.continuation.binding.run_id = saved.current_run.id; await ui.poll(); ui.type('保留要求'); await ui.submit();
+  saved.current_run.id = '55555555-5555-4555-8555-555555555555'; await ui.poll();
+  assert.equal(ui.get('action-error').hidden, false); assert.equal(ui.posts().length, 2);
+});
+
+
+test('fresh available member quota clears the old all-partner warning without a new run; stale unknown and blocked do not', async () => {
+  let now = Date.now();
+  const saved = withNaturalContinuation(objectiveSnapshot({ status: 'stopped' }));
+  const partners = catalog.slice(0, 2).map((partner) => ({ ...partner, enabled: true, availability: { scope: 'default_cli_login', state: 'blocked', selectable: false, stale: false, observed_at: now / 1000 } }));
+  const ui = await browser({ rooms: [saved.room], saved, partners, now: () => now, naturalContinuationSupport: true, route(request) {
+    if (request.path.endsWith('/messages')) return { error: 'all_partners_quota_exhausted' };
+  } });
+  ui.type('继续'); await ui.submit(); assert.equal(ui.get('action-error').hidden, false);
+  now += 1000;
+  partners[1].availability = { ...partners[1].availability, observed_at: now / 1000, state: 'unknown', selectable: true };
+  await ui.poll(); assert.equal(ui.get('action-error').hidden, false);
+  partners[1].availability.state = 'available'; partners[1].availability.stale = true;
+  await ui.poll(); assert.equal(ui.get('action-error').hidden, false);
+  partners[1].availability = { ...partners[1].availability, stale: false, state: 'blocked', selectable: false };
+  await ui.poll(); assert.equal(ui.get('action-error').hidden, false);
+  partners[1].availability = { ...partners[1].availability, state: 'available', selectable: true };
+  await ui.poll(); assert.equal(ui.get('action-error').hidden, true);
+  assert.equal(ui.posts().filter((request) => request.path.endsWith('/messages')).length, 1);
+});
+
+test('repeated top notice stays dismissed and a different condition becomes visible', async () => {
+  let failure = 'fixture_warning_one';
+  const options = { route(request) { if (request.path === '/api/status') return { app: 'local-agent-rooms', agents: catalog, task_modes: ['text'], background_error: failure }; } };
+  const ui = await browser(options);
+  assert.equal(ui.get('notice').hidden, false); await ui.click('dismiss-notice');
+  await ui.poll(); assert.equal(ui.get('notice').hidden, true);
+  const reloaded = await browser({ ...options, storage: ui.storage });
+  assert.equal(reloaded.get('notice').hidden, true);
+  failure = 'fixture_warning_two'; await reloaded.poll(); assert.equal(reloaded.get('notice').hidden, false);
+  assert.equal(ui.posts().length + reloaded.posts().length, 0);
+});
+
+test('warning dismissal still works when session storage refuses preferences', async () => {
+  class RefusingPreferences extends Map {
+    set(key, value) { if (key.startsWith('beanest:dismissed-warnings:')) throw new Error('storage refused'); return super.set(key, value); }
+  }
+  const ui = await browser({ storage: new RefusingPreferences(), route(request) {
+    if (request.path === '/api/status') return { app: 'local-agent-rooms', agents: catalog, task_modes: ['text'], background_error: 'fixture_storage_warning' };
+  } });
+  await ui.click('dismiss-notice'); await ui.poll();
+  assert.equal(ui.get('notice').hidden, true); assert.equal(ui.posts().length, 0);
 });

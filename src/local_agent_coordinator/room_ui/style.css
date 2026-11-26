@@ -1963,3 +1963,13 @@ html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .t
 /* The tab panels are focusable so the keyboard can scroll them. A ring around the whole panel drew a
    coloured line under the tabs and above the composer that read as decoration, not as focus. */
 [role="tabpanel"]:focus-visible, .timeline:focus-visible, .task-materials-body:focus-visible { outline: none; }
+
+/* A dismiss button changes only the warning's visibility. */
+.dismissible-notice { display: flex; align-items: flex-start; gap: 12px; }
+.dismissible-notice .warning-message { flex: 1; min-width: 0; }
+.warning-dismiss { flex: 0 0 28px; width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 7px; color: inherit; background: transparent; cursor: pointer; }
+.warning-dismiss::before { content: "×"; font-size: 22px; line-height: 1; }
+.warning-dismiss:hover { background: var(--hover); }
+.native-workspace-warning { position: relative; }
+.native-workspace-warning > .warning-dismiss { position: absolute; top: 6px; right: 6px; color: var(--ask); }
+.native-workspace-warning .native-workspace-issues { padding-right: 42px; }

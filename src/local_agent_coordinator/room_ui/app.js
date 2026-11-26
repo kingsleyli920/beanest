@@ -3345,24 +3345,73 @@ function renderRecipientControl() {
   else if (recipientMenu) renderRecipientMenu();
 }
 
-function showNotice(message = '', type = '') {
-  $('notice').textContent = message;
-  $('notice').className = `notice ${type}`;
-  $('notice').hidden = !message;
+// Dismissal is a viewing preference, never an acknowledgement or task mutation.
+// Keep it stable across polling and reloads; timestamps/revisions are not evidence.
+const dismissedWarnings = new Map();
+function warningDismissals(roomId) {
+  const key = `beanest:dismissed-warnings:${state.authScope}:${roomId}`;
+  if (!dismissedWarnings.has(key)) {
+    const saved = readSessionJson(key);
+    dismissedWarnings.set(key, new Set(Array.isArray(saved) ? saved.filter((value) => typeof value === 'string') : []));
+  }
+  return { key, values: dismissedWarnings.get(key) };
 }
-
+function warningDismissButton(roomId, fingerprint, onDismiss, id) {
+  const button = element('button', '', 'warning-dismiss');
+  button.type = 'button'; button.id = id;
+  button.setAttribute('aria-label', t("关闭提示")); button.title = t("关闭提示");
+  button.addEventListener('click', (event) => {
+    event.preventDefault(); event.stopPropagation();
+    const saved = warningDismissals(roomId); saved.values.add(fingerprint);
+    try { sessionStorage.setItem(saved.key, JSON.stringify([...saved.values])); } catch (_) { /* In-memory dismissal still works. */ }
+    onDismiss();
+  });
+  return button;
+}
+function renderDismissibleNotice(node, message, type, fingerprint, id) {
+  const roomId = state.selected || 'new';
+  node.replaceChildren(); node.className = `notice ${type} dismissible-notice`;
+  node.hidden = !message || warningDismissals(roomId).values.has(fingerprint);
+  if (!message) return;
+  node.append(element('span', message, 'warning-message'), warningDismissButton(roomId, fingerprint, () => { node.hidden = true; }, id));
+}
+function showNotice(message = '', type = '', evidence = message) {
+  renderDismissibleNotice($('notice'), message, type, JSON.stringify(['notice', type, evidence]), 'dismiss-notice');
+}
+function quotaActionErrorResolved(error) {
+  if (!quotaBlockCodes.has(error.code)) return false;
+  const snapshot = state.snapshot;
+  if (!snapshot || snapshot.room.id !== error.roomId) return false;
+  const run = snapshot.current_run;
+  const active = run && !['complete', 'completed', 'ready_for_user', 'needs_user', 'stopped', 'interrupted', 'cancelled', 'unknown'].includes(run.status);
+  if (active && (run.id !== error.runId || run.status !== error.runStatus
+    || (snapshot.jobs || []).some((job) => job.run_id === run.id && !error.jobIds.includes(job.id)))) return true;
+  // A fresh, affirmative quota observation can resolve an all-partner refusal.
+  // An elapsed reset estimate or an unknown observation cannot.
+  return error.code === 'all_partners_quota_exhausted' && (state.partners || []).some((partner) => {
+    const availability = partner.availability;
+    return snapshot.members.some((member) => member.id === partner.id)
+      && partner.enabled !== false && partner.lifecycle_state !== 'archived'
+      && availability?.state === 'available' && availability.selectable === true && availability.stale !== true
+      && Number.isFinite(availability.observed_at) && availability.observed_at > error.observedAt
+      && availability.observed_at <= Date.now() / 1000 && Date.now() / 1000 - availability.observed_at <= 90;
+  });
+}
 function renderActionError() {
-  const error = state.actionError;
+  let error = state.actionError;
+  if (error && quotaActionErrorResolved(error)) { state.actionError = null; error = null; }
   const visible = error && error.roomId === (state.selected || 'new');
-  $('action-error').textContent = visible ? error.message : '';
-  $('action-error').hidden = !visible;
+  renderDismissibleNotice($('action-error'), visible ? error.message : '', 'error action-error',
+    JSON.stringify(['action-error', error?.action, error?.code, error?.runId, error?.message]), 'dismiss-action-error');
 }
 function clearActionError() {
   state.actionError = null; renderActionError();
 }
-function showActionError(message, roomId, action) {
+function showActionError(message, roomId, action, code = '') {
   if ((state.selected || 'new') !== roomId) return;
-  state.actionError = { roomId, action, message }; renderActionError();
+  state.actionError = { roomId, action, message, code, runId: state.snapshot?.current_run?.id,
+    runStatus: state.snapshot?.current_run?.status, jobIds: (state.snapshot?.jobs || []).map((job) => job.id), observedAt: Date.now() / 1000 };
+  renderActionError();
 }
 
 function renderConnection() {
@@ -6162,6 +6211,13 @@ function renderNativeWorkspaceNotes(container, snapshot) {
     ...(Array.isArray(workspace.blocked) ? workspace.blocked.map((item) => ({ ...item, provider: workspace.provider })) : []),
   ]);
   if (!issues.length) return;
+  const roomId = snapshot.room.id;
+  const evidence = issues.map((item) => [item.provider, item.path, item.reason, !!item.conflict, item.sha256 ?? null, item.canonical_sha256 ?? null,
+    item.kind ?? null, item.baseline_sha256 ?? null, item.source_sha256 ?? null, item.candidate_sha256 ?? null])
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const fingerprint = JSON.stringify(['native-workspace', evidence]);
+  if (warningDismissals(roomId).values.has(fingerprint)) return;
+  const wrapper = element('div', '', 'native-workspace-warning');
   const details = element('details', '', 'native-workspace-issues');
   details.append(element('summary', t("有 {p0} 项改动需要处理，尚未纳入交付", { p0: issues.length })));
   const reasons = { native_binary_not_imported: t("二进制改动尚未导入"), native_deletion_not_imported: t("删除操作尚未导入"),
@@ -6169,7 +6225,11 @@ function renderNativeWorkspaceNotes(container, snapshot) {
     native_change_too_large: t("改动超过本次导入范围"), native_merge_conflict: t("文件版本冲突"), native_unresolved_conflict: t("旧版本冲突尚未明确解决，改动未导入") };
   const list = element('ul');
   for (const item of issues) list.append(element('li', `${displayName(item.provider)} · ${typeof item.path === 'string' ? item.path : t("文件路径未提供")}${interfaceColon()}${item.conflict ? t("需核对新旧版本冲突") : reasons[item.reason] || t("改动未导入，原因待核对")}`));
-  details.append(list, element('p', t("这些改动保留为待处理项，不表示已合入成果或完成目标。"), 'detail-caption')); container.append(details);
+  details.append(list, element('p', t("这些改动保留为待处理项，不表示已合入成果或完成目标。"), 'detail-caption'));
+  const publishedCount = workspaces.reduce((count, workspace) => count + (Number.isSafeInteger(workspace.published_count) && workspace.published_count > 0 ? workspace.published_count : 0), 0);
+  if (publishedCount) details.append(element('p', t("另有 {p0} 项此前标记的改动已与当前成果一致。", { p0: publishedCount }), 'detail-caption'));
+  wrapper.append(details, warningDismissButton(roomId, fingerprint, () => { wrapper.hidden = true; }, 'dismiss-native-workspace-warning'));
+  container.append(wrapper);
 }
 function renderNativeExecutions(snapshot) {
   const records = Array.isArray(snapshot?.native_executions) ? snapshot.native_executions : [];
@@ -6741,7 +6801,7 @@ async function refresh({ initial = false, restoreSelection = false } = {}) {
     const failure = results.find((result) => result.status === 'rejected');
     if (failure) showNotice(failure.reason.message, 'error');
     else if (discoveryError) showNotice(discoveryError, 'error');
-    else if (status.status === 'fulfilled' && status.value.background_error) showNotice(executionMessage(status.value.background_error), 'error');
+    else if (status.status === 'fulfilled' && status.value.background_error) showNotice(executionMessage(status.value.background_error), 'error', status.value.background_error);
     else if (!state.pending) showNotice();
     if ((initial || restoreSelection) && !state.selected && list.status === 'fulfilled' && Array.isArray(list.value.rooms)) {
       const hash = window.location?.hash || '';
@@ -7317,7 +7377,7 @@ async function submitPending() {
       } else {
         retireOutboxRequest(pending, 'abandoned'); state.pending = null;
         rememberPending();
-        showActionError(error.message || t("请求未完成，请核对状态。"), pending.roomId || 'new', pending.kind);
+        showActionError(error.message || t("请求未完成，请核对状态。"), pending.roomId || 'new', pending.kind, error.code);
       }
     }
   } finally {

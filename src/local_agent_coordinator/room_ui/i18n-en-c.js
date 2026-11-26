@@ -1279,4 +1279,6 @@ Object.assign(window.BeanestI18nEnglish || (window.BeanestI18nEnglish = Object.c
   "已中断那条命令，伙伴会接着做。": "Stopped that command; the partner carries on.",
   "这条命令已经结束，或这次调用已不在运行。": "That command has already ended, or the call is no longer running.",
   "中断命令要你本人在界面里操作。": "Only you can stop a command, from the interface.",
+  "关闭提示": "Dismiss notice",
+  "另有 {p0} 项此前标记的改动已与当前成果一致。": "Another {p0} previously flagged changes now match the current output.",
 });

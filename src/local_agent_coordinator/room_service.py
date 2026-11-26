@@ -1544,6 +1544,25 @@ class RoomService(RoomPromptMixin):
                     changed.update({file["path"]: changed.get(file["path"], file) for file in metadata})
                     snapshot["project"]["files"] = list(changed.values())
                     snapshot["project"].update(execution="native_tools", execution_reason=None)
+                    # Saved publication warnings are history. Display only private
+                    # bytes that still differ from the canonical project.
+                    for workspace in snapshot["native_workspaces"]:
+                        if not workspace["blocked"]:
+                            continue
+                        state = self.store.native_workspace(room_id, workspace["provider"])
+                        if not isinstance(state, dict):
+                            continue  # A disappearing tree provides no proof to clear its warning.
+                        try:
+                            pending_paths = sorted({item["path"] for item in workspace["blocked"]} - changed.keys())
+                            for offset in range(0, len(pending_paths), 16):
+                                changed.update({file["path"]: file for file in self._project(room_id).metadata_for_paths(
+                                    pending_paths[offset:offset + 16])})
+                            projection = native_workspace.pending_blocked(state,
+                                {path: file["sha256"] for path, file in changed.items()})
+                        except (native_workspace.NativeWorkspaceError, ProjectWorkspaceError, OSError):
+                            continue  # Display auditing must preserve unknown warnings, not break the room.
+                        workspace.update(projection)
+                        workspace["state"] = "blocked" if workspace["blocked"] else "ready"
             except (RoomError, ProjectWorkspaceError) as error:
                 snapshot["project"] = {"available": False, "error": error.code, "execution": "disabled"}
         active = snapshot["room"]["id"] in self._captures or any(room == snapshot["room"]["id"] and not worker.done()
@@ -2100,11 +2119,18 @@ class RoomService(RoomPromptMixin):
                 actual = {file["path"]: file for file in project.get("files", [])}
                 review_retry = (action == "restart-objective"
                     and (self.store.host_text_failure(room_id) or {}).get("review_only") is True)
-                files = self.store.run_result_files(room_id, run_id, include_provenance=True,
-                                                    include_retry_review=review_retry)
-                if any(actual.get(file["path"], {}).get("sha256") != file["sha256"] for file in files):
-                    raise RoomError("objective_binding_changed")
+                changed = []
+                if action == "restart-objective" and not review_retry:
+                    files, changed = self.store.restart_result_files(room_id, run_id,
+                        {path: file["sha256"] for path, file in actual.items()})
+                else:
+                    files = self.store.run_result_files(room_id, run_id, include_provenance=True,
+                                                        include_retry_review=review_retry)
+                    if any(actual.get(file["path"], {}).get("sha256") != file["sha256"] for file in files):
+                        raise RoomError("objective_binding_changed")
                 baseline = {"run_id": run_id, "revision": revision, "digest": digest, "files": files, "verified": True}
+                if changed:
+                    baseline["changed_since_delivery"] = changed
                 if review_retry:
                     baseline["review_retry"] = True
             elif action == "followup-objective":
@@ -5505,9 +5531,20 @@ class RoomService(RoomPromptMixin):
         # Per room, not per run: each continue starts a new run, and keying on
         # the run let a still-exhausted room restart every few seconds.
         previous = self._quota_waits.get(room_id)
-        if previous and (not previous["task"].done()
-                         or self.clock() - previous["checked_at"] < _QUOTA_WAIT_RECHECK_SECONDS):
-            return
+        if previous:
+            if not previous["task"].done():
+                return
+            # A real account refresh can confirm recovery before the periodic
+            # recheck. Consume each new observation once, without extra polling.
+            refreshed = False
+            if self.partner_manager is not None:
+                for provider in self._recovered_quota_members(snapshot):
+                    observed_at = self.partner_manager.get(provider)["availability"].get("observed_at")
+                    if type(observed_at) in (int, float) and previous["checked_at"] < observed_at <= self.clock():
+                        refreshed = True
+                        break
+            if not refreshed and self.clock() - previous["checked_at"] < _QUOTA_WAIT_RECHECK_SECONDS:
+                return
         task = asyncio.create_task(self._resume_after_quota_wait(room_id, snapshot["current_run"]["id"]))
         self._quota_waits[room_id] = {"checked_at": self.clock(), "task": task,
                                       "evidence_free_at": (previous or {}).get("evidence_free_at")}
