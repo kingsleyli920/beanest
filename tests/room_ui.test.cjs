@@ -4904,7 +4904,7 @@ test('native tool activity is bound to the active provider job and never masquer
   saved.native_workspaces = [{ provider: 'claude', state: 'blocked', conflicts: [{ path: 'main.py', reason: 'native_merge_conflict' }], blocked: [{ path: 'art.png', reason: 'native_binary_not_imported' }, { path: 'other.py', reason: 'native_path_not_owned' }, { path: 'old.py', reason: 'native_unresolved_conflict' }] }];
   const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
   assert.match(ui.get('partner-activity-claude').textContent, /正在使用本机工具.*实现计分规则/);
-  assert.match(ui.get('collaboration-outcome').textContent, /有 4 项改动.*main.py.*新旧版本冲突.*art.png.*二进制.*other.py.*授权写入范围.*old.py.*旧版本冲突尚未明确解决/);
+  assert.match(ui.get('collaboration-outcome').textContent, /有 4 处工作副本改动.*main.py.*新旧版本冲突.*art.png.*二进制.*other.py.*授权写入范围.*old.py.*旧版本冲突尚未明确解决/);
   assert.match(ui.get('native-execution-records').textContent, /工具调用 3 次.*工具返回 3 次.*退出码 0.*已确认清理/);
   assert.match(ui.get('native-execution-records').textContent, /不等于测试、游戏操作或目标已验收/);
   assert.doesNotMatch(ui.get('events').textContent, /正在使用工具|private-command-receipt|工具调用 3/);
@@ -12455,26 +12455,26 @@ test('workspace warnings dismiss by room and byte evidence across polling and re
   saved.native_workspaces = [{ provider: 'codex', published_count: 25, blocked: [{ path: 'review.ts', reason: 'native_path_not_owned', sha256: 'private-a', canonical_sha256: 'shared-a' }] }];
   const options = { rooms: [saved.room], saved, nativeProjectSupport: true };
   const ui = await browser(options);
-  assert.match(ui.get('collaboration-outcome').textContent, /有 1 项改动.*另有 25 项/);
+  assert.match(ui.get('collaboration-outcome').textContent, /有 1 处工作副本改动/);
   ui.type('未发送草稿'); await ui.click('dismiss-native-workspace-warning');
-  await ui.poll(); assert.ok(!ui.document.getElementById('dismiss-native-workspace-warning') || ui.document.getElementById('dismiss-native-workspace-warning').parentNode.hidden);
+  await ui.poll(); assert.ok(!ui.document.getElementById('dismiss-native-workspace-warning') || ui.document.querySelector('.native-change-card').hidden);
   saved.native_workspaces[0].checked_revision = 999; await ui.poll();
-  assert.ok(!ui.document.getElementById('dismiss-native-workspace-warning') || ui.document.getElementById('dismiss-native-workspace-warning').parentNode.hidden);
+  assert.ok(!ui.document.getElementById('dismiss-native-workspace-warning') || ui.document.querySelector('.native-change-card').hidden);
   const reopened = await browser({ ...options, storage: ui.storage });
-  assert.doesNotMatch(reopened.get('collaboration-outcome').textContent, /有 1 项改动/);
+  assert.doesNotMatch(reopened.get('collaboration-outcome').textContent, /有 1 处工作副本改动/);
   const other = structuredClone(saved); other.room.id = '77777777-7777-4777-8777-777777777777';
   const otherUi = await browser({ ...options, rooms: [other.room], saved: other, storage: ui.storage,
     route(request) { if (request.path === `/api/rooms/${other.room.id}`) return other; } });
-  assert.match(otherUi.get('collaboration-outcome').textContent, /有 1 项改动/);
+  assert.match(otherUi.get('collaboration-outcome').textContent, /有 1 处工作副本改动/);
   saved.native_workspaces[0].blocked[0].sha256 = 'private-b'; await reopened.poll();
-  assert.match(reopened.get('collaboration-outcome').textContent, /有 1 项改动/);
+  assert.match(reopened.get('collaboration-outcome').textContent, /有 1 处工作副本改动/);
   assert.equal(ui.get('message').value, '未发送草稿'); assert.equal(ui.posts().length, 0); assert.equal(reopened.posts().length, 0);
   saved.native_workspaces[0].blocked = []; await reopened.poll();
-  assert.doesNotMatch(reopened.get('collaboration-outcome').textContent, /尚未纳入交付/);
+  assert.doesNotMatch(reopened.get('collaboration-outcome').textContent, /工作副本改动待核对/);
   saved.native_workspaces[0].conflicts = [{ path: 'conflict.ts', kind: 'source_handoff', baseline_sha256: 'base', source_sha256: 'source-a', candidate_sha256: 'candidate' }];
   await reopened.poll(); await reopened.click('dismiss-native-workspace-warning'); await reopened.poll();
   saved.native_workspaces[0].conflicts[0].source_sha256 = 'source-b'; await reopened.poll();
-  assert.match(reopened.get('collaboration-outcome').textContent, /有 1 项改动.*conflict.ts/);
+  assert.match(reopened.get('collaboration-outcome').textContent, /有 1 处工作副本改动.*conflict.ts/);
 });
 
 test('action warning dismissal survives polling and repeated same refusal without deleting draft or retrying', async () => {
@@ -12554,19 +12554,18 @@ test('native workspace warnings count a partner file once while retaining confli
       { path: 'artifacts/aftermath/index.html', reason: 'native_path_not_owned', sha256: 'private', canonical_sha256: 'canonical' }] }];
   const original = JSON.stringify(saved.native_workspaces);
   const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
-  const details = () => ui.document.querySelectorAll('.native-workspace-issues')[0];
-  assert.equal(details().children[0].textContent, '有 1 项改动需要处理，尚未纳入交付');
-  assert.equal(details().children[1].children.length, 1);
-  assert.match(details().children[1].textContent, /Codex · artifacts\/aftermath\/index.html：需核对新旧版本冲突；旧版本冲突尚未明确解决，改动未导入；超出本任务授权写入范围/);
-  assert.equal(JSON.stringify(saved.native_workspaces), original, 'grouping changes no diagnostic evidence');
+  const card = () => ui.document.querySelector('.native-change-card');
+  const rows = () => ui.document.querySelector('.native-change-files').children;
+  assert.equal(card().children[0].textContent, '有 1 处工作副本改动待核对'); assert.equal(rows().length, 1);
+  assert.match(rows()[0].textContent, /Codex · index.html.*artifacts\/aftermath\/index.html.*需核对新旧版本冲突；旧版本冲突尚未明确解决，改动未导入；超出本任务授权写入范围/);
+  assert.equal(JSON.stringify(saved.native_workspaces), original);
   ui.type('未发送的要求'); await ui.click('dismiss-native-workspace-warning'); await ui.poll();
-  assert.ok(!details() || details().parentNode.hidden);
+  assert.ok(!card() || card().hidden);
   saved.native_workspaces[0].blocked[0].canonical_sha256 = 'new-canonical'; await ui.poll();
-  assert.equal(details().children[0].textContent, '有 1 项改动需要处理，尚未纳入交付');
-  await ui.click('dismiss-native-workspace-warning'); await ui.poll(); assert.ok(!details() || details().parentNode.hidden);
+  assert.equal(card().children[0].textContent, '有 1 处工作副本改动待核对');
+  await ui.click('dismiss-native-workspace-warning'); await ui.poll(); assert.ok(!card() || card().hidden);
   saved.native_workspaces[0].conflicts[0].candidate_sha256 = 'new-candidate'; await ui.poll();
-  assert.equal(details().children[1].children.length, 1);
-  assert.match(details().children[1].textContent, /需核对新旧版本冲突.*授权写入范围/);
+  assert.equal(rows().length, 1); assert.match(rows()[0].textContent, /需核对新旧版本冲突.*授权写入范围/);
   assert.equal(ui.get('message').value, '未发送的要求'); assert.equal(ui.posts().length, 0);
 });
 
@@ -12578,10 +12577,11 @@ test('native workspace file grouping keeps different partners and paths separate
       { provider: 'codex', conflicts: [{ path: 'same.html', candidate_sha256: 'codex' }], blocked: [{ path: 'same.html', reason: 'native_path_not_owned' }, { reason: 'native_binary_not_imported' }, { reason: 'native_symlink_refused' }] },
     ];
     const ui = await browser({ language, rooms: [saved.room], saved, nativeProjectSupport: true });
-    const details = ui.document.querySelectorAll('.native-workspace-issues')[0];
-    assert.match(details.children[0].textContent, language === 'en' ? /5 changes/ : /有 5 项改动/);
-    const rows = details.children[1].children;
-    assert.equal(rows.length, 5);
+    const card = ui.document.querySelector('.native-change-card');
+    assert.match(card.children[0].textContent, language === 'en' ? /Working-copy changes to check: 5/ : /有 5 处工作副本改动/);
+    const rows = ui.document.querySelectorAll('.native-change-file');
+    assert.equal(rows.length, 5); assert.equal(ui.document.querySelector('.native-change-files').children.length, 3);
+    assert.notEqual(ui.document.querySelector('.native-change-more').open, true);
     assert.match(rows[0].textContent, /Claude Code · same.html/); assert.match(rows[2].textContent, /Codex · same.html/);
     assert.match(rows[0].textContent, language === 'en' ? /conflict.*not been explicitly resolved/i : /需核对新旧版本冲突.*旧版本冲突/);
     assert.match(rows[2].textContent, language === 'en' ? /conflict.*scope/i : /需核对新旧版本冲突.*授权写入范围/);
@@ -12689,4 +12689,113 @@ test('a temporary status failure retains negotiated paging and keeps reading cur
   assert.ok(ui.requests.filter((request) => request.path === `/api/rooms/${roomId}/state`).length >= 2);
   assert.match(ui.get('events').textContent, /已经读到的尾页/); assert.equal(ui.get('notice').hidden, false);
   statusFails = false; await ui.poll(); assert.equal(ui.get('notice').hidden, true); assert.equal(ui.posts().length, 0);
+});
+
+function workingCopyWarningFixture() {
+  const saved = activeActivitySnapshot();
+  saved.native_workspaces = [{ provider: 'codex', workspace_id: 'codex~x3', conflicts: [{ path: 'artifacts/demo/index.html', kind: 'concurrent_changes', candidate_sha256: 'private-sha' }],
+    blocked: [{ path: 'artifacts/demo/index.html', reason: 'native_path_not_owned', sha256: 'private-sha', canonical_sha256: 'canonical-sha' }] }];
+  return saved;
+}
+function workingCopyPreview(overrides = {}) {
+  return { workspace_id: 'codex~x3', provider: 'codex', path: 'artifacts/demo/index.html', read_only: true, state: 'different',
+    canonical: { available: true, exists: true, text: true, truncated: false, bytes: 40, sha256: 'a'.repeat(64), content: 'canonical codex~x3 <script>not executed</script>' },
+    private: { available: true, exists: true, text: true, truncated: false, bytes: 40, sha256: 'b'.repeat(64), content: '<img src=x onerror=alert(1)> private codex~x3' }, ...overrides };
+}
+
+test('working-copy comparison is exact read-only plain text with modal keyboard and focus behavior in both languages', async () => {
+  for (const language of ['zh-CN', 'en']) {
+    const saved = workingCopyWarningFixture();
+    const ui = await browser({ language, rooms: [saved.room], saved, nativeProjectSupport: true, route(request) {
+      if (request.path.includes('/native-changes?')) {
+        const url = new URL(`http://fixture${request.path}`);
+        assert.equal(url.searchParams.get('workspace_id'), 'codex~x3'); assert.equal(url.searchParams.get('path'), 'artifacts/demo/index.html'); assert.equal(request.method, 'GET');
+        return workingCopyPreview();
+      }
+    } });
+    const card = ui.document.querySelector('.native-change-card');
+    assert.match(card.textContent, language === 'en' ? /Beanest.*main-branch and GitHub/ : /豆窝成果.*主分支和 GitHub/);
+    assert.notEqual(ui.document.querySelector('.native-workspace-issues').open, true);
+    await ui.click('native-change-compare-0');
+    assert.equal(ui.get('native-change-dialog').getAttribute('role'), 'dialog'); assert.equal(ui.document.querySelector('.app-shell').inert, true);
+    assert.match(ui.get('native-change-body').textContent, /codex~x3 <script>not executed<\/script>/);
+    assert.match(ui.get('native-change-body').textContent, /<img src=x onerror=alert\(1\)>/);
+    const texts = ui.document.querySelectorAll('.native-diff-text'); assert.equal(texts.length, 2); assert.equal(texts[0].children.length, 0); assert.equal(texts[1].children.length, 0);
+    ui.document.root.fire('keydown', { key: 'Tab' }); assert.equal(ui.document.activeElement.className, 'native-diff-text');
+    ui.document.root.fire('keydown', { key: 'Tab', shiftKey: true }); assert.equal(ui.document.activeElement.id, 'native-change-close');
+    ui.document.root.fire('keydown', { key: 'Tab', shiftKey: true }); assert.equal(ui.document.activeElement.tagName, 'SUMMARY');
+    ui.document.root.fire('keydown', { key: 'Tab' }); assert.equal(ui.document.activeElement.id, 'native-change-close');
+    ui.document.root.fire('keydown', { key: 'Escape' });
+    assert.equal(ui.document.getElementById('native-change-dialog'), null); assert.equal(ui.document.querySelector('.app-shell').inert, false);
+    assert.equal(ui.document.activeElement.id, 'native-change-compare-0'); assert.equal(ui.posts().length, 0);
+    assert.equal(ui.document.querySelector('.native-change-card').hidden, false);
+  }
+});
+
+test('working-copy handling only prepares a reviewable draft, preserves an existing recipient and never dispatches or expands authority', async () => {
+  const saved = workingCopyWarningFixture(); const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  await ui.click('native-change-prepare-0');
+  assert.match(ui.get('message').value, /codex~x3[\s\S]*Codex.*artifacts\/demo\/index.html.*豆窝保存的成果.*先保留.*已有授权.*不要盲目覆盖.*不要扩大/);
+  assert.match(ui.get('recipient-button').textContent, /Codex/); assert.equal(ui.posts().length, 0);
+  ui.type('请先完成我原来的要求'); await ui.choose('claude');
+  await ui.click('native-change-prepare-0');
+  assert.match(ui.get('message').value, /^请先完成我原来的要求\n来源工作副本：codex~x3。\n请核对/); assert.match(ui.get('recipient-button').textContent, /Claude/);
+  assert.match(ui.get('notice').textContent, /原收件人保持不变/);
+  const draft = ui.get('message').value; await ui.click('native-change-prepare-0'); assert.equal(ui.get('message').value, draft);
+  assert.equal(ui.posts().length, 0);
+});
+
+test('working-copy comparison distinguishes missing, unreadable, binary, truncated and aligned evidence without resolving the warning', async () => {
+  const saved = workingCopyWarningFixture(); let reply = workingCopyPreview({ state: 'unavailable',
+    canonical: { available: false, exists: false, reason: 'not_present', text: false, truncated: false },
+    private: { available: false, exists: null, reason: 'changed', text: false, truncated: false } });
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true, route(request) { if (request.path.includes('/native-changes?')) return reply; } });
+  await ui.click('native-change-compare-0'); assert.match(ui.get('native-change-body').textContent, /未能完整核对.*此处未找到.*暂时无法读取/); await ui.click('native-change-close');
+  reply = workingCopyPreview({ canonical: { available: true, text: false, bytes: 3, content: 'not text', truncated: false },
+    private: { available: true, text: true, bytes: 90000, content: 'bounded preview', truncated: true } });
+  await ui.click('native-change-compare-0'); assert.match(ui.get('native-change-body').textContent, /二进制.*前 64 KiB.*bounded preview/); assert.doesNotMatch(ui.get('native-change-body').textContent, /not text/); await ui.click('native-change-close');
+  reply = workingCopyPreview({ state: 'aligned' }); reply.private.sha256 = reply.canonical.sha256;
+  await ui.click('native-change-compare-0'); assert.match(ui.get('native-change-body').textContent, /两份内容目前一致.*不会更改成果记录/); await ui.click('native-change-close');
+  reply = workingCopyPreview({ state: 'aligned', canonical: { available: false, exists: false, text: false, truncated: false }, private: { available: false, exists: false, text: false, truncated: false } });
+  await ui.click('native-change-compare-0'); assert.match(ui.get('native-change-body').textContent, /两处目前均无该文件/); await ui.click('native-change-close');
+  assert.equal(ui.document.querySelector('.native-change-card').hidden, false); assert.equal(ui.posts().length, 0);
+});
+
+test('working-copy comparison rejects wrong identity and inconsistent aligned responses and ignores a response after close', async () => {
+  const saved = workingCopyWarningFixture(); let reply = workingCopyPreview({ workspace_id: 'codex~x4' }); let held;
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true, route(request) { if (request.path.includes('/native-changes?')) return held ? held.promise : reply; } });
+  await ui.click('native-change-compare-0'); assert.match(ui.get('native-change-body').textContent, /副本信息不匹配/); assert.equal(ui.document.querySelectorAll('.native-diff-text').length, 0); await ui.click('native-change-close');
+  reply = workingCopyPreview({ state: 'aligned', private: { available: false, text: false, truncated: false } });
+  await ui.click('native-change-compare-0'); assert.match(ui.get('native-change-body').textContent, /副本信息不匹配/); await ui.click('native-change-close');
+  held = deferred(); await ui.click('native-change-compare-0'); await ui.click('native-change-close'); held.resolve(workingCopyPreview()); await settle();
+  assert.equal(ui.document.getElementById('native-change-dialog'), null);
+  held = deferred(); await ui.click('native-change-compare-0'); await ui.click('new-room'); ui.type('新任务草稿');
+  held.resolve(workingCopyPreview()); await settle();
+  assert.equal(ui.document.getElementById('native-change-dialog'), null); assert.equal(ui.get('message').value, '新任务草稿'); assert.equal(ui.posts().length, 0);
+});
+
+test('working-copy cards separate exact sessions, disable unidentified comparisons and show only evidence-backed task impact', async () => {
+  const saved = workingCopyWarningFixture(); saved.native_workspaces.push({ ...structuredClone(saved.native_workspaces[0]), workspace_id: 'codex~x4' });
+  const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  assert.match(ui.document.querySelector('.native-change-card').textContent, /有 2 处工作副本改动/);
+  saved.native_workspaces = [saved.native_workspaces[0]]; delete saved.native_workspaces[0].workspace_id; await ui.poll();
+  assert.equal(ui.get('native-change-compare-0').disabled, true); assert.match(ui.document.querySelector('.native-change-card').textContent, /暂时无法定位/);
+  saved.team.tasks = [{ id: 'task-private', status: 'blocked', owner: 'codex', write_paths: ['artifacts/demo/index.html'], blocked_reason: 'native_path_not_owned' }]; await ui.poll();
+  assert.match(ui.document.querySelector('.native-change-card').textContent, /当前有任务正等待核对/);
+  saved.team.tasks[0].write_paths = ['another.html']; saved.current_run.status = 'stopped'; await ui.poll();
+  assert.match(ui.document.querySelector('.native-change-card').textContent, /当前推进已停止/);
+  assert.doesNotMatch(ui.document.querySelector('.native-change-card').textContent, /当前有任务正等待核对/); assert.equal(ui.posts().length, 0);
+});
+
+
+test('working-copy impact uses actual waiting and terminal status instead of calling every stop a pause or ongoing work', async () => {
+  const saved = workingCopyWarningFixture(); const ui = await browser({ rooms: [saved.room], saved, nativeProjectSupport: true });
+  const cases = [['needs_user', /在等你的回复/], ['stopped', /推进已停止/], ['interrupted', /推进已中断/], ['paused', /任务已暂停/], ['completed', /本轮已结束/]];
+  for (const [status, copy] of cases) {
+    saved.current_run.status = status; await ui.poll(); const card = ui.document.querySelector('.native-change-card');
+    assert.match(card.textContent, copy); assert.doesNotMatch(card.textContent, /其他任务按当前状态继续/);
+  }
+  delete saved.native_workspaces[0].workspace_id; saved.current_run.status = 'in_progress'; await ui.poll(); await ui.click('native-change-prepare-0');
+  assert.match(ui.get('message').value, /^请先定位这份工作副本/); assert.equal(ui.posts().length, 0);
+  assert.equal(ui.get('dismiss-native-workspace-warning').getAttribute('aria-label'), '暂时忽略'); assert.equal(ui.get('dismiss-native-workspace-warning').title, '暂时忽略');
 });

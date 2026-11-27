@@ -19,7 +19,7 @@ from . import parallel_sessions
 from .parallel_sessions import is_lane, partner_of
 from . import job_progress, native_adapters, native_workspace
 from . import room_projection, room_media, git_status, code_delivery
-from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id
+from .agent_registry import AgentRegistry, bean_styles, bounded_session_id, default_registry, safe_agent_id, safe_member_id
 from .execution_policy import seconds_available, deadline_reached, task_settled
 from .stop_policy import continues_after_recovery_audit, continues_automatically, host_block_recoverable
 from .room_store import PROJECT_MODES, WORK_MODES, MAX_INSPECTION_CONTEXT_BYTES, NATIVE_RECOVERY_ERRORS, NATIVE_METADATA_ERROR, RoomError, RoomStore, checked_id, checked_text, checked_message, checked_target, checked_lifecycle_action
@@ -1530,6 +1530,8 @@ class RoomService(RoomPromptMixin):
         """poll=True only for display reads: can_recover_native may then come
         from _recovery_display's cached audit. Every action keeps poll=False."""
         snapshot = self.store.snapshot(room_id, events=not list_view)
+        for workspace in snapshot["native_workspaces"]:
+            workspace["workspace_id"] = workspace["provider"]
         snapshot["member_invitation"] = self._member_invitation(snapshot)
         if snapshot["room"]["mode"] in PROJECT_MODES:
             try:
@@ -4117,6 +4119,48 @@ class RoomService(RoomPromptMixin):
     async def read_room(self, room_id):
         self._available()
         return self._snapshot(room_id, poll=True)
+
+    async def read_native_changes(self, room_id, *, workspace_id, path):
+        if self._closed:
+            raise RoomError("service_stopping")
+        return await asyncio.to_thread(self._native_change_preview, room_id, workspace_id, path)
+
+    def _native_change_preview(self, room_id, workspace_id, path):
+        if not safe_member_id(workspace_id):
+            raise RoomError("invalid_native_change_workspace")
+        room = self.store.snapshot(room_id, events=False)["room"]
+        if room["mode"] != "native_project":
+            raise RoomError("native_change_not_found")
+        manifest = self.store.native_workspace(room_id, workspace_id)
+        if not isinstance(manifest, dict):
+            raise RoomError("native_change_not_found")
+        try:
+            private = native_workspace.change_preview(manifest, path)
+        except native_workspace.NativeWorkspaceError as error:
+            code = {"invalid_native_path": "invalid_native_change_path",
+                    "native_change_not_found": "native_change_not_found",
+                    "native_change_path_refused": "native_change_path_refused"}.get(error.code)
+            if code:
+                raise RoomError(code) from None
+            raise RoomError("native_change_unavailable") from None
+        canonical = native_workspace.unavailable_preview("unreadable")
+        try:
+            workspace = self._project(room_id)
+            with workspace.verified_file(path) as (stream, metadata):
+                canonical = native_workspace.preview_stream(stream, metadata["sha256"], metadata["bytes"],
+                                                            text_hint=metadata["text"])
+        except ProjectWorkspaceError as error:
+            canonical = (native_workspace.unavailable_preview("not_present", exists=False)
+                         if error.code == "project_file_unavailable" else native_workspace.unavailable_preview("unreadable"))
+        except (OSError, KeyError):
+            canonical = native_workspace.unavailable_preview("unreadable")
+        known = all(side["available"] or side["exists"] is False for side in (canonical, private))
+        aligned = (canonical["exists"] is False and private["exists"] is False
+                   or canonical["available"] and private["available"] and canonical["sha256"] == private["sha256"])
+        return {"projection": "native_change_preview_v1", "workspace_id": workspace_id,
+                "provider": partner_of(workspace_id), "path": path, "read_only": True,
+                "state": ("aligned" if aligned else "different") if known else "unavailable",
+                "canonical": canonical, "private": private}
 
     async def read_room_state(self, room_id):
         self._available()

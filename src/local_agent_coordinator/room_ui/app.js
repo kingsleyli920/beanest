@@ -2604,8 +2604,8 @@ async function refreshRuntimeOptions(id) {
   finally { state.runtimeRefreshId = null; renderRuntimeSettings(); }
 }
 function syncModalInert() {
-  document.querySelector('.app-shell').inert = !!(state.manager || state.taskOptions || state.runtimePopoverOpen || state.availabilityRecheck || state.lifecycleConfirm || state.appearance || state.taskWithdraw);
-  $('workspace-manager').inert = !!(state.lifecycleConfirm || state.availabilityRecheck || state.appearance);
+  document.querySelector('.app-shell').inert = !!(state.manager || state.taskOptions || state.runtimePopoverOpen || state.availabilityRecheck || state.lifecycleConfirm || state.appearance || state.taskWithdraw || state.nativeChangeDialog);
+  $('workspace-manager').inert = !!(state.lifecycleConfirm || state.availabilityRecheck || state.appearance || state.nativeChangeDialog);
 }
 function dialogControls(container) {
   const controls = [];
@@ -6213,46 +6213,153 @@ function renderExecutions(executions) {
   }
 }
 
+function nativeChangeImpact(snapshot, files) {
+  const status = currentObjective(snapshot)?.status || snapshot.current_run?.status || snapshot.room.status;
+  const statusText = {
+    paused: t("当前任务已暂停，原因见任务状态。"), needs_user: t("当前任务在等你的回复。"),
+    stopped: t("当前推进已停止。"), interrupted: t("当前推进已中断。"), cancelled: t("当前推进已取消。"),
+    complete: t("本轮已结束，这份工作副本仍需核对。"), completed: t("本轮已结束，这份工作副本仍需核对。"),
+    ready_for_user: t("当前步骤已结束，等待你的处理。"), awaiting_continue: t("当前目标在等待继续。"),
+    failed: t("当前推进遇到问题，详情见任务状态。"),
+  }[status];
+  if (statusText) return statusText;
+  const taskBlocksFile = (task, file) => task.status === 'blocked' && typeof task.owner === 'string'
+    && [file.workspaceId, file.provider].includes(task.owner)
+    && Array.isArray(task.write_paths) && task.write_paths.includes(file.path)
+    && file.reports.some((report) => report.reason && report.reason === task.blocked_reason);
+  if ((snapshot.team?.tasks || []).some((task) => files.some((file) => taskBlocksFile(task, file)))) return t("当前有任务正等待核对这份改动。");
+  return t("其他任务按当前状态继续。");
+}
+function prepareNativeChangeRequest(snapshot, file) {
+  if (state.selected !== snapshot.room.id || $('message').disabled) return;
+  const source = file.workspaceId ? t("来源工作副本：{p0}。", { p0: file.workspaceId }) : t("请先定位这份工作副本，确认具体来源后再处理。");
+  const request = t("请核对 {p0} 的工作副本「{p1}」与豆窝保存的成果，并结合原项目的实际状态判断。先保留需要的副本，确认哪些内容应保留，再按已有授权处理并说明结果；不要盲目覆盖已更新的成果，也不要扩大修改范围。", { p0: displayName(file.provider), p1: file.path });
+  const existingDraft = $('message').value.trim();
+  if (!existingDraft) {
+    state.target = snapshot.members.some((member) => member.id === file.provider) ? file.provider : 'all';
+    state.targetExplicit = true;
+  }
+  fillAnswerDraft(`${source}\n${request}`);
+  showNotice(existingDraft ? t("处理请求已追加到草稿，原收件人保持不变；检查后再发送。") : t("处理请求已放入输入框；检查收件人和内容后再发送。"));
+}
+function closeNativeChangeDialog() {
+  const operation = state.nativeChangeDialog; if (!operation) return;
+  state.nativeChangeDialog = null; operation.dialog.remove(); syncModalInert();
+  const target = nodeContains(document.body, operation.trigger) ? operation.trigger : $('message');
+  target.focus({ preventScroll: true });
+}
+function nativeChangeSide(side, title, operation) {
+  const section = element('section', '', 'native-diff-side'); section.append(element('h3', title));
+  if (!side?.available) {
+    section.append(element('p', side?.exists === false ? t("此处未找到这个文件。") : t("暂时无法读取，不能据此判断内容是否一致。"), 'detail-caption')); return section;
+  }
+  if (Number.isSafeInteger(side.bytes) && side.bytes >= 0) section.append(element('p', `${side.bytes} B`, 'detail-caption'));
+  if (!side.text) { section.append(element('p', t("这是二进制文件，不能在这里按文本比较。"), 'detail-caption')); return section; }
+  if (typeof side.content !== 'string') { section.append(element('p', t("文本内容暂不可用。"), 'detail-caption')); return section; }
+  if (side.truncated) section.append(element('p', t("文件较大，仅显示前 64 KiB；这不是完整差异。"), 'detail-caption'));
+  const pre = element('pre', side.content || t("文件为空。"), 'native-diff-text'); pre.tabIndex = 0;
+  section.append(pre); operation.focusables.push(pre); return section;
+}
+async function openNativeChangeDialog(snapshot, file, trigger) {
+  if (!file.workspaceId || state.selected !== snapshot.room.id) return;
+  closeNativeChangeDialog(); closeUsagePopover(); closeTaskOptions({ restoreFocus: false }); closeRuntimePopover({ restoreFocus: false }); closeContextMenu();
+  const dialog = element('section', '', 'lifecycle-confirm native-change-dialog'); dialog.id = 'native-change-dialog';
+  dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'native-change-title');
+  const sheet = element('div', '', 'lifecycle-confirm-sheet native-change-sheet');
+  const heading = element('h2', t("查看工作副本差异")); heading.id = 'native-change-title';
+  const close = element('button', t("关闭"), 'quiet-button'); close.type = 'button'; close.id = 'native-change-close'; close.addEventListener('click', closeNativeChangeDialog);
+  const body = element('div', t("正在读取两份内容…")); body.id = 'native-change-body'; body.setAttribute('aria-busy', 'true');
+  sheet.append(heading, element('p', `${displayName(file.provider)} · ${file.path.split('/').at(-1)}`), close, body); dialog.append(sheet);
+  const operation = { dialog, trigger, roomId: snapshot.room.id, focusables: [close] };
+  state.nativeChangeDialog = operation; document.body.append(dialog); syncModalInert(); close.focus({ preventScroll: true });
+  dialog.addEventListener('pointerdown', (event) => { if (event.target === dialog) closeNativeChangeDialog(); });
+  try {
+    const result = await api(`${roomPath(snapshot.room.id)}/native-changes?workspace_id=${encodeURIComponent(file.workspaceId)}&path=${encodeURIComponent(file.path)}`);
+    if (state.nativeChangeDialog !== operation) return;
+    if (state.selected !== operation.roomId) { closeNativeChangeDialog(); return; }
+    const bothAbsent = result.canonical?.exists === false && result.private?.exists === false;
+    if (result.workspace_id !== file.workspaceId || result.path !== file.path || result.read_only !== true
+        || !['different', 'aligned', 'unavailable'].includes(result.state) || !result.canonical || !result.private
+        || result.state === 'aligned' && !bothAbsent && (result.canonical.available !== true || result.private.available !== true
+          || !/^[a-f0-9]{64}$/.test(result.canonical.sha256 || '') || result.canonical.sha256 !== result.private.sha256)) throw new RequestError(t("返回的副本信息不匹配，未显示内容。"));
+    let summary;
+    if (result.state === 'aligned') summary = bothAbsent
+      ? t("两处目前均无该文件。可关闭并刷新提示；这里不会更改成果记录。") : t("两份内容目前一致。可关闭并刷新提示；这里不会更改成果记录。");
+    else if (result.state === 'different') summary = t("两份内容不同。可核对后准备处理请求；这里不会合并或覆盖文件。");
+    else summary = t("本次未能完整核对；可稍后重试或请伙伴核对，不能据此判断一致。");
+    body.replaceChildren(element('p', summary, 'detail-caption'));
+    const columns = element('div', '', 'native-diff-columns');
+    columns.append(nativeChangeSide(result.canonical, t("豆窝保存的成果"), operation), nativeChangeSide(result.private, t("伙伴工作副本"), operation)); body.append(columns);
+    const technical = techDetails(`${file.workspaceId}\n${file.path}`); body.append(technical); operation.focusables.push(technical.firstChild); body.setAttribute('aria-busy', 'false');
+  } catch (error) {
+    if (state.nativeChangeDialog === operation && state.selected !== operation.roomId) closeNativeChangeDialog();
+    else if (state.nativeChangeDialog === operation) { body.replaceChildren(element('p', error.message || t("两份内容暂时无法读取。"), 'notice error')); body.setAttribute('aria-busy', 'false'); }
+  }
+}
+document.addEventListener('keydown', (event) => {
+  const operation = state.nativeChangeDialog; if (!operation) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeNativeChangeDialog(); }
+  else if (event.key === 'Tab') {
+    event.preventDefault(); const controls = operation.focusables;
+    const current = controls.indexOf(document.activeElement); const step = event.shiftKey ? -1 : 1;
+    controls[(current + step + controls.length) % controls.length].focus({ preventScroll: true });
+  }
+});
 function renderNativeWorkspaceNotes(container, snapshot) {
   const workspaces = Array.isArray(snapshot.native_workspaces) ? snapshot.native_workspaces : [];
   const issues = workspaces.flatMap((workspace) => [
-    ...(Array.isArray(workspace.conflicts) ? workspace.conflicts.map((item) => ({ ...item, provider: workspace.provider, conflict: true })) : []),
-    ...(Array.isArray(workspace.blocked) ? workspace.blocked.map((item) => ({ ...item, provider: workspace.provider })) : []),
+    ...(Array.isArray(workspace.conflicts) ? workspace.conflicts.map((item) => ({ ...item, provider: workspace.provider, workspaceId: workspace.workspace_id, conflict: true })) : []),
+    ...(Array.isArray(workspace.blocked) ? workspace.blocked.map((item) => ({ ...item, provider: workspace.provider, workspaceId: workspace.workspace_id })) : []),
   ]);
   if (!issues.length) return;
-  // Conflict and import diagnostics can describe the same private file.
-  // Count that file once, keeping every diagnostic for display and dismissal.
   const files = new Map();
   for (const item of issues) {
-    const identified = typeof item.provider === 'string' && item.provider.length && typeof item.path === 'string' && item.path.length;
-    const key = identified ? JSON.stringify([item.provider, item.path]) : Symbol();
-    if (!files.has(key)) files.set(key, { provider: item.provider, path: item.path, reports: [] });
+    const identity = item.workspaceId || item.provider;
+    const identified = typeof identity === 'string' && identity.length && typeof item.path === 'string' && item.path.length;
+    const key = identified ? JSON.stringify([identity, item.path]) : Symbol();
+    if (!files.has(key)) files.set(key, { provider: item.provider, workspaceId: item.workspaceId, path: item.path, reports: [] });
     files.get(key).reports.push(item);
   }
   const roomId = snapshot.room.id;
-  const evidence = issues.map((item) => [item.provider, item.path, item.reason, !!item.conflict, item.sha256 ?? null, item.canonical_sha256 ?? null,
+  const evidence = issues.map((item) => [item.workspaceId || item.provider, item.path, item.reason, !!item.conflict, item.sha256 ?? null, item.canonical_sha256 ?? null,
     item.kind ?? null, item.baseline_sha256 ?? null, item.source_sha256 ?? null, item.candidate_sha256 ?? null])
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   const fingerprint = JSON.stringify(['native-workspace', evidence]);
   if (warningDismissals(roomId).values.has(fingerprint)) return;
-  const wrapper = element('div', '', 'native-workspace-warning');
-  const details = element('details', '', 'native-workspace-issues');
-  details.append(element('summary', t("有 {p0} 项改动需要处理，尚未纳入交付", { p0: files.size })));
+  const wrapper = element('section', '', 'native-workspace-warning native-change-card');
+  wrapper.append(element('h3', t("有 {p0} 处工作副本改动待核对", { p0: files.size })), element('p', `${nativeChangeImpact(snapshot, [...files.values()])} ${t("工作副本尚未计入豆窝成果；主分支和 GitHub 状态见「交付」。")}`, 'detail-caption'));
   const reasons = { native_binary_not_imported: t("二进制改动尚未导入"), native_deletion_not_imported: t("删除操作尚未导入"),
     native_path_not_owned: t("超出本任务授权写入范围"), native_symlink_refused: t("符号链接未导入"), native_mode_change_not_imported: t("文件权限改动尚未导入"),
     native_change_too_large: t("改动超过本次导入范围"), native_merge_conflict: t("文件版本冲突"), native_unresolved_conflict: t("旧版本冲突尚未明确解决，改动未导入") };
-  const list = element('ul');
+  const list = element('ul', '', 'native-change-files'); const additional = element('ul', '', 'native-change-files');
+  let index = 0;
   for (const file of files.values()) {
-    const messages = [
-      ...(file.reports.some((item) => item.conflict) ? [t("需核对新旧版本冲突")] : []),
-      ...file.reports.filter((item) => !item.conflict).map((item) => reasons[item.reason] || t("改动未导入，原因待核对")),
-    ];
-    list.append(element('li', `${displayName(file.provider)} · ${typeof file.path === 'string' ? file.path : t("文件路径未提供")}${interfaceColon()}${[...new Set(messages)].join(interfaceSemicolon())}`));
+    const row = element('li', '', 'native-change-file'); const path = typeof file.path === 'string' ? file.path : t("文件路径未提供");
+    row.append(element('strong', `${displayName(file.provider)} · ${path.split('/').at(-1)}`));
+    const details = element('details', '', 'native-workspace-issues'); details.append(element('summary', t("技术细节")));
+    const messages = [...(file.reports.some((item) => item.conflict) ? [t("需核对新旧版本冲突")] : []),
+      ...file.reports.filter((item) => !item.conflict).map((item) => reasons[item.reason] || t("改动未导入，原因待核对"))];
+    details.append(element('p', path), element('p', [...new Set(messages)].join(interfaceSemicolon())));
+    if (file.workspaceId) details.append(element('code', file.workspaceId)); row.append(details);
+    const actions = element('div', '', 'manager-card-actions');
+    const compare = element('button', t("查看差异"), 'quiet-button'); compare.type = 'button'; compare.id = `native-change-compare-${index}`;
+    compare.setAttribute('aria-haspopup', 'dialog'); compare.setAttribute('aria-controls', 'native-change-dialog');
+    compare.disabled = typeof file.workspaceId !== 'string' || !file.workspaceId || typeof file.path !== 'string'; compare.addEventListener('click', () => void openNativeChangeDialog(snapshot, file, compare));
+    const prepare = element('button', t("准备处理请求"), 'quiet-button native-change-prepare'); prepare.type = 'button'; prepare.id = `native-change-prepare-${index}`;
+    prepare.dataset.room = roomId; prepare.dataset.validPath = String(typeof file.path === 'string');
+    prepare.disabled = $('message').disabled || typeof file.path !== 'string'; prepare.addEventListener('click', () => prepareNativeChangeRequest(snapshot, file));
+    actions.append(compare, prepare); row.append(actions);
+    if (!file.workspaceId) row.append(element('p', t("暂时无法定位这份副本，不能查看差异。"), 'detail-caption'));
+    (index < 3 ? list : additional).append(row); index += 1;
   }
-  details.append(list, element('p', t("这些改动保留为待处理项，不表示已合入成果或完成目标。"), 'detail-caption'));
-  const publishedCount = workspaces.reduce((count, workspace) => count + (Number.isSafeInteger(workspace.published_count) && workspace.published_count > 0 ? workspace.published_count : 0), 0);
-  if (publishedCount) details.append(element('p', t("另有 {p0} 项此前标记的改动已与当前成果一致。", { p0: publishedCount }), 'detail-caption'));
-  wrapper.append(details, warningDismissButton(roomId, fingerprint, () => { wrapper.hidden = true; }, 'dismiss-native-workspace-warning'));
+  wrapper.append(list);
+  if (files.size > 3) {
+    const more = element('details', '', 'native-change-more'); more.append(element('summary', t("展开其余 {p0} 项", { p0: files.size - 3 })), additional); wrapper.append(more);
+  }
+  const dismiss = warningDismissButton(roomId, fingerprint, () => { wrapper.hidden = true; }, 'dismiss-native-workspace-warning');
+  dismiss.className = 'quiet-button'; dismiss.textContent = t("暂时忽略"); dismiss.setAttribute('aria-label', t("暂时忽略")); dismiss.title = t("暂时忽略");
+  const dismissal = element('div', '', 'native-change-dismissal');
+  dismissal.append(dismiss, element('p', t("仅隐藏这条提示，不代表改动已解决。"), 'detail-caption')); wrapper.append(dismissal);
   container.append(wrapper);
 }
 function renderNativeExecutions(snapshot) {
@@ -6543,6 +6650,7 @@ function renderControls() {
       : `${t("这轮只讨论方案，不创建或修改文件，也不运行代码。")}${interfaceWordSpace()}${planNextStepText()}`;
   }
   $('message').disabled = !canCompose;
+  for (const button of document.querySelectorAll('.native-change-prepare')) button.disabled = !canCompose || button.dataset.room !== state.selected || button.dataset.validPath !== 'true';
   $('message').placeholder = natural ? !natural.canSend ? natural.canHold ? t("可以先留言，能继续时会带给伙伴") : t("当前无法发送，原因见下方") : objective?.status === 'complete' ? t("哪里还要调整？直接告诉伙伴") : t("补充要求，或说继续") : continuation === 'native_recovery' ? t("继续，或补充要求后接着做") : continuation ? t("说“继续”，接着完成原任务") : room ? t("补充要求，或告诉伙伴要调整什么") : t("说说这次想做什么");
   const policyInputError = policySubmissionError() || runtimeSubmissionError();
   $('send').disabled = !!recipientProblem() || !canCompose || (natural && !natural.canSend && !natural.canHold) || (!natural && !continuation && (!!policyInputError || (preparingFork ? blockedParticipants().length > 0 : submissionAvailabilityBlocked()))) || !$('message').value.trim()
@@ -6692,6 +6800,7 @@ function applySnapshot(snapshot) {
 async function selectRoom(id, { restoringLocation = false } = {}) {
   if (!uuidPattern.test(id) || state.deletedRooms.has(id) || state.busy && !canDetachPendingRequest()) return;
   detachMessageForNavigation();
+  closeNativeChangeDialog();
   if (state.selected !== id) clearActionError();
   closeTaskOptions({ restoreFocus: false });
   closeRuntimePopover({ restoreFocus: false });
@@ -7493,6 +7602,7 @@ function chooseDefaultArtifactMode() {
 function startNewRoom({ preserveRoomHash = false } = {}) {
   if ((state.busy || state.pending) && !canDetachPendingRequest()) return;
   detachMessageForNavigation();
+  closeNativeChangeDialog();
   if (!preserveRoomHash) rememberRoomLocation();
   clearActionError();
   closeTaskOptions({ restoreFocus: false });

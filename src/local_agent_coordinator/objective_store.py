@@ -458,6 +458,14 @@ class ObjectiveStore:
             db.execute("UPDATE objectives SET status='paused',checkpoint_json=? WHERE id=?",
                        (json.dumps(checkpoint), objective_id))
         else:
+            if row["status"] == "paused" and row["pause_requested"]:
+                # Shutdown may finish a call after its cleanup receipt left
+                # this flag set. Recheck durable cleanup before rejecting resume.
+                self.settle_pause(db, room_id)
+                row = self.current(db, room_id)
+                if row["status"] != "paused":
+                    return  # An earlier deferred resume was just fulfilled.
+                checkpoint = json.loads(row["checkpoint_json"] or "{}")
             if row["status"] != "paused" or row["pause_requested"] and not defer_resume:
                 raise RoomError("objective_not_paused")
             if row["pause_requested"]:

@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from . import parallel_sessions
+
 EVENT_DEFAULT_BYTES = 256 * 1024
 # The largest page a caller may ask for. A page is cut at this size, never an
 # event: one event bigger than the page is still returned whole, alone.
@@ -11,6 +13,32 @@ EVENT_MAX_BYTES = 8 * 1024 * 1024
 EVENT_DEFAULT_LIMIT = 100
 EVENT_MAX_LIMIT = 500
 TEXT_PREVIEW_CHARACTERS = 240
+
+
+def public_response(value):
+    """Fold display identities, retaining exact read-only diagnostic bindings."""
+    result = parallel_sessions.fold(value)
+    if not isinstance(value, dict):
+        return result
+    if (set(value) == {"projection", "workspace_id", "provider", "path", "read_only", "state", "canonical", "private"}
+            and value.get("projection") == "native_change_preview_v1" and value.get("read_only") is True
+            and all(isinstance(value.get(side), dict) for side in ("canonical", "private"))):
+        for key in ("workspace_id", "path"):
+            result[key] = value[key]
+        for side in ("canonical", "private"):
+            result[side]["content"] = value[side].get("content")
+    original = value.get("native_workspaces")
+    if isinstance(original, list) and isinstance(result.get("native_workspaces"), list):
+        for workspace, displayed in zip(original, result["native_workspaces"]):
+            if not isinstance(workspace, dict) or not isinstance(displayed, dict):
+                continue
+            if isinstance(workspace.get("workspace_id"), str):
+                displayed["workspace_id"] = workspace["workspace_id"]
+            for kind in ("blocked", "conflicts"):
+                for issue, projected in zip(workspace.get(kind, []), displayed.get(kind, [])):
+                    if isinstance(issue, dict) and isinstance(projected, dict) and isinstance(issue.get("path"), str):
+                        projected["path"] = issue["path"]
+    return result
 
 
 def wire_bytes(value):

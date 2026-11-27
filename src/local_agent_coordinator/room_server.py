@@ -21,13 +21,13 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit, quote
 
 from .room_service import RoomError, RoomService
 from .room_store import TASK_MODES, WORK_MODES, checked_message
-from . import room_projection, room_media
+from . import room_projection, room_media, parallel_sessions
 from .project_catalog import ProjectCatalogError
 from .partner_manager import PartnerError
 from .ui_server import LocalUIServer, TASK_ID, _Handler, _HTTPError
 
 
-ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task|answer-task|interrupt-tool))?")
+ROOM_ROUTE = re.compile(rf"/api/rooms/({TASK_ID})(?:/(messages(?:/receipt)?|members|state|events|text|jobs|native-changes|code-status|delivery-repository|cancel|runs|accept|fork|export|preview|objective|continue|pause|resume|answer|file|restart-objective|native-handoff|recover-native|reassess-objective|withdraw-task|answer-task|interrupt-tool))?")
 TARGET_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 PARTNER_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/(check|enabled|connection|appearance|account-source|workload|parallel-limit|api-model)")
 RUNTIME_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/runtime/refresh")
@@ -36,6 +36,9 @@ ACCOUNT_REFRESH_ROUTE = re.compile(r"/api/partners/([a-z][a-z0-9_-]{0,31})/accou
 LIFECYCLE_ROUTE = re.compile(rf"/api/(projects|rooms|partners)/({TASK_ID}|[a-z][a-z0-9_-]{{0,31}})/lifecycle")
 PROJECT_NAME_ROUTE = re.compile(rf"/api/projects/({TASK_ID})/name")
 ERROR_STATUS = {
+    "invalid_native_change_workspace":400, "invalid_native_change_path":400,
+    "native_change_not_found":404, "native_change_path_refused":403,
+    "native_change_unavailable":409, "user_native_changes_required":403,
     "invalid_api_model":400, "unsupported_api_host":400, "api_model_required":400, "invalid_api_key_reference":400,
     "invalid_api_prices":400, "invalid_api_models":400, "invalid_api_peak_windows":400, "invalid_api_caps":400,
     "invalid_api_timezone":400,
@@ -160,6 +163,12 @@ class RoomUIServer(LocalUIServer):
 
 class _RoomHandler(_Handler):
     server: RoomUIServer
+
+    def _json(self, status, value):
+        text = json.dumps(value, ensure_ascii=True, allow_nan=False)
+        if parallel_sessions.SEPARATOR in text:
+            text = json.dumps(room_projection.public_response(value), ensure_ascii=True, allow_nan=False)
+        self._response(status, text.encode(), "application/json; charset=utf-8")
 
     def _handle(self):
         try:
@@ -413,6 +422,16 @@ class _RoomHandler(_Handler):
                     return await service.retire_outbox(body["scope"], request_id, body["fingerprint"], body["disposition"], instance_id=instance)
             raise _HTTPError(400, "invalid_arguments")
         match = ROOM_ROUTE.fullmatch(path)
+        if match and match[2] == "native-changes":
+            if mcp:
+                raise _HTTPError(403, "user_native_changes_required")
+            if self.command != "GET":
+                raise _HTTPError(405, "method_not_allowed")
+            fields = parse_qs(query, keep_blank_values=True)
+            if (set(fields) != {"workspace_id", "path"} or any(len(values) != 1 for values in fields.values())
+                    or not self._text(fields["workspace_id"][0], 64) or not self._text(fields["path"][0], 1024)):
+                raise _HTTPError(400, "invalid_arguments")
+            return await service.read_native_changes(match[1], workspace_id=fields["workspace_id"][0], path=fields["path"][0])
         if self.command == "POST" and match and match[2] == "delivery-repository":
             if mcp:
                 raise _HTTPError(403, "user_delivery_repository_required")

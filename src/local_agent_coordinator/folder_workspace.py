@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+from contextlib import contextmanager
 from collections import Counter
 import difflib
 import hashlib
@@ -570,6 +571,26 @@ class FolderWorkspace(ProjectWorkspace):
             blobs = _open_directory("blobs", parent=room)
             try:
                 return {path: self._raw(blobs, files[path]) for path in names}
+            finally:
+                os.close(blobs)
+
+    @contextmanager
+    def verified_file(self, path, revision=None):
+        """A pinned, verified single blob for bounded streaming readers."""
+        path = _path(path)
+        with self._locked() as (room, revisions, _):
+            index = self._index(revisions, self._manifest(room), revision)
+            entry = next((item for item in index["files"] if item["path"] == path), None)
+            if entry is None:
+                raise ProjectWorkspaceError("project_file_unavailable")
+            blobs = _open_directory("blobs", parent=room)
+            try:
+                with os.fdopen(self._verified_blob(blobs, entry), "rb") as stream:
+                    before = _attributes(os.fstat(stream.fileno()))
+                    yield stream, dict(entry)
+                    after = os.stat(entry["sha256"], dir_fd=blobs, follow_symlinks=False)
+                    if (_attributes(os.fstat(stream.fileno())) != before or _attributes(after) != before):
+                        raise ProjectWorkspaceError("project_storage_corrupt")
             finally:
                 os.close(blobs)
 

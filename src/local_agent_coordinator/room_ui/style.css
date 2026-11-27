@@ -1973,3 +1973,26 @@ html[lang="en"] .task-partner-panel .runtime-partner > label, html[lang="en"] .t
 .native-workspace-warning { position: relative; }
 .native-workspace-warning > .warning-dismiss { position: absolute; top: 6px; right: 6px; color: var(--ask); }
 .native-workspace-warning .native-workspace-issues { padding-right: 42px; }
+
+.native-change-card { padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--hover); }
+.native-change-card > h3 { margin: 0 0 4px; color: var(--ask); font-size: 14px; }
+.native-change-files { margin: 6px 0; padding: 0; list-style: none; }
+.native-change-files > li { padding: 6px 0; border-top: 0; overflow-wrap: anywhere; }
+.native-change-card .native-workspace-issues { margin: 2px 0; padding: 0; border: 0; border-radius: 0; background: none; }
+.native-change-sheet { width: min(1100px, 100%); max-height: calc(100dvh - 48px); overflow: auto; }
+.native-change-sheet > .quiet-button { margin-bottom: 12px; }
+.native-diff-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.native-diff-side { min-width: 0; }
+.native-diff-side h3 { margin: 8px 0; font-size: 15px; }
+.native-diff-text { max-height: 52vh; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 12px; }
+@media (max-width: 760px) { .native-diff-columns { grid-template-columns: 1fr; } }
+
+/* Keep a pending-copy notice useful within the visible chat area. */
+.native-change-card > .detail-caption { margin: 0; line-height: 1.4; font-size: 12px; }
+.native-change-files > li + li { border-top: 1px solid var(--line); }
+.native-change-file > strong { display: block; font-size: 13px; }
+.native-change-card .native-workspace-issues summary { color: var(--ink2); font-size: 12px; }
+.native-change-file > .manager-card-actions { margin-top: 6px; gap: 6px; }
+.native-change-card button.quiet-button { min-height: 28px; padding: 4px 9px; font-size: 12px; line-height: 1.4; }
+.native-change-dismissal { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.native-change-dismissal > .detail-caption { margin: 0; font-size: 12px; line-height: 1.4; }

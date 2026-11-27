@@ -7,6 +7,7 @@ for a CLI running with Full Access. Only the host imports authorized changes.
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import json
 import os
@@ -18,12 +19,110 @@ import subprocess
 from uuid import uuid4
 
 from .folder_workspace import _excluded
+from .project_catalog import _SECRET, _open_absolute
 
 
 class NativeWorkspaceError(ValueError):
     def __init__(self, code):
         self.code = code
         super().__init__(code)
+
+
+PREVIEW_BYTES = 64 * 1024
+
+
+def unavailable_preview(reason, *, exists=None):
+    return {"available": False, "exists": exists, "reason": reason, "sha256": None,
+            "bytes": None, "content": None, "text": False, "truncated": False}
+
+
+def preview_stream(stream, sha256, size, *, text_hint=True):
+    """Bound retained text, while classifying the complete verified file."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    prefix, text, sensitive, tail, read = bytearray(), text_hint is not False, False, "", 0
+    digest = hashlib.sha256()
+    while chunk := stream.read(256 * 1024):
+        read += len(chunk)
+        digest.update(chunk)
+        prefix.extend(chunk[:max(0, PREVIEW_BYTES - len(prefix))])
+        if text:
+            try:
+                decoded = decoder.decode(chunk)
+                text = not any(ord(char) < 32 and char not in "\r\n\t" for char in decoded)
+                sensitive = sensitive or bool(_SECRET.search(tail + decoded))
+                tail = decoded[-16384:]
+            except UnicodeError:
+                text = False
+    if text:
+        try:
+            sensitive = sensitive or bool(_SECRET.search(tail + decoder.decode(b"", final=True)))
+        except UnicodeError:
+            text = False
+    if read != size or digest.hexdigest() != sha256:
+        return unavailable_preview("changed")
+    if sensitive:
+        return unavailable_preview("sensitive_content")
+    return {"available": True, "exists": True, "sha256": sha256, "bytes": size,
+            "content": bytes(prefix).decode("utf-8", errors="ignore") if text else None,
+            "text": text, "truncated": text and size > PREVIEW_BYTES}
+
+
+def change_preview(manifest, name):
+    """Read only an exact currently recorded private diagnostic, without writes."""
+    name = _path(name)
+    if len(name) > 1024:
+        raise NativeWorkspaceError("invalid_native_path")
+    if not isinstance(manifest, dict) or any(not isinstance(manifest.get(field, []), list)
+                                             for field in ("blocked", "conflicts")):
+        raise NativeWorkspaceError("invalid_native_manifest")
+    if any(_excluded(part) == "sensitive_path" for part in name.split("/")):
+        raise NativeWorkspaceError("native_change_path_refused")
+    if not any(isinstance(issue, dict) and issue.get("path") == name
+               for field in ("blocked", "conflicts") for issue in manifest.get(field, [])):
+        raise NativeWorkspaceError("native_change_not_found")
+    from . import room_media
+    stream = None
+    try:
+        root = _directory(manifest["project"])
+        path = _file(root, name)
+        stream, metadata = room_media.open_verified(path)
+        result = preview_stream(stream, metadata["sha256"], metadata["bytes"])
+        # The hash and retained preview must describe the same stable inode.
+        # Reopen ancestors without following links to detect path replacement.
+        parent = _open_absolute(path.parent)
+        try:
+            after = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        finally:
+            os.close(parent)
+        if (room_media._identity(os.fstat(stream.fileno())) != metadata["identity"]
+                or room_media._identity(after) != metadata["identity"]):
+            return unavailable_preview("changed")
+        return result
+    except room_media.MediaError as error:
+        if error.code == "media_changed":
+            return unavailable_preview("changed")
+        if error.code == "media_unsafe_path":
+            return unavailable_preview("unsafe_path")
+        # Confirm absence through no-follow ancestors; an unreadable path is
+        # unknown, never a claimed deletion.
+        try:
+            parent = _open_absolute(path.parent)
+            try:
+                os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            finally:
+                os.close(parent)
+        except FileNotFoundError:
+            return unavailable_preview("not_present", exists=False)
+        except OSError:
+            pass
+        return unavailable_preview("unreadable")
+    except NativeWorkspaceError:
+        return unavailable_preview("unsafe_path")
+    except (OSError, KeyError, TypeError, ValueError):
+        return unavailable_preview("unreadable")
+    finally:
+        if stream is not None:
+            stream.close()
 
 
 _CONTROL = re.compile(r"[\x00-\x1f]")
