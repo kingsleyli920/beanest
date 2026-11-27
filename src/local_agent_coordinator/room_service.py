@@ -1556,13 +1556,14 @@ class RoomService(RoomPromptMixin):
                     # Saved publication warnings are history. Display only private
                     # bytes that still differ from the canonical project.
                     for workspace in snapshot["native_workspaces"]:
-                        if not workspace["blocked"]:
+                        if not workspace["blocked"] and not workspace["conflicts"]:
                             continue
                         state = self.store.native_workspace(room_id, workspace["provider"])
                         if not isinstance(state, dict):
                             continue  # A disappearing tree provides no proof to clear its warning.
                         try:
-                            pending_paths = sorted({item["path"] for item in workspace["blocked"]} - changed.keys())
+                            pending_paths = sorted({item["path"] for item in [*workspace["blocked"], *workspace["conflicts"]]}
+                                                   - changed.keys())
                             for offset in range(0, len(pending_paths), 16):
                                 changed.update({file["path"]: file for file in self._project(room_id).metadata_for_paths(
                                     pending_paths[offset:offset + 16])})
@@ -1571,7 +1572,7 @@ class RoomService(RoomPromptMixin):
                         except (native_workspace.NativeWorkspaceError, ProjectWorkspaceError, OSError):
                             continue  # Display auditing must preserve unknown warnings, not break the room.
                         workspace.update(projection)
-                        workspace["state"] = "blocked" if workspace["blocked"] else "ready"
+                        workspace["state"] = "blocked" if workspace["blocked"] or workspace["conflicts"] else "ready"
             except (RoomError, ProjectWorkspaceError) as error:
                 snapshot["project"] = {"available": False, "error": error.code, "execution": "disabled"}
         active = snapshot["room"]["id"] in self._captures or any(room == snapshot["room"]["id"] and not worker.done()

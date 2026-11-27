@@ -108,43 +108,69 @@ def _file_digest(path):
 
 
 def pending_blocked(manifest, canonical):
-    """Project old import warnings against the current shared file bytes.
+    """Project old import/conflict warnings against current shared file bytes.
 
     This is display evidence, not an import or an ownership decision. The
     persisted manifest remains intact, and unknown evidence stays visible.
     """
     blocked = manifest.get("blocked", [])
-    if not isinstance(blocked, list) or not all(isinstance(issue, dict) for issue in blocked):
+    conflicts = manifest.get("conflicts", [])
+    if any(not isinstance(items, list) or not all(isinstance(issue, dict) for issue in items)
+           for items in (blocked, conflicts)):
         raise NativeWorkspaceError("invalid_native_manifest")
     try:
         root = _directory(manifest["project"])
     except (NativeWorkspaceError, OSError, KeyError, TypeError, ValueError):
         root = None
-    pending, published = [], 0
-    for issue in blocked:
-        name, actual = issue.get("path"), None
+    observed = {}
+    def evidence(name):
         expected = canonical.get(name) if isinstance(canonical, dict) and isinstance(name, str) else None
         if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
             expected = None
+        if isinstance(name, str) and name in observed:
+            return observed[name], expected
+        actual = None
         if root is not None:
             try:
                 path = _file(root, name)
                 before = path.stat()
                 if stat.S_ISREG(before.st_mode):
-                    observed = _file_digest(path)
+                    actual_sha = _file_digest(path)
                     after = _file(root, name).stat()
                     if all(getattr(before, key) == getattr(after, key) for key in
                            ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")):
-                        actual = observed
+                        actual = actual_sha
             except (NativeWorkspaceError, OSError, TypeError, ValueError):
                 pass
+        if isinstance(name, str):
+            observed[name] = actual
+        return actual, expected
+
+    pending_conflicts, resolved = [], set()
+    for conflict in conflicts:
+        name = conflict.get("path")
+        actual, expected = evidence(name)
+        # These conflict kinds record competing content versions, not mode or
+        # ownership decisions. Equal current bytes settle only their display.
+        if (conflict.get("kind") in {"concurrent_changes", "source_handoff"}
+                and actual is not None and actual == expected):
+            resolved.add(name)
+        else:
+            pending_conflicts.append({"path": name, "reason": "native_merge_conflict",
+                **{key: conflict[key] for key in ("kind", "baseline_sha256", "source_sha256", "candidate_sha256")
+                   if key in conflict}, "sha256": actual, "canonical_sha256": expected})
+    pending, published = [], 0
+    for issue in blocked:
+        name = issue.get("path")
+        actual, expected = evidence(name)
         # Equal bytes settle only the old "not owned" import warning. A mode
         # or coordination conflict needs its own evidence, even for equal bytes.
-        if issue.get("reason") == "native_path_not_owned" and actual is not None and actual == expected:
+        if ((issue.get("reason") == "native_path_not_owned" and actual is not None and actual == expected)
+                or issue.get("reason") == "native_unresolved_conflict" and isinstance(name, str) and name in resolved):
             published += 1
         else:
             pending.append({**issue, "sha256": actual, "canonical_sha256": expected})
-    return {"blocked": pending, "published_count": published}
+    return {"blocked": pending, "conflicts": pending_conflicts, "published_count": published}
 
 
 def signature_paths(manifest, extra_names=()):

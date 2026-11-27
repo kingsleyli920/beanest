@@ -157,6 +157,28 @@ class QuotaResetPendingReviewHTTPTests(unittest.TestCase):
         self.assertEqual(len(workspace["blocked"]), 2)
         self.assertEqual(self.service.store.native_workspace(self.room_id, "codex"), manifest)
 
+    def test_conflict_only_warning_tracks_current_bytes_without_changing_persisted_manifest(self):
+        self.stopped()
+        manifest = self.service.store.native_workspace(self.room_id, "codex")
+        manifest["blocked"] = []
+        manifest["conflicts"] = [{"path": "main.py", "kind": "concurrent_changes",
+                                  "candidate_sha256": "0" * 64, "source_sha256": "1" * 64}]
+        self.service.store.save_native_workspace(self.room_id, "codex", manifest)
+        code, view = self.request("GET", f"/api/rooms/{self.room_id}")
+        self.assertEqual(code, 200, view)
+        workspace, = view["native_workspaces"]
+        self.assertEqual(workspace["conflicts"], [])
+        self.assertEqual(workspace["state"], "ready")
+        private = Path(manifest["project"])
+        (private / "main.py").write_text("VALUE = 400\n")
+        code, view = self.request("GET", f"/api/rooms/{self.room_id}")
+        self.assertEqual(code, 200, view)
+        workspace, = view["native_workspaces"]
+        self.assertEqual(workspace["state"], "blocked")
+        issue, = workspace["conflicts"]
+        self.assertNotEqual(issue["sha256"], issue["canonical_sha256"])
+        self.assertEqual(self.service.store.native_workspace(self.room_id, "codex"), manifest)
+
     def test_warning_audit_failure_keeps_unknown_warning_and_room_readable(self):
         self.stopped()
         manifest = self.service.store.native_workspace(self.room_id, "codex")
